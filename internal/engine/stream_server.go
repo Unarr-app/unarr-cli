@@ -3,9 +3,11 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,7 +17,7 @@ import (
 
 // fileProvider abstracts where to get a file reader for streaming.
 type fileProvider interface {
-	NewFileReader(ctx context.Context) torrent.Reader
+	NewFileReader(ctx context.Context) io.ReadSeekCloser
 	FileName() string
 }
 
@@ -49,7 +51,7 @@ type torrentFileProvider struct {
 	file *torrent.File
 }
 
-func (p *torrentFileProvider) NewFileReader(ctx context.Context) torrent.Reader {
+func (p *torrentFileProvider) NewFileReader(ctx context.Context) io.ReadSeekCloser {
 	reader := p.file.NewReader()
 	reader.SetResponsive()
 	reader.SetReadahead(5 * 1024 * 1024)
@@ -59,6 +61,33 @@ func (p *torrentFileProvider) NewFileReader(ctx context.Context) torrent.Reader 
 
 func (p *torrentFileProvider) FileName() string {
 	return filepath.Base(p.file.DisplayPath())
+}
+
+// diskFileProvider serves a file from disk.
+type diskFileProvider struct {
+	path string
+	name string
+}
+
+func (p *diskFileProvider) NewFileReader(_ context.Context) io.ReadSeekCloser {
+	f, err := os.Open(p.path)
+	if err != nil {
+		return nil
+	}
+	return f
+}
+
+func (p *diskFileProvider) FileName() string { return p.name }
+
+// NewStreamServerFromDisk creates a server that streams a file from disk.
+func NewStreamServerFromDisk(filePath string, port int) *StreamServer {
+	return &StreamServer{
+		provider: &diskFileProvider{
+			path: filePath,
+			name: filepath.Base(filePath),
+		},
+		port: port,
+	}
 }
 
 // Start begins serving the file on localhost. Returns the full URL.
@@ -106,6 +135,10 @@ func (ss *StreamServer) Shutdown(ctx context.Context) error {
 
 func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 	reader := ss.provider.NewFileReader(r.Context())
+	if reader == nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
 	defer reader.Close()
 
 	w.Header().Set("Content-Type", mimeTypeFromExt(ss.provider.FileName()))

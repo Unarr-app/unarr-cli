@@ -10,8 +10,10 @@ import (
 )
 
 var (
-	yearRegex   = regexp.MustCompile(`\b(19|20)\d{2}\b`)
-	seasonRegex = regexp.MustCompile(`(?i)S(\d{2})`)
+	yearRegex    = regexp.MustCompile(`\b(19|20)\d{2}\b`)
+	seasonRegex  = regexp.MustCompile(`(?i)S(\d{2})`)
+	episodeRegex = regexp.MustCompile(`(?i)S(\d{2})E(\d{2})`)
+	altEpRegex   = regexp.MustCompile(`(?i)(\d{1,2})x(\d{2})`) // 1x05 format
 )
 
 // OrganizeConfig holds file organization settings.
@@ -37,9 +39,15 @@ func organize(result *Result, task *Task, cfg OrganizeConfig) (string, error) {
 	isTV := strings.Contains(strings.ToLower(task.PreferredMethod), "show") ||
 		seasonRegex.MatchString(result.FileName)
 
-	// Detect season for TV
+	// Detect season for TV (S01E05 or 1x05 format)
 	var season string
-	if m := seasonRegex.FindStringSubmatch(result.FileName); len(m) > 1 {
+	if m := episodeRegex.FindStringSubmatch(result.FileName); len(m) > 2 {
+		season = m[1]
+		isTV = true
+	} else if m := altEpRegex.FindStringSubmatch(result.FileName); len(m) > 2 {
+		season = fmt.Sprintf("%02s", m[1])
+		isTV = true
+	} else if m := seasonRegex.FindStringSubmatch(result.FileName); len(m) > 1 {
 		season = m[1]
 		isTV = true
 	}
@@ -79,6 +87,23 @@ func organize(result *Result, task *Task, cfg OrganizeConfig) (string, error) {
 	}
 
 	destPath := filepath.Join(destDir, filepath.Base(result.FilePath))
+
+	// Check if source is a directory (multi-file torrent)
+	srcInfo, err := os.Stat(result.FilePath)
+	if err != nil {
+		return "", fmt.Errorf("stat source: %w", err)
+	}
+
+	if srcInfo.IsDir() {
+		// For directories: remove existing destination if present, then rename
+		if _, err := os.Stat(destPath); err == nil {
+			os.RemoveAll(destPath)
+		}
+		if err := os.Rename(result.FilePath, destPath); err != nil {
+			return "", fmt.Errorf("move directory: %w", err)
+		}
+		return destPath, nil
+	}
 
 	// Try rename first (same filesystem), fall back to copy+delete
 	if err := os.Rename(result.FilePath, destPath); err != nil {

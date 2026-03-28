@@ -109,7 +109,7 @@ func TestE2EDownload(t *testing.T) {
 		fmt.Fprintln(os.Stderr)
 	}()
 
-	downloadedFiles, err := dl.DownloadNZB(ctx, nzbFile, outputDir, progressCh)
+	downloadedFiles, err := dl.DownloadNZB(ctx, nzbFile, outputDir, nil, progressCh)
 	close(progressCh)
 	if err != nil {
 		t.Fatalf("download: %v", err)

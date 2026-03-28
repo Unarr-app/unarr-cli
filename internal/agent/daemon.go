@@ -44,6 +44,9 @@ type Daemon struct {
 	// Exposed tickers for hot-reload
 	PollTicker      *time.Ticker
 	HeartbeatTicker *time.Ticker
+
+	// pollNow triggers an immediate poll (e.g. on resume)
+	pollNow chan struct{}
 }
 
 // NewDaemon creates a daemon with the given transport.
@@ -59,6 +62,7 @@ func NewDaemon(cfg DaemonConfig, transport Transport) *Daemon {
 	return &Daemon{
 		cfg:       cfg,
 		transport: transport,
+		pollNow:   make(chan struct{}, 1),
 	}
 }
 
@@ -151,6 +155,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 			if d.transport.Mode() == "http" {
 				d.poll(ctx)
 			}
+
+		case <-d.pollNow:
+			d.poll(ctx)
 		}
 	}
 }
@@ -233,6 +240,15 @@ func (d *Daemon) handleEvent(event ServerEvent) {
 
 	case "disconnected":
 		log.Println("WebSocket disconnected, switching to HTTP polling")
+	}
+}
+
+// TriggerPoll requests an immediate task poll cycle.
+// Used when a resume event is received to pick up re-pending tasks faster.
+func (d *Daemon) TriggerPoll() {
+	select {
+	case d.pollNow <- struct{}{}:
+	default: // already pending
 	}
 }
 

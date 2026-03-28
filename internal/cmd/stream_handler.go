@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -125,13 +127,29 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 				Seeds:           p.Seeds,
 				FileName:        p.FileName,
 			})
+
+			// Terminal progress
+			if p.TotalBytes > 0 {
+				pct := int(float64(p.DownloadedBytes) / float64(p.TotalBytes) * 100)
+				fmt.Fprintf(os.Stderr, "\r[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
+					at.ID[:8], pct,
+					ui.FormatBytes(p.DownloadedBytes), ui.FormatBytes(p.TotalBytes), ui.FormatBytes(p.SpeedBps),
+					p.Peers, p.Seeds)
+			}
+
 			if p.DownloadedBytes >= p.TotalBytes && p.TotalBytes > 0 {
+				fmt.Fprint(os.Stderr, "\r\033[2K") // clear progress line
 				task.Transition(engine.StatusCompleted)
-				log.Printf("[%s] stream download complete, server stays up until cancelled", at.ID[:8])
-				// Don't return — keep HTTP server running so the player
-				// can finish reading. The stream stops when the user
-				// cancels from the web or the daemon shuts down.
-				<-ctx.Done()
+				log.Printf("[%s] stream download complete, server stays up for 30m or until cancelled", at.ID[:8])
+				// Keep HTTP server running so the player can finish reading.
+				// Auto-shutdown after 30 minutes of idle to prevent resource leaks.
+				idleTimer := time.NewTimer(30 * time.Minute)
+				defer idleTimer.Stop()
+				select {
+				case <-ctx.Done():
+				case <-idleTimer.C:
+					log.Printf("[%s] stream idle timeout (30m), shutting down", at.ID[:8])
+				}
 				return
 			}
 		}

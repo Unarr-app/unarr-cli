@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,7 +234,7 @@ func (s *StreamEngine) WaitBuffer(ctx context.Context, progressFn func(buffered,
 
 // NewFileReader creates a new reader for the selected file.
 // Each HTTP request should get its own reader (not safe for concurrent use).
-func (s *StreamEngine) NewFileReader(ctx context.Context) torrent.Reader {
+func (s *StreamEngine) NewFileReader(ctx context.Context) io.ReadSeekCloser {
 	reader := s.file.NewReader()
 	reader.SetResponsive()
 	reader.SetReadahead(5 * 1024 * 1024) // 5MB readahead

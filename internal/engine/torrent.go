@@ -146,13 +146,28 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 	}
 
 	// 4. Determine file path
+	// For multi-file torrents, fileName includes the torrent dir prefix (e.g. "TorrentName/file.mkv").
+	// Try the full path first, then just the file inside the torrent dir.
 	filePath := filepath.Join(d.cfg.DataDir, fileName)
 	if _, statErr := os.Stat(filePath); statErr != nil {
-		filePath = filepath.Join(d.cfg.DataDir, t.Name())
+		// File might have been moved — try torrent directory
+		dirPath := filepath.Join(d.cfg.DataDir, t.Name())
+		if fi, statErr2 := os.Stat(dirPath); statErr2 == nil && fi.IsDir() {
+			// Look for the actual file inside the directory
+			base := filepath.Base(fileName)
+			candidate := filepath.Join(dirPath, base)
+			if _, statErr3 := os.Stat(candidate); statErr3 == nil {
+				filePath = candidate
+			} else {
+				filePath = dirPath
+			}
+		} else {
+			filePath = dirPath
+		}
 	}
 
 	result.FilePath = filePath
-	result.FileName = fileName
+	result.FileName = filepath.Base(fileName)
 	result.Method = MethodTorrent
 	result.Size = totalBytes
 
@@ -211,6 +226,13 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 			// Peer stats
 			stats := t.Stats()
 
+			// Terminal progress
+			pct := int(float64(downloaded) / float64(totalBytes) * 100)
+			fmt.Fprintf(os.Stderr, "\r[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
+				task.ID[:8], pct,
+				formatBytes(downloaded), formatBytes(totalBytes), formatBytes(speed),
+				stats.ActivePeers, stats.ConnectedSeeders)
+
 			// Report progress
 			p := Progress{
 				DownloadedBytes: downloaded,
@@ -230,6 +252,7 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 
 			// Check completion
 			if downloaded >= totalBytes {
+				fmt.Fprint(os.Stderr, "\r\033[2K") // clear progress line
 				log.Printf("[%s] download complete: %s", task.ID[:8], fileName)
 				return &Result{}, nil
 			}

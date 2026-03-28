@@ -16,6 +16,7 @@ import (
 	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
 	"github.com/torrentclaw/torrentclaw-cli/internal/config"
 	"github.com/torrentclaw/torrentclaw-cli/internal/engine"
+	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/download"
 	"github.com/torrentclaw/torrentclaw-cli/internal/upgrade"
 )
 
@@ -115,6 +116,12 @@ func runDaemonStart() error {
 	// Ensure download dir exists
 	if err := os.MkdirAll(cfg.Download.Dir, 0o755); err != nil {
 		return fmt.Errorf("create download dir: %w", err)
+	}
+
+	// Clean up stale resume files (>7 days old)
+	resumeDir := filepath.Join(config.DataDir(), "resume")
+	if removed := download.CleanStaleFiles(resumeDir, 7*24*time.Hour); removed > 0 {
+		log.Printf("Cleaned %d stale resume file(s)", removed)
 	}
 
 	fmt.Println()
@@ -314,7 +321,8 @@ func runDaemonStart() error {
 			manager.PauseTask(taskID)
 			cancelStreamTask(taskID)
 		case "resume":
-			log.Printf("[%s] resume requested via WebSocket", taskID[:8])
+			log.Printf("[%s] resume requested via WebSocket, triggering poll", taskID[:8])
+			d.TriggerPoll()
 		case "stream":
 			// Use registry mutex to prevent TOCTOU race with HTTP-polled stream requests
 			streamRegistry.mu.Lock()

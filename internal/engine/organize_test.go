@@ -71,6 +71,60 @@ func TestOrganizeTVShow(t *testing.T) {
 	}
 }
 
+func TestOrganizeTVShowAltFormat(t *testing.T) {
+	tmp := t.TempDir()
+	srcFile := filepath.Join(tmp, "Show.3x12.HDTV.mkv")
+	os.WriteFile(srcFile, []byte("data"), 0o644)
+
+	tvDir := filepath.Join(tmp, "TV Shows")
+
+	r := &Result{FilePath: srcFile, FileName: "Show.3x12.HDTV.mkv"}
+	task := &Task{Title: "Show 3x12"}
+
+	path, err := organize(r, task, OrganizeConfig{
+		Enabled:    true,
+		TVShowsDir: tvDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should detect season 03 from "3x12" format
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("organized file should exist at %s: %v", path, err)
+	}
+	// Verify it went into Season 03 directory
+	dir := filepath.Dir(path)
+	if filepath.Base(dir) != "Season 03" {
+		t.Errorf("expected Season 03 directory, got %q", filepath.Base(dir))
+	}
+}
+
+func TestSeasonDetectionFormats(t *testing.T) {
+	tests := []struct {
+		filename string
+		wantTV   bool
+	}{
+		{"Show.S01E05.720p.mkv", true},
+		{"Show.s02e10.1080p.mkv", true},
+		{"Show.3x12.HDTV.mkv", true},
+		{"Show.12x01.mkv", true},
+		{"Movie.2023.1080p.mkv", false},
+		{"Just.A.Movie.mkv", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.filename, func(t *testing.T) {
+			isTV := episodeRegex.MatchString(tt.filename) ||
+				altEpRegex.MatchString(tt.filename) ||
+				seasonRegex.MatchString(tt.filename)
+			if isTV != tt.wantTV {
+				t.Errorf("isTV(%q) = %v, want %v", tt.filename, isTV, tt.wantTV)
+			}
+		})
+	}
+}
+
 func TestCleanTitle(t *testing.T) {
 	tests := []struct {
 		input string

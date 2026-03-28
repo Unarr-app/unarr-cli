@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
-	"github.com/torrentclaw/torrentclaw-cli/internal/ui"
+	"github.com/torrentclaw/torrentclaw-cli/internal/config"
 	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/download"
 	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/nntp"
 	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/nzb"
@@ -125,10 +125,22 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 
 	log.Printf("[%s] NZB: %s", shortID, nzbTitle)
 
-	// Step 2: Download NZB file
-	nzbData, err := u.apiClient.DownloadNzb(dlCtx, nzbID)
+	// Step 2: Download NZB file (or use cached version for resume)
+	resumeDir := filepath.Join(config.DataDir(), "resume")
+	nzbCachePath := filepath.Join(resumeDir, task.ID+".nzb")
+
+	nzbData, err := os.ReadFile(nzbCachePath)
 	if err != nil {
-		return nil, fmt.Errorf("download NZB: %w", err)
+		// Not cached — download from server
+		nzbData, err = u.apiClient.DownloadNzb(dlCtx, nzbID)
+		if err != nil {
+			return nil, fmt.Errorf("download NZB: %w", err)
+		}
+		// Cache for future resume
+		os.MkdirAll(resumeDir, 0o755)
+		os.WriteFile(nzbCachePath, nzbData, 0o644)
+	} else {
+		log.Printf("[%s] using cached NZB", shortID)
 	}
 
 	// Step 3: Parse NZB
@@ -140,7 +152,15 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	totalBytes := nzbFile.TotalBytes()
 	totalSegs := nzbFile.TotalSegments()
 	log.Printf("[%s] NZB parsed: %d files, %d segments, %s",
-		shortID, len(nzbFile.Files), totalSegs, ui.FormatBytes(totalBytes))
+		shortID, len(nzbFile.Files), totalSegs, formatBytes(totalBytes))
+
+	// Step 3.5: Resume support — load or create progress tracker
+	tracker := download.NewProgressTracker(task.ID, nzbFile, resumeDir)
+	resumed, _ := tracker.Load()
+	if resumed {
+		log.Printf("[%s] resuming usenet download (%d/%d segments completed)",
+			shortID, tracker.TotalCompleted(), totalSegs)
+	}
 
 	// Step 4: Get NNTP credentials and connect
 	creds, err := u.getCredentials(dlCtx)
@@ -185,7 +205,7 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		}
 	}()
 
-	downloadedFiles, err := dl.DownloadNZB(dlCtx, nzbFile, taskDir, dlProgressCh)
+	downloadedFiles, err := dl.DownloadNZB(dlCtx, nzbFile, taskDir, tracker, dlProgressCh)
 	close(dlProgressCh)
 
 	if err != nil {
@@ -233,6 +253,9 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	if fi, err := os.Stat(finalPath); err == nil {
 		finalSize = fi.Size()
 	}
+
+	// Clean up resume state on successful completion
+	tracker.Remove()
 
 	return &Result{
 		FilePath: finalPath,

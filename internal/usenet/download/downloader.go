@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/ui"
 	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/nntp"
 	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/nzb"
 	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/yenc"
@@ -39,8 +38,11 @@ func NewDownloader(nntpClient *nntp.Client) *Downloader {
 }
 
 // DownloadFile downloads all segments of a single NZB file and assembles them.
+// If tracker is non-nil, it is used for resume support: completed segments are
+// skipped, and progress is persisted to disk on pause/error.
+// fileIndex is the index of this file within the NZB (for the tracker).
 // Returns the path to the assembled file.
-func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, outputDir string, progressCh chan<- Progress) (string, error) {
+func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, fileIndex int, outputDir string, tracker *ProgressTracker, progressCh chan<- Progress) (string, error) {
 	fileName := file.Filename()
 	if fileName == "" {
 		fileName = fmt.Sprintf("usenet_%d", time.Now().UnixNano())
@@ -53,6 +55,15 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, outputDir 
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
 
+	// If tracker says this file is fully done, skip entirely
+	if tracker != nil && tracker.IsFileDone(fileIndex) {
+		if _, err := os.Stat(destPath); err == nil {
+			log.Printf("[usenet] skipping %s (fully downloaded in previous run)", fileName)
+			return destPath, nil
+		}
+		// File was marked done but doesn't exist on disk — re-download
+	}
+
 	totalBytes := file.TotalBytes()
 	totalSegs := len(file.Segments)
 
@@ -63,34 +74,6 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, outputDir 
 		return segments[i].Number < segments[j].Number
 	})
 
-	// Create/open output file
-	outFile, err := os.Create(destPath)
-	if err != nil {
-		return "", fmt.Errorf("create file: %w", err)
-	}
-	defer outFile.Close()
-
-	// Pre-allocate file if we know the size
-	if totalBytes > 0 {
-		outFile.Truncate(totalBytes)
-	}
-
-	// Download segments using worker pool
-	var downloaded atomic.Int64
-	var segsDone atomic.Int32
-	startTime := time.Now()
-
-	// Create work channel
-	type segWork struct {
-		seg   nzb.Segment
-		index int
-	}
-	workCh := make(chan segWork, len(segments))
-	for i, seg := range segments {
-		workCh <- segWork{seg: seg, index: i}
-	}
-	close(workCh)
-
 	// Track file offsets for each segment (sequential assembly)
 	offsets := make([]int64, len(segments))
 	var offset int64
@@ -98,6 +81,76 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, outputDir 
 		offsets[i] = offset
 		offset += seg.Bytes
 	}
+
+	// Open output file — resume-aware
+	var outFile *os.File
+	var err error
+	resuming := false
+
+	if tracker != nil {
+		if _, statErr := os.Stat(destPath); statErr == nil && tracker.CompletedSegments(fileIndex) > 0 {
+			// Partial file exists and we have progress — open for read-write (no truncate)
+			outFile, err = os.OpenFile(destPath, os.O_RDWR, 0o644)
+			resuming = true
+		}
+	}
+
+	if outFile == nil {
+		// Fresh start
+		outFile, err = os.Create(destPath)
+		if err != nil {
+			return "", fmt.Errorf("create file: %w", err)
+		}
+		// Pre-allocate file if we know the size
+		if totalBytes > 0 {
+			outFile.Truncate(totalBytes)
+		}
+	} else if err != nil {
+		return "", fmt.Errorf("open file for resume: %w", err)
+	}
+	defer outFile.Close()
+
+	// Download segments using worker pool
+	var downloaded atomic.Int64
+	var segsDone atomic.Int32
+	startTime := time.Now()
+
+	// Create work channel — skip already-completed segments
+	type segWork struct {
+		seg   nzb.Segment
+		index int
+	}
+
+	pendingCount := 0
+	for i := range segments {
+		if tracker != nil && tracker.IsDone(fileIndex, i) {
+			// Already downloaded — count towards progress
+			downloaded.Add(segments[i].Bytes)
+			segsDone.Add(1)
+		} else {
+			pendingCount++
+		}
+	}
+
+	if resuming {
+		log.Printf("[usenet] resuming %s (%d/%d segments, %s/%s)",
+			fileName, totalSegs-pendingCount, totalSegs,
+			formatBytes(downloaded.Load()), formatBytes(totalBytes))
+	}
+
+	if pendingCount == 0 {
+		// All segments already done
+		log.Printf("[usenet] %s already complete (%d segments)", fileName, totalSegs)
+		return destPath, nil
+	}
+
+	workCh := make(chan segWork, pendingCount)
+	for i, seg := range segments {
+		if tracker == nil || !tracker.IsDone(fileIndex, i) {
+			workCh <- segWork{seg: seg, index: i}
+		}
+	}
+	close(workCh)
 
 	// Progress reporter goroutine
 	stopProgress := make(chan struct{})
@@ -177,6 +230,11 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, outputDir 
 
 				downloaded.Add(int64(len(data)))
 				segsDone.Add(1)
+
+				// Mark segment as completed in tracker
+				if tracker != nil {
+					tracker.MarkDone(fileIndex, work.index)
+				}
 			}
 		}()
 	}
@@ -187,17 +245,21 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, outputDir 
 	// Stop progress reporter before sending final progress
 	close(stopProgress)
 
-	// Check for errors
+	// Check for errors — keep partial file for resume (don't delete)
 	select {
 	case err := <-errCh:
-		os.Remove(destPath)
+		if tracker != nil {
+			tracker.Flush()
+		}
 		return "", err
 	default:
 	}
 
-	// Check context cancellation
+	// Check context cancellation — keep partial file for resume (don't delete)
 	if ctx.Err() != nil {
-		os.Remove(destPath)
+		if tracker != nil {
+			tracker.Flush()
+		}
 		return "", ctx.Err()
 	}
 
@@ -228,15 +290,16 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, outputDir 
 		outFile.Truncate(actualSize)
 	}
 
-	log.Printf("[usenet] downloaded %s (%d segments, %s)", fileName, totalSegs, ui.FormatBytes(actualSize))
+	log.Printf("[usenet] downloaded %s (%d segments, %s)", fileName, totalSegs, formatBytes(actualSize))
 	return destPath, nil
 }
 
 // DownloadNZB downloads content files from an NZB (rars or direct content).
 // Par2 files are NOT downloaded initially — they're only fetched on demand
 // if extraction fails (via DownloadPar2).
+// If tracker is non-nil, completed files are skipped and progress is tracked per-segment.
 // Returns a map of filename → filepath for all downloaded files.
-func (d *Downloader) DownloadNZB(ctx context.Context, n *nzb.NZB, outputDir string, progressCh chan<- Progress) (map[string]string, error) {
+func (d *Downloader) DownloadNZB(ctx context.Context, n *nzb.NZB, outputDir string, tracker *ProgressTracker, progressCh chan<- Progress) (map[string]string, error) {
 	// Determine which files to download (NO par2 initially)
 	var filesToDownload []nzb.File
 
@@ -250,6 +313,13 @@ func (d *Downloader) DownloadNZB(ctx context.Context, n *nzb.NZB, outputDir stri
 		return nil, fmt.Errorf("no downloadable files found in NZB")
 	}
 
+	// Build NZB file index mapping: Subject → index in n.Files
+	// This maps each file to its position in the ProgressTracker
+	nzbFileIndex := make(map[string]int)
+	for i, f := range n.Files {
+		nzbFileIndex[f.Subject] = i
+	}
+
 	results := make(map[string]string)
 
 	for _, file := range filesToDownload {
@@ -259,7 +329,19 @@ func (d *Downloader) DownloadNZB(ctx context.Context, n *nzb.NZB, outputDir stri
 		default:
 		}
 
-		path, err := d.DownloadFile(ctx, file, outputDir, progressCh)
+		fileIdx := nzbFileIndex[file.Subject]
+
+		// Skip fully completed files
+		if tracker != nil && tracker.IsFileDone(fileIdx) {
+			destPath := filepath.Join(outputDir, file.Filename())
+			if _, err := os.Stat(destPath); err == nil {
+				results[file.Filename()] = destPath
+				log.Printf("[usenet] skipping %s (complete)", file.Filename())
+				continue
+			}
+		}
+
+		path, err := d.DownloadFile(ctx, file, fileIdx, outputDir, tracker, progressCh)
 		if err != nil {
 			return results, fmt.Errorf("download %s: %w", file.Filename(), err)
 		}
@@ -271,6 +353,7 @@ func (d *Downloader) DownloadNZB(ctx context.Context, n *nzb.NZB, outputDir stri
 
 // DownloadPar2 downloads par2 parity files from the NZB.
 // Called on-demand when extraction/verification fails.
+// No resume tracking — par2 files are small and downloaded fresh.
 func (d *Downloader) DownloadPar2(ctx context.Context, n *nzb.NZB, outputDir string, progressCh chan<- Progress) (map[string]string, error) {
 	par2Files := n.Par2Files()
 	if len(par2Files) == 0 {
@@ -279,7 +362,7 @@ func (d *Downloader) DownloadPar2(ctx context.Context, n *nzb.NZB, outputDir str
 
 	results := make(map[string]string)
 	for _, file := range par2Files {
-		path, err := d.DownloadFile(ctx, file, outputDir, progressCh)
+		path, err := d.DownloadFile(ctx, file, -1, outputDir, nil, progressCh)
 		if err != nil {
 			log.Printf("[usenet] par2 download failed (non-fatal): %v", err)
 			continue
@@ -306,3 +389,15 @@ func (d *Downloader) downloadSegment(ctx context.Context, seg nzb.Segment) ([]by
 	return part.Data, nil
 }
 
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
