@@ -26,8 +26,17 @@ func newStartCmd() *cobra.Command {
 		Short: "Start the download daemon (foreground)",
 		Long: `Start the unarr daemon in the foreground.
 
-Registers with the server, polls for download tasks, and executes them
-using the configured download method. Press Ctrl+C to stop gracefully.`,
+Registers with the server, receives download tasks via WebSocket (with
+HTTP fallback), and executes them using the configured download method.
+Supports torrent, debrid, and usenet downloads concurrently.
+
+The daemon sends periodic heartbeats and reports download progress back
+to the web dashboard. Press Ctrl+C to stop gracefully — active downloads
+get up to 30 seconds to finish.
+
+Requires: API key, agent ID, and download directory (run 'unarr setup' first).
+
+To run as a background service, use 'unarr daemon install' instead.`,
 		Example: `  unarr start
   unarr start --config /path/to/config.toml`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -41,9 +50,21 @@ func newStopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the running daemon",
+		Long: `Stop the unarr daemon.
+
+If running in the foreground, press Ctrl+C in the terminal where it was started.
+If installed as a system service, use your OS service manager:
+
+  Linux (systemd):   systemctl --user stop unarr
+  macOS (launchd):   launchctl unload ~/Library/LaunchAgents/com.torrentclaw.unarr.plist`,
+		Example: `  unarr stop`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Println("  Use Ctrl+C in the terminal where the daemon is running.")
-			fmt.Println("  (Signal-based stop coming in a future release)")
+			fmt.Println()
+			fmt.Println("  If installed as a service:")
+			fmt.Println("    Linux:  systemctl --user stop unarr")
+			fmt.Println("    macOS:  launchctl unload ~/Library/LaunchAgents/com.torrentclaw.unarr.plist")
+			fmt.Println()
 			return nil
 		},
 	}
@@ -52,9 +73,14 @@ func newStopCmd() *cobra.Command {
 // newDaemonCmd creates `unarr daemon` for administrative subcommands.
 func newDaemonCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "daemon",
-		Short: "Daemon administration (install, uninstall, logs)",
-		Long:  "Administrative commands for managing the daemon as a system service.",
+		Use:   "daemon <command>",
+		Short: "Manage the daemon as a system service",
+		Long: `Install or remove unarr as a system service that starts automatically on boot.
+
+  Linux:  Creates a systemd user service (~/.config/systemd/user/unarr.service)
+  macOS:  Creates a launchd agent (~/Library/LaunchAgents/com.torrentclaw.unarr.plist)`,
+		Example: `  unarr daemon install
+  unarr daemon uninstall`,
 	}
 
 	cmd.AddCommand(

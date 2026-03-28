@@ -66,6 +66,8 @@ type Task struct {
 	Mode            string `json:"mode,omitempty"`   // download | stream
 	DirectURL       string `json:"directUrl,omitempty"`      // HTTPS download URL (debrid, etc.)
 	DirectFileName  string `json:"directFileName,omitempty"` // Original filename from direct URL
+	NzbID           string `json:"nzbId,omitempty"`          // Pre-resolved NZB ID from server
+	NzbPassword     string `json:"nzbPassword,omitempty"`    // Password for encrypted NZB archives
 }
 
 // TasksResponse wraps the array of tasks returned by the server.
@@ -140,4 +142,58 @@ type AgentInfo struct {
 	StartedAt   time.Time
 	LastPollAt  time.Time
 	ActiveTasks int
+}
+
+// ---------------------------------------------------------------------------
+// Usenet types
+// ---------------------------------------------------------------------------
+
+// UsenetCredentials holds NNTP connection details for the CLI.
+type UsenetCredentials struct {
+	Host           string `json:"host"`
+	Port           int    `json:"port"`
+	SSL            bool   `json:"ssl"`
+	TLSServerName  string `json:"tlsServerName,omitempty"` // override for cert validation (e.g., "xsnews.nl")
+	Username       string `json:"username"`
+	Password       string `json:"password"`
+	MaxConnections int    `json:"maxConnections"`
+}
+
+// NzbSearchParams defines search criteria for NZB indexers.
+type NzbSearchParams struct {
+	Query   string `json:"query,omitempty"`
+	IMDbID  string `json:"imdbId,omitempty"`
+	TVDbID  string `json:"tvdbId,omitempty"`
+	Season  *int   `json:"season,omitempty"`
+	Episode *int   `json:"episode,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
+}
+
+// NzbSearchResult represents a single NZB found by the indexer.
+type NzbSearchResult struct {
+	Title       string            `json:"title"`
+	NzbID       string            `json:"nzbId"`
+	Category    string            `json:"category"`
+	Size        int64             `json:"size"`
+	PublishedAt string            `json:"publishedAt"`
+	Grabs       int               `json:"grabs"`
+	Group       string            `json:"group"`
+	Poster      string            `json:"poster"`
+	Attributes  map[string]string `json:"attributes"`
+}
+
+// NzbSearchResponse wraps search results.
+type NzbSearchResponse struct {
+	Results []NzbSearchResult `json:"results"`
+	Total   int               `json:"total"`
+	Offset  int               `json:"offset"`
+}
+
+// UsenetUsageResponse holds quota information.
+type UsenetUsageResponse struct {
+	UsedBytes      int64   `json:"usedBytes"`
+	QuotaBytes     int64   `json:"quotaBytes"`
+	PercentUsed    float64 `json:"percentUsed"`
+	RemainingBytes int64   `json:"remainingBytes"`
+	QuotaResetDate string  `json:"quotaResetDate"`
 }

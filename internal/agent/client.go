@@ -40,31 +40,115 @@ func (c *Client) Register(ctx context.Context, req RegisterRequest) (*RegisterRe
 	return &resp, nil
 }
 
-// Heartbeat sends a periodic keep-alive signal.
-func (c *Client) Heartbeat(ctx context.Context, req HeartbeatRequest) error {
-	var resp StatusResponse
+// Heartbeat sends a periodic keep-alive signal and returns server directives.
+func (c *Client) Heartbeat(ctx context.Context, req HeartbeatRequest) (*HeartbeatResponse, error) {
+	var resp HeartbeatResponse
 	if err := c.doPost(ctx, "/api/internal/agent/heartbeat", req, &resp); err != nil {
-		return fmt.Errorf("heartbeat: %w", err)
+		return nil, fmt.Errorf("heartbeat: %w", err)
 	}
-	return nil
+	return &resp, nil
 }
 
 // ClaimTasks polls for pending download tasks and claims them atomically.
-func (c *Client) ClaimTasks(ctx context.Context, agentID string) ([]Task, error) {
+// Also returns any stream requests for completed downloads.
+func (c *Client) ClaimTasks(ctx context.Context, agentID string) (*TasksResponse, error) {
 	url := fmt.Sprintf("/api/internal/agent/tasks?agentId=%s", agentID)
 	var resp TasksResponse
 	if err := c.doGet(ctx, url, &resp); err != nil {
 		return nil, fmt.Errorf("claim tasks: %w", err)
 	}
-	return resp.Tasks, nil
+	return &resp, nil
 }
 
 // ReportStatus reports download progress or completion for a task.
+// Deregister notifies the server that the agent is shutting down.
+func (c *Client) Deregister(ctx context.Context, agentID string) error {
+	req := struct {
+		AgentID string `json:"agentId"`
+	}{AgentID: agentID}
+	var resp StatusResponse
+	if err := c.doPost(ctx, "/api/internal/agent/deregister", req, &resp); err != nil {
+		return fmt.Errorf("deregister: %w", err)
+	}
+	return nil
+}
+
+// ReportUpgradeResult reports the outcome of a self-upgrade attempt.
+func (c *Client) ReportUpgradeResult(ctx context.Context, result UpgradeResult) error {
+	var resp struct {
+		Success bool `json:"success"`
+	}
+	if err := c.doPost(ctx, "/api/internal/agent/upgrade-result", result, &resp); err != nil {
+		return fmt.Errorf("report upgrade: %w", err)
+	}
+	return nil
+}
+
 // ReportStatus reports download progress. Returns server-side flags the CLI must act on.
 func (c *Client) ReportStatus(ctx context.Context, update StatusUpdate) (*StatusResponse, error) {
 	var resp StatusResponse
 	if err := c.doPost(ctx, "/api/internal/agent/status", update, &resp); err != nil {
 		return nil, fmt.Errorf("report status: %w", err)
+	}
+	return &resp, nil
+}
+
+// ---------------------------------------------------------------------------
+// Usenet endpoints
+// ---------------------------------------------------------------------------
+
+// SearchNzbs searches NZB indexers for matching content.
+func (c *Client) SearchNzbs(ctx context.Context, params NzbSearchParams) (*NzbSearchResponse, error) {
+	var resp NzbSearchResponse
+	if err := c.doPost(ctx, "/api/internal/agent/nzb-search", params, &resp); err != nil {
+		return nil, fmt.Errorf("nzb search: %w", err)
+	}
+	return &resp, nil
+}
+
+// DownloadNzb downloads the NZB file for the given nzbId.
+// Returns the raw NZB XML bytes.
+func (c *Client) DownloadNzb(ctx context.Context, nzbID string) ([]byte, error) {
+	url := fmt.Sprintf("/api/internal/agent/nzb-download?nzbId=%s", nzbID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	c.setHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return nil, fmt.Errorf("nzb download error %d: %s", resp.StatusCode, string(body))
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 100<<20)) // 100MB limit
+	if err != nil {
+		return nil, fmt.Errorf("read nzb: %w", err)
+	}
+	return data, nil
+}
+
+// GetUsenetCredentials fetches NNTP connection credentials.
+func (c *Client) GetUsenetCredentials(ctx context.Context) (*UsenetCredentials, error) {
+	var resp UsenetCredentials
+	if err := c.doGet(ctx, "/api/internal/agent/usenet-credentials", &resp); err != nil {
+		return nil, fmt.Errorf("usenet credentials: %w", err)
+	}
+	return &resp, nil
+}
+
+// GetUsenetUsage fetches current month's usenet quota usage.
+func (c *Client) GetUsenetUsage(ctx context.Context) (*UsenetUsageResponse, error) {
+	var resp UsenetUsageResponse
+	if err := c.doGet(ctx, "/api/internal/agent/usenet-usage", &resp); err != nil {
+		return nil, fmt.Errorf("usenet usage: %w", err)
 	}
 	return &resp, nil
 }

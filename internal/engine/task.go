@@ -48,6 +48,8 @@ type Task struct {
 	PreferredMethod string // auto | torrent | debrid | usenet
 	DirectURL       string // HTTPS download URL (debrid, etc.)
 	DirectFileName  string // Original filename from direct URL
+	NzbID           string // Pre-resolved NZB ID (usenet)
+	NzbPassword     string // Password for encrypted NZB archives
 
 	// Runtime state
 	Status          TaskStatus
@@ -84,6 +86,8 @@ func NewTaskFromAgent(at agent.Task) *Task {
 		PreferredMethod: at.PreferredMethod,
 		DirectURL:       at.DirectURL,
 		DirectFileName:  at.DirectFileName,
+		NzbID:           at.NzbID,
+		NzbPassword:     at.NzbPassword,
 		Mode:            mode,
 		Status:          StatusClaimed,
 		ClaimedAt:       time.Now(),
