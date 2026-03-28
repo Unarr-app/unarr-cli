@@ -25,6 +25,7 @@ type Config struct {
 type AuthConfig struct {
 	APIKey string `toml:"api_key"`
 	APIURL string `toml:"api_url"`
+	WSURL  string `toml:"ws_url"` // optional, derived from api_url if empty
 }
 
 type AgentConfig struct {

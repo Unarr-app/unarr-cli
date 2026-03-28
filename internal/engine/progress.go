@@ -12,11 +12,17 @@ import (
 // ActionFunc is called when the server signals an action on a task.
 type ActionFunc func(taskID string)
 
+// StatusReporter is the interface used by ProgressReporter to send progress updates.
+// Both *agent.Client and agent.Transport implement this via their ReportStatus/SendProgress methods.
+type StatusReporter interface {
+	ReportStatus(ctx context.Context, update agent.StatusUpdate) (*agent.StatusResponse, error)
+}
+
 // ProgressReporter aggregates progress from downloads and reports to the API.
 // It batches updates to avoid flooding the server.
 type ProgressReporter struct {
-	agentClient *agent.Client
-	interval    time.Duration
+	reporter StatusReporter
+	interval time.Duration
 
 	onCancel          ActionFunc
 	onPause           ActionFunc
@@ -28,12 +34,31 @@ type ProgressReporter struct {
 }
 
 // NewProgressReporter creates a reporter that flushes every interval.
+// Accepts *agent.Client directly (backwards compatible).
 func NewProgressReporter(ac *agent.Client, interval time.Duration) *ProgressReporter {
 	return &ProgressReporter{
-		agentClient: ac,
-		interval:    interval,
-		latest:      make(map[string]*Task),
+		reporter: ac,
+		interval: interval,
+		latest:   make(map[string]*Task),
 	}
+}
+
+// NewProgressReporterWithTransport creates a reporter using a Transport.
+func NewProgressReporterWithTransport(t agent.Transport, interval time.Duration) *ProgressReporter {
+	return &ProgressReporter{
+		reporter: &transportStatusAdapter{t: t},
+		interval: interval,
+		latest:   make(map[string]*Task),
+	}
+}
+
+// transportStatusAdapter adapts agent.Transport to StatusReporter.
+type transportStatusAdapter struct {
+	t agent.Transport
+}
+
+func (a *transportStatusAdapter) ReportStatus(ctx context.Context, update agent.StatusUpdate) (*agent.StatusResponse, error) {
+	return a.t.SendProgress(ctx, update)
 }
 
 // SetCancelHandler sets the callback invoked when the server says a task is cancelled.
@@ -95,7 +120,7 @@ func (r *ProgressReporter) flush(ctx context.Context) {
 		}
 
 		update := task.ToStatusUpdate()
-		resp, err := r.agentClient.ReportStatus(ctx, update)
+		resp, err := r.reporter.ReportStatus(ctx, update)
 		if err != nil {
 			log.Printf("[%s] progress report failed: %v", task.ID[:8], err)
 			continue
@@ -130,7 +155,7 @@ func (r *ProgressReporter) flush(ctx context.Context) {
 // ReportFinal sends a final status update for a completed/failed task.
 func (r *ProgressReporter) ReportFinal(ctx context.Context, task *Task) {
 	update := task.ToStatusUpdate()
-	if _, err := r.agentClient.ReportStatus(ctx, update); err != nil {
+	if _, err := r.reporter.ReportStatus(ctx, update); err != nil {
 		log.Printf("[%s] final report failed: %v", task.ID[:8], err)
 	}
 	r.Untrack(task.ID)
