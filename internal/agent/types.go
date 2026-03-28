@@ -64,11 +64,20 @@ type Task struct {
 	IMDbID          string `json:"imdbId,omitempty"`
 	PreferredMethod string `json:"preferredMethod"` // auto | debrid | usenet | torrent
 	Mode            string `json:"mode,omitempty"`   // download | stream
+	DirectURL       string `json:"directUrl,omitempty"`      // HTTPS download URL (debrid, etc.)
+	DirectFileName  string `json:"directFileName,omitempty"` // Original filename from direct URL
 }
 
 // TasksResponse wraps the array of tasks returned by the server.
 type TasksResponse struct {
-	Tasks []Task `json:"tasks"`
+	Tasks          []Task          `json:"tasks"`
+	StreamRequests []StreamRequest `json:"streamRequests,omitempty"`
+}
+
+// StreamRequest is a request to stream a completed download from disk.
+type StreamRequest struct {
+	TaskID   string `json:"taskId"`
+	FilePath string `json:"filePath"`
 }
 
 // StatusUpdate is sent by the CLI to report download progress.
@@ -95,6 +104,25 @@ type StatusResponse struct {
 	Paused          bool `json:"paused,omitempty"`
 	DeleteFiles     bool `json:"deleteFiles,omitempty"`
 	StreamRequested bool `json:"streamRequested,omitempty"`
+}
+
+// HeartbeatResponse is returned by the server on heartbeat.
+type HeartbeatResponse struct {
+	Success bool           `json:"success"`
+	Upgrade *UpgradeSignal `json:"upgrade,omitempty"`
+}
+
+// UpgradeSignal tells the agent to upgrade to a specific version.
+type UpgradeSignal struct {
+	Version string `json:"version"`
+}
+
+// UpgradeResult is sent by the agent after an upgrade attempt.
+type UpgradeResult struct {
+	AgentID string `json:"agentId"`
+	Success bool   `json:"success"`
+	Version string `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // ErrorResponse is returned on API errors.

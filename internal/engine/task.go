@@ -46,6 +46,8 @@ type Task struct {
 	ContentID       *int
 	IMDbID          string
 	PreferredMethod string // auto | torrent | debrid | usenet
+	DirectURL       string // HTTPS download URL (debrid, etc.)
+	DirectFileName  string // Original filename from direct URL
 
 	// Runtime state
 	Status          TaskStatus
@@ -80,6 +82,8 @@ func NewTaskFromAgent(at agent.Task) *Task {
 		ContentID:       at.ContentID,
 		IMDbID:          at.IMDbID,
 		PreferredMethod: at.PreferredMethod,
+		DirectURL:       at.DirectURL,
+		DirectFileName:  at.DirectFileName,
 		Mode:            mode,
 		Status:          StatusClaimed,
 		ClaimedAt:       time.Now(),
@@ -165,7 +169,15 @@ func (t *Task) ToStatusUpdate() agent.StatusUpdate {
 
 	apiStatus := ""
 	switch t.Status {
-	case StatusResolving, StatusDownloading, StatusVerifying, StatusOrganizing, StatusSeeding:
+	case StatusResolving:
+		apiStatus = "resolving"
+	case StatusDownloading:
+		apiStatus = "downloading"
+	case StatusVerifying:
+		apiStatus = "verifying"
+	case StatusOrganizing:
+		apiStatus = "organizing"
+	case StatusSeeding:
 		apiStatus = "downloading"
 	case StatusCompleted:
 		apiStatus = "completed"

@@ -88,6 +88,8 @@ func runDownload(input, method string) error {
 		5*time.Second,
 	)
 
+	debridDl := engine.NewDebridDownloader()
+
 	manager := engine.NewManager(engine.ManagerConfig{
 		MaxConcurrent: 1,
 		OutputDir:     outputDir,
@@ -96,7 +98,7 @@ func runDownload(input, method string) error {
 			MoviesDir:  cfg.Organize.MoviesDir,
 			TVShowsDir: cfg.Organize.TVShowsDir,
 		},
-	}, reporter, torrentDl)
+	}, reporter, torrentDl, debridDl)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

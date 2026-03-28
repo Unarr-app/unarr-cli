@@ -171,6 +171,34 @@ func TestToStatusUpdate(t *testing.T) {
 	}
 }
 
+func TestToStatusUpdateGranularStates(t *testing.T) {
+	tests := []struct {
+		status    TaskStatus
+		wantAPI   string
+	}{
+		{StatusResolving, "resolving"},
+		{StatusDownloading, "downloading"},
+		{StatusVerifying, "verifying"},
+		{StatusOrganizing, "organizing"},
+		{StatusCompleted, "completed"},
+		{StatusFailed, "failed"},
+		{StatusSeeding, "downloading"}, // seeding maps to downloading for backwards compat
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			task := &Task{
+				ID:     "task-1",
+				Status: tt.status,
+			}
+			update := task.ToStatusUpdate()
+			if update.Status != tt.wantAPI {
+				t.Errorf("ToStatusUpdate().Status for %s = %q, want %q", tt.status, update.Status, tt.wantAPI)
+			}
+		})
+	}
+}
+
 func TestMagnetURI(t *testing.T) {
 	task := &Task{InfoHash: "abc123"}
 	m := task.MagnetURI()

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
 	"github.com/torrentclaw/torrentclaw-cli/internal/config"
 	"github.com/torrentclaw/torrentclaw-cli/internal/engine"
+	"github.com/torrentclaw/torrentclaw-cli/internal/upgrade"
 )
 
 // newStartCmd creates the top-level `unarr start` command.
@@ -55,35 +57,13 @@ func newDaemonCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(
-		newDaemonInstallCmd(),
-		newDaemonUninstallCmd(),
+		newDaemonInstallCmdReal(),
+		newDaemonUninstallCmdReal(),
 	)
 
 	return cmd
 }
 
-func newDaemonInstallCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "install",
-		Short: "Install daemon as a system service (systemd/launchd)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("  Service installation coming in a future release.")
-			fmt.Println("  For now, use: unarr start")
-			return nil
-		},
-	}
-}
-
-func newDaemonUninstallCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "uninstall",
-		Short: "Remove daemon system service",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("  Service uninstall coming in a future release.")
-			return nil
-		},
-	}
-}
 
 func runDaemonStart() error {
 	cfg := loadConfig()
@@ -124,10 +104,11 @@ func runDaemonStart() error {
 		heartbeatInterval = 30 * time.Second
 	}
 
-	// Create agent client
+	// Create agent client (direct HTTP — always available as fallback)
 	ac := agent.NewClient(cfg.Auth.APIURL, cfg.Auth.APIKey, "unarr/"+Version)
+	userAgent := "unarr/" + Version
 
-	// Create daemon
+	// Create daemon config
 	daemonCfg := agent.DaemonConfig{
 		AgentID:           cfg.Agent.ID,
 		AgentName:         cfg.Agent.Name,
@@ -136,10 +117,37 @@ func runDaemonStart() error {
 		PollInterval:      pollInterval,
 		HeartbeatInterval: heartbeatInterval,
 	}
-	d := agent.NewDaemon(daemonCfg, ac)
 
+	// Create transport: Hybrid (WS + HTTP fallback) or HTTP-only
+	wsURL := cfg.Auth.WSURL
+	if wsURL == "" {
+		wsURL = deriveWSURL(cfg.Auth.APIURL, cfg.Agent.ID)
+	}
+
+	var transport agent.Transport
+	if wsURL != "" {
+		httpT := agent.NewHTTPTransport(cfg.Auth.APIURL, cfg.Auth.APIKey, userAgent)
+		wsT := agent.NewWSTransport(wsURL, cfg.Auth.APIKey, cfg.Agent.ID, userAgent)
+		transport = agent.NewHybridTransport(wsT, httpT)
+		log.Printf("Transport: WebSocket (fallback: HTTP) → %s", wsURL)
+	}
+
+	// Create daemon
+	var d *agent.Daemon
+	if transport != nil {
+		d = agent.NewDaemonWithTransport(daemonCfg, transport)
+	} else {
+		d = agent.NewDaemon(daemonCfg, ac)
+	}
+
+	// Wire state tracking (connected after manager creation below)
 	// Create progress reporter
-	reporter := engine.NewProgressReporter(ac, 3*time.Second)
+	var reporter *engine.ProgressReporter
+	if transport != nil {
+		reporter = engine.NewProgressReporterWithTransport(transport, 3*time.Second)
+	} else {
+		reporter = engine.NewProgressReporter(ac, 3*time.Second)
+	}
 
 	// Parse speed limits
 	maxDl, _ := config.ParseSpeed(cfg.Download.MaxDownloadSpeed)
@@ -169,6 +177,9 @@ func runDaemonStart() error {
 		log.Printf("Speed limits: download=%s upload=%s", dlStr, ulStr)
 	}
 
+	// Create debrid downloader (HTTPS-based, no provider interaction needed)
+	debridDl := engine.NewDebridDownloader()
+
 	// Create download manager
 	manager := engine.NewManager(engine.ManagerConfig{
 		MaxConcurrent: cfg.Download.MaxConcurrent,
@@ -179,7 +190,10 @@ func runDaemonStart() error {
 			MoviesDir:  cfg.Organize.MoviesDir,
 			TVShowsDir: cfg.Organize.TVShowsDir,
 		},
-	}, reporter, torrentDl)
+	}, reporter, torrentDl, debridDl)
+
+	// Wire state tracking
+	d.GetActiveCount = manager.ActiveCount
 
 	// Wire: server-side signals -> manager actions + stream tasks
 	reporter.SetCancelHandler(func(taskID string) {
@@ -233,6 +247,142 @@ func runDaemonStart() error {
 		}
 	}
 
+	// Wire: stream requests for completed downloads → serve file from disk
+	d.OnStreamRequested = func(sr agent.StreamRequest) {
+		// Check if already streaming this task
+		streamRegistry.mu.Lock()
+		_, exists := streamRegistry.servers[sr.TaskID]
+		streamRegistry.mu.Unlock()
+		if exists {
+			return
+		}
+
+		if _, err := os.Stat(sr.FilePath); err != nil {
+			log.Printf("[%s] stream request: file not found: %s", sr.TaskID[:8], sr.FilePath)
+			return
+		}
+
+		srv := engine.NewStreamServerFromDisk(sr.FilePath, 0)
+		streamURL, err := srv.Start(context.Background())
+		if err != nil {
+			log.Printf("[%s] stream failed: %v", sr.TaskID[:8], err)
+			return
+		}
+
+		streamRegistry.mu.Lock()
+		streamRegistry.servers[sr.TaskID] = srv
+		streamRegistry.mu.Unlock()
+
+		log.Printf("[%s] streaming from disk: %s → %s", sr.TaskID[:8], filepath.Base(sr.FilePath), streamURL)
+
+		// Report stream URL back to the server
+		go func() {
+			if _, err := ac.ReportStatus(ctx, agent.StatusUpdate{
+				TaskID:    sr.TaskID,
+				StreamURL: streamURL,
+			}); err != nil {
+				log.Printf("[%s] stream URL report failed: %v", sr.TaskID[:8], err)
+			}
+		}()
+	}
+
+	// Wire: WS control actions (pause/cancel/stream pushed from server)
+	d.OnControlAction = func(action, taskID string) {
+		switch action {
+		case "cancel":
+			manager.CancelTask(taskID)
+			cancelStreamTask(taskID)
+		case "pause":
+			manager.PauseTask(taskID)
+			cancelStreamTask(taskID)
+		case "resume":
+			log.Printf("[%s] resume requested via WebSocket", taskID[:8])
+		case "stream":
+			task := manager.GetTask(taskID)
+			if task == nil {
+				return
+			}
+			if task.GetStreamURL() != "" {
+				return
+			}
+			srv, err := torrentDl.StartStream(taskID)
+			if err != nil {
+				log.Printf("[%s] stream failed: %v", taskID[:8], err)
+				return
+			}
+			streamRegistry.mu.Lock()
+			streamRegistry.servers[taskID] = srv
+			streamRegistry.mu.Unlock()
+			task.SetStreamURL(srv.URL())
+		}
+	}
+
+	// Wire: server-requested upgrade
+	d.OnUpgradeRequested = func(targetVersion string) {
+
+		// Wait for active downloads to finish
+		if active := manager.ActiveCount(); active > 0 {
+			log.Printf("Waiting for %d active download(s) to finish before upgrading...", active)
+			manager.Wait()
+		}
+
+		upgrader := &upgrade.Upgrader{CurrentVersion: Version}
+		result := upgrader.Execute(ctx, targetVersion)
+
+		// Report result to server
+		reportCtx, reportCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer reportCancel()
+		errMsg := ""
+		if result.Error != nil {
+			errMsg = result.Error.Error()
+		}
+		upgradeResult := agent.UpgradeResult{
+			AgentID: cfg.Agent.ID,
+			Success: result.Success,
+			Version: result.NewVersion,
+			Error:   errMsg,
+		}
+		if transport != nil {
+			_ = transport.ReportUpgradeResult(reportCtx, upgradeResult)
+		} else {
+			_ = ac.ReportUpgradeResult(reportCtx, upgradeResult)
+		}
+
+		if !result.Success {
+			log.Printf("Upgrade failed: %v", result.Error)
+			d.ClearUpgradeInProgress()
+			return
+		}
+
+		// Restart: replace current process with the new binary
+		log.Printf("Upgrade successful (%s → %s), restarting...", result.OldVersion, result.NewVersion)
+
+		// Deregister first so the server knows we're restarting
+		deregCtx, deregCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer deregCancel()
+		_ = ac.Deregister(deregCtx, cfg.Agent.ID)
+
+		// Flush progress reporter
+		cancel()
+
+		// Re-exec with the same args — the new binary takes over
+		binPath, err := os.Executable()
+		if err != nil {
+			log.Printf("Could not determine executable path: %v", err)
+			os.Exit(75) // EX_TEMPFAIL
+		}
+		// syscall.Exec replaces the current process (Unix)
+		execErr := syscall.Exec(binPath, os.Args, os.Environ())
+		// If we get here, exec failed (e.g. Windows)
+		log.Printf("Exec failed: %v — exiting for service manager restart", execErr)
+		os.Exit(75)
+	}
+
+	// Config hot-reload (SIGUSR1 on Unix, no-op on Windows)
+	// Tickers are initialized inside d.Run(), so we pass the daemon
+	// and the reload goroutine reads them when the signal arrives.
+	startReloadWatcher(&ReloadableConfig{Daemon: d})
+
 	// Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -264,6 +414,31 @@ func runDaemonStart() error {
 		cancel()
 		return err
 	}
+}
+
+// deriveWSURL derives a WebSocket URL from the API URL.
+// https://torrentclaw.com → wss://unarr.torrentclaw.com/ws/{agentId}
+func deriveWSURL(apiURL, agentID string) string {
+	if apiURL == "" || agentID == "" {
+		return ""
+	}
+	// Parse domain from API URL
+	domain := apiURL
+	for _, prefix := range []string{"https://", "http://"} {
+		if len(domain) > len(prefix) && domain[:len(prefix)] == prefix {
+			domain = domain[len(prefix):]
+			break
+		}
+	}
+	// Strip trailing slash/path
+	for i := 0; i < len(domain); i++ {
+		if domain[i] == '/' {
+			domain = domain[:i]
+			break
+		}
+	}
+
+	return "wss://unarr." + domain + "/ws/" + agentID
 }
 
 func formatSpeedLog(bps int64) string {
