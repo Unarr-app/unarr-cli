@@ -8,6 +8,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	tc "github.com/torrentclaw/go-client"
 )
 
@@ -20,6 +21,22 @@ var (
 	dimColor     = color.New(color.FgHiBlack)
 	boldColor    = color.New(color.Bold)
 )
+
+// newCleanTable creates a borderless, minimal table with left-aligned columns.
+func newCleanTable(w io.Writer) *tablewriter.Table {
+	t := tablewriter.NewWriter(w)
+	t.Configure(func(cfg *tablewriter.Config) {
+		cfg.Header = tw.CellConfig{
+			Alignment: tw.CellAlignment{Global: tw.AlignLeft},
+			Padding:   tw.CellPadding{Global: tw.Padding{Left: " ", Right: " "}},
+		}
+		cfg.Row = tw.CellConfig{
+			Alignment: tw.CellAlignment{Global: tw.AlignLeft},
+			Padding:   tw.CellPadding{Global: tw.Padding{Left: " ", Right: " "}},
+		}
+	})
+	return t
+}
 
 // PrintSearchResults renders search results as a colored table.
 func PrintSearchResults(resp *tc.SearchResponse) {
@@ -55,16 +72,8 @@ func printSearchResultEntry(w io.Writer, r tc.SearchResult) {
 		return
 	}
 
-	table := tablewriter.NewWriter(w)
-	table.SetHeader([]string{"", "Quality", "Size", "Seeds", "Source", "Codec", "Lang", "Score"})
-	table.SetBorder(false)
-	table.SetColumnSeparator("")
-	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-	table.SetAlignment(tablewriter.ALIGN_LEFT)
-	table.SetCenterSeparator("")
-	table.SetRowSeparator("")
-	table.SetTablePadding("  ")
-	table.SetNoWhiteSpace(true)
+	table := newCleanTable(w)
+	table.Header([]string{"", "Quality", "Size", "Seeds", "Source", "Codec", "Lang", "Score"})
 
 	for _, t := range r.Torrents {
 		quality := StringOrDash(t.Quality)
@@ -96,16 +105,8 @@ func PrintPopularItems(items []tc.PopularItem) {
 	headerColor.Println("  🔥 Popular on unarr")
 	fmt.Println()
 
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"#", "Title", "Year", "Type", "IMDb", "Seeds"})
-	table.SetBorder(false)
-	table.SetColumnSeparator("")
-	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-	table.SetAlignment(tablewriter.ALIGN_LEFT)
-	table.SetCenterSeparator("")
-	table.SetRowSeparator("")
-	table.SetTablePadding("  ")
-	table.SetNoWhiteSpace(true)
+	table := newCleanTable(os.Stdout)
+	table.Header([]string{"#", "Title", "Year", "Type", "IMDb", "Seeds"})
 
 	for i, item := range items {
 		table.Append([]string{
@@ -133,16 +134,8 @@ func PrintRecentItems(items []tc.RecentItem) {
 	headerColor.Println("  🆕 Recently Added")
 	fmt.Println()
 
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"#", "Title", "Year", "Type", "IMDb", "Added"})
-	table.SetBorder(false)
-	table.SetColumnSeparator("")
-	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-	table.SetAlignment(tablewriter.ALIGN_LEFT)
-	table.SetCenterSeparator("")
-	table.SetRowSeparator("")
-	table.SetTablePadding("  ")
-	table.SetNoWhiteSpace(true)
+	table := newCleanTable(os.Stdout)
+	table.Header([]string{"#", "Title", "Year", "Type", "IMDb", "Added"})
 
 	for i, item := range items {
 		table.Append([]string{
@@ -186,16 +179,8 @@ func PrintStats(stats *tc.StatsResponse) {
 		fmt.Println()
 		boldColor.Println("  Recent Ingestions:")
 
-		table := tablewriter.NewWriter(os.Stdout)
-		table.SetHeader([]string{"", "Source", "Status", "Fetched", "New", "Updated"})
-		table.SetBorder(false)
-		table.SetColumnSeparator("")
-		table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-		table.SetAlignment(tablewriter.ALIGN_LEFT)
-		table.SetCenterSeparator("")
-		table.SetRowSeparator("")
-		table.SetTablePadding("  ")
-		table.SetNoWhiteSpace(true)
+		table := newCleanTable(os.Stdout)
+		table.Header([]string{"", "Source", "Status", "Fetched", "New", "Updated"})
 
 		for _, ing := range stats.RecentIngestions {
 			status := ing.Status
@@ -294,16 +279,8 @@ func PrintInspect(title string, year string, torrents []tc.TorrentInfo, magnetUR
 	if len(torrents) > 1 {
 		dimColor.Printf("  + %d more torrents available\n\n", len(torrents)-1)
 
-		table := tablewriter.NewWriter(os.Stdout)
-		table.SetHeader([]string{"", "Quality", "Size", "Seeds", "Source", "Score"})
-		table.SetBorder(false)
-		table.SetColumnSeparator("")
-		table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-		table.SetAlignment(tablewriter.ALIGN_LEFT)
-		table.SetCenterSeparator("")
-		table.SetRowSeparator("")
-		table.SetTablePadding("  ")
-		table.SetNoWhiteSpace(true)
+		table := newCleanTable(os.Stdout)
+		table.Header([]string{"", "Quality", "Size", "Seeds", "Source", "Score"})
 
 		for i, tt := range torrents[1:] {
 			score := ""
@@ -387,16 +364,8 @@ func PrintWatchProviders(title string, year string, providers *tc.WatchProviders
 	if len(torrents) > 0 {
 		headerColor.Println("  🏴‍☠️ TORRENT:")
 
-		table := tablewriter.NewWriter(os.Stdout)
-		table.SetHeader([]string{"", "Quality", "Size", "Seeds", "Source", "Score"})
-		table.SetBorder(false)
-		table.SetColumnSeparator("")
-		table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-		table.SetAlignment(tablewriter.ALIGN_LEFT)
-		table.SetCenterSeparator("")
-		table.SetRowSeparator("")
-		table.SetTablePadding("  ")
-		table.SetNoWhiteSpace(true)
+		table := newCleanTable(os.Stdout)
+		table.Header([]string{"", "Quality", "Size", "Seeds", "Source", "Score"})
 
 		for _, t := range torrents {
 			score := ""

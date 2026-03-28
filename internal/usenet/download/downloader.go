@@ -91,6 +91,9 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, fileIndex 
 		if _, statErr := os.Stat(destPath); statErr == nil && tracker.CompletedSegments(fileIndex) > 0 {
 			// Partial file exists and we have progress — open for read-write (no truncate)
 			outFile, err = os.OpenFile(destPath, os.O_RDWR, 0o644)
+			if err != nil {
+				return "", fmt.Errorf("open file for resume: %w", err)
+			}
 			resuming = true
 		}
 	}
@@ -105,10 +108,13 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, fileIndex 
 		if totalBytes > 0 {
 			outFile.Truncate(totalBytes)
 		}
-	} else if err != nil {
-		return "", fmt.Errorf("open file for resume: %w", err)
 	}
-	defer outFile.Close()
+	defer func() {
+		if err := outFile.Sync(); err != nil {
+			log.Printf("[usenet] sync warning: %v", err)
+		}
+		outFile.Close()
+	}()
 
 	// Download segments using worker pool
 	var downloaded atomic.Int64
@@ -329,7 +335,10 @@ func (d *Downloader) DownloadNZB(ctx context.Context, n *nzb.NZB, outputDir stri
 		default:
 		}
 
-		fileIdx := nzbFileIndex[file.Subject]
+		fileIdx, ok := nzbFileIndex[file.Subject]
+		if !ok {
+			fileIdx = -1 // unknown index — tracker will treat as no-op
+		}
 
 		// Skip fully completed files
 		if tracker != nil && tracker.IsFileDone(fileIdx) {

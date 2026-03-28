@@ -79,7 +79,7 @@ func (t *WSTransport) Connect(ctx context.Context) error {
 	t.authDoneOnce = sync.Once{}
 	t.mu.Unlock()
 
-	go t.readLoop()
+	go t.readLoop(conn)
 	return nil
 }
 
@@ -240,9 +240,9 @@ func (t *WSTransport) send(msg any) error {
 	return t.conn.WriteMessage(websocket.TextMessage, data)
 }
 
-func (t *WSTransport) readLoop() {
+func (t *WSTransport) readLoop(conn *websocket.Conn) {
 	for {
-		_, msg, err := t.conn.ReadMessage()
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if !t.closed.Load() {
 				log.Printf("[ws] read error: %v", err)

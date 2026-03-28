@@ -43,7 +43,7 @@ type ProgressTracker struct {
 	dir         string // directory where progress files are stored
 	files       []fileProgress
 
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	dirty     bool
 	lastFlush time.Time
 	markCount int // marks since last flush
@@ -185,12 +185,16 @@ func (p *ProgressTracker) MarkDone(fileIndex, segIndex int) {
 	}
 
 	p.mu.Lock()
-	fp.completed[segIndex/8] |= 1 << uint(segIndex%8)
-	fp.doneCount.Add(1)
-	p.dirty = true
-	p.markCount++
+	mask := byte(1 << uint(segIndex%8))
+	alreadyDone := fp.completed[segIndex/8]&mask != 0
+	if !alreadyDone {
+		fp.completed[segIndex/8] |= mask
+		fp.doneCount.Add(1)
+		p.dirty = true
+		p.markCount++
+	}
 
-	shouldFlush := p.markCount >= flushSegmentFreq || time.Since(p.lastFlush) >= flushInterval
+	shouldFlush := !alreadyDone && (p.markCount >= flushSegmentFreq || time.Since(p.lastFlush) >= flushInterval)
 	p.mu.Unlock()
 
 	if shouldFlush {
@@ -207,10 +211,10 @@ func (p *ProgressTracker) IsDone(fileIndex, segIndex int) bool {
 	if segIndex < 0 || segIndex >= fp.segCount {
 		return false
 	}
-	// Read without lock — single-byte read is atomic on aligned data,
-	// and we only ever set bits (never clear), so a stale read just means
-	// we might re-download a segment (harmless, WriteAt is idempotent).
-	return fp.completed[segIndex/8]&(1<<uint(segIndex%8)) != 0
+	p.mu.RLock()
+	done := fp.completed[segIndex/8]&(1<<uint(segIndex%8)) != 0
+	p.mu.RUnlock()
+	return done
 }
 
 // IsFileDone returns true if all segments of a file are completed.
@@ -294,16 +298,25 @@ func (p *ProgressTracker) Flush() error {
 
 	// Atomic write: tmp file + rename
 	if err := os.MkdirAll(p.dir, 0o755); err != nil {
+		p.mu.Lock()
+		p.dirty = true // re-mark so next Flush retries
+		p.mu.Unlock()
 		return fmt.Errorf("create resume dir: %w", err)
 	}
 
 	tmpPath := p.progressPath() + ".tmp"
 	if err := os.WriteFile(tmpPath, buf, 0o644); err != nil {
+		p.mu.Lock()
+		p.dirty = true
+		p.mu.Unlock()
 		return fmt.Errorf("write progress tmp: %w", err)
 	}
 
 	if err := os.Rename(tmpPath, p.progressPath()); err != nil {
 		os.Remove(tmpPath)
+		p.mu.Lock()
+		p.dirty = true
+		p.mu.Unlock()
 		return fmt.Errorf("rename progress: %w", err)
 	}
 

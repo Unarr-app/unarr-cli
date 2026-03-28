@@ -136,9 +136,12 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		if err != nil {
 			return nil, fmt.Errorf("download NZB: %w", err)
 		}
-		// Cache for future resume
-		os.MkdirAll(resumeDir, 0o755)
-		os.WriteFile(nzbCachePath, nzbData, 0o644)
+		// Cache for future resume (best-effort — download still works without cache)
+		if mkErr := os.MkdirAll(resumeDir, 0o755); mkErr != nil {
+			log.Printf("[%s] resume dir create failed: %v", shortID, mkErr)
+		} else if wErr := os.WriteFile(nzbCachePath, nzbData, 0o644); wErr != nil {
+			log.Printf("[%s] NZB cache write failed: %v", shortID, wErr)
+		}
 	} else {
 		log.Printf("[%s] using cached NZB", shortID)
 	}
@@ -161,6 +164,11 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		log.Printf("[%s] resuming usenet download (%d/%d segments completed)",
 			shortID, tracker.TotalCompleted(), totalSegs)
 	}
+
+	// Always flush progress on exit — covers graceful shutdown, SIGTERM,
+	// error returns, and shutdown-timeout scenarios. The atomic write
+	// (tmp+rename) ensures the file is never corrupted even on hard kill.
+	defer tracker.Flush()
 
 	// Step 4: Get NNTP credentials and connect
 	creds, err := u.getCredentials(dlCtx)
