@@ -13,10 +13,14 @@ import (
 
 func newStatsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "stats",
-		Short:   "Show system statistics",
-		Long:    "Display aggregator statistics including content counts, torrent sources, and recent ingestion history.",
-		Example: `  unarr stats`,
+		Use:   "stats",
+		Short: "Show catalog statistics",
+		Long: `Display aggregator statistics from the unarr catalog.
+
+Shows total content count, torrent count, sources breakdown, and recent
+ingestion activity. Useful for understanding the catalog coverage.`,
+		Example: `  unarr stats
+  unarr stats --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := getClient()
 

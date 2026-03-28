@@ -11,6 +11,7 @@ func newVersionCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Show unarr version",
+		Long:  "Print the unarr version, operating system, and architecture.",
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Printf("unarr %s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
 		},

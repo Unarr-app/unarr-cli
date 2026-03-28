@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"syscall"
 	"time"
 
 	"github.com/fatih/color"
@@ -17,8 +16,20 @@ import (
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Diagnose CLI configuration and connectivity",
-		Long:  "Run diagnostic checks on API connectivity, config validity, disk space, and capabilities.",
+		Short: "Diagnose configuration and connectivity",
+		Long: `Run diagnostic checks to verify that unarr is correctly configured.
+
+Checks performed:
+  - Config file exists and is readable
+  - API key is configured
+  - API server is reachable (with latency)
+  - Agent is registered with the server
+  - Download directory exists and is writable
+  - Disk space is sufficient (warns below 10 GB)
+  - Current unarr version
+
+Use this command to troubleshoot connection issues or verify setup.`,
+		Example: `  unarr doctor`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDoctor()
 		},
@@ -176,17 +187,7 @@ func runDoctor() error {
 		if dir == "" {
 			return "", fmt.Errorf("not configured")
 		}
-		var stat syscall.Statfs_t
-		if err := syscall.Statfs(dir, &stat); err != nil {
-			return "", err
-		}
-		available := int64(stat.Bavail) * int64(stat.Bsize)
-		gb := float64(available) / (1024 * 1024 * 1024)
-		msg := fmt.Sprintf("%.1f GB free", gb)
-		if gb < 10 {
-			return "!" + msg + " (low)", nil
-		}
-		return msg, nil
+		return checkDiskSpace(dir)
 	})
 
 	fmt.Println()

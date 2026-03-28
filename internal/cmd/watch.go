@@ -75,6 +75,7 @@ then torrent alternatives below. Helps you decide the best way to watch.`,
 	}
 
 	cmd.Flags().StringVar(&country, "country", "", "country code for streaming availability (e.g. US, ES)")
+	cmd.RegisterFlagCompletionFunc("country", completionCountryCodes)
 
 	return cmd
 }

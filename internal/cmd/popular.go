@@ -20,8 +20,11 @@ func newPopularCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "popular",
-		Short: "Show popular content",
-		Long:  "Display the most popular movies and TV shows, ranked by community engagement.",
+		Short: "Show popular movies and TV shows",
+		Long: `Display the most popular movies and TV shows, ranked by community engagement.
+
+Results are ordered by trending score. Use --limit to control how many
+results to show and --page for pagination.`,
 		Example: `  unarr popular
   unarr popular --limit 20
   unarr popular --page 2 --json`,

@@ -14,16 +14,28 @@ Search 30+ torrent sources, inspect torrent quality, discover popular content, f
 
 ## Installation
 
-### Go install
+### Quick install (Linux/macOS)
 
 ```bash
-go install github.com/torrentclaw/torrentclaw-cli/cmd/unarr@latest
+curl -fsSL https://torrentclaw.com/install.sh | sh
+```
+
+### PowerShell (Windows)
+
+```powershell
+irm https://torrentclaw.com/install.ps1 | iex
 ```
 
 ### Homebrew (macOS/Linux)
 
 ```bash
 brew install torrentclaw/tap/unarr
+```
+
+### Go install
+
+```bash
+go install github.com/torrentclaw/torrentclaw-cli/cmd/unarr@latest
 ```
 
 ### GitHub Releases
@@ -41,117 +53,184 @@ make build
 ## Quick Start
 
 ```bash
-# Configure (first time)
-unarr config
+# 1. Run the setup wizard (opens browser for API key)
+unarr setup
 
-# Search for content
+# 2. Search for content
 unarr search "breaking bad" --type show --quality 1080p
 
-# Inspect a torrent
-unarr inspect "magnet:?xt=urn:btih:ABC123&dn=Movie.2023.1080p.BluRay.x265"
-
-# Popular content
-unarr popular --limit 20
-
-# Recently added
-unarr recent
-
-# Where to watch (streaming + torrents)
-unarr watch "oppenheimer" --country ES
-
-# System statistics
-unarr stats
+# 3. Start the download daemon
+unarr start
 ```
 
 ## Commands
 
-### Search
+### Getting Started
 
-Search the unarr catalog with advanced filters.
+| Command | Description |
+|---------|-------------|
+| `unarr setup` | First-time configuration wizard (API key, download dir, method) |
+| `unarr config` | Edit configuration interactively |
+
+### Search & Discovery
+
+| Command | Description |
+|---------|-------------|
+| `unarr search <query>` | Search for movies and TV shows with advanced filters |
+| `unarr inspect <magnet\|hash\|name>` | TrueSpec analysis — quality, codec, seed health |
+| `unarr popular` | Show popular movies and TV shows |
+| `unarr recent` | Show recently added content |
+| `unarr watch <query>` | Find where to watch — streaming + torrents |
+
+### Downloads & Streaming
+
+| Command | Description |
+|---------|-------------|
+| `unarr download <hash\|magnet>` | One-shot download (no daemon needed) |
+| `unarr stream <hash\|magnet>` | Stream a torrent directly to mpv/vlc/browser |
+
+### Daemon Management
+
+| Command | Description |
+|---------|-------------|
+| `unarr start` | Start the download daemon (foreground) |
+| `unarr stop` | How to stop the running daemon |
+| `unarr status` | Show daemon status and active downloads |
+| `unarr daemon install` | Install as system service (systemd/launchd) |
+| `unarr daemon uninstall` | Remove the system service |
+
+### System & Diagnostics
+
+| Command | Description |
+|---------|-------------|
+| `unarr stats` | Show catalog statistics |
+| `unarr doctor` | Diagnose configuration and connectivity |
+| `unarr self-update` | Update unarr to the latest version |
+| `unarr version` | Show version info |
+| `unarr completion <shell>` | Generate shell completion scripts |
+
+---
+
+## Search
+
+Search the catalog with advanced filters. Results include quality scores, seed health, and metadata from 30+ sources.
 
 ```bash
 unarr search "inception" --sort seeders --min-rating 7 --lang es
+unarr search "breaking bad" --type show --quality 1080p
+unarr search "matrix" --json | jq '.results[].title'
 ```
 
 **Filters:**
 
-| Flag | Description | Example |
-|------|-------------|---------|
+| Flag | Description | Values |
+|------|-------------|--------|
 | `--type` | Content type | `movie`, `show` |
 | `--quality` | Video quality | `480p`, `720p`, `1080p`, `2160p` |
-| `--lang` | Audio language (ISO 639) | `es`, `en`, `fr` |
-| `--genre` | Genre filter | `Action`, `Comedy`, `Drama` |
+| `--lang` | Audio language (ISO 639) | `es`, `en`, `fr`, `de`, ... |
+| `--genre` | Genre | `Action`, `Comedy`, `Drama`, `Horror`, ... |
 | `--year-min` | Minimum release year | `2020` |
 | `--year-max` | Maximum release year | `2026` |
-| `--min-rating` | Minimum IMDb/TMDb rating | `7` |
+| `--min-rating` | Minimum IMDb/TMDb rating | `0`-`10` |
 | `--sort` | Sort order | `relevance`, `seeders`, `year`, `rating`, `added` |
-| `--limit` | Results per page (1-50) | `10` |
-| `--page` | Page number | `2` |
-| `--country` | Country for streaming info | `US`, `ES` |
+| `--limit` | Results per page | `1`-`50` |
+| `--page` | Page number | `1`, `2`, ... |
+| `--country` | Country for streaming info | `US`, `ES`, `GB`, ... |
 
-### Inspect
+## Inspect
 
-TrueSpec analysis — parse a torrent and show detailed specs.
+TrueSpec analysis — parse a torrent and show detailed quality specs.
 
 ```bash
 unarr inspect "Oppenheimer.2023.1080p.BluRay.x265"
+unarr inspect abc123def456abc123def456abc123def456abc1
+unarr inspect "magnet:?xt=urn:btih:ABC123&dn=Movie.2023.1080p"
 ```
 
-Accepts magnet URIs, 40-character info hashes, or torrent names.
+Accepts magnet URIs, 40-character info hashes, or torrent file names. Shows quality, codec, size, seeds, languages, source, quality score, health, and alternatives.
 
-Output includes: quality, codec, size, seeds, languages, source, quality score, and health.
-
-### Watch
+## Watch
 
 Find where to watch — streaming services alongside torrent options.
 
 ```bash
 unarr watch "oppenheimer" --country ES
+unarr watch "breaking bad" --json
 ```
 
 Shows legal streaming options first (subscription, free, rent, buy), then torrent alternatives.
 
-### Popular
+## Stream
 
-Show trending content ranked by community engagement.
+Stream a torrent directly to a media player without waiting for the full download.
 
 ```bash
-unarr popular --limit 20
+unarr stream abc123def456abc123def456abc123def456abc1
+unarr stream "magnet:?xt=urn:btih:..." --port 8080
+unarr stream <hash> --player mpv
+unarr stream <hash> --no-open   # just print the URL
 ```
 
-### Recent
+Downloads pieces sequentially and serves the video over a local HTTP server. Auto-detects mpv, vlc, or your default browser.
 
-Show the most recently added content.
+## Download
+
+One-shot download by info hash or magnet link (no daemon required).
 
 ```bash
-unarr recent --limit 20
+unarr download abc123def456abc123def456abc123def456abc1
+unarr download "magnet:?xt=urn:btih:..." --method torrent
 ```
 
-### Stats
+## Daemon
 
-Display unarr system statistics.
+The daemon receives download tasks from the web dashboard and executes them automatically.
 
 ```bash
-unarr stats
+# Start in foreground (Ctrl+C to stop)
+unarr start
+
+# Or install as a system service (auto-starts on boot)
+unarr daemon install
+
+# Check status
+unarr status
+
+# Uninstall the service
+unarr daemon uninstall
 ```
 
-### Config
+The daemon connects via WebSocket for instant task delivery, with automatic HTTP fallback. It supports torrent, debrid, and usenet downloads concurrently, reports progress to the web dashboard, and handles graceful shutdown.
 
-Interactive configuration setup.
+**Service locations:**
+- Linux: `~/.config/systemd/user/unarr.service` (systemd)
+- macOS: `~/Library/LaunchAgents/com.torrentclaw.unarr.plist` (launchd)
+
+## Diagnostics
 
 ```bash
-unarr config
+# Run all diagnostic checks
+unarr doctor
+
+# Update to the latest version
+unarr self-update
+unarr self-update --force   # reinstall even if up to date
 ```
 
-Saves to `~/.config/unarr/config.yaml`.
+`unarr doctor` checks: config file, API key, server connectivity (with latency), agent registration, download directory, disk space, and version.
 
-## Alias
+## Alias (optional)
 
-You can use `un` as a shorthand for `unarr`:
+Create a shell alias for shorter commands:
 
 ```bash
+# Add to ~/.bashrc or ~/.zshrc
+alias un=unarr
+
+# Then use:
 un search "breaking bad" --type show
 un popular --limit 5
+un start
 ```
 
 ## Global Flags
@@ -165,7 +244,7 @@ un popular --limit 5
 
 ## JSON Output
 
-All commands support `--json` for scripting:
+All query commands support `--json` for scripting:
 
 ```bash
 # Pipe to jq
@@ -180,32 +259,97 @@ SEEDS=$(unarr search "inception" --json | jq '.results[0].torrents[0].seeders')
 
 ## Configuration
 
-Config file location: `~/.config/unarr/config.yaml`
+### Config file
 
-```yaml
-api_url: https://torrentclaw.com
-api_key: tc_your_api_key_here
-country: US
+Location: `~/.config/unarr/config.toml`
+
+```toml
+[auth]
+api_key = "tc_your_api_key_here"
+api_url = "https://torrentclaw.com"
+
+[agent]
+id = "auto-generated-uuid"
+name = "My PC"
+
+[downloads]
+dir = "~/Media"
+preferred_method = "auto"        # auto | torrent | debrid | usenet
+max_concurrent = 3
+max_download_speed = "0"         # e.g. "10MB", "500KB", "0" = unlimited
+max_upload_speed = "0"
+
+[organize]
+enabled = true
+movies_dir = "~/Media/Movies"
+tv_shows_dir = "~/Media/TV Shows"
+
+[daemon]
+poll_interval = "30s"
+heartbeat_interval = "30s"
+
+[notifications]
+enabled = true
+
+[general]
+country = "US"
 ```
 
-Environment variables (override config file):
+### Environment variables
+
+Environment variables override config file values:
 
 ```bash
-export UNARR_API_URL=https://torrentclaw.com
 export UNARR_API_KEY=tc_your_api_key
+export UNARR_API_URL=https://torrentclaw.com
 export UNARR_COUNTRY=ES
+export UNARR_DOWNLOAD_DIR=~/Media
 ```
+
+### Speed limits
+
+Speed limits use human-readable format:
+
+```toml
+max_download_speed = "10MB"    # 10 megabytes/sec
+max_upload_speed = "1MB"       # 1 megabyte/sec
+max_download_speed = "500KB"   # 500 kilobytes/sec
+max_download_speed = "0"       # unlimited (default)
+```
+
+## Shell Completion
+
+Generate tab-completion scripts for your shell:
+
+```bash
+# Bash — add to ~/.bashrc
+eval "$(unarr completion bash)"
+
+# Zsh — add to ~/.zshrc
+eval "$(unarr completion zsh)"
+
+# Fish
+unarr completion fish > ~/.config/fish/completions/unarr.fish
+
+# PowerShell — add to $PROFILE
+unarr completion powershell >> $PROFILE
+```
+
+Completions provide tab-completion for commands, flags, and flag values (e.g. `--type <Tab>` shows `movie` and `show`).
 
 ## Coming Soon
 
-These commands are stubbed and will be available in future releases:
+These commands are planned for future releases:
 
-- `unarrupgrade` — Find a better version of a torrent
-- `unarrmoreseed` — Find same quality with more seeders
-- `unarrcompare` — Compare two torrents side by side
-- `unarrscan` — Scan your media library for upgrades
-- `unarradd` — Search and add torrents to your client
-- `unarrmonitor` — Watch for new episodes of a series
+| Command | Description |
+|---------|-------------|
+| `unarr upgrade` | Find a better version of a torrent |
+| `unarr moreseed` | Find same quality with more seeders |
+| `unarr compare` | Compare two torrents side by side |
+| `unarr scan` | Scan your media library for upgrades |
+| `unarr add` | Search and add torrents to your client |
+| `unarr monitor` | Watch for new episodes of a series |
+| `unarr open` | Open content in the browser |
 
 ## Contributing
 

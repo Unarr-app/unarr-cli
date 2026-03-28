@@ -23,7 +23,17 @@ func newSetupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "setup",
 		Short: "First-time configuration wizard",
-		Long:  "Interactive setup that configures API key, download directory, and preferred download method.",
+		Long: `Interactive setup that configures API key, download directory, and
+preferred download method.
+
+Opens your browser to create/copy your API key, then walks you through
+choosing a download directory, method (torrent, debrid, usenet), and
+device name. Validates the API key against the server before saving.
+
+Run this once after installing unarr. To change settings later,
+use 'unarr config' or edit ~/.config/unarr/config.toml directly.`,
+		Example: `  unarr setup
+  unarr setup --api-url https://custom.server.com`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSetup(apiURL)
 		},
@@ -238,7 +248,7 @@ func runSetup(apiURLOverride string) error {
 	}
 	cyan.Printf("  Available: %s\n", strings.Join(features, ", "))
 	fmt.Println()
-	fmt.Println("  Next: run", bold.Sprint("unarr daemon start"), "to begin downloading")
+	fmt.Println("  Next: run", bold.Sprint("unarr start"), "to begin downloading")
 	fmt.Println()
 
 	return nil

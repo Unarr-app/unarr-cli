@@ -14,11 +14,20 @@ import (
 func newConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Configure unarr",
-		Long: `Interactive setup for unarr.
+		Short: "Edit configuration interactively",
+		Long: `Edit unarr settings interactively in your terminal.
 
-Configures the API URL, API key, default country, and saves to config file.`,
-		Example: `  unarr config`,
+Prompts for API URL, API key, and default country. Press Enter to keep
+the current value. For first-time setup use 'unarr setup' instead.
+
+Config file: ~/.config/unarr/config.toml
+Environment variables override config file values:
+  UNARR_API_KEY        API key
+  UNARR_API_URL        API URL
+  UNARR_COUNTRY        Default country code
+  UNARR_DOWNLOAD_DIR   Download directory`,
+		Example: `  unarr config
+  unarr config --config /path/to/config.toml`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runConfig()
 		},

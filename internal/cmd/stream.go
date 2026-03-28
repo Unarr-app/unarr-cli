@@ -27,9 +27,14 @@ func newStreamCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stream <magnet|infohash>",
 		Short: "Stream a torrent directly to a media player",
-		Long: `Stream a torrent by info hash or magnet link.
-Downloads sequentially and serves the video over HTTP.
-Automatically opens mpv, vlc, or your browser.`,
+		Long: `Stream a torrent by info hash or magnet link without waiting for the full download.
+
+Downloads pieces sequentially (prioritizing the beginning of the file) and serves
+the video over a local HTTP server. Automatically detects and opens mpv, vlc, or
+your default browser.
+
+The stream server runs until you press Ctrl+C. Data is stored temporarily in your
+download directory (or system temp if not configured).`,
 		Example: `  unarr stream abc123def456abc123def456abc123def456abc1
   unarr stream "magnet:?xt=urn:btih:..." --port 8080
   unarr stream <hash> --player mpv
@@ -43,6 +48,9 @@ Automatically opens mpv, vlc, or your browser.`,
 	cmd.Flags().IntVar(&port, "port", 0, "HTTP server port (default: random available)")
 	cmd.Flags().BoolVar(&noOpen, "no-open", false, "don't open a player, just print the URL")
 	cmd.Flags().StringVar(&playerCmd, "player", "", "media player command (default: auto-detect)")
+	cmd.RegisterFlagCompletionFunc("player", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return []string{"mpv\tmpv media player", "vlc\tVLC media player"}, cobra.ShellCompDirectiveNoFileComp
+	})
 
 	return cmd
 }

@@ -11,7 +11,11 @@ func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show daemon status and active downloads",
-		Long:  "Display the current state of the daemon, active downloads, and recent activity.",
+		Long: `Display the current state of the daemon, active downloads, and recent activity.
+
+Shows the configured agent name, download directory, and preferred method.
+When the daemon is running, also displays active downloads and their progress.`,
+		Example: `  unarr status`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runStatus()
 		},
@@ -39,7 +43,7 @@ func runStatus() error {
 	fmt.Printf("  Method:    %s\n", cfg.Download.PreferredMethod)
 	fmt.Println()
 
-	dim.Println("  Daemon not running. Start with 'unarr daemon start'")
+	dim.Println("  Daemon not running. Start with 'unarr start'")
 	dim.Println("  (Live status will be shown here when daemon is running)")
 	fmt.Println()
 

@@ -20,8 +20,11 @@ func newRecentCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "recent",
-		Short: "Show recently added content",
-		Long:  "Display the most recently added movies and TV shows to the catalog.",
+		Short: "Show recently added movies and TV shows",
+		Long: `Display the most recently added movies and TV shows to the catalog.
+
+Shows the latest additions ordered by ingestion date. Use --limit to
+control how many results to show and --page for pagination.`,
 		Example: `  unarr recent
   unarr recent --limit 20
   unarr recent --page 2 --json`,

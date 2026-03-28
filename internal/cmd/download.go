@@ -24,7 +24,13 @@ func newDownloadCmd() *cobra.Command {
 		Use:   "download <info_hash|magnet>",
 		Short: "Download a torrent (one-shot, no daemon needed)",
 		Long: `Download a specific torrent by info hash or magnet link.
-This is a standalone download — it does not require the daemon to be running.`,
+
+This is a standalone download that does not require the daemon to be running.
+Useful for quick one-off downloads. The file is saved to your configured
+download directory. Press Ctrl+C to cancel.
+
+For managed downloads (queue, progress tracking, web dashboard), use the
+daemon instead: 'unarr start'.`,
 		Example: `  unarr download abc123def456abc123def456abc123def456abc1
   unarr download "magnet:?xt=urn:btih:..." --method torrent`,
 		Args: cobra.ExactArgs(1),
@@ -33,7 +39,10 @@ This is a standalone download — it does not require the daemon to be running.`
 		},
 	}
 
-	cmd.Flags().StringVar(&method, "method", "torrent", "download method: torrent (default)")
+	cmd.Flags().StringVar(&method, "method", "torrent", "download method: torrent, debrid, usenet")
+	cmd.RegisterFlagCompletionFunc("method", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return []string{"torrent\tBitTorrent P2P", "debrid\tReal-Debrid / AllDebrid", "usenet\tUsenet (requires Pro)"}, cobra.ShellCompDirectiveNoFileComp
+	})
 
 	return cmd
 }
@@ -54,6 +63,9 @@ func runDownload(input, method string) error {
 		} else {
 			return fmt.Errorf("invalid input: provide a 40-char info hash or magnet URI")
 		}
+	}
+	if len(infoHash) < 40 {
+		return fmt.Errorf("invalid info hash: expected 40 characters, got %d", len(infoHash))
 	}
 
 	outputDir := cfg.Download.Dir
