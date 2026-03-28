@@ -109,12 +109,7 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, fileIndex 
 			outFile.Truncate(totalBytes)
 		}
 	}
-	defer func() {
-		if err := outFile.Sync(); err != nil {
-			log.Printf("[usenet] sync warning: %v", err)
-		}
-		outFile.Close()
-	}()
+	defer outFile.Close()
 
 	// Download segments using worker pool
 	var downloaded atomic.Int64

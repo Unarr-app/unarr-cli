@@ -18,6 +18,13 @@ import (
 	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/postprocess"
 )
 
+// activeDownload holds the state for a single in-progress usenet download.
+type activeDownload struct {
+	cancel  context.CancelFunc
+	taskDir string                   // populated after MkdirAll; empty before
+	tracker *download.ProgressTracker // populated after tracker creation; nil before
+}
+
 // UsenetDownloader downloads via Usenet/NZB protocol.
 // It searches for NZBs, downloads articles via NNTP, and assembles the final files.
 type UsenetDownloader struct {
@@ -26,7 +33,7 @@ type UsenetDownloader struct {
 
 	mu         sync.Mutex
 	nntpClient *nntp.Client
-	active     map[string]context.CancelFunc
+	active     map[string]*activeDownload
 
 	// Cached credentials
 	credentials *agent.UsenetCredentials
@@ -43,7 +50,7 @@ func NewUsenetDownloader(apiClient *agent.Client) *UsenetDownloader {
 	return &UsenetDownloader{
 		apiClient: apiClient,
 		enabled:   true,
-		active:    make(map[string]context.CancelFunc),
+		active:    make(map[string]*activeDownload),
 		nzbCache:  make(map[string]*agent.NzbSearchResult),
 	}
 }
@@ -101,8 +108,9 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	// Create cancellable context
 	dlCtx, cancel := context.WithCancel(ctx)
 
+	dl := &activeDownload{cancel: cancel}
 	u.mu.Lock()
-	u.active[task.ID] = cancel
+	u.active[task.ID] = dl
 	u.mu.Unlock()
 
 	defer func() {
@@ -189,8 +197,14 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		return nil, fmt.Errorf("create dir: %w", err)
 	}
 
+	// Register tracker and taskDir for Cancel() cleanup
+	u.mu.Lock()
+	dl.taskDir = taskDir
+	dl.tracker = tracker
+	u.mu.Unlock()
+
 	// Step 6: Download all files via NNTP
-	dl := download.NewDownloader(nntpClient)
+	segDl := download.NewDownloader(nntpClient)
 
 	// Bridge download.Progress to engine.Progress
 	dlProgressCh := make(chan download.Progress, 16)
@@ -213,7 +227,7 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		}
 	}()
 
-	downloadedFiles, err := dl.DownloadNZB(dlCtx, nzbFile, taskDir, tracker, dlProgressCh)
+	downloadedFiles, err := segDl.DownloadNZB(dlCtx, nzbFile, taskDir, tracker, dlProgressCh)
 	close(dlProgressCh)
 
 	if err != nil {
@@ -276,17 +290,38 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 // Pause cancels an in-progress download but keeps files.
 func (u *UsenetDownloader) Pause(taskID string) error {
 	u.mu.Lock()
-	cancel, ok := u.active[taskID]
+	dl := u.active[taskID]
 	u.mu.Unlock()
-	if ok {
-		cancel()
+	if dl != nil {
+		dl.cancel()
 	}
 	return nil
 }
 
-// Cancel aborts an in-progress download.
+// Cancel aborts an in-progress download and removes partial files + resume state.
 func (u *UsenetDownloader) Cancel(taskID string) error {
-	return u.Pause(taskID)
+	u.mu.Lock()
+	dl := u.active[taskID]
+	u.mu.Unlock()
+
+	if dl == nil {
+		return nil
+	}
+
+	// Cancel context first — workers will stop and release file handles
+	dl.cancel()
+
+	// Remove resume state (best-effort)
+	if dl.tracker != nil {
+		dl.tracker.Remove()
+	}
+
+	// Remove partial download directory in background (can be slow for large dirs)
+	if dl.taskDir != "" {
+		go os.RemoveAll(dl.taskDir)
+	}
+
+	return nil
 }
 
 // Shutdown closes the NNTP connection pool.
@@ -295,8 +330,8 @@ func (u *UsenetDownloader) Shutdown(_ context.Context) error {
 	defer u.mu.Unlock()
 
 	// Cancel all active downloads
-	for id, cancel := range u.active {
-		cancel()
+	for id, dl := range u.active {
+		dl.cancel()
 		delete(u.active, id)
 	}
 

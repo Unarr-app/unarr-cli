@@ -182,12 +182,7 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 	if err != nil {
 		return nil, fmt.Errorf("open file: %w", err)
 	}
-	defer func() {
-		if err := file.Sync(); err != nil {
-			log.Printf("[%s] sync warning: %v", shortID(task.ID), err)
-		}
-		file.Close()
-	}()
+	defer file.Close()
 
 	// Download with progress reporting
 	downloaded := startOffset

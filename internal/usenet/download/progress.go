@@ -43,7 +43,7 @@ type ProgressTracker struct {
 	dir         string // directory where progress files are stored
 	files       []fileProgress
 
-	mu        sync.RWMutex
+	mu        sync.Mutex
 	dirty     bool
 	lastFlush time.Time
 	markCount int // marks since last flush
@@ -211,9 +211,9 @@ func (p *ProgressTracker) IsDone(fileIndex, segIndex int) bool {
 	if segIndex < 0 || segIndex >= fp.segCount {
 		return false
 	}
-	p.mu.RLock()
+	p.mu.Lock()
 	done := fp.completed[segIndex/8]&(1<<uint(segIndex%8)) != 0
-	p.mu.RUnlock()
+	p.mu.Unlock()
 	return done
 }
 
@@ -258,6 +258,8 @@ func (p *ProgressTracker) TotalCompleted() int {
 }
 
 // Flush writes the current progress state to disk atomically (tmp + rename).
+// dirty is cleared before I/O to prevent concurrent Flush calls from racing
+// on the same tmp file. If I/O fails, the next MarkDone will re-set dirty.
 func (p *ProgressTracker) Flush() error {
 	p.mu.Lock()
 	if !p.dirty {
@@ -265,7 +267,9 @@ func (p *ProgressTracker) Flush() error {
 		return nil
 	}
 
-	// Calculate total size
+	// Snapshot state and clear dirty while holding the lock.
+	// This serializes flushes: a concurrent MarkDone will set dirty=true
+	// again, but won't trigger a competing Flush on the same tmp file.
 	size := headerSize
 	for i := range p.files {
 		size += 4 + (p.files[i].segCount+7)/8
@@ -296,40 +300,29 @@ func (p *ProgressTracker) Flush() error {
 	p.lastFlush = time.Now()
 	p.mu.Unlock()
 
-	// Atomic write: tmp file + rename
+	// Atomic write: tmp file + rename (outside lock — I/O is slow)
 	if err := os.MkdirAll(p.dir, 0o755); err != nil {
-		p.mu.Lock()
-		p.dirty = true // re-mark so next Flush retries
-		p.mu.Unlock()
 		return fmt.Errorf("create resume dir: %w", err)
 	}
 
 	tmpPath := p.progressPath() + ".tmp"
 	if err := os.WriteFile(tmpPath, buf, 0o644); err != nil {
-		p.mu.Lock()
-		p.dirty = true
-		p.mu.Unlock()
 		return fmt.Errorf("write progress tmp: %w", err)
 	}
 
 	if err := os.Rename(tmpPath, p.progressPath()); err != nil {
 		os.Remove(tmpPath)
-		p.mu.Lock()
-		p.dirty = true
-		p.mu.Unlock()
 		return fmt.Errorf("rename progress: %w", err)
 	}
 
 	return nil
 }
 
-// Remove deletes both the progress file and cached NZB file.
-func (p *ProgressTracker) Remove() error {
+// Remove deletes both the progress file and cached NZB file (best-effort).
+func (p *ProgressTracker) Remove() {
 	os.Remove(p.progressPath())
 	os.Remove(p.nzbPath())
-	// Also remove tmp file if it exists
 	os.Remove(p.progressPath() + ".tmp")
-	return nil
 }
 
 // CleanStaleFiles removes resume files older than maxAge from the given directory.
