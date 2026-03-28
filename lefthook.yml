@@ -1,0 +1,29 @@
+# Lefthook git hooks configuration
+# Install: lefthook install (or make install-hooks)
+# Docs: https://github.com/evilmartians/lefthook
+
+pre-commit:
+  parallel: true
+  commands:
+    gofmt-check:
+      glob: "*.go"
+      run: test -z "$(gofmt -l .)" || { echo "Files not formatted:"; gofmt -l .; exit 1; }
+    go-vet:
+      glob: "*.go"
+      run: go vet ./...
+    go-build:
+      glob: "*.go"
+      run: go build ./...
+    golangci-lint:
+      glob: "*.go"
+      run: |
+        if command -v golangci-lint &> /dev/null; then
+          golangci-lint run ./...
+        else
+          echo "golangci-lint not installed, skipping (install: https://golangci-lint.run/welcome/install/)"
+        fi
+
+commit-msg:
+  scripts:
+    validate.sh:
+      runner: bash

@@ -1,0 +1,41 @@
+# Binary (root only, not cmd/ directory)
+/unarr
+/unarr.exe
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+coverage.html
+
+# Go profiling
+*.prof
+
+# Go workspace
+go.work
+go.work.sum
+
+# Go debugger (delve)
+__debug_bin*
+
+# Environment files (may contain API keys)
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# GoReleaser
+dist/
+
+# Docker
+tmp/

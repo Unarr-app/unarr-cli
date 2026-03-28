@@ -1,0 +1,10 @@
+# Default owners for everything in the repo
+* @torrentclaw/maintainers
+
+# CI/CD and release
+.github/ @torrentclaw/maintainers
+.goreleaser.yml @torrentclaw/maintainers
+Dockerfile @torrentclaw/maintainers
+
+# Core engine
+internal/engine/ @torrentclaw/maintainers

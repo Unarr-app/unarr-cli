@@ -1,0 +1,7 @@
+.git
+.github
+*.md
+LICENSE
+.goreleaser.yml
+unarr
+dist/

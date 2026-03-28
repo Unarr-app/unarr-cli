@@ -1,0 +1,48 @@
+services:
+  unarr:
+    build:
+      context: ..
+      dockerfile: torrentclaw-cli/Dockerfile
+    image: torrentclaw/unarr:latest
+    container_name: unarr
+    restart: unless-stopped
+    user: "1000:1000"
+
+    # Read-only root filesystem — only volumes are writable
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    volumes:
+      # Config: your config.toml lives here
+      - ./config:/config
+      # Downloads: finished media goes here
+      - ~/Media:/downloads
+      # Data: torrent metadata, piece DB, cache
+      - unarr-data:/data
+
+    environment:
+      - TZ=${TZ:-UTC}
+      # Optional overrides (uncomment to use):
+      # - UNARR_API_KEY=tc_your_key_here
+      # - UNARR_API_URL=https://torrentclaw.com
+
+    # Resource limits — adjust to your needs
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "2.0"
+
+    # Torrent P2P needs host network or explicit port range
+    # Option A: host network (simplest, full P2P performance)
+    network_mode: host
+
+    # Option B: bridge network with port mapping (more isolated)
+    # Uncomment below and comment out network_mode above:
+    # ports:
+    #   - "6881-6889:6881-6889/tcp"
+    #   - "6881-6889:6881-6889/udp"
+
+volumes:
+  unarr-data:
