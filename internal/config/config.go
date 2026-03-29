@@ -68,10 +68,12 @@ type GeneralConfig struct {
 }
 
 type LibraryConfig struct {
-	ScanPath    string `toml:"scan_path"`    // remembered from last scan
-	Workers     int    `toml:"workers"`      // concurrent ffprobe (default 8)
-	FFprobePath string `toml:"ffprobe_path"` // optional explicit path
-	BackupDir   string `toml:"backup_dir"`   // for replaced files
+	ScanPath     string `toml:"scan_path"`     // remembered from last scan
+	Workers      int    `toml:"workers"`       // concurrent ffprobe (default 8)
+	FFprobePath  string `toml:"ffprobe_path"`  // optional explicit path
+	BackupDir    string `toml:"backup_dir"`    // for replaced files
+	AutoScan     bool   `toml:"auto_scan"`     // enable daily auto-scan in daemon (default true)
+	ScanInterval string `toml:"scan_interval"` // e.g. "24h", "12h", "6h" (default "24h")
 }
 
 // Default returns a Config with sensible defaults.
@@ -97,6 +99,11 @@ func Default() Config {
 		General: GeneralConfig{
 			Country: "US",
 			Locale:  "en",
+		},
+		Library: LibraryConfig{
+			AutoScan:     true,
+			ScanInterval: "24h",
+			Workers:      8,
 		},
 	}
 }

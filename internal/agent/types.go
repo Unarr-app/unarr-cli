@@ -70,6 +70,7 @@ type Task struct {
 	NzbPassword     string `json:"nzbPassword,omitempty"`    // Password for encrypted NZB archives
 	ReplacePath     string `json:"replacePath,omitempty"`    // File to replace after download (upgrade mode)
 	LibraryItemID   int    `json:"libraryItemId,omitempty"`  // Library item being upgraded
+	ForceStart      bool   `json:"forceStart,omitempty"`     // Bypass queue (like Transmission's Force Start)
 }
 
 // TasksResponse wraps the array of tasks returned by the server.

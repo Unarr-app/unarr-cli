@@ -82,8 +82,11 @@ type TorrentDownloader struct {
 
 // NewTorrentDownloader creates a BitTorrent downloader with a long-lived client.
 func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
-	// 0 = unlimited for all timeouts (like qBittorrent)
-	// Users can set these in config.toml [downloads] section
+	// MetadataTimeout: 0 = unlimited (wait forever like qBittorrent)
+	// StallTimeout: default 30m (no bytes for 30 min = dead torrent, frees the slot)
+	if cfg.StallTimeout == 0 {
+		cfg.StallTimeout = 30 * time.Minute
+	}
 
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)

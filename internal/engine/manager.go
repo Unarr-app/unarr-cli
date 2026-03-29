@@ -59,6 +59,17 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 
 	m.reporter.Track(task)
 
+	// Force start: bypass semaphore (like Transmission's "Force Start")
+	if at.ForceStart {
+		log.Printf("[%s] force start: bypassing queue", task.ID[:8])
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.processTask(ctx, task)
+		}()
+		return
+	}
+
 	// Acquire semaphore slot
 	select {
 	case m.sem <- struct{}{}:

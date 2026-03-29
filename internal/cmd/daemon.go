@@ -16,6 +16,7 @@ import (
 	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
 	"github.com/torrentclaw/torrentclaw-cli/internal/config"
 	"github.com/torrentclaw/torrentclaw-cli/internal/engine"
+	"github.com/torrentclaw/torrentclaw-cli/internal/library"
 	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/download"
 	"github.com/torrentclaw/torrentclaw-cli/internal/upgrade"
 )
@@ -438,6 +439,17 @@ func runDaemonStart() error {
 		}
 	}()
 
+	// Start auto-scan goroutine (daily library scan + sync)
+	if cfg.Library.ScanPath != "" && cfg.Library.AutoScan {
+		scanInterval := 24 * time.Hour
+		if cfg.Library.ScanInterval != "" {
+			if parsed, err := time.ParseDuration(cfg.Library.ScanInterval); err == nil && parsed > 0 {
+				scanInterval = parsed
+			}
+		}
+		go runAutoScan(ctx, cfg, scanInterval)
+	}
+
 	// Start daemon (blocks)
 	errCh := make(chan error, 1)
 	go func() {
@@ -510,4 +522,131 @@ func formatSpeedLog(bps int64) string {
 	default:
 		return fmt.Sprintf("%d B/s", bps)
 	}
+}
+
+// runAutoScan runs a library scan + sync on a timer.
+func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration) {
+	log.Printf("[auto-scan] enabled: every %s, path: %s", interval, cfg.Library.ScanPath)
+
+	// Run first scan after a short delay (let daemon stabilize)
+	select {
+	case <-time.After(30 * time.Second):
+	case <-ctx.Done():
+		return
+	}
+
+	doScan := func() {
+		log.Printf("[auto-scan] starting scan of %s", cfg.Library.ScanPath)
+
+		existing, _ := library.LoadCache()
+
+		workers := cfg.Library.Workers
+		if workers == 0 {
+			workers = 8
+		}
+
+		cache, err := library.Scan(ctx, cfg.Library.ScanPath, existing, library.ScanOptions{
+			Workers:     workers,
+			FFprobePath: cfg.Library.FFprobePath,
+			Incremental: existing != nil,
+		})
+		if err != nil {
+			log.Printf("[auto-scan] scan failed: %v", err)
+			return
+		}
+
+		if err := library.SaveCache(cache); err != nil {
+			log.Printf("[auto-scan] save cache failed: %v", err)
+			return
+		}
+
+		// Sync to server
+		apiKey := cfg.Auth.APIKey
+		if apiKey == "" {
+			log.Printf("[auto-scan] no API key, skipping sync")
+			return
+		}
+
+		ac := agent.NewClient(cfg.Auth.APIURL, apiKey, "unarr/"+Version)
+		items := buildSyncItems(cache)
+		if len(items) == 0 {
+			log.Printf("[auto-scan] no items to sync")
+			return
+		}
+
+		const batchSize = 100
+		for i := 0; i < len(items); i += batchSize {
+			end := i + batchSize
+			if end > len(items) {
+				end = len(items)
+			}
+			isLast := end >= len(items)
+
+			_, err := ac.SyncLibrary(ctx, agent.LibrarySyncRequest{
+				Items:       items[i:end],
+				ScanPath:    cache.Path,
+				IsLastBatch: isLast,
+			})
+			if err != nil {
+				log.Printf("[auto-scan] sync failed: %v", err)
+				return
+			}
+		}
+
+		log.Printf("[auto-scan] synced %d items", len(items))
+	}
+
+	doScan()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			doScan()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// buildSyncItems converts cached library items to sync request items.
+func buildSyncItems(cache *library.LibraryCache) []agent.LibrarySyncItem {
+	items := make([]agent.LibrarySyncItem, 0, len(cache.Items))
+	for _, item := range cache.Items {
+		if item.ScanError != "" {
+			continue
+		}
+		si := agent.LibrarySyncItem{
+			FilePath:    item.FilePath,
+			FileName:    item.FileName,
+			FileSize:    item.FileSize,
+			Title:       item.Title,
+			Year:        item.Year,
+			ContentType: library.DeriveContentType(item),
+			Season:      item.Season,
+			Episode:     item.Episode,
+		}
+
+		if item.MediaInfo != nil {
+			if item.MediaInfo.Video != nil {
+				si.Resolution = library.ResolveResolution(item.MediaInfo.Video.Height)
+				si.VideoCodec = item.MediaInfo.Video.Codec
+				si.HDR = item.MediaInfo.Video.HDR
+				si.BitDepth = item.MediaInfo.Video.BitDepth
+			}
+			codec, channels := library.PrimaryAudioTrack(item.MediaInfo.Audio)
+			si.AudioCodec = codec
+			si.AudioChannels = channels
+			si.AudioLanguages = library.AudioLanguages(item.MediaInfo.Audio)
+			si.SubtitleLanguages = library.SubtitleLanguages(item.MediaInfo.Subtitles)
+			si.AudioTracks = item.MediaInfo.Audio
+			si.SubtitleTracks = item.MediaInfo.Subtitles
+			si.VideoInfo = item.MediaInfo.Video
+		}
+
+		items = append(items, si)
+	}
+	return items
 }
