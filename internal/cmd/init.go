@@ -73,39 +73,56 @@ func runInit(apiURLOverride string) error {
 
 	// ── Step 1/3: Connect account ───────────────────────────────────
 
-	keysURL := apiURL + "/profile?tab=apikey"
-	fmt.Printf("  Opening %s ...\n", keysURL)
-	openBrowser(keysURL)
-	fmt.Println()
-
 	apiKey := cfg.Auth.APIKey
-	err := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Step 1/3 — API Key").
-				Description("Copy it from the page that just opened in your browser").
-				Placeholder("tc_...").
-				Value(&apiKey).
-				Validate(func(s string) error {
-					s = strings.TrimSpace(s)
-					if s == "" {
-						return fmt.Errorf("API key is required")
-					}
-					if !strings.HasPrefix(s, "tc_") {
-						return fmt.Errorf("API key should start with tc_")
-					}
+
+	if apiKey == "" {
+		// Try browser-based auth first (like Claude Code / GitHub CLI)
+		fmt.Println("  Opening browser to connect your account...")
+		fmt.Println()
+
+		browserKey, browserErr := browserAuth(apiURL)
+		if browserErr == nil && strings.HasPrefix(browserKey, "tc_") {
+			apiKey = browserKey
+			green.Println("  ✓ Connected via browser")
+			fmt.Println()
+		} else {
+			// Fallback to manual API key entry
+			if browserErr != nil {
+				dim.Printf("  Could not connect automatically: %s\n", browserErr)
+			}
+			fmt.Println("  Paste your API key instead:")
+			dim.Printf("  (get it from %s/profile?tab=apikey)\n", apiURL)
+			fmt.Println()
+
+			var err error
+			err = huh.NewForm(
+				huh.NewGroup(
+					huh.NewInput().
+						Title("Step 1/3 — API Key").
+						Placeholder("tc_...").
+						Value(&apiKey).
+						Validate(func(s string) error {
+							s = strings.TrimSpace(s)
+							if s == "" {
+								return fmt.Errorf("API key is required")
+							}
+							if !strings.HasPrefix(s, "tc_") {
+								return fmt.Errorf("API key should start with tc_")
+							}
+							return nil
+						}),
+				),
+			).Run()
+			if err != nil {
+				if errors.Is(err, huh.ErrUserAborted) {
+					fmt.Println("\n  Init cancelled.")
 					return nil
-				}),
-		),
-	).Run()
-	if err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			fmt.Println("\n  Init cancelled.")
-			return nil
+				}
+				return err
+			}
+			apiKey = strings.TrimSpace(apiKey)
 		}
-		return err
 	}
-	apiKey = strings.TrimSpace(apiKey)
 
 	// Validate API key by registering with the server
 	fmt.Print("  Verifying API key... ")
