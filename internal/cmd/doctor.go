@@ -84,7 +84,7 @@ func runDoctor() error {
 			path = cfgFile
 		}
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			return path + " (not found, run unarr setup)", fmt.Errorf("missing")
+			return path + " (not found, run unarr init)", fmt.Errorf("missing")
 		}
 		return path, nil
 	})
@@ -95,7 +95,7 @@ func runDoctor() error {
 			key = cfg.Auth.APIKey
 		}
 		if key == "" {
-			return "run unarr setup to configure", fmt.Errorf("missing")
+			return "run unarr init to configure", fmt.Errorf("missing")
 		}
 		if len(key) > 8 {
 			return key[:8] + "...", nil
@@ -130,7 +130,7 @@ func runDoctor() error {
 			return "no API key", fmt.Errorf("skipped")
 		}
 		if cfg.Agent.ID == "" {
-			return "no agent ID, run unarr setup", fmt.Errorf("not registered")
+			return "no agent ID, run unarr init", fmt.Errorf("not registered")
 		}
 
 		ac := agent.NewClient(cfg.Auth.APIURL, key, "unarr/"+Version)
@@ -155,7 +155,7 @@ func runDoctor() error {
 	check("Download directory", func() (string, error) {
 		dir := cfg.Download.Dir
 		if dir == "" {
-			return "not configured, run unarr setup", fmt.Errorf("missing")
+			return "not configured, run unarr init", fmt.Errorf("missing")
 		}
 		fi, err := os.Stat(dir)
 		if os.IsNotExist(err) {

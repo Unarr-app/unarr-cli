@@ -32,7 +32,7 @@ Search 30+ torrent sources, inspect torrent quality, discover popular content,
 find streaming providers, and manage your media collection — all from your terminal.
 
 Get started:
-  unarr setup                          First-time configuration wizard
+  unarr init                           First-time configuration wizard
   unarr search "breaking bad"          Search for content
   unarr start                          Start the download daemon
 
@@ -62,8 +62,8 @@ Source:         https://github.com/torrentclaw/torrentclaw-cli`,
 	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colored output")
 
 	// Getting Started
-	setupCmd := newSetupCmd()
-	setupCmd.GroupID = "start"
+	initCmd := newInitCmd()
+	initCmd.GroupID = "start"
 	configCmd := newConfigCmd()
 	configCmd.GroupID = "start"
 
@@ -111,7 +111,7 @@ Source:         https://github.com/torrentclaw/torrentclaw-cli`,
 
 	rootCmd.AddCommand(
 		// Getting Started
-		setupCmd,
+		initCmd,
 		configCmd,
 		// Search & Discovery
 		searchCmd,

@@ -33,7 +33,7 @@ func runStatus() error {
 	cfg := loadConfig()
 
 	if cfg.Auth.APIKey == "" {
-		dim.Println("  Not configured. Run 'unarr setup' first.")
+		dim.Println("  Not configured. Run 'unarr init' first.")
 		fmt.Println()
 		return nil
 	}

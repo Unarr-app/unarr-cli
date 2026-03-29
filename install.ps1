@@ -153,7 +153,7 @@ function Install-Docker {
     Write-Host "  mkdir `$env:APPDATA\unarr"
     Write-Host ""
     Write-Host "  # 2. Run setup (interactive)"
-    Write-Host "  docker run -it --rm -v `$env:APPDATA\unarr:/config torrentclaw/unarr setup"
+    Write-Host "  docker run -it --rm -v `$env:APPDATA\unarr:/config torrentclaw/unarr init"
     Write-Host ""
     Write-Host "  # 3. Start daemon"
     Write-Host "  docker run -d --name unarr --restart unless-stopped ``"
@@ -238,7 +238,7 @@ function Main {
             Install-Binary
             Write-Host ""
             Write-Host "  Run " -NoNewline
-            Write-Host "unarr setup" -ForegroundColor White -NoNewline
+            Write-Host "unarr init" -ForegroundColor White -NoNewline
             Write-Host " to get started."
             Write-Host ""
         }

@@ -204,7 +204,7 @@ install_docker() {
   # 2. Run setup (interactive)
   docker run -it --rm \
     -v ~/.config/unarr:/config \
-    torrentclaw/unarr setup
+    torrentclaw/unarr init
 
   # 3. Start daemon
   docker run -d --name unarr \
@@ -310,7 +310,7 @@ main() {
     case "$METHOD" in
         binary)
             install_binary
-            printf "\n  Run ${BOLD}unarr setup${RESET} to get started.\n\n"
+            printf "\n  Run ${BOLD}unarr init${RESET} to get started.\n\n"
             ;;
         docker)
             install_docker
@@ -322,7 +322,7 @@ main() {
             info "Installing via Homebrew..."
             brew install torrentclaw/tap/unarr
             ok "Installed via Homebrew"
-            printf "\n  Run ${BOLD}unarr setup${RESET} to get started.\n\n"
+            printf "\n  Run ${BOLD}unarr init${RESET} to get started.\n\n"
             ;;
         *)
             error "Unknown method: $METHOD"

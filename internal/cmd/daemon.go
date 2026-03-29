@@ -35,7 +35,7 @@ The daemon sends periodic heartbeats and reports download progress back
 to the web dashboard. Press Ctrl+C to stop gracefully — active downloads
 get up to 30 seconds to finish.
 
-Requires: API key, agent ID, and download directory (run 'unarr setup' first).
+Requires: API key, agent ID, and download directory (run 'unarr init' first).
 
 To run as a background service, use 'unarr daemon install' instead.`,
 		Example: `  unarr start
@@ -99,13 +99,13 @@ func runDaemonStart() error {
 
 	// Validate config
 	if cfg.Auth.APIKey == "" {
-		return fmt.Errorf("no API key configured — run 'unarr setup' first")
+		return fmt.Errorf("no API key configured — run 'unarr init' first")
 	}
 	if cfg.Agent.ID == "" {
-		return fmt.Errorf("no agent ID — run 'unarr setup' first")
+		return fmt.Errorf("no agent ID — run 'unarr init' first")
 	}
 	if cfg.Download.Dir == "" {
-		return fmt.Errorf("no download directory — run 'unarr setup' first")
+		return fmt.Errorf("no download directory — run 'unarr init' first")
 	}
 
 	// Validate configured paths are safe

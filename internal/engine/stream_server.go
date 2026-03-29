@@ -72,6 +72,7 @@ type diskFileProvider struct {
 func (p *diskFileProvider) NewFileReader(_ context.Context) io.ReadSeekCloser {
 	f, err := os.Open(p.path)
 	if err != nil {
+		log.Printf("stream: failed to open %q: %v", p.path, err)
 		return nil
 	}
 	return f
@@ -134,6 +135,17 @@ func (ss *StreamServer) Shutdown(ctx context.Context) error {
 }
 
 func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
+	// CORS headers — allow web player from any origin (HTTPS site → localhost)
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Range")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	reader := ss.provider.NewFileReader(r.Context())
 	if reader == nil {
 		http.Error(w, "file not found", http.StatusNotFound)

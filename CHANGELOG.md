@@ -8,11 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Init wizard with daemon install step (`unarr init`, replaces `unarr setup`)
+- Interactive config menu with 7 categories (`unarr config [category]`)
 - Clean command to remove temp files, logs, and cached data (`unarr clean`)
 - Daemon mode with background download management (`unarr start`)
 - One-shot download command (`unarr download`)
 - Stream to media player (`unarr stream`)
-- Setup wizard for first-time configuration (`unarr setup`)
 - Doctor command for diagnostics (`unarr doctor`)
 - Status command for daemon monitoring (`unarr status`)
 - Download engine with torrent support (debrid and usenet coming soon)

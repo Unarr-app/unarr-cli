@@ -53,8 +53,8 @@ make build
 ## Quick Start
 
 ```bash
-# 1. Run the setup wizard (opens browser for API key)
-unarr setup
+# 1. Run the init wizard (opens browser for API key)
+unarr init
 
 # 2. Search for content
 unarr search "breaking bad" --type show --quality 1080p
@@ -69,8 +69,8 @@ unarr start
 
 | Command | Description |
 |---------|-------------|
-| `unarr setup` | First-time configuration wizard (API key, download dir, method) |
-| `unarr config` | Edit configuration interactively |
+| `unarr init` | First-time configuration wizard (API key, download dir, daemon) |
+| `unarr config` | Edit all settings interactively (speed, organization, etc.) |
 
 ### Search & Discovery
 
