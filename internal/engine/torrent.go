@@ -12,25 +12,60 @@ import (
 	"time"
 
 	alog "github.com/anacrolix/log"
+	"github.com/anacrolix/dht/v2"
+	"github.com/anacrolix/dht/v2/krpc"
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/storage"
+	"github.com/torrentclaw/torrentclaw-cli/internal/config"
 	"golang.org/x/time/rate"
 )
 
 var defaultTrackers = []string{
+	// Tier 1: ngosang/trackerslist "best" + newtrackon "stable"
 	"udp://tracker.opentrackr.org:1337/announce",
-	"udp://open.stealth.si:80/announce",
+	"udp://open.tracker.cl:1337/announce",
+	"udp://tracker.openbittorrent.com:6969/announce",
 	"udp://tracker.torrent.eu.org:451/announce",
-	"udp://open.demonii.com:1337/announce",
+	"udp://open.stealth.si:80/announce",
 	"udp://exodus.desync.com:6969/announce",
+	"udp://open.demonii.com:1337/announce",
+	"udp://tracker.qu.ax:6969/announce",
+	"udp://tracker.dler.org:6969/announce",
+	"udp://tracker.filemail.com:6969/announce",
+	"udp://tracker.theoks.net:6969/announce",
+	"udp://tracker.bittor.pw:1337/announce",
+	"udp://tracker-udp.gbitt.info:80/announce",
+	"udp://open.dstud.io:6969/announce",
+	"udp://leet-tracker.moe:1337/announce",
+	// Tier 2: newtrackon stable (95%+ uptime)
+	"udp://tracker.torrust-demo.com:6969/announce",
+	"udp://tracker.plx.im:6969/announce",
+	"udp://tracker.tryhackx.org:6969/announce",
+	"udp://tracker.fnix.net:6969/announce",
+	"udp://tracker.srv00.com:6969/announce",
+	"udp://tracker.corpscorp.online:80/announce",
+	"udp://tracker.opentorrent.top:6969/announce",
+	"udp://tracker.flatuslifir.is:6969/announce",
+	"udp://tracker.gmi.gd:6969/announce",
+	"udp://tracker.t-1.org:6969/announce",
+	"udp://tracker.bluefrog.pw:2710/announce",
+	"udp://evan.im:6969/announce",
+	// Tier 3: additional coverage
+	"udp://t.overflow.biz:6969/announce",
+	"udp://wepzone.net:6969/announce",
+	"udp://tracker.alaskantf.com:6969/announce",
+	"udp://tracker.therarbg.to:6969/announce",
 }
 
 // TorrentConfig holds settings for the BitTorrent downloader.
 type TorrentConfig struct {
 	DataDir          string
-	StallTimeout     time.Duration // no progress for this long = stall (default 90s)
-	MaxTimeout       time.Duration // absolute maximum per torrent (default 30m)
+	MetadataTimeout  time.Duration // how long to wait for torrent metadata (default 15m, 0 = unlimited)
+	StallTimeout     time.Duration // no progress during download for this long = stall (default 10m)
+	MaxTimeout       time.Duration // absolute maximum per torrent (default 0 = unlimited)
 	MaxDownloadRate  int64         // bytes/s, 0 = unlimited
 	MaxUploadRate    int64         // bytes/s, 0 = unlimited
+	ListenPort       int           // fixed port for incoming peers (default 42069, 0 = random)
 	SeedEnabled      bool
 	SeedRatio        float64       // target seed ratio (default 0, meaning seed until SeedTime)
 	SeedTime         time.Duration // min seed time after completion (default 0)
@@ -47,12 +82,8 @@ type TorrentDownloader struct {
 
 // NewTorrentDownloader creates a BitTorrent downloader with a long-lived client.
 func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
-	if cfg.StallTimeout == 0 {
-		cfg.StallTimeout = 90 * time.Second
-	}
-	if cfg.MaxTimeout == 0 {
-		cfg.MaxTimeout = 30 * time.Minute
-	}
+	// 0 = unlimited for all timeouts (like qBittorrent)
+	// Users can set these in config.toml [downloads] section
 
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
@@ -62,8 +93,46 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	tcfg.DataDir = cfg.DataDir
 	tcfg.Seed = cfg.SeedEnabled
 	tcfg.NoUpload = !cfg.SeedEnabled
-	tcfg.ListenPort = 0
-	tcfg.Logger = alog.Default.FilterLevel(alog.Disabled)
+	tcfg.Logger = alog.Default.FilterLevel(alog.Warning)
+
+	// --- Performance optimizations ---
+
+	// Storage: mmap instead of default file backend.
+	// The library author notes file storage has "very high system overhead".
+	// mmap improves I/O throughput and piece verification speed significantly.
+	tcfg.DefaultStorage = storage.NewMMap(cfg.DataDir)
+
+	// Fixed port for incoming peer connections (enables UPnP port mapping).
+	// With ListenPort=0, only ~30% of peers can connect to us.
+	listenPort := cfg.ListenPort
+	if listenPort == 0 {
+		listenPort = 42069
+	}
+	tcfg.ListenPort = listenPort
+
+	// Connection limits: more peers = more download sources.
+	// Defaults are conservative (50/25/100). Beyond ~100 established, diminishing returns.
+	tcfg.EstablishedConnsPerTorrent = 80
+	tcfg.HalfOpenConnsPerTorrent = 50
+	tcfg.TotalHalfOpenConns = 150
+
+	// Pipeline depth: bytes downloaded but not yet hash-verified.
+	// Default 64 MiB throttles fast connections. The library author recommends
+	// "set a very large MaxUnverifiedBytes" for speed (Discussion #741).
+	tcfg.MaxUnverifiedBytes = 256 << 20 // 256 MiB
+
+	// Faster peer discovery: default is 10 dials/s which is very conservative.
+	tcfg.DialRateLimiter = rate.NewLimiter(40, 40)
+
+	// IPv6 peer selection is poor in anacrolix (Issue #713) — wastes connections.
+	tcfg.DisableIPv6 = true
+
+	// Accept incoming connections faster + clean up useless peers.
+	tcfg.DisableAcceptRateLimiting = true
+	tcfg.DropDuplicatePeerIds = true
+	tcfg.DropMutuallyCompletePeers = true
+
+	// --- Rate limiting ---
 
 	if cfg.MaxDownloadRate > 0 {
 		burst := int(cfg.MaxDownloadRate)
@@ -80,9 +149,72 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 		tcfg.UploadRateLimiter = rate.NewLimiter(rate.Limit(cfg.MaxUploadRate), burst)
 	}
 
-	client, err := torrent.NewClient(tcfg)
+	// --- DHT tuning ---
+
+	// Feed cached nodes into the bootstrap traversal (not just AddDhtNodes post-creation).
+	// StartingNodes are used during the initial Bootstrap() which populates the routing table
+	// much faster than async pings from AddDhtNodes().
+	dhtNodesPath := dhtNodesBinPath()
+	tcfg.DhtStartingNodes = func(network string) dht.StartingNodesGetter {
+		return func() ([]dht.Addr, error) {
+			addrs, _ := dht.GlobalBootstrapAddrs(network)
+			// Merge cached nodes from previous session
+			cached, err := dht.ReadNodesFromFile(dhtNodesPath)
+			if err == nil && len(cached) > 0 {
+				for _, ni := range cached {
+					addrs = append(addrs, dht.NewAddr(ni.Addr.UDP()))
+				}
+				log.Printf("[torrent] DHT: loaded %d cached nodes into bootstrap", len(cached))
+			}
+			return addrs, nil
+		}
+	}
+
+	// Tune DHT server for faster warmup and more aggressive peer discovery.
+	tcfg.ConfigureAnacrolixDhtServer = func(cfg *dht.ServerConfig) {
+		// Increase send rate: default 250/s burst 25 is conservative.
+		// Higher rate lets bootstrap query more nodes concurrently.
+		cfg.SendLimiter = rate.NewLimiter(500, 50)
+		// Faster query retries: default 2s, reduce to 1s for quicker fallback.
+		cfg.QueryResendDelay = func() time.Duration { return time.Second }
+		// Accept all node IDs regardless of BEP 42 validation.
+		// Fills routing table faster; most clients don't enforce BEP 42 strictly.
+		cfg.NoSecurity = true
+		// Request both IPv4 node lists in responses.
+		cfg.DefaultWant = []krpc.Want{krpc.WantNodes}
+	}
+
+	// Re-announce active torrents to DHT periodically (keeps routing table healthy).
+	tcfg.PeriodicallyAnnounceTorrentsToDht = true
+
+	// Try to create client; if the port is in use, try the next few ports.
+	var client *torrent.Client
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		client, err = torrent.NewClient(tcfg)
+		if err == nil {
+			break
+		}
+		if !strings.Contains(err.Error(), "address already in use") {
+			return nil, fmt.Errorf("create torrent client: %w", err)
+		}
+		tcfg.ListenPort++
+		log.Printf("[torrent] port %d in use, trying %d", tcfg.ListenPort-1, tcfg.ListenPort)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("create torrent client: %w", err)
+		return nil, fmt.Errorf("create torrent client (all ports busy): %w", err)
+	}
+	if tcfg.ListenPort != listenPort {
+		log.Printf("[torrent] listening on port %d (configured: %d was busy)", tcfg.ListenPort, listenPort)
+	}
+
+	// Restore DHT nodes with full node IDs (direct routing table insertion, no async pings).
+	for _, s := range client.DhtServers() {
+		if w, ok := s.(torrent.AnacrolixDhtServerWrapper); ok {
+			if added, err := w.Server.AddNodesFromFile(dhtNodesPath); err == nil && added > 0 {
+				log.Printf("[torrent] DHT: restored %d nodes directly into routing table", added)
+			}
+		}
 	}
 
 	return &TorrentDownloader{
@@ -120,17 +252,33 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 		}
 	}
 
-	// 1. Wait for metadata
-	log.Printf("[%s] waiting for metadata...", task.ID[:8])
-	metaCtx, metaCancel := context.WithTimeout(ctx, d.cfg.StallTimeout)
-	defer metaCancel()
+	// 1. Wait for metadata (0 = unlimited, like qBittorrent)
+	if d.cfg.MetadataTimeout > 0 {
+		log.Printf("[%s] waiting for metadata (timeout: %s, trackers: %d)...", task.ID[:8], d.cfg.MetadataTimeout, len(defaultTrackers))
+	} else {
+		log.Printf("[%s] waiting for metadata (no timeout, trackers: %d)...", task.ID[:8], len(defaultTrackers))
+	}
 
-	select {
-	case <-t.GotInfo():
-		log.Printf("[%s] metadata received: %s (%d files)", task.ID[:8], t.Name(), len(t.Files()))
-	case <-metaCtx.Done():
-		cleanup()
-		return nil, fmt.Errorf("metadata timeout after %s", d.cfg.StallTimeout)
+	if d.cfg.MetadataTimeout > 0 {
+		metaCtx, metaCancel := context.WithTimeout(ctx, d.cfg.MetadataTimeout)
+		defer metaCancel()
+		select {
+		case <-t.GotInfo():
+			log.Printf("[%s] metadata received: %s (%d files)", task.ID[:8], t.Name(), len(t.Files()))
+		case <-metaCtx.Done():
+			stats := t.Stats()
+			cleanup()
+			return nil, fmt.Errorf("metadata timeout after %s (peers: %d)", d.cfg.MetadataTimeout, stats.ActivePeers)
+		}
+	} else {
+		// Unlimited — wait until metadata arrives or context is cancelled
+		select {
+		case <-t.GotInfo():
+			log.Printf("[%s] metadata received: %s (%d files)", task.ID[:8], t.Name(), len(t.Files()))
+		case <-ctx.Done():
+			cleanup()
+			return nil, fmt.Errorf("cancelled while waiting for metadata")
+		}
 	}
 
 	// 2. Select files to download (prefer largest video + matching subs)
@@ -184,7 +332,11 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	deadline := time.After(d.cfg.MaxTimeout)
+	// MaxTimeout = 0 means unlimited (like qBittorrent)
+	var deadline <-chan time.Time
+	if d.cfg.MaxTimeout > 0 {
+		deadline = time.After(d.cfg.MaxTimeout)
+	}
 	lastBytesAt := time.Now()
 	lastBytes := int64(0)
 
@@ -206,11 +358,11 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 				speed = 0
 			}
 
-			// Stall detection (dual-level like TrueSpec)
+			// Stall detection (0 = disabled, like qBittorrent)
 			if downloaded > lastBytes {
 				lastBytesAt = now
 				lastBytes = downloaded
-			} else if now.Sub(lastBytesAt) > d.cfg.StallTimeout {
+			} else if d.cfg.StallTimeout > 0 && now.Sub(lastBytesAt) > d.cfg.StallTimeout {
 				stats := t.Stats()
 				return nil, fmt.Errorf("stalled: no progress for %s (peers: %d, seeds: %d)",
 					d.cfg.StallTimeout, stats.ActivePeers, stats.ConnectedSeeders)
@@ -226,9 +378,9 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 			// Peer stats
 			stats := t.Stats()
 
-			// Terminal progress
+			// Terminal progress (log.Printf for daemon-friendly output, no \r)
 			pct := int(float64(downloaded) / float64(totalBytes) * 100)
-			fmt.Fprintf(os.Stderr, "\r[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
+			log.Printf("[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
 				task.ID[:8], pct,
 				formatBytes(downloaded), formatBytes(totalBytes), formatBytes(speed),
 				stats.ActivePeers, stats.ConnectedSeeders)
@@ -252,7 +404,6 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 
 			// Check completion
 			if downloaded >= totalBytes {
-				fmt.Fprint(os.Stderr, "\r\033[2K") // clear progress line
 				log.Printf("[%s] download complete: %s", task.ID[:8], fileName)
 				return &Result{}, nil
 			}
@@ -310,6 +461,9 @@ func (d *TorrentDownloader) Cancel(taskID string) error {
 }
 
 func (d *TorrentDownloader) Shutdown(ctx context.Context) error {
+	// Save DHT nodes in binary format for next session (warm start)
+	saveDhtNodesBinary(d.client)
+
 	d.activeMu.Lock()
 	for id, t := range d.active {
 		t.Drop()
@@ -322,6 +476,11 @@ func (d *TorrentDownloader) Shutdown(ctx context.Context) error {
 		return fmt.Errorf("close client: %v", errs[0])
 	}
 	return nil
+}
+
+// SaveDhtNodes persists DHT nodes to disk (for periodic saves from daemon).
+func (d *TorrentDownloader) SaveDhtNodes() {
+	saveDhtNodesBinary(d.client)
 }
 
 // StartStream starts an HTTP server for an active torrent download.
@@ -453,4 +612,41 @@ func formatBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %s", float64(b)/float64(div), []string{"KB", "MB", "GB", "TB"}[exp])
+}
+
+// ---------------------------------------------------------------------------
+// DHT node persistence — binary format with node IDs for direct table insertion
+// ---------------------------------------------------------------------------
+
+const dhtNodesBinFile = "dht-nodes.bin"
+
+// dhtNodesBinPath returns the path to the binary DHT nodes cache file.
+func dhtNodesBinPath() string {
+	return filepath.Join(config.DataDir(), dhtNodesBinFile)
+}
+
+// saveDhtNodesBinary exports known DHT nodes with full node IDs (20-byte ID + address).
+// Binary format allows AddNodesFromFile to insert directly into routing table buckets
+// without needing async pings, which is much faster than text-based host:port persistence.
+func saveDhtNodesBinary(client *torrent.Client) {
+	var allNodes []krpc.NodeInfo
+	for _, s := range client.DhtServers() {
+		if w, ok := s.(torrent.AnacrolixDhtServerWrapper); ok {
+			allNodes = append(allNodes, w.Nodes()...)
+		}
+	}
+	if len(allNodes) == 0 {
+		return
+	}
+
+	path := dhtNodesBinPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+
+	if err := dht.WriteNodesToFile(allNodes, path); err != nil {
+		log.Printf("[torrent] DHT: error saving nodes: %v", err)
+		return
+	}
+	log.Printf("[torrent] DHT: saved %d nodes to cache", len(allNodes))
 }

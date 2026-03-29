@@ -143,6 +143,7 @@ func TestCleanTitle(t *testing.T) {
 		{"Breaking.Bad.S01E05.720p.HDTV.mkv", "Breaking Bad S01E05"},
 		{"The.Matrix.1999.2160p.UHD.BluRay.REMUX.mkv", "The Matrix"},
 		{"Movie [YTS.MX].mp4", "Movie"},
+		{"Greenland 4Kremux2160.pctfenix.com.mkv", "Greenland"},
 	}
 
 	for _, tt := range tests {

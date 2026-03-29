@@ -178,13 +178,19 @@ func runDaemonStart() error {
 	maxDl, _ := config.ParseSpeed(cfg.Download.MaxDownloadSpeed)
 	maxUl, _ := config.ParseSpeed(cfg.Download.MaxUploadSpeed)
 
+	// Parse torrent timeouts from config (default: 0 = unlimited, like qBittorrent)
+	metaTimeout, _ := time.ParseDuration(cfg.Download.MetadataTimeout)
+	stallTimeout, _ := time.ParseDuration(cfg.Download.StallTimeout)
+
 	// Create torrent downloader
 	torrentDl, err := engine.NewTorrentDownloader(engine.TorrentConfig{
 		DataDir:         cfg.Download.Dir,
-		StallTimeout:    90 * time.Second,
-		MaxTimeout:      30 * time.Minute,
+		MetadataTimeout: metaTimeout,  // 0 = unlimited (default)
+		StallTimeout:    stallTimeout,  // 0 = unlimited (default)
+		MaxTimeout:      0,            // unlimited
 		MaxDownloadRate: maxDl,
 		MaxUploadRate:   maxUl,
+		ListenPort:      cfg.Download.ListenPort, // 0 = default 42069
 		SeedEnabled:     false,
 	})
 	if err != nil {
@@ -417,6 +423,20 @@ func runDaemonStart() error {
 
 	// Start progress reporter in background
 	go reporter.Run(ctx)
+
+	// Periodic DHT node persistence (every 5 min) — protects against crash data loss
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				torrentDl.SaveDhtNodes()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// Start daemon (blocks)
 	errCh := make(chan error, 1)

@@ -224,7 +224,7 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 				pct = int(float64(downloaded) / float64(totalBytes) * 100)
 			}
 
-			fmt.Fprintf(os.Stderr, "\r[%s] %d%% — %s/%s @ %s/s  (debrid)",
+			log.Printf("[%s] %d%% — %s/%s @ %s/s  (debrid)",
 				shortID(task.ID), pct,
 				formatBytes(downloaded), formatBytes(totalBytes), formatBytes(speed))
 
@@ -254,7 +254,6 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 		}
 	}
 
-	fmt.Fprint(os.Stderr, "\r\033[2K") // clear progress line
 	log.Printf("[%s] debrid download complete: %s (%s)", shortID(task.ID), fileName, formatBytes(downloaded))
 
 	return &Result{

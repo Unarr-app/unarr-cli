@@ -85,10 +85,11 @@ func runDownload(input, method string) error {
 
 	// Create torrent downloader
 	torrentDl, err := engine.NewTorrentDownloader(engine.TorrentConfig{
-		DataDir:      outputDir,
-		StallTimeout: 90 * time.Second,
-		MaxTimeout:   60 * time.Minute,
-		SeedEnabled:  false,
+		DataDir:         outputDir,
+		MetadataTimeout: 15 * time.Minute,
+		StallTimeout:    10 * time.Minute,
+		MaxTimeout:      0, // unlimited
+		SeedEnabled:     false,
 	})
 	if err != nil {
 		return fmt.Errorf("create downloader: %w", err)

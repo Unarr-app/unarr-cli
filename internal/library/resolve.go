@@ -108,11 +108,17 @@ func CleanTitle(filename string) string {
 	// Remove brackets
 	name = regexp.MustCompile(`[\[\(].*?[\]\)]`).ReplaceAllString(name, "")
 
+	// Remove web domains BEFORE replacing separators (dots are still dots here)
+	name = regexp.MustCompile(`(?i)[a-z0-9]+\.(com|org|net|mx|io|to|cc|se)`).ReplaceAllString(name, "")
+
 	// Replace common separators with spaces
 	name = strings.NewReplacer(".", " ", "_", " ", "-", " ").Replace(name)
 
 	// Remove quality/codec/release artifacts
-	name = regexp.MustCompile(`(?i)\b(2160p|1080p|720p|480p|4K|UHD|BluRay|BDRip|WEBRip|WEB-DL|HDTV|DVDRip|BRRip|x264|x265|HEVC|AVC|AV1|AAC|DTS|AC3|Atmos|FLAC|10bit|HDR10?\+?|DV|DoVi|PROPER|REPACK|REMUX|EXTENDED|DUAL|MULTi)\b`).ReplaceAllString(name, "")
+	name = regexp.MustCompile(`(?i)\b(2160p|1080p|720p|480p|4K|UHD|BluRay|BDRip|WEBRip|WEB-DL|HDTV|DVDRip|BRRip|x264|x265|HEVC|AVC|AV1|AAC|DTS|AC3|Atmos|FLAC|10bit|HDR10?\+?|DV|DoVi|PROPER|REPACK|REMUX|EXTENDED|DUAL|MULTi|UHDremux|4Kremux\d*)\b`).ReplaceAllString(name, "")
+
+	// Remove standalone numbers that look like resolution/format (e.g. "2160", "1080")
+	name = regexp.MustCompile(`\b(2160|1080|720|480)\b`).ReplaceAllString(name, "")
 
 	// Remove year
 	name = regexp.MustCompile(`\b(19|20)\d{2}\b`).ReplaceAllString(name, "")
