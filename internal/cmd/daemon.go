@@ -536,6 +536,11 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration)
 	}
 
 	doScan := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[auto-scan] panic recovered: %v", r)
+			}
+		}()
 		log.Printf("[auto-scan] starting scan of %s", cfg.Library.ScanPath)
 
 		existing, _ := library.LoadCache()

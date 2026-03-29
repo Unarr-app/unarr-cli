@@ -642,6 +642,11 @@ func saveDhtNodesBinary(client *torrent.Client) {
 		return
 	}
 
+	// Cap at 200 nodes to prevent unbounded file growth
+	if len(allNodes) > 200 {
+		allNodes = allNodes[:200]
+	}
+
 	path := dhtNodesBinPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return
