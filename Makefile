@@ -2,13 +2,17 @@
 
 BINARY = unarr
 SENTRY_DSN ?=
-LDFLAGS = -X github.com/torrentclaw/torrentclaw-cli/internal/sentry.dsn=$(SENTRY_DSN)
+LDFLAGS = -s -w -X github.com/torrentclaw/torrentclaw-cli/internal/sentry.dsn=$(SENTRY_DSN)
 
 all: fmt vet lint test build
 
-## Build the binary
+## Build the binary (stripped, ~28MB)
 build:
-	go build -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/unarr/
+	go build -ldflags '$(LDFLAGS)' -trimpath -o $(BINARY) ./cmd/unarr/
+
+## Build small binary (stripped + UPX compressed, ~5MB)
+build-small: build
+	@command -v upx >/dev/null 2>&1 && upx --best -q $(BINARY) || echo "upx not installed — install with: brew install upx"
 
 ## Run all tests
 test:
