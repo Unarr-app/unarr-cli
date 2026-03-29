@@ -153,6 +153,33 @@ func (c *Client) GetUsenetUsage(ctx context.Context) (*UsenetUsageResponse, erro
 	return &resp, nil
 }
 
+// ConfigureDebrid saves a debrid provider token for the user (used by unarr init/migrate).
+func (c *Client) ConfigureDebrid(ctx context.Context, req ConfigureDebridRequest) (*ConfigureDebridResponse, error) {
+	var resp ConfigureDebridResponse
+	if err := c.doPost(ctx, "/api/internal/agent/debrid-config", req, &resp); err != nil {
+		return nil, fmt.Errorf("configure debrid: %w", err)
+	}
+	return &resp, nil
+}
+
+// BatchDownload queues multiple items for download (used by unarr migrate).
+func (c *Client) BatchDownload(ctx context.Context, req BatchDownloadRequest) (*BatchDownloadResponse, error) {
+	var resp BatchDownloadResponse
+	if err := c.doPost(ctx, "/api/internal/agent/batch-download", req, &resp); err != nil {
+		return nil, fmt.Errorf("batch download: %w", err)
+	}
+	return &resp, nil
+}
+
+// SyncLibrary sends scanned library items to the server for matching and upgrade discovery.
+func (c *Client) SyncLibrary(ctx context.Context, req LibrarySyncRequest) (*LibrarySyncResponse, error) {
+	var resp LibrarySyncResponse
+	if err := c.doPost(ctx, "/api/internal/agent/library-sync", req, &resp); err != nil {
+		return nil, fmt.Errorf("library sync: %w", err)
+	}
+	return &resp, nil
+}
+
 // doPost sends a JSON POST request and decodes the response.
 func (c *Client) doPost(ctx context.Context, path string, body any, dst any) error {
 	jsonBody, err := json.Marshal(body)

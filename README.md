@@ -71,6 +71,7 @@ unarr start
 |---------|-------------|
 | `unarr init` | First-time configuration wizard (API key, download dir, daemon) |
 | `unarr config` | Edit all settings interactively (speed, organization, etc.) |
+| `unarr migrate` | Import settings and wanted list from Sonarr/Radarr/Prowlarr [pre-beta] |
 
 ### Search & Discovery
 

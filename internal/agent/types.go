@@ -68,6 +68,8 @@ type Task struct {
 	DirectFileName  string `json:"directFileName,omitempty"` // Original filename from direct URL
 	NzbID           string `json:"nzbId,omitempty"`          // Pre-resolved NZB ID from server
 	NzbPassword     string `json:"nzbPassword,omitempty"`    // Password for encrypted NZB archives
+	ReplacePath     string `json:"replacePath,omitempty"`    // File to replace after download (upgrade mode)
+	LibraryItemID   int    `json:"libraryItemId,omitempty"`  // Library item being upgraded
 }
 
 // TasksResponse wraps the array of tasks returned by the server.
@@ -196,4 +198,103 @@ type UsenetUsageResponse struct {
 	PercentUsed    float64 `json:"percentUsed"`
 	RemainingBytes int64   `json:"remainingBytes"`
 	QuotaResetDate string  `json:"quotaResetDate"`
+}
+
+// ---------------------------------------------------------------------------
+// Batch download types (used by unarr migrate)
+// ---------------------------------------------------------------------------
+
+// BatchDownloadRequest sends a list of wanted items to queue for download.
+type BatchDownloadRequest struct {
+	Items         []WantedItem `json:"items"`
+	ExcludeHashes []string     `json:"excludeHashes,omitempty"` // blocklisted + already-downloaded hashes
+}
+
+// WantedItem represents a movie or series the user wants.
+type WantedItem struct {
+	TmdbID int    `json:"tmdbId,omitempty"`
+	ImdbID string `json:"imdbId,omitempty"`
+	Title  string `json:"title"`
+	Year   int    `json:"year,omitempty"`
+	Type   string `json:"type"` // "movie" or "show"
+}
+
+// BatchDownloadResponse reports the outcome of a batch download request.
+type BatchDownloadResponse struct {
+	Queued        int         `json:"queued"`
+	NotFound      int         `json:"notFound"`
+	AlreadyActive int         `json:"alreadyActive"`
+	Items         []BatchItem `json:"items"`
+}
+
+// BatchItem is the per-item result of a batch download.
+type BatchItem struct {
+	Title  string `json:"title"`
+	Status string `json:"status"` // "queued", "not_found", "already_active"
+}
+
+// ---------------------------------------------------------------------------
+// Debrid config types (used by unarr init/migrate)
+// ---------------------------------------------------------------------------
+
+// ConfigureDebridRequest configures a debrid provider.
+type ConfigureDebridRequest struct {
+	Provider string `json:"provider"` // "real-debrid", "alldebrid", "torbox", "premiumize"
+	Token    string `json:"token"`
+}
+
+// ConfigureDebridResponse is returned after configuring a debrid provider.
+type ConfigureDebridResponse struct {
+	Success bool         `json:"success"`
+	Account DebridAccount `json:"account"`
+	Error   string       `json:"error,omitempty"`
+}
+
+// DebridAccount holds verified debrid account info.
+type DebridAccount struct {
+	Valid     bool   `json:"valid"`
+	Premium   bool   `json:"premium"`
+	Username  string `json:"username"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Library sync types (used by unarr scan)
+// ---------------------------------------------------------------------------
+
+// LibrarySyncRequest sends scanned media items to the server.
+type LibrarySyncRequest struct {
+	Items       []LibrarySyncItem `json:"items"`
+	ScanPath    string            `json:"scanPath"`
+	IsLastBatch bool              `json:"isLastBatch"`
+}
+
+// LibrarySyncItem is a single scanned media file with ffprobe metadata.
+type LibrarySyncItem struct {
+	FilePath          string   `json:"filePath"`
+	FileName          string   `json:"fileName"`
+	FileSize          int64    `json:"fileSize,omitempty"`
+	Title             string   `json:"title"`
+	Year              string   `json:"year,omitempty"`
+	Season            int      `json:"season,omitempty"`
+	Episode           int      `json:"episode,omitempty"`
+	ContentType       string   `json:"contentType"`
+	Resolution        string   `json:"resolution,omitempty"`
+	VideoCodec        string   `json:"videoCodec,omitempty"`
+	HDR               string   `json:"hdr,omitempty"`
+	BitDepth          int      `json:"bitDepth,omitempty"`
+	AudioCodec        string   `json:"audioCodec,omitempty"`
+	AudioChannels     int      `json:"audioChannels,omitempty"`
+	AudioLanguages    []string `json:"audioLanguages,omitempty"`
+	SubtitleLanguages []string `json:"subtitleLanguages,omitempty"`
+	AudioTracks       any      `json:"audioTracks,omitempty"`
+	SubtitleTracks    any      `json:"subtitleTracks,omitempty"`
+	VideoInfo         any      `json:"videoInfo,omitempty"`
+}
+
+// LibrarySyncResponse is returned after syncing library items.
+type LibrarySyncResponse struct {
+	Synced  int `json:"synced"`
+	Matched int `json:"matched"`
+	Removed int `json:"removed"`
 }

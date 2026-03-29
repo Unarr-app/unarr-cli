@@ -20,6 +20,7 @@ type Config struct {
 	Daemon        DaemonConfig        `toml:"daemon"`
 	Notifications NotificationsConfig `toml:"notifications"`
 	General       GeneralConfig       `toml:"general"`
+	Library       LibraryConfig       `toml:"library"`
 }
 
 type AuthConfig struct {
@@ -36,6 +37,7 @@ type AgentConfig struct {
 type DownloadConfig struct {
 	Dir              string `toml:"dir"`
 	PreferredMethod  string `toml:"preferred_method"`
+	PreferredQuality string `toml:"preferred_quality"` // "2160p", "1080p", "720p" — hint for auto-selection
 	MaxConcurrent    int    `toml:"max_concurrent"`
 	MaxDownloadSpeed string `toml:"max_download_speed"` // e.g. "10MB", "500KB", "0" = unlimited
 	MaxUploadSpeed   string `toml:"max_upload_speed"`   // e.g. "1MB", "0" = unlimited
@@ -60,6 +62,13 @@ type GeneralConfig struct {
 	Country string `toml:"country"`
 	Locale  string `toml:"locale"`
 	NoColor bool   `toml:"no_color"`
+}
+
+type LibraryConfig struct {
+	ScanPath    string `toml:"scan_path"`    // remembered from last scan
+	Workers     int    `toml:"workers"`      // concurrent ffprobe (default 8)
+	FFprobePath string `toml:"ffprobe_path"` // optional explicit path
+	BackupDir   string `toml:"backup_dir"`   // for replaced files
 }
 
 // Default returns a Config with sensible defaults.

@@ -50,6 +50,8 @@ type Task struct {
 	DirectFileName  string // Original filename from direct URL
 	NzbID           string // Pre-resolved NZB ID (usenet)
 	NzbPassword     string // Password for encrypted NZB archives
+	ReplacePath     string // File to replace after download (upgrade mode)
+	LibraryItemID   int    // Library item being upgraded
 
 	// Runtime state
 	Status          TaskStatus
@@ -88,6 +90,8 @@ func NewTaskFromAgent(at agent.Task) *Task {
 		DirectFileName:  at.DirectFileName,
 		NzbID:           at.NzbID,
 		NzbPassword:     at.NzbPassword,
+		ReplacePath:     at.ReplacePath,
+		LibraryItemID:   at.LibraryItemID,
 		Mode:            mode,
 		Status:          StatusClaimed,
 		ClaimedAt:       time.Now(),

@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Init wizard with daemon install step (`unarr init`, replaces `unarr setup`)
 - Interactive config menu with 7 categories (`unarr config [category]`)
+- Migration wizard from Sonarr/Radarr/Prowlarr (`unarr migrate`) [pre-beta]
+  - Auto-detect instances via Docker, config files, port scan, Prowlarr
+  - Import download history and blocklist to avoid re-downloading
+  - Detect Plex/Jellyfin/Emby media servers and library paths
+  - Extract debrid tokens from *arr download clients
+  - JSON export with `--dry-run --json`
+- Media server detection in `unarr init` (suggests library paths as download directory)
+- `preferred_quality` setting in config (2160p/1080p/720p)
 - Clean command to remove temp files, logs, and cached data (`unarr clean`)
 - Daemon mode with background download management (`unarr start`)
 - One-shot download command (`unarr download`)

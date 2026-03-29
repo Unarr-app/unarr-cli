@@ -66,6 +66,8 @@ Source:         https://github.com/torrentclaw/torrentclaw-cli`,
 	initCmd.GroupID = "start"
 	configCmd := newConfigCmd()
 	configCmd.GroupID = "start"
+	migrateCmd := newMigrateCmd()
+	migrateCmd.GroupID = "start"
 
 	// Search & Discovery
 	searchCmd := newSearchCmd()
@@ -109,10 +111,15 @@ Source:         https://github.com/torrentclaw/torrentclaw-cli`,
 	completionCmd := newCompletionCmd()
 	completionCmd.GroupID = "system"
 
+	// Library
+	scanCmd := newScanCmd()
+	scanCmd.GroupID = "search"
+
 	rootCmd.AddCommand(
 		// Getting Started
 		initCmd,
 		configCmd,
+		migrateCmd,
 		// Search & Discovery
 		searchCmd,
 		inspectCmd,
@@ -134,11 +141,12 @@ Source:         https://github.com/torrentclaw/torrentclaw-cli`,
 		selfUpdateCmd,
 		versionCmd,
 		completionCmd,
+		// Library
+		scanCmd,
 		// Stubs for future commands
 		newStubCmd("upgrade", "Find a better version of a torrent"),
 		newStubCmd("moreseed", "Find same quality with more seeders"),
 		newStubCmd("compare", "Compare two torrents side by side"),
-		newStubCmd("scan", "Scan your media library for upgrades"),
 		newStubCmd("add", "Search and add torrents to your client"),
 		newStubCmd("monitor", "Watch for new episodes of a series"),
 		newStubCmd("open", "Open content in the browser"),

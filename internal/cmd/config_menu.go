@@ -158,6 +158,11 @@ func configDownloads(cfg *config.Config) error {
 		cfg.Download.PreferredMethod = "auto"
 	}
 
+	validQualities := map[string]bool{"": true, "720p": true, "1080p": true, "2160p": true}
+	if !validQualities[cfg.Download.PreferredQuality] {
+		cfg.Download.PreferredQuality = ""
+	}
+
 	err := huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().
@@ -172,6 +177,16 @@ func configDownloads(cfg *config.Config) error {
 					huh.NewOption("Usenet only (requires Pro)", "usenet"),
 				).
 				Value(&cfg.Download.PreferredMethod),
+			huh.NewSelect[string]().
+				Title("Preferred quality").
+				Description("Hint for automatic torrent selection").
+				Options(
+					huh.NewOption("Any (best available)", ""),
+					huh.NewOption("720p", "720p"),
+					huh.NewOption("1080p", "1080p"),
+					huh.NewOption("2160p (4K)", "2160p"),
+				).
+				Value(&cfg.Download.PreferredQuality),
 			huh.NewSelect[string]().
 				Title("Max concurrent downloads").
 				Options(

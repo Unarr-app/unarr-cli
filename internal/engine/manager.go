@@ -280,6 +280,19 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 	task.FilePath = finalPath
 	task.mu.Unlock()
 
+	// 4b. Handle upgrade replacement (mode = "upgrade")
+	if task.ReplacePath != "" {
+		backupDir := "" // uses default ~/.local/share/unarr/replaced/
+		if err := replaceFile(task.ReplacePath, finalPath, backupDir); err != nil {
+			log.Printf("[%s] replace warning: %v (keeping new file at %s)", task.ID[:8], err, finalPath)
+		} else {
+			task.mu.Lock()
+			task.FilePath = task.ReplacePath
+			task.mu.Unlock()
+			log.Printf("[%s] upgraded: replaced %s", task.ID[:8], task.ReplacePath)
+		}
+	}
+
 	// 5. Complete
 	if method == MethodTorrent && m.cfg.Organize.Enabled {
 		// Could add seeding here in the future

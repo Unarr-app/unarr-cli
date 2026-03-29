@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var (
@@ -134,6 +135,53 @@ func cleanTitle(title string) string {
 		return title
 	}
 	return t
+}
+
+// replaceFile moves the old file to a backup dir, then moves the new file to the old path.
+// Used by upgrade downloads to replace an existing file with a better version.
+func replaceFile(oldPath, newPath, backupDir string) error {
+	if _, err := os.Stat(oldPath); err != nil {
+		return fmt.Errorf("original file not found: %w", err)
+	}
+
+	if backupDir == "" {
+		home, _ := os.UserHomeDir()
+		backupDir = filepath.Join(home, ".local", "share", "unarr", "replaced")
+	}
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		return fmt.Errorf("create backup dir: %w", err)
+	}
+
+	// Move old file to backup (with timestamp to avoid collisions)
+	base := filepath.Base(oldPath)
+	ext := filepath.Ext(base)
+	nameNoExt := strings.TrimSuffix(base, ext)
+	backupName := fmt.Sprintf("%s.%d%s", nameNoExt, time.Now().Unix(), ext)
+	backupPath := filepath.Join(backupDir, backupName)
+
+	if err := os.Rename(oldPath, backupPath); err != nil {
+		// Cross-device: copy + delete
+		if err := copyFile(oldPath, backupPath); err != nil {
+			return fmt.Errorf("backup failed: %w", err)
+		}
+		os.Remove(oldPath)
+	}
+
+	// Move new file to old path
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		return fmt.Errorf("create target dir: %w", err)
+	}
+	if err := os.Rename(newPath, oldPath); err != nil {
+		// Cross-device: copy + delete
+		if err := copyFile(newPath, oldPath); err != nil {
+			// Rollback: restore backup
+			os.Rename(backupPath, oldPath)
+			return fmt.Errorf("replace failed: %w", err)
+		}
+		os.Remove(newPath)
+	}
+
+	return nil
 }
 
 func copyFile(src, dst string) error {

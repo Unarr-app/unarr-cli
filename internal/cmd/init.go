@@ -14,7 +14,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
+	"github.com/torrentclaw/torrentclaw-cli/internal/arr"
 	"github.com/torrentclaw/torrentclaw-cli/internal/config"
+	"github.com/torrentclaw/torrentclaw-cli/internal/mediaserver"
 )
 
 func newInitCmd() *cobra.Command {
@@ -52,6 +54,7 @@ func runInit(apiURLOverride string) error {
 	bold := color.New(color.Bold)
 	green := color.New(color.FgGreen)
 	cyan := color.New(color.FgCyan)
+	dim := color.New(color.FgHiBlack)
 
 	fmt.Println()
 	bold.Println("  unarr init")
@@ -140,23 +143,73 @@ func runInit(apiURLOverride string) error {
 	// ── Step 2/3: Download directory ────────────────────────────────
 
 	downloadDir := cfg.Download.Dir
+
+	// Detect media servers and library paths
+	detected := mediaserver.Detect()
+	if len(detected.Servers) > 0 {
+		for _, s := range detected.Servers {
+			cyan.Printf("  Detected %s at %s\n", s.Name, s.URL)
+		}
+		if len(detected.Paths) > 0 {
+			dim.Printf("  Found media libraries: %s\n", strings.Join(detected.Paths, ", "))
+		}
+		fmt.Println()
+	}
+
+	// If no dir yet and we detected media paths, offer a Select; otherwise show Input
+	needsInput := true
+	if downloadDir == "" && len(detected.Paths) > 0 {
+		var options []huh.Option[string]
+		for _, p := range detected.Paths {
+			options = append(options, huh.NewOption(p, p))
+		}
+		if parent := mediaserver.ParentDir(detected.Paths); parent != "" {
+			options = append(options, huh.NewOption(parent+" (parent directory)", parent))
+		}
+		options = append(options, huh.NewOption(defaultDownloadDir()+" (default)", defaultDownloadDir()))
+		options = append(options, huh.NewOption("Custom path...", "__custom__"))
+
+		downloadDir = detected.Paths[0]
+		err = huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Step 2/3 — Download Directory").
+					Description("Detected media libraries on your system").
+					Options(options...).
+					Value(&downloadDir),
+			),
+		).Run()
+		if err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				fmt.Println("\n  Init cancelled.")
+				return nil
+			}
+			return err
+		}
+		needsInput = downloadDir == "__custom__"
+		if needsInput {
+			downloadDir = defaultDownloadDir()
+		}
+	}
 	if downloadDir == "" {
 		downloadDir = defaultDownloadDir()
 	}
-	err = huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Step 2/3 — Download Directory").
-				Description("Where should downloaded files be saved?").
-				Value(&downloadDir),
-		),
-	).Run()
-	if err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			fmt.Println("\n  Init cancelled.")
-			return nil
+	if needsInput {
+		err = huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title("Step 2/3 — Download Directory").
+					Description("Where should downloaded files be saved?").
+					Value(&downloadDir),
+			),
+		).Run()
+		if err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				fmt.Println("\n  Init cancelled.")
+				return nil
+			}
+			return err
 		}
-		return err
 	}
 	downloadDir = expandHome(strings.TrimSpace(downloadDir))
 
@@ -226,6 +279,60 @@ func runInit(apiURLOverride string) error {
 		}
 	}
 
+	// ── Debrid auto-detection from *arr ─────────────────────────────
+
+	if resp.User.IsPro {
+		debridTokens := detectDebridFromArr(dim)
+		if len(debridTokens) > 0 {
+			fmt.Println()
+			cyan.Printf("  Found %d debrid token(s) from your *arr setup:\n", len(debridTokens))
+			for _, dt := range debridTokens {
+				masked := dt.Token
+				if len(masked) > 8 {
+					masked = masked[:8] + "..."
+				}
+				fmt.Printf("    %s (%s) — %s\n", dt.Provider, dt.Name, masked)
+			}
+			fmt.Println()
+
+			var configureDebrid bool
+			err = huh.NewForm(
+				huh.NewGroup(
+					huh.NewConfirm().
+						Title("Configure debrid automatically?").
+						Description("Validates and saves the token to your unarr account").
+						Affirmative("Yes, configure").
+						Negative("No, skip").
+						Value(&configureDebrid),
+				),
+			).Run()
+			if err == nil && configureDebrid {
+				for _, dt := range debridTokens {
+					fmt.Printf("  Configuring %s... ", dt.Provider)
+					result, err := ac.ConfigureDebrid(context.Background(), agent.ConfigureDebridRequest{
+						Provider: dt.Provider,
+						Token:    dt.Token,
+					})
+					if err != nil {
+						color.New(color.FgYellow).Printf("failed: %s\n", err)
+					} else if result.Success {
+						green.Printf("OK")
+						if result.Account.Username != "" {
+							fmt.Printf(" (%s", result.Account.Username)
+							if result.Account.Premium {
+								fmt.Print(", premium")
+							}
+							fmt.Print(")")
+						}
+						fmt.Println()
+					} else if result.Error != "" {
+						color.New(color.FgYellow).Printf("failed: %s\n", result.Error)
+					}
+				}
+			}
+		}
+	}
+
 	// ── Summary ─────────────────────────────────────────────────────
 
 	fmt.Println()
@@ -263,4 +370,32 @@ func runInit(apiURLOverride string) error {
 	fmt.Println()
 
 	return nil
+}
+
+// detectDebridFromArr does a lightweight scan for *arr instances and extracts
+// debrid tokens from their download client configs.
+func detectDebridFromArr(dim *color.Color) []arr.DebridToken {
+	dim.Println("  Scanning for *arr instances with debrid...")
+
+	instances := arr.Discover()
+	if len(instances) == 0 {
+		return nil
+	}
+
+	var tokens []arr.DebridToken
+	for _, inst := range instances {
+		if inst.App == "prowlarr" || inst.APIKey == "" {
+			continue
+		}
+		client := arr.NewClient(inst.URL, inst.APIKey)
+		dcs, _ := client.DownloadClients()
+		if len(dcs) == 0 {
+			continue
+		}
+		tokens = append(tokens, arr.ExtractDebridTokens(dcs, func(id int) []arr.Field {
+			fields, _ := client.DownloadClientDetails(id)
+			return fields
+		})...)
+	}
+	return tokens
 }
