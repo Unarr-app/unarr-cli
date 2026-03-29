@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -23,10 +24,11 @@ type fileProvider interface {
 
 // StreamServer serves a torrent file over HTTP with Range request support.
 type StreamServer struct {
-	provider fileProvider
-	server   *http.Server
-	port     int
-	url      string
+	provider    fileProvider
+	server      *http.Server
+	port        int
+	url         string
+	upnpMapping *UPnPMapping
 }
 
 // NewStreamServer creates a new HTTP server for streaming via StreamEngine.
@@ -91,12 +93,15 @@ func NewStreamServerFromDisk(filePath string, port int) *StreamServer {
 	}
 }
 
-// Start begins serving the file on localhost. Returns the full URL.
+// Start begins serving the file on all interfaces. Returns the best reachable URL:
+//  1. UPnP public IP (accessible from anywhere on the internet)
+//  2. Tailscale IP (accessible from any device in the tailnet)
+//  3. LAN IP (accessible from local network)
 func (ss *StreamServer) Start(ctx context.Context) (string, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stream", ss.handler)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", ss.port)
+	addr := fmt.Sprintf("0.0.0.0:%d", ss.port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return "", fmt.Errorf("listen on %s: %w", addr, err)
@@ -104,7 +109,17 @@ func (ss *StreamServer) Start(ctx context.Context) (string, error) {
 
 	// Extract actual port (important when port=0)
 	ss.port = listener.Addr().(*net.TCPAddr).Port
-	ss.url = fmt.Sprintf("http://127.0.0.1:%d/stream", ss.port)
+
+	// Try UPnP for public internet access (like Plex Remote Access)
+	if mapping, upnpErr := setupUPnP(ss.port); upnpErr == nil {
+		ss.upnpMapping = mapping
+		ss.url = fmt.Sprintf("http://%s:%d/stream", mapping.ExternalIP, mapping.ExternalPort)
+		log.Printf("stream: UPnP mapped %s:%d -> local:%d", mapping.ExternalIP, mapping.ExternalPort, ss.port)
+	} else {
+		// Fallback: Tailscale IP > LAN IP > 127.0.0.1
+		ss.url = fmt.Sprintf("http://%s:%d/stream", reachableIP(), ss.port)
+		log.Printf("stream: UPnP unavailable (%v), using %s", upnpErr, ss.url)
+	}
 
 	ss.server = &http.Server{
 		Handler:           mux,
@@ -126,8 +141,9 @@ func (ss *StreamServer) URL() string { return ss.url }
 // Port returns the bound port.
 func (ss *StreamServer) Port() int { return ss.port }
 
-// Shutdown gracefully stops the HTTP server.
+// Shutdown gracefully stops the HTTP server and removes the UPnP port mapping.
 func (ss *StreamServer) Shutdown(ctx context.Context) error {
+	ss.upnpMapping.Remove()
 	if ss.server != nil {
 		return ss.server.Shutdown(ctx)
 	}
@@ -158,6 +174,37 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", mimeTypeFromExt(ss.provider.FileName()))
 
 	http.ServeContent(w, r, ss.provider.FileName(), time.Time{}, reader)
+}
+
+// reachableIP returns the best IP to use for the stream URL, in priority order:
+//  1. Tailscale IP (100.x.x.x) — accessible from anywhere via Tailscale mesh
+//  2. LAN IP — accessible from local network
+//  3. 127.0.0.1 — fallback (same machine only)
+func reachableIP() string {
+	// 1. Try Tailscale — gives an IP reachable from any device in the tailnet
+	if ip := tailscaleIP(); ip != "" {
+		return ip
+	}
+	// 2. Fall back to LAN IP
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return "127.0.0.1"
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String()
+}
+
+// tailscaleIP returns the Tailscale IPv4 address, or "" if Tailscale isn't running.
+func tailscaleIP() string {
+	out, err := exec.Command("tailscale", "ip", "-4").Output()
+	if err != nil {
+		return ""
+	}
+	ip := strings.TrimSpace(string(out))
+	if net.ParseIP(ip) == nil {
+		return ""
+	}
+	return ip
 }
 
 func mimeTypeFromExt(filename string) string {
