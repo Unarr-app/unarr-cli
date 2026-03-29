@@ -17,6 +17,7 @@ builds:
     ldflags:
       - -s -w
       - -X github.com/torrentclaw/torrentclaw-cli/internal/cmd.Version={{.Version}}
+      - -X github.com/torrentclaw/torrentclaw-cli/internal/sentry.dsn={{ .Env.SENTRY_DSN }}
 
 upx:
   - enabled: true

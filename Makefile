@@ -1,12 +1,14 @@
 .PHONY: all build test lint coverage clean fmt vet check install-hooks
 
 BINARY = unarr
+SENTRY_DSN ?=
+LDFLAGS = -X github.com/torrentclaw/torrentclaw-cli/internal/sentry.dsn=$(SENTRY_DSN)
 
 all: fmt vet lint test build
 
 ## Build the binary
 build:
-	go build -o $(BINARY) ./cmd/unarr/
+	go build -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/unarr/
 
 ## Run all tests
 test:

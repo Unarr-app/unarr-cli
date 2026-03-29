@@ -7,6 +7,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/torrentclaw/torrentclaw-cli/internal/config"
+	"github.com/torrentclaw/torrentclaw-cli/internal/sentry"
 	tc "github.com/torrentclaw/go-client"
 )
 
@@ -144,6 +145,14 @@ Source:         https://github.com/torrentclaw/torrentclaw-cli`,
 // Execute runs the root command.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		// Report to Sentry with command context
+		command := ""
+		if cmd, _, cerr := rootCmd.Find(os.Args[1:]); cerr == nil && cmd != nil && cmd != rootCmd {
+			command = cmd.Name()
+		}
+		sentry.CaptureError(err, command)
+		sentry.Close() // Flush before os.Exit (defers don't run after os.Exit)
+
 		fmt.Fprintln(os.Stderr, color.RedString("Error: %s", err))
 		os.Exit(1)
 	}
@@ -164,6 +173,11 @@ func loadConfig() config.Config {
 
 	appCfg.ApplyEnvOverrides()
 	cfgLoaded = true
+
+	if appCfg.Agent.ID != "" {
+		sentry.SetUser(appCfg.Agent.ID)
+	}
+
 	return appCfg
 }
 
