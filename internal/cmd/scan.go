@@ -153,42 +153,7 @@ func syncToServer(ctx context.Context, cfg config.Config, cache *library.Library
 
 	ac := agent.NewClient(cfg.Auth.APIURL, apiKey, "unarr/"+Version)
 
-	// Build sync items from cache
-	items := make([]agent.LibrarySyncItem, 0, len(cache.Items))
-	for _, item := range cache.Items {
-		if item.ScanError != "" {
-			continue // skip items with scan errors
-		}
-		si := agent.LibrarySyncItem{
-			FilePath:    item.FilePath,
-			FileName:    item.FileName,
-			FileSize:    item.FileSize,
-			Title:       item.Title,
-			Year:        item.Year,
-			ContentType: library.DeriveContentType(item),
-			Season:      item.Season,
-			Episode:     item.Episode,
-		}
-
-		if item.MediaInfo != nil {
-			if item.MediaInfo.Video != nil {
-				si.Resolution = library.ResolveResolution(item.MediaInfo.Video.Height)
-				si.VideoCodec = item.MediaInfo.Video.Codec
-				si.HDR = item.MediaInfo.Video.HDR
-				si.BitDepth = item.MediaInfo.Video.BitDepth
-			}
-			codec, channels := library.PrimaryAudioTrack(item.MediaInfo.Audio)
-			si.AudioCodec = codec
-			si.AudioChannels = channels
-			si.AudioLanguages = library.AudioLanguages(item.MediaInfo.Audio)
-			si.SubtitleLanguages = library.SubtitleLanguages(item.MediaInfo.Subtitles)
-			si.AudioTracks = item.MediaInfo.Audio
-			si.SubtitleTracks = item.MediaInfo.Subtitles
-			si.VideoInfo = item.MediaInfo.Video
-		}
-
-		items = append(items, si)
-	}
+	items := library.BuildSyncItems(cache)
 
 	if len(items) == 0 {
 		color.Yellow("\n  No valid items to sync.")

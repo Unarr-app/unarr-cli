@@ -573,7 +573,7 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration)
 		}
 
 		ac := agent.NewClient(cfg.Auth.APIURL, apiKey, "unarr/"+Version)
-		items := buildSyncItems(cache)
+		items := library.BuildSyncItems(cache)
 		if len(items) == 0 {
 			log.Printf("[auto-scan] no items to sync")
 			return
@@ -616,42 +616,4 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration)
 	}
 }
 
-// buildSyncItems converts cached library items to sync request items.
-func buildSyncItems(cache *library.LibraryCache) []agent.LibrarySyncItem {
-	items := make([]agent.LibrarySyncItem, 0, len(cache.Items))
-	for _, item := range cache.Items {
-		if item.ScanError != "" {
-			continue
-		}
-		si := agent.LibrarySyncItem{
-			FilePath:    item.FilePath,
-			FileName:    item.FileName,
-			FileSize:    item.FileSize,
-			Title:       item.Title,
-			Year:        item.Year,
-			ContentType: library.DeriveContentType(item),
-			Season:      item.Season,
-			Episode:     item.Episode,
-		}
-
-		if item.MediaInfo != nil {
-			if item.MediaInfo.Video != nil {
-				si.Resolution = library.ResolveResolution(item.MediaInfo.Video.Height)
-				si.VideoCodec = item.MediaInfo.Video.Codec
-				si.HDR = item.MediaInfo.Video.HDR
-				si.BitDepth = item.MediaInfo.Video.BitDepth
-			}
-			codec, channels := library.PrimaryAudioTrack(item.MediaInfo.Audio)
-			si.AudioCodec = codec
-			si.AudioChannels = channels
-			si.AudioLanguages = library.AudioLanguages(item.MediaInfo.Audio)
-			si.SubtitleLanguages = library.SubtitleLanguages(item.MediaInfo.Subtitles)
-			si.AudioTracks = item.MediaInfo.Audio
-			si.SubtitleTracks = item.MediaInfo.Subtitles
-			si.VideoInfo = item.MediaInfo.Video
-		}
-
-		items = append(items, si)
-	}
-	return items
-}
+// buildSyncItems moved to internal/library/sync.go as library.BuildSyncItems
