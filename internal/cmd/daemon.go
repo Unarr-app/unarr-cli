@@ -272,7 +272,7 @@ func runDaemonStart() error {
 		for _, t := range tasks {
 			if t.Mode == "stream" {
 				go handleStreamTask(ctx, t, reporter, cfg)
-			} else if manager.HasCapacity() {
+			} else if t.ForceStart || manager.HasCapacity() {
 				manager.Submit(ctx, t)
 			} else {
 				log.Printf("[%s] skipped: no capacity (max %d)", t.ID[:8], cfg.Download.MaxConcurrent)
