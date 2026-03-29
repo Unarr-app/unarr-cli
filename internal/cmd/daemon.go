@@ -219,6 +219,7 @@ func runDaemonStart() error {
 
 	// Wire state tracking
 	d.GetActiveCount = manager.ActiveCount
+	d.GetCleanableBytes = CleanableBytes
 
 	// Wire: server-side signals -> manager actions + stream tasks
 	reporter.SetCancelHandler(func(taskID string) {

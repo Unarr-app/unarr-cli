@@ -100,6 +100,8 @@ Source:         https://github.com/torrentclaw/torrentclaw-cli`,
 	statsCmd.GroupID = "system"
 	doctorCmd := newDoctorCmd()
 	doctorCmd.GroupID = "system"
+	cleanCmd := newCleanCmd()
+	cleanCmd.GroupID = "system"
 	selfUpdateCmd := newSelfUpdateCmd()
 	selfUpdateCmd.GroupID = "system"
 	versionCmd := newVersionCmd()
@@ -128,6 +130,7 @@ Source:         https://github.com/torrentclaw/torrentclaw-cli`,
 		// System & Diagnostics
 		statsCmd,
 		doctorCmd,
+		cleanCmd,
 		selfUpdateCmd,
 		versionCmd,
 		completionCmd,

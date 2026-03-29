@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Clean command to remove temp files, logs, and cached data (`unarr clean`)
 - Daemon mode with background download management (`unarr start`)
 - One-shot download command (`unarr download`)
 - Stream to media player (`unarr stream`)

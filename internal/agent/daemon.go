@@ -39,7 +39,8 @@ type Daemon struct {
 	heartbeatFailures int
 
 	// Callbacks for state tracking (set by cmd/daemon.go)
-	GetActiveCount func() int
+	GetActiveCount    func() int
+	GetCleanableBytes func() int64
 
 	// Exposed tickers for hot-reload
 	PollTicker      *time.Ticker
