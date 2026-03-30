@@ -37,13 +37,16 @@ changelog:
       - "^test:"
       - "^chore:"
 
-brews:
-  - repository:
-      owner: torrentclaw
-      name: homebrew-tap
-    name: unarr
-    homepage: https://github.com/torrentclaw/unarr
-    description: "unarr — replaces the entire *arr stack"
-    license: MIT
-    install: |
-      bin.install "unarr"
+# Homebrew tap — requires PAT with repo scope (not GITHUB_TOKEN)
+# Enable when torrentclaw/homebrew-tap PAT is configured as HOMEBREW_TAP_TOKEN
+# brews:
+#   - repository:
+#       owner: torrentclaw
+#       name: homebrew-tap
+#       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+#     name: unarr
+#     homepage: https://github.com/torrentclaw/unarr
+#     description: "unarr — replaces the entire *arr stack"
+#     license: MIT
+#     install: |
+#       bin.install "unarr"
