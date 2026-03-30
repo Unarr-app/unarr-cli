@@ -14,8 +14,6 @@ import (
 	"github.com/anacrolix/torrent"
 )
 
-
-
 // StreamConfig holds settings for the streaming engine.
 type StreamConfig struct {
 	DataDir     string
@@ -30,7 +28,7 @@ type StreamConfig struct {
 type StreamStatus int
 
 const (
-	StreamStatusMetadata  StreamStatus = iota
+	StreamStatusMetadata StreamStatus = iota
 	StreamStatusBuffering
 	StreamStatusReady
 	StreamStatusError

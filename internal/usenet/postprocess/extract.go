@@ -105,7 +105,7 @@ func IsPasswordProtected(archivePath string) bool {
 		return false
 	}
 
-	switch extType {
+	switch extType { //nolint:exhaustive // ExtractorNone handled above
 	case ExtractorUnrar:
 		cmd := exec.Command(extPath, "t", "-p-", archivePath)
 		output, err := cmd.CombinedOutput()

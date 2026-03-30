@@ -6,9 +6,9 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	tc "github.com/torrentclaw/go-client"
 	"github.com/torrentclaw/unarr/internal/config"
 	"github.com/torrentclaw/unarr/internal/sentry"
-	tc "github.com/torrentclaw/go-client"
 )
 
 var (

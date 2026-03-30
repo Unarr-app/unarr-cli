@@ -11,16 +11,16 @@ import (
 
 // Client talks to a single *arr instance (Sonarr, Radarr, or Prowlarr).
 type Client struct {
-	baseURL string
-	apiKey  string
+	baseURL    string
+	apiKey     string
 	httpClient *http.Client
 }
 
 // NewClient creates a client for the given *arr instance.
 func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		apiKey:     apiKey,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 	}
 }

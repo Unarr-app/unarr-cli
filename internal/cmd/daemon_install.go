@@ -236,4 +236,3 @@ func runDaemonUninstall() error {
 	fmt.Println()
 	return nil
 }
-

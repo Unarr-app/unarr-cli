@@ -8,9 +8,9 @@ import (
 )
 
 var (
-	seasonRegex  = regexp.MustCompile(`(?i)S(\d{1,2})E(\d{1,2})`)
-	seasonOnly   = regexp.MustCompile(`(?i)S(\d{1,2})(?:\b|$)`)
-	altEpRegex   = regexp.MustCompile(`(?i)(\d{1,2})x(\d{2})`)
+	seasonRegex = regexp.MustCompile(`(?i)S(\d{1,2})E(\d{1,2})`)
+	seasonOnly  = regexp.MustCompile(`(?i)S(\d{1,2})(?:\b|$)`)
+	altEpRegex  = regexp.MustCompile(`(?i)(\d{1,2})x(\d{2})`)
 )
 
 // ResolveResolution maps a pixel height to a standard resolution label.

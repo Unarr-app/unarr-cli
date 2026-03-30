@@ -62,8 +62,8 @@ type Task struct {
 	Title           string `json:"title"`
 	ContentID       *int   `json:"contentId,omitempty"`
 	IMDbID          string `json:"imdbId,omitempty"`
-	PreferredMethod string `json:"preferredMethod"` // auto | debrid | usenet | torrent
-	Mode            string `json:"mode,omitempty"`   // download | stream
+	PreferredMethod string `json:"preferredMethod"`          // auto | debrid | usenet | torrent
+	Mode            string `json:"mode,omitempty"`           // download | stream
 	DirectURL       string `json:"directUrl,omitempty"`      // HTTPS download URL (debrid, etc.)
 	DirectFileName  string `json:"directFileName,omitempty"` // Original filename from direct URL
 	NzbID           string `json:"nzbId,omitempty"`          // Pre-resolved NZB ID from server
@@ -88,8 +88,8 @@ type StreamRequest struct {
 // StatusUpdate is sent by the CLI to report download progress.
 type StatusUpdate struct {
 	TaskID          string `json:"taskId"`
-	Status          string `json:"status,omitempty"`          // downloading | completed | failed
-	Progress        int    `json:"progress,omitempty"`        // 0-100
+	Status          string `json:"status,omitempty"`   // downloading | completed | failed
+	Progress        int    `json:"progress,omitempty"` // 0-100
 	DownloadedBytes int64  `json:"downloadedBytes,omitempty"`
 	TotalBytes      int64  `json:"totalBytes,omitempty"`
 	SpeedBps        int64  `json:"speedBps,omitempty"`
@@ -249,9 +249,9 @@ type ConfigureDebridRequest struct {
 
 // ConfigureDebridResponse is returned after configuring a debrid provider.
 type ConfigureDebridResponse struct {
-	Success bool         `json:"success"`
+	Success bool          `json:"success"`
 	Account DebridAccount `json:"account"`
-	Error   string       `json:"error,omitempty"`
+	Error   string        `json:"error,omitempty"`
 }
 
 // DebridAccount holds verified debrid account info.

@@ -18,8 +18,8 @@ var configCategories = []string{"downloads", "organization", "notifications", "d
 
 func newConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:       "config [category]",
-		Short:     "Edit settings interactively",
+		Use:   "config [category]",
+		Short: "Edit settings interactively",
 		Long: `Edit unarr settings interactively with a category-based menu.
 
 Categories:

@@ -161,5 +161,5 @@ func TestFormatContentType(t *testing.T) {
 	}
 }
 
-func ptr[T any](v T) *T    { return &v }
-func intPtr(v int) *int     { return &v }
+func ptr[T any](v T) *T { return &v }
+func intPtr(v int) *int { return &v }

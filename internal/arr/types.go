@@ -112,11 +112,11 @@ type Tag struct {
 
 // HistoryRecord is a single entry from /api/v3/history.
 type HistoryRecord struct {
-	ID           int    `json:"id"`
-	EventType    string `json:"eventType"` // "grabbed", "downloadFolderImported", etc.
-	DownloadID   string `json:"downloadId"`
-	SourceTitle  string `json:"sourceTitle"`
-	Data         HistoryData `json:"data"`
+	ID          int         `json:"id"`
+	EventType   string      `json:"eventType"` // "grabbed", "downloadFolderImported", etc.
+	DownloadID  string      `json:"downloadId"`
+	SourceTitle string      `json:"sourceTitle"`
+	Data        HistoryData `json:"data"`
 }
 
 // HistoryData holds the nested data of a history record.
@@ -127,14 +127,14 @@ type HistoryData struct {
 
 // HistoryResponse wraps the paginated history from *arr.
 type HistoryResponse struct {
-	Records []HistoryRecord `json:"records"`
-	TotalRecords int        `json:"totalRecords"`
+	Records      []HistoryRecord `json:"records"`
+	TotalRecords int             `json:"totalRecords"`
 }
 
 // BlocklistItem is an item the user explicitly rejected.
 type BlocklistItem struct {
-	ID          int    `json:"id"`
-	SourceTitle string `json:"sourceTitle"`
+	ID          int           `json:"id"`
+	SourceTitle string        `json:"sourceTitle"`
 	Data        BlocklistData `json:"data"`
 }
 
@@ -145,8 +145,8 @@ type BlocklistData struct {
 
 // BlocklistResponse wraps paginated blocklist from *arr.
 type BlocklistResponse struct {
-	Records []BlocklistItem `json:"records"`
-	TotalRecords int        `json:"totalRecords"`
+	Records      []BlocklistItem `json:"records"`
+	TotalRecords int             `json:"totalRecords"`
 }
 
 // Instance represents a discovered *arr application.

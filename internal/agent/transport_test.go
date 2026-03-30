@@ -83,8 +83,8 @@ func TestWSTransportConnectAndAuth(t *testing.T) {
 
 		// Send registered response
 		conn.WriteJSON(wsRegisteredMessage{
-			Type: "registered",
-			User: UserInfo{Name: "WS User", Plan: "pro", IsPro: true},
+			Type:     "registered",
+			User:     UserInfo{Name: "WS User", Plan: "pro", IsPro: true},
 			Features: FeatureFlags{Torrent: true},
 		})
 

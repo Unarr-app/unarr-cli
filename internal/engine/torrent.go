@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	alog "github.com/anacrolix/log"
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/dht/v2/krpc"
+	alog "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/storage"
 	"github.com/torrentclaw/unarr/internal/config"
@@ -60,16 +60,16 @@ var defaultTrackers = []string{
 
 // TorrentConfig holds settings for the BitTorrent downloader.
 type TorrentConfig struct {
-	DataDir          string
-	MetadataTimeout  time.Duration // how long to wait for torrent metadata (default 15m, 0 = unlimited)
-	StallTimeout     time.Duration // no progress during download for this long = stall (default 10m)
-	MaxTimeout       time.Duration // absolute maximum per torrent (default 0 = unlimited)
-	MaxDownloadRate  int64         // bytes/s, 0 = unlimited
-	MaxUploadRate    int64         // bytes/s, 0 = unlimited
-	ListenPort       int           // fixed port for incoming peers (default 42069, 0 = random)
-	SeedEnabled      bool
-	SeedRatio        float64       // target seed ratio (default 0, meaning seed until SeedTime)
-	SeedTime         time.Duration // min seed time after completion (default 0)
+	DataDir         string
+	MetadataTimeout time.Duration // how long to wait for torrent metadata (default 15m, 0 = unlimited)
+	StallTimeout    time.Duration // no progress during download for this long = stall (default 10m)
+	MaxTimeout      time.Duration // absolute maximum per torrent (default 0 = unlimited)
+	MaxDownloadRate int64         // bytes/s, 0 = unlimited
+	MaxUploadRate   int64         // bytes/s, 0 = unlimited
+	ListenPort      int           // fixed port for incoming peers (default 42069, 0 = random)
+	SeedEnabled     bool
+	SeedRatio       float64       // target seed ratio (default 0, meaning seed until SeedTime)
+	SeedTime        time.Duration // min seed time after completion (default 0)
 }
 
 // TorrentDownloader downloads torrents via BitTorrent P2P.

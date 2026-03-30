@@ -55,7 +55,6 @@ func TestFileSize_NonExistent(t *testing.T) {
 	}
 }
 
-
 func TestRunClean_DryRun(t *testing.T) {
 	err := runClean(true, false, false)
 	if err != nil {

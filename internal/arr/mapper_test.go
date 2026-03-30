@@ -128,7 +128,7 @@ func TestExtractBlocklistedHashes(t *testing.T) {
 		{Data: BlocklistData{InfoHash: "AAAA"}},
 		{Data: BlocklistData{InfoHash: "AAAA"}}, // duplicate
 		{Data: BlocklistData{InfoHash: "BBBB"}},
-		{Data: BlocklistData{InfoHash: ""}},       // empty
+		{Data: BlocklistData{InfoHash: ""}}, // empty
 	}
 	hashes := ExtractBlocklistedHashes(items)
 	if len(hashes) != 2 {
@@ -139,8 +139,8 @@ func TestExtractBlocklistedHashes(t *testing.T) {
 func TestExtractDownloadedHashes(t *testing.T) {
 	records := []HistoryRecord{
 		{EventType: "downloadFolderImported", Data: HistoryData{InfoHash: "hash1"}},
-		{EventType: "grabbed", Data: HistoryData{InfoHash: "hash2"}},                    // not imported
-		{EventType: "downloadFolderImported", Data: HistoryData{InfoHash: "hash1"}},     // duplicate
+		{EventType: "grabbed", Data: HistoryData{InfoHash: "hash2"}},                // not imported
+		{EventType: "downloadFolderImported", Data: HistoryData{InfoHash: "hash1"}}, // duplicate
 		{EventType: "downloadFolderImported", Data: HistoryData{InfoHash: "hash3"}},
 	}
 	hashes := ExtractDownloadedHashes(records)

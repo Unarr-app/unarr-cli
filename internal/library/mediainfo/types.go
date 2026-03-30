@@ -10,7 +10,7 @@ type MediaInfo struct {
 
 // VideoInfo represents the primary video stream metadata.
 type VideoInfo struct {
-	Codec     string  `json:"codec"`     // "hevc", "h264", "av1"
+	Codec     string  `json:"codec"` // "hevc", "h264", "av1"
 	Width     int     `json:"width"`
 	Height    int     `json:"height"`
 	BitDepth  int     `json:"bitDepth"`  // 8, 10, 12

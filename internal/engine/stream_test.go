@@ -354,7 +354,7 @@ type responseRecorder struct {
 	body       *strings.Builder
 }
 
-func (r *responseRecorder) Header() http.Header { return r.headers }
+func (r *responseRecorder) Header() http.Header  { return r.headers }
 func (r *responseRecorder) WriteHeader(code int) { r.statusCode = code }
 func (r *responseRecorder) Write(b []byte) (int, error) {
 	if r.statusCode == 0 {

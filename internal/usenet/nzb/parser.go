@@ -50,11 +50,11 @@ type xmlMeta struct {
 }
 
 type xmlFile struct {
-	Poster   string        `xml:"poster,attr"`
-	Date     string        `xml:"date,attr"`
-	Subject  string        `xml:"subject,attr"`
-	Groups   xmlGroups     `xml:"groups"`
-	Segments xmlSegments   `xml:"segments"`
+	Poster   string      `xml:"poster,attr"`
+	Date     string      `xml:"date,attr"`
+	Subject  string      `xml:"subject,attr"`
+	Groups   xmlGroups   `xml:"groups"`
+	Segments xmlSegments `xml:"segments"`
 }
 
 type xmlGroups struct {
@@ -263,8 +263,9 @@ func (f *File) TotalBytes() int64 {
 
 // subjectFilenameRe matches the filename in a typical Usenet subject line.
 // Examples:
-//   "Movie.2024.1080p.mkv" yEnc (1/50)
-//   [PRiVATE]-[#a]- "file.rar" yEnc (01/99)
+//
+//	"Movie.2024.1080p.mkv" yEnc (1/50)
+//	[PRiVATE]-[#a]- "file.rar" yEnc (01/99)
 var subjectFilenameRe = regexp.MustCompile(`"([^"]+)"`)
 
 // Filename extracts the filename from the subject line.

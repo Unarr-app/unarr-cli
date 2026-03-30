@@ -191,6 +191,8 @@ func (t *Task) ToStatusUpdate() agent.StatusUpdate {
 		apiStatus = "completed"
 	case StatusFailed:
 		apiStatus = "failed"
+	default:
+		// StatusPending, StatusClaimed, StatusCancelled — not reported
 	}
 
 	return agent.StatusUpdate{

@@ -173,8 +173,8 @@ func TestToStatusUpdate(t *testing.T) {
 
 func TestToStatusUpdateGranularStates(t *testing.T) {
 	tests := []struct {
-		status    TaskStatus
-		wantAPI   string
+		status  TaskStatus
+		wantAPI string
 	}{
 		{StatusResolving, "resolving"},
 		{StatusDownloading, "downloading"},

@@ -21,7 +21,7 @@ import (
 // activeDownload holds the state for a single in-progress usenet download.
 type activeDownload struct {
 	cancel  context.CancelFunc
-	taskDir string                   // populated after MkdirAll; empty before
+	taskDir string                    // populated after MkdirAll; empty before
 	tracker *download.ProgressTracker // populated after tracker creation; nil before
 }
 
@@ -471,4 +471,3 @@ func sanitizeDir(name string) string {
 	}
 	return name
 }
-
