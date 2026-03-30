@@ -37,13 +37,13 @@ changelog:
       - "^test:"
       - "^chore:"
 
-brews:
-  - repository:
-      owner: torrentclaw
-      name: homebrew-tap
-    name: unarr
-    homepage: https://github.com/torrentclaw/unarr
-    description: "unarr — replaces the entire *arr stack"
-    license: MIT
-    install: |
-      bin.install "unarr"
+# brews:
+#   - repository:
+#       owner: torrentclaw
+#       name: homebrew-tap
+#     name: unarr
+#     homepage: https://github.com/torrentclaw/unarr
+#     description: "unarr — replaces the entire *arr stack"
+#     license: MIT
+#     install: |
+#       bin.install "unarr"
