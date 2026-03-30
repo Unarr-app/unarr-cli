@@ -1,26 +1,19 @@
 # ---- Build stage ----
-# Build context must be the parent directory containing both unarr/
-# and go-client/. Use: docker build -f unarr/Dockerfile .
-# Or use the provided docker-build.sh script.
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
-# Copy go-client dependency (local replace in go.mod -> ../go-client)
-WORKDIR /deps
-COPY go-client/ /deps/go-client/
+WORKDIR /src
 
 # Copy go.mod/go.sum first for layer caching
-WORKDIR /src
-COPY unarr/go.mod unarr/go.sum ./
-RUN go mod edit -replace github.com/torrentclaw/go-client=/deps/go-client
+COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source (changes here won't invalidate mod cache)
-COPY unarr/ .
-RUN go mod edit -replace github.com/torrentclaw/go-client=/deps/go-client
+# Copy source
+COPY . .
 
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /unarr ./cmd/unarr/
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/torrentclaw/unarr/internal/cmd.Version=${VERSION}" -trimpath -o /unarr ./cmd/unarr/
 
 # ---- Runtime stage ----
 FROM alpine:3.21
