@@ -97,7 +97,7 @@ func DownloadFFprobe() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("download failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // best-effort close
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
@@ -167,7 +167,7 @@ func extractFromZip(data []byte, target string) ([]byte, error) {
 			if err != nil {
 				return nil, fmt.Errorf("cannot extract %s from archive: %w", target, err)
 			}
-			defer rc.Close()
+			defer rc.Close() //nolint:errcheck // best-effort close
 			return io.ReadAll(rc)
 		}
 	}

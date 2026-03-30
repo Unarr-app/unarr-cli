@@ -93,7 +93,7 @@ func TestLoadPreservesDefaults(t *testing.T) {
 	path := filepath.Join(tmp, "config.toml")
 
 	// Write partial config (only auth section)
-	os.WriteFile(path, []byte(`[auth]
+	_ = os.WriteFile(path, []byte(`[auth]
 api_key = "tc_partial"
 `), 0o644)
 
@@ -193,7 +193,7 @@ func TestParseSpeed(t *testing.T) {
 func TestLoadInvalidTOML(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "config.toml")
-	os.WriteFile(path, []byte(`not valid toml [[[`), 0o644)
+	_ = os.WriteFile(path, []byte(`not valid toml [[[`), 0o644)
 
 	_, err := Load(path)
 	if err == nil {
