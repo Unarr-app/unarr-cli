@@ -383,4 +383,3 @@ func (c *Client) Status() string {
 	pooled := len(c.pool)
 	return fmt.Sprintf("%d connections (%d pooled) to %s:%d", open, pooled, c.cfg.Host, c.cfg.Port)
 }
-

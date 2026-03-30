@@ -30,12 +30,12 @@ type Daemon struct {
 	OnControlAction   func(action, taskID string)
 
 	// State
-	User                 UserInfo
-	Features             FeatureFlags
-	Info                 AgentInfo
-	State                DaemonState
-	heartbeatFailures    int
-	lastNotifiedVersion  string
+	User                UserInfo
+	Features            FeatureFlags
+	Info                AgentInfo
+	State               DaemonState
+	heartbeatFailures   int
+	lastNotifiedVersion string
 
 	// Callbacks for state tracking (set by cmd/daemon.go)
 	GetActiveCount    func() int

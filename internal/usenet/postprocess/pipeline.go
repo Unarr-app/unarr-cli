@@ -226,4 +226,3 @@ func findMainFile(dir string, files []string) string {
 
 	return bestPath
 }
-

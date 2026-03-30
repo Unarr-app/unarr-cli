@@ -114,7 +114,6 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 		if resp.ContentLength > 0 {
 			totalBytes = resp.ContentLength
 		}
-		existingSize = 0 // Start fresh
 	case http.StatusPartialContent:
 		// Resume accepted
 		startOffset = existingSize
@@ -131,7 +130,6 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 				if _, err := fmt.Sscanf(cr, "bytes */%d", &serverSize); err == nil && serverSize > 0 && existingSize != serverSize {
 					// Local file size doesn't match server — re-download from scratch
 					log.Printf("[%s] local size %s != server size %s, re-downloading", shortID(task.ID), formatBytes(existingSize), formatBytes(serverSize))
-					existingSize = 0
 					resp.Body.Close()
 					req2, err := http.NewRequestWithContext(dlCtx, http.MethodGet, task.DirectURL, nil)
 					if err != nil {
