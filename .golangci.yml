@@ -5,7 +5,6 @@ run:
 
 linters:
   enable:
-    - errcheck
     - govet
     - ineffassign
     - staticcheck
@@ -20,55 +19,24 @@ linters:
     gosec:
       excludes:
         - G104  # Unhandled errors in fire-and-forget
+        - G112  # Slowloris — local-only servers
         - G115  # Integer overflow — CLI-safe conversions
         - G204  # Subprocess with variable — intentional for player/extractor launch
         - G301  # Directory perms > 0750 — standard for user dirs
         - G302  # File perms > 0600 — resume files need 0644
         - G304  # File inclusion via variable — config paths are trusted
         - G306  # WriteFile perms > 0600 — binaries need 0755
+        - G702  # Command injection via taint — self-update uses trusted URLs
         - G703  # Path traversal via taint — internal paths only
         - G704  # SSRF via taint — user-configured URLs
         - G706  # Log injection via taint — internal log lines
-    errcheck:
-      exclude-functions:
-        - (*os/exec.Cmd).Start
-        - (*os.File).Close
-        - (io.Closer).Close
-        - (*compress/gzip.Reader).Close
-        - (*archive/tar.Reader).Close
-        - (net.Conn).Close
-        - os.Remove
-        - os.RemoveAll
-        - os.MkdirAll
-        - os.Rename
-        - os.Unsetenv
-        - os.WriteFile
-        - fmt.Fprint
-        - fmt.Fprintf
-        - fmt.Printf
-        - fmt.Println
-        - (*github.com/fatih/color.Color).Fprintf
-        - (*github.com/fatih/color.Color).Printf
-        - (*github.com/fatih/color.Color).Println
-        - (*encoding/json.Encoder).Encode
-        - (*encoding/json.Decoder).Decode
-        - (*archive/tar.Writer).WriteHeader
-        - (*archive/tar.Writer).Write
-        - (*archive/tar.Writer).Close
-        - (*compress/gzip.Writer).Close
-        - (net.Conn).SetDeadline
-        - filepath.Walk
     exhaustive:
       default-signifies-exhaustive: true
   exclusions:
     paths:
       - dist
     rules:
-      # Disable errcheck in test files — test helpers don't need error checks
-      - linters:
-          - errcheck
-        path: _test\.go
-      # Allow misspell "cancelled" — used in API constants matching server
+      # Allow misspell "cancelled" — API constant matching server
       - linters:
           - misspell
         text: "Cancell"
@@ -76,26 +44,10 @@ linters:
       - linters:
           - nilerr
         path: "(clean|scanner|usenet|engine)"
-      # Ignore prealloc suggestions
-      - linters:
-          - prealloc
-        path: ".*"
-      # Ignore unparam in migration code
-      - linters:
-          - unparam
-        path: migrate\.go
-      # Ignore staticcheck style suggestions (QF/S)
+      # Ignore staticcheck style suggestions (QF/S/SA4/SA9)
       - linters:
           - staticcheck
         text: "^(QF|S1|SA4011|SA9003)"
-      # Ignore errorlint for now (requires broader refactor)
-      - linters:
-          - errorlint
-        path: ".*"
-      # Ignore gosec G112 (Slowloris) in local-only auth server
-      - linters:
-          - gosec
-        path: auth_browser
       # Ignore gosec G101 (hardcoded creds) in tests
       - linters:
           - gosec

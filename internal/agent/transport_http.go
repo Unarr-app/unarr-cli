@@ -20,7 +20,7 @@ func NewHTTPTransport(baseURL, apiKey, userAgent string) *HTTPTransport {
 func (t *HTTPTransport) Connect(_ context.Context) error { return nil }
 func (t *HTTPTransport) Close() error                    { return nil }
 func (t *HTTPTransport) Mode() string                    { return "http" }
-func (t *HTTPTransport) Events() <-chan ServerEvent       { return t.events }
+func (t *HTTPTransport) Events() <-chan ServerEvent      { return t.events }
 
 func (t *HTTPTransport) Register(ctx context.Context, req RegisterRequest) (*RegisterResponse, error) {
 	return t.client.Register(ctx, req)

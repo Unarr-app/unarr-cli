@@ -35,7 +35,7 @@ func NewHybridTransport(ws *WSTransport, http *HTTPTransport) *HybridTransport {
 	return h
 }
 
-func (h *HybridTransport) Mode() string              { return h.mode.Load().(string) }
+func (h *HybridTransport) Mode() string               { return h.mode.Load().(string) }
 func (h *HybridTransport) Events() <-chan ServerEvent { return h.events }
 
 // Connect tries WS first. If it fails, falls back to HTTP and starts reconnection loop.

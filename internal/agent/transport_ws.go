@@ -45,7 +45,7 @@ func NewWSTransport(wsURL, apiKey, agentID, userAgent string) *WSTransport {
 	}
 }
 
-func (t *WSTransport) Mode() string              { return "ws" }
+func (t *WSTransport) Mode() string               { return "ws" }
 func (t *WSTransport) Events() <-chan ServerEvent { return t.events }
 
 // Connect dials the WebSocket server and starts the read loop.
@@ -306,7 +306,9 @@ func (t *WSTransport) readLoop(conn *websocket.Conn) {
 			}
 
 		case "error":
-			var resp struct{ Message string `json:"message"` }
+			var resp struct {
+				Message string `json:"message"`
+			}
 			if json.Unmarshal(msg, &resp) == nil {
 				log.Printf("[ws] server error: %s", resp.Message)
 			}
