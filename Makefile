@@ -10,9 +10,6 @@ all: fmt vet lint test build
 build:
 	go build -ldflags '$(LDFLAGS)' -trimpath -o $(BINARY) ./cmd/unarr/
 
-## Build small binary (stripped + UPX compressed, ~5MB)
-build-small: build
-	@command -v upx >/dev/null 2>&1 && upx --best -q $(BINARY) || echo "upx not installed — install with: brew install upx"
 
 ## Run all tests
 test:

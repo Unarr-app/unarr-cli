@@ -19,12 +19,6 @@ builds:
       - -X github.com/torrentclaw/torrentclaw-cli/internal/cmd.Version={{.Version}}
       - -X github.com/torrentclaw/torrentclaw-cli/internal/sentry.dsn={{ .Env.SENTRY_DSN }}
 
-upx:
-  - enabled: true
-    goos:
-      - linux
-      - windows
-
 archives:
   - format: tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
