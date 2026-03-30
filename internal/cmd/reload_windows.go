@@ -2,7 +2,7 @@
 
 package cmd
 
-import "github.com/torrentclaw/torrentclaw-cli/internal/agent"
+import "github.com/torrentclaw/unarr/internal/agent"
 
 // ReloadableConfig holds a reference to the daemon for hot-reload.
 type ReloadableConfig struct {

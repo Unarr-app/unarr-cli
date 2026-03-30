@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/torrentclaw/torrentclaw-cli/internal/cmd"
-	"github.com/torrentclaw/torrentclaw-cli/internal/sentry"
+	"github.com/torrentclaw/unarr/internal/cmd"
+	"github.com/torrentclaw/unarr/internal/sentry"
 )
 
 func main() {

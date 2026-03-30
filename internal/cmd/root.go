@@ -6,8 +6,8 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/torrentclaw-cli/internal/config"
-	"github.com/torrentclaw/torrentclaw-cli/internal/sentry"
+	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/torrentclaw/unarr/internal/sentry"
 	tc "github.com/torrentclaw/go-client"
 )
 
@@ -37,7 +37,7 @@ Get started:
   unarr start                          Start the download daemon
 
 Documentation:  https://torrentclaw.com/cli
-Source:         https://github.com/torrentclaw/torrentclaw-cli`,
+Source:         https://github.com/torrentclaw/unarr`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			if noColor || os.Getenv("NO_COLOR") != "" {
 				color.NoColor = true

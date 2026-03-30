@@ -15,7 +15,7 @@ Only the latest release receives security updates.
 
 Instead, report them via **GitHub Security Advisories**:
 
-1. Go to [Security Advisories](https://github.com/torrentclaw/torrentclaw-cli/security/advisories)
+1. Go to [Security Advisories](https://github.com/torrentclaw/unarr/security/advisories)
 2. Click **"Report a vulnerability"**
 3. Fill in the details
 

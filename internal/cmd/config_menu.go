@@ -11,7 +11,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/torrentclaw-cli/internal/config"
+	"github.com/torrentclaw/unarr/internal/config"
 )
 
 var configCategories = []string{"downloads", "organization", "notifications", "device", "region", "connection", "advanced"}

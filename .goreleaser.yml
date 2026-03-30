@@ -16,8 +16,8 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/torrentclaw/torrentclaw-cli/internal/cmd.Version={{.Version}}
-      - -X github.com/torrentclaw/torrentclaw-cli/internal/sentry.dsn={{ .Env.SENTRY_DSN }}
+      - -X github.com/torrentclaw/unarr/internal/cmd.Version={{.Version}}
+      - -X github.com/torrentclaw/unarr/internal/sentry.dsn={{ .Env.SENTRY_DSN }}
 
 archives:
   - format: tar.gz
@@ -42,7 +42,7 @@ brews:
       owner: torrentclaw
       name: homebrew-tap
     name: unarr
-    homepage: https://github.com/torrentclaw/torrentclaw-cli
+    homepage: https://github.com/torrentclaw/unarr
     description: "unarr — replaces the entire *arr stack"
     license: MIT
     install: |

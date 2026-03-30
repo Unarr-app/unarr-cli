@@ -1,6 +1,6 @@
 package library
 
-import "github.com/torrentclaw/torrentclaw-cli/internal/library/mediainfo"
+import "github.com/torrentclaw/unarr/internal/library/mediainfo"
 
 // LibraryItem represents a single scanned media file.
 type LibraryItem struct {

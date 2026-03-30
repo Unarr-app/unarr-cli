@@ -2,7 +2,7 @@ services:
   unarr:
     build:
       context: ..
-      dockerfile: torrentclaw-cli/Dockerfile
+      dockerfile: unarr/Dockerfile
     image: torrentclaw/unarr:latest
     container_name: unarr
     restart: unless-stopped

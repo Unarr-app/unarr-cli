@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/config"
+	"github.com/torrentclaw/unarr/internal/config"
 )
 
 // DaemonState is written to disk every heartbeat for external tools to read.

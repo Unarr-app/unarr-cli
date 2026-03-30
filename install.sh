@@ -1,7 +1,7 @@
 #!/bin/sh
 # unarr — cross-platform installer (Linux / macOS)
 # Usage: curl -fsSL https://get.unarr.com/install.sh | sh
-#    or: curl -fsSL https://raw.githubusercontent.com/torrentclaw/torrentclaw-cli/main/install.sh | sh
+#    or: curl -fsSL https://raw.githubusercontent.com/torrentclaw/unarr/main/install.sh | sh
 #
 # Options (env vars):
 #   INSTALL_DIR=/usr/local/bin  — where to place the binary (default: /usr/local/bin or ~/.local/bin)
@@ -9,7 +9,7 @@
 #   METHOD=binary|docker        — force install method (default: auto-detect)
 set -e
 
-REPO="torrentclaw/torrentclaw-cli"
+REPO="torrentclaw/unarr"
 BINARY="unarr"
 
 # ---- Colors (only if terminal) ----
@@ -217,7 +217,7 @@ install_docker() {
     torrentclaw/unarr
 
   # Or use the provided docker-compose.yml:
-  # curl -fsSL https://raw.githubusercontent.com/torrentclaw/torrentclaw-cli/main/docker-compose.yml > docker-compose.yml
+  # curl -fsSL https://raw.githubusercontent.com/torrentclaw/unarr/main/docker-compose.yml > docker-compose.yml
   # docker compose up -d
 
 DOCKER_USAGE

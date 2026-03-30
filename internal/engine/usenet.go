@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
-	"github.com/torrentclaw/torrentclaw-cli/internal/config"
-	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/download"
-	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/nntp"
-	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/nzb"
-	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/postprocess"
+	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/torrentclaw/unarr/internal/usenet/download"
+	"github.com/torrentclaw/unarr/internal/usenet/nntp"
+	"github.com/torrentclaw/unarr/internal/usenet/nzb"
+	"github.com/torrentclaw/unarr/internal/usenet/postprocess"
 )
 
 // activeDownload holds the state for a single in-progress usenet download.

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
+	"github.com/torrentclaw/unarr/internal/agent"
 )
 
 func TestManagerSubmitAndWait(t *testing.T) {

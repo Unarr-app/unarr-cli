@@ -15,7 +15,7 @@ func newStubCmd(name, short string) *cobra.Command {
 			fmt.Println()
 			color.New(color.FgYellow).Printf("  ⚠️  '%s' is coming in a future release.\n", name)
 			fmt.Println()
-			fmt.Println("  Follow progress at: https://github.com/torrentclaw/torrentclaw-cli")
+			fmt.Println("  Follow progress at: https://github.com/torrentclaw/unarr")
 			fmt.Println()
 		},
 	}

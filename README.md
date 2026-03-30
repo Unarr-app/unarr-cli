@@ -1,9 +1,9 @@
 # unarr
 
-[![CI](https://github.com/torrentclaw/torrentclaw-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/torrentclaw/torrentclaw-cli/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/torrentclaw/torrentclaw-cli)](https://goreportcard.com/report/github.com/torrentclaw/torrentclaw-cli)
+[![CI](https://github.com/torrentclaw/unarr/actions/workflows/ci.yml/badge.svg)](https://github.com/torrentclaw/unarr/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/torrentclaw/unarr)](https://goreportcard.com/report/github.com/torrentclaw/unarr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/torrentclaw/torrentclaw-cli)](go.mod)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/torrentclaw/unarr)](go.mod)
 
 Powerful terminal tool for torrent search and management.
 
@@ -35,18 +35,18 @@ brew install torrentclaw/tap/unarr
 ### Go install
 
 ```bash
-go install github.com/torrentclaw/torrentclaw-cli/cmd/unarr@latest
+go install github.com/torrentclaw/unarr/cmd/unarr@latest
 ```
 
 ### GitHub Releases
 
-Download prebuilt binaries for Linux, macOS, and Windows from [GitHub Releases](https://github.com/torrentclaw/torrentclaw-cli/releases).
+Download prebuilt binaries for Linux, macOS, and Windows from [GitHub Releases](https://github.com/torrentclaw/unarr/releases).
 
 ### Build from source
 
 ```bash
-git clone https://github.com/torrentclaw/torrentclaw-cli.git
-cd torrentclaw-cli
+git clone https://github.com/torrentclaw/unarr.git
+cd unarr
 make build
 ```
 

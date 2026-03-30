@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
+	"github.com/torrentclaw/unarr/internal/agent"
 )
 
 // TaskStatus represents the current state of a download task.

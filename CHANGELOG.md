@@ -53,5 +53,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI pipeline (test, build, lint, vet)
 - Lefthook git hooks (gofmt, go vet, conventional commits)
 
-[Unreleased]: https://github.com/torrentclaw/torrentclaw-cli/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/torrentclaw/torrentclaw-cli/releases/tag/v0.1.0
+[Unreleased]: https://github.com/torrentclaw/unarr/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/torrentclaw/unarr/releases/tag/v0.1.0

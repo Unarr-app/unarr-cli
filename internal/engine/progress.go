@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
+	"github.com/torrentclaw/unarr/internal/agent"
 )
 
 // ActionFunc is called when the server signals an action on a task.

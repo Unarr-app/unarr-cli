@@ -13,12 +13,12 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
-	"github.com/torrentclaw/torrentclaw-cli/internal/config"
-	"github.com/torrentclaw/torrentclaw-cli/internal/engine"
-	"github.com/torrentclaw/torrentclaw-cli/internal/library"
-	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/download"
-	"github.com/torrentclaw/torrentclaw-cli/internal/upgrade"
+	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/torrentclaw/unarr/internal/engine"
+	"github.com/torrentclaw/unarr/internal/library"
+	"github.com/torrentclaw/unarr/internal/usenet/download"
+	"github.com/torrentclaw/unarr/internal/upgrade"
 )
 
 // newStartCmd creates the top-level `unarr start` command.

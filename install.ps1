@@ -1,6 +1,6 @@
 # unarr — Windows installer (PowerShell 5.1+)
 # Usage: irm https://get.unarr.com/install.ps1 | iex
-#    or: irm https://raw.githubusercontent.com/torrentclaw/torrentclaw-cli/main/install.ps1 | iex
+#    or: irm https://raw.githubusercontent.com/torrentclaw/unarr/main/install.ps1 | iex
 #
 # Options (env vars):
 #   $env:INSTALL_DIR = "C:\path"  — where to place the binary
@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "torrentclaw/torrentclaw-cli"
+$Repo = "torrentclaw/unarr"
 $Binary = "unarr.exe"
 
 # ---- Helpers ----

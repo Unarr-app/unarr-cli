@@ -9,8 +9,8 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
-	"github.com/torrentclaw/torrentclaw-cli/internal/config"
+	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/torrentclaw/unarr/internal/config"
 )
 
 func newDoctorCmd() *cobra.Command {

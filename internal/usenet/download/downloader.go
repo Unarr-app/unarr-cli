@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/nntp"
-	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/nzb"
-	"github.com/torrentclaw/torrentclaw-cli/internal/usenet/yenc"
+	"github.com/torrentclaw/unarr/internal/usenet/nntp"
+	"github.com/torrentclaw/unarr/internal/usenet/nzb"
+	"github.com/torrentclaw/unarr/internal/usenet/yenc"
 )
 
 // Progress is emitted during download.

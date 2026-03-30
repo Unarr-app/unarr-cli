@@ -7,15 +7,15 @@ Thank you for your interest in contributing! This guide will help you get starte
 1. **Fork** the repository on GitHub
 2. **Clone** your fork locally:
    ```bash
-   git clone https://github.com/YOUR-USERNAME/torrentclaw-cli.git
-   cd torrentclaw-cli
+   git clone https://github.com/YOUR-USERNAME/unarr.git
+   cd unarr
    ```
 3. **Set up the Go client** (local dependency):
    ```bash
    # Clone the go-client next to the CLI
    cd ..
    git clone https://github.com/torrentclaw/go-client.git
-   cd torrentclaw-cli
+   cd unarr
    ```
 4. **Create a branch** for your change:
    ```bash
@@ -23,7 +23,7 @@ Thank you for your interest in contributing! This guide will help you get starte
    ```
 5. **Make your changes**, write tests, and ensure everything passes
 6. **Commit** with a clear message (see [Commit Messages](#commit-messages))
-7. **Push** to your fork and [open a Pull Request](https://github.com/torrentclaw/torrentclaw-cli/compare)
+7. **Push** to your fork and [open a Pull Request](https://github.com/torrentclaw/unarr/compare)
 
 ## Development Setup
 
@@ -76,7 +76,7 @@ make install-hooks  # Install lefthook git hooks
 ## Project Structure
 
 ```
-torrentclaw-cli/
+unarr/
 ├── cmd/unarr/           # Entry point
 │   └── main.go
 ├── internal/
@@ -176,7 +176,7 @@ chore: update CI matrix to Go 1.24
 
 ## Reporting Bugs
 
-[Open an issue](https://github.com/torrentclaw/torrentclaw-cli/issues/new?labels=bug) with:
+[Open an issue](https://github.com/torrentclaw/unarr/issues/new?labels=bug) with:
 
 - **Description** — what went wrong
 - **Steps to reproduce** — minimal commands to trigger the bug

@@ -16,7 +16,7 @@ import (
 	"github.com/anacrolix/dht/v2/krpc"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/storage"
-	"github.com/torrentclaw/torrentclaw-cli/internal/config"
+	"github.com/torrentclaw/unarr/internal/config"
 	"golang.org/x/time/rate"
 )
 

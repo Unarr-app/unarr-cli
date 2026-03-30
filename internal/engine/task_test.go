@@ -3,7 +3,7 @@ package engine
 import (
 	"testing"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
+	"github.com/torrentclaw/unarr/internal/agent"
 )
 
 func TestNewTaskFromAgent(t *testing.T) {

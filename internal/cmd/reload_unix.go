@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
-	"github.com/torrentclaw/torrentclaw-cli/internal/config"
+	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/torrentclaw/unarr/internal/config"
 )
 
 // ReloadableConfig holds a reference to the daemon for hot-reload.

@@ -13,10 +13,10 @@ import (
 	"github.com/fatih/color"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
-	"github.com/torrentclaw/torrentclaw-cli/internal/arr"
-	"github.com/torrentclaw/torrentclaw-cli/internal/config"
-	"github.com/torrentclaw/torrentclaw-cli/internal/mediaserver"
+	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/torrentclaw/unarr/internal/arr"
+	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/torrentclaw/unarr/internal/mediaserver"
 )
 
 func newInitCmd() *cobra.Command {

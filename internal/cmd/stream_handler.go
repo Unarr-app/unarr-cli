@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
-	"github.com/torrentclaw/torrentclaw-cli/internal/config"
-	"github.com/torrentclaw/torrentclaw-cli/internal/engine"
-	"github.com/torrentclaw/torrentclaw-cli/internal/ui"
+	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/torrentclaw/unarr/internal/engine"
+	"github.com/torrentclaw/unarr/internal/ui"
 )
 
 // streamRegistry tracks active stream tasks and servers for cancellation.

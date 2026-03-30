@@ -11,7 +11,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/torrentclaw-cli/internal/upgrade"
+	"github.com/torrentclaw/unarr/internal/upgrade"
 )
 
 func newSelfUpdateCmd() *cobra.Command {

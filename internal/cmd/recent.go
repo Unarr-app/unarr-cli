@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	tc "github.com/torrentclaw/go-client"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/ui"
+	"github.com/torrentclaw/unarr/internal/ui"
 )
 
 func newRecentCmd() *cobra.Command {

@@ -1,6 +1,6 @@
 package library
 
-import "github.com/torrentclaw/torrentclaw-cli/internal/agent"
+import "github.com/torrentclaw/unarr/internal/agent"
 
 // BuildSyncItems converts cached library items to sync request items.
 // Shared between unarr scan (cmd/scan.go) and auto-scan (cmd/daemon.go).

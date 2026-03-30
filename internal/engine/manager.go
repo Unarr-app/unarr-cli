@@ -5,7 +5,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/agent"
+	"github.com/torrentclaw/unarr/internal/agent"
 )
 
 // ManagerConfig holds download manager settings.
@@ -24,6 +24,7 @@ type Manager struct {
 
 	activeMu sync.RWMutex
 	active   map[string]*Task
+	cancels  map[string]context.CancelFunc // per-task cancel functions
 
 	sem chan struct{}
 	wg  sync.WaitGroup
@@ -45,6 +46,7 @@ func NewManager(cfg ManagerConfig, reporter *ProgressReporter, downloaders ...Do
 		reporter:    reporter,
 		downloaders: dlMap,
 		active:      make(map[string]*Task),
+		cancels:     make(map[string]context.CancelFunc),
 		sem:         make(chan struct{}, cfg.MaxConcurrent),
 	}
 }
@@ -53,8 +55,12 @@ func NewManager(cfg ManagerConfig, reporter *ProgressReporter, downloaders ...Do
 func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 	task := NewTaskFromAgent(at)
 
+	// Per-task cancellable context so CancelTask can unblock the goroutine
+	taskCtx, taskCancel := context.WithCancel(ctx)
+
 	m.activeMu.Lock()
 	m.active[task.ID] = task
+	m.cancels[task.ID] = taskCancel
 	m.activeMu.Unlock()
 
 	m.reporter.Track(task)
@@ -65,7 +71,8 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			m.processTask(ctx, task)
+			defer taskCancel()
+			m.processTask(taskCtx, task)
 		}()
 		return
 	}
@@ -74,6 +81,7 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 	select {
 	case m.sem <- struct{}{}:
 	case <-ctx.Done():
+		taskCancel()
 		return
 	}
 
@@ -81,7 +89,8 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 	go func() {
 		defer m.wg.Done()
 		defer func() { <-m.sem }()
-		m.processTask(ctx, task)
+		defer taskCancel()
+		m.processTask(taskCtx, task)
 	}()
 }
 
@@ -119,10 +128,17 @@ func (m *Manager) ActiveTasks() []*Task {
 func (m *Manager) CancelTask(taskID string) {
 	m.activeMu.RLock()
 	task, ok := m.active[taskID]
+	cancel := m.cancels[taskID]
 	m.activeMu.RUnlock()
 
 	if !ok {
 		return
+	}
+
+	// Cancel the task's context first — this unblocks the goroutine
+	// (e.g. stuck waiting for metadata) so it exits and releases the semaphore slot.
+	if cancel != nil {
+		cancel()
 	}
 
 	if dl, exists := m.downloaders[task.ResolvedMethod]; exists {
@@ -141,10 +157,15 @@ func (m *Manager) CancelTask(taskID string) {
 func (m *Manager) PauseTask(taskID string) {
 	m.activeMu.RLock()
 	task, ok := m.active[taskID]
+	cancel := m.cancels[taskID]
 	m.activeMu.RUnlock()
 
 	if !ok {
 		return
+	}
+
+	if cancel != nil {
+		cancel()
 	}
 
 	if dl, exists := m.downloaders[task.ResolvedMethod]; exists {
@@ -159,10 +180,15 @@ func (m *Manager) PauseTask(taskID string) {
 func (m *Manager) CancelAndDeleteFiles(taskID string) {
 	m.activeMu.RLock()
 	task, ok := m.active[taskID]
+	cancel := m.cancels[taskID]
 	m.activeMu.RUnlock()
 
 	if !ok {
 		return
+	}
+
+	if cancel != nil {
+		cancel()
 	}
 
 	if dl, exists := m.downloaders[task.ResolvedMethod]; exists {
@@ -204,8 +230,12 @@ func (m *Manager) Shutdown(ctx context.Context) {
 		}
 	}
 
-	// Clean active map
+	// Clean active map and cancel functions
 	m.activeMu.Lock()
+	for id, cancel := range m.cancels {
+		cancel()
+		delete(m.cancels, id)
+	}
 	m.active = make(map[string]*Task)
 	m.activeMu.Unlock()
 }
@@ -214,6 +244,7 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 	defer func() {
 		m.activeMu.Lock()
 		delete(m.active, task.ID)
+		delete(m.cancels, task.ID)
 		m.activeMu.Unlock()
 	}()
 

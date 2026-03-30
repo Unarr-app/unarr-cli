@@ -20,11 +20,13 @@ type UPnPMapping struct {
 // setupUPnP discovers the gateway, maps the port, and gets the public IP.
 // Returns nil if UPnP is not available or fails.
 func setupUPnP(internalPort int) (*UPnPMapping, error) {
-	devices := upnp.Discover(0, 5*time.Second, alog.Logger{})
+	log.Println("stream: discovering UPnP gateway (10s timeout)...")
+	devices := upnp.Discover(0, 10*time.Second, alog.Logger{})
 	if len(devices) == 0 {
-		return nil, fmt.Errorf("no UPnP devices found")
+		return nil, fmt.Errorf("no UPnP devices found (is UPnP enabled on your router?)")
 	}
 
+	log.Printf("stream: found %d UPnP device(s), using %s", len(devices), devices[0].ID())
 	device := devices[0]
 
 	// Get public IP
@@ -32,13 +34,15 @@ func setupUPnP(internalPort int) (*UPnPMapping, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get external IP: %w", err)
 	}
+	log.Printf("stream: public IP via UPnP: %s", externalIP)
 
-	// Map port (0 = let router choose external port, 2h lease)
+	// Map port (same internal/external, 2h lease)
 	mappedPort, err := device.AddPortMapping(upnp.TCP, internalPort, internalPort, "unarr stream", 2*time.Hour)
 	if err != nil {
-		return nil, fmt.Errorf("add port mapping: %w", err)
+		return nil, fmt.Errorf("add port mapping %d: %w", internalPort, err)
 	}
 
+	log.Printf("stream: UPnP port mapped %s:%d -> local:%d (2h lease)", externalIP, mappedPort, internalPort)
 	return &UPnPMapping{
 		ExternalIP:   externalIP.String(),
 		ExternalPort: mappedPort,

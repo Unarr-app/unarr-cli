@@ -12,9 +12,9 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/torrentclaw-cli/internal/engine"
-	"github.com/torrentclaw/torrentclaw-cli/internal/parser"
-	"github.com/torrentclaw/torrentclaw-cli/internal/ui"
+	"github.com/torrentclaw/unarr/internal/engine"
+	"github.com/torrentclaw/unarr/internal/parser"
+	"github.com/torrentclaw/unarr/internal/ui"
 )
 
 func newStreamCmd() *cobra.Command {

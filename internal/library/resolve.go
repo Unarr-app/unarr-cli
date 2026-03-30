@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/library/mediainfo"
+	"github.com/torrentclaw/unarr/internal/library/mediainfo"
 )
 
 var (

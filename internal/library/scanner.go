@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/torrentclaw/torrentclaw-cli/internal/library/mediainfo"
-	"github.com/torrentclaw/torrentclaw-cli/internal/parser"
+	"github.com/torrentclaw/unarr/internal/library/mediainfo"
+	"github.com/torrentclaw/unarr/internal/parser"
 )
 
 // videoExts are file extensions considered as video files.
