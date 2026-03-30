@@ -113,7 +113,7 @@ func plexLibraryPaths() []string {
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort close
+	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		return nil
@@ -200,7 +200,7 @@ func jellyfinLibraryPaths(baseURL string) []string {
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort close
+	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		return nil

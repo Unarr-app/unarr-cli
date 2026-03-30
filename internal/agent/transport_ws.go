@@ -69,7 +69,7 @@ func (t *WSTransport) Connect(ctx context.Context) error {
 
 	conn, wsResp, err := dialer.DialContext(ctx, wsURLWithKey, header)
 	if wsResp != nil && wsResp.Body != nil {
-		defer wsResp.Body.Close() //nolint:errcheck
+		defer wsResp.Body.Close()
 	}
 	if err != nil {
 		return fmt.Errorf("ws dial: %w", err)

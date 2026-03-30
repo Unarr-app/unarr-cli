@@ -29,7 +29,21 @@ linters:
         - G104  # Allow unhandled errors in fire-and-forget (notifications)
     errcheck:
       exclude-functions:
-        - (*os/exec.Cmd).Start  # Fire-and-forget for notifications
+        - (*os/exec.Cmd).Start      # Fire-and-forget for notifications
+        - (*os.File).Close           # Deferred close — error irrelevant after read
+        - (io.Closer).Close          # Same pattern for interfaces
+        - (*compress/gzip.Reader).Close
+        - (*archive/tar.Reader).Close
+        - (net.Conn).Close           # Best-effort cleanup
+        - os.Remove                  # Best-effort cleanup of temp files
+        - os.RemoveAll
+        - os.Unsetenv                # Test-only, always succeeds
+        - fmt.Fprintf                # Terminal output — error never actionable
+        - fmt.Printf
+        - fmt.Println
+        - (*github.com/fatih/color.Color).Fprintf
+        - (*github.com/fatih/color.Color).Printf
+        - (*github.com/fatih/color.Color).Println
     exhaustive:
       default-signifies-exhaustive: true
     misspell:

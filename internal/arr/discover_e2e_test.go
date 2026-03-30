@@ -21,7 +21,7 @@ func TestDiscoverE2E(t *testing.T) {
 		if err != nil {
 			t.Skipf("Port %s not reachable, skipping", port)
 		}
-		_ = conn.Close()
+		conn.Close()
 	}
 
 	t.Run("Discover", func(t *testing.T) {

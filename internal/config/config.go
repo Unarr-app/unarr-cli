@@ -171,7 +171,7 @@ func Save(cfg Config, path string) error {
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
+		os.Remove(tmpPath)
 		return fmt.Errorf("rename config: %w", err)
 	}
 

@@ -43,7 +43,7 @@ func TestDirOverrideEnv(t *testing.T) {
 
 func TestDirXDGOverride(t *testing.T) {
 	// Clear the custom env so XDG takes effect
-	_ = os.Unsetenv("UNARR_CONFIG_DIR")
+	os.Unsetenv("UNARR_CONFIG_DIR")
 	t.Setenv("XDG_CONFIG_HOME", "/xdg/config")
 
 	dir := Dir()
