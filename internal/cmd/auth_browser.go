@@ -8,11 +8,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 )
 
-const browserAuthTimeout = 5 * time.Minute
+const browserAuthTimeout = 60 * time.Second
 
 // browserAuth opens a browser for the user to authorize the CLI.
 // Returns the API key on success, or an error if the flow fails/times out.
@@ -60,6 +61,14 @@ func browserAuth(apiURL string) (string, error) {
 				return
 			}
 
+			// Check if user rejected the authorization
+			if r.URL.Query().Get("rejected") == "1" {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				fmt.Fprint(w, rejectedHTML)
+				errCh <- fmt.Errorf("authorization rejected by user")
+				return
+			}
+
 			token := r.URL.Query().Get("token")
 			if token == "" {
 				http.Error(w, "No token received", http.StatusBadRequest)
@@ -88,35 +97,72 @@ func browserAuth(apiURL string) (string, error) {
 	}()
 
 	// Open browser
-	authURL := fmt.Sprintf("%s/cli/auth?state=%s&port=%d", apiURL, url.QueryEscape(state), port)
+	authURL := fmt.Sprintf("%s/unarr/auth?state=%s&port=%d", apiURL, url.QueryEscape(state), port)
 	openBrowser(authURL)
 
-	// Wait for callback, error, or timeout
+	// Listen for Enter key to skip to manual fallback
+	skipCh := make(chan struct{}, 1)
+	go func() {
+		buf := make([]byte, 1)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil || n == 0 {
+				return
+			}
+			if buf[0] == '\n' || buf[0] == '\r' {
+				skipCh <- struct{}{}
+				return
+			}
+		}
+	}()
+
+	// Wait for callback with countdown
 	ctx, cancel := context.WithTimeout(context.Background(), browserAuthTimeout)
 	defer cancel()
 
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	remaining := int(browserAuthTimeout.Seconds())
+
+	// Show initial countdown
+	fmt.Printf("\r  Waiting for browser authorization... %ds (Enter to skip)  ", remaining)
+
 	var token string
-	select {
-	case token = <-tokenCh:
-		// Success
-	case err := <-errCh:
-		shutdownCtx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = server.Shutdown(shutdownCtx2)
-		cancel2()
-		return "", err
-	case <-ctx.Done():
-		shutdownCtx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = server.Shutdown(shutdownCtx2)
-		cancel2()
-		return "", fmt.Errorf("timed out waiting for browser authorization")
+	done := false
+	for !done {
+		select {
+		case token = <-tokenCh:
+			fmt.Print("\r\033[K") // clear countdown line
+			done = true
+		case err := <-errCh:
+			fmt.Print("\r\033[K")
+			shutdownServer(server)
+			return "", err
+		case <-ctx.Done():
+			fmt.Print("\r\033[K")
+			shutdownServer(server)
+			return "", fmt.Errorf("timed out waiting for browser authorization")
+		case <-skipCh:
+			fmt.Print("\r\033[K")
+			shutdownServer(server)
+			return "", fmt.Errorf("skipped by user")
+		case <-ticker.C:
+			remaining--
+			if remaining >= 0 {
+				fmt.Printf("\r  Waiting for browser authorization... %ds (Enter to skip)  ", remaining)
+			}
+		}
 	}
 
-	// Shutdown the server
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer shutdownCancel()
-	_ = server.Shutdown(shutdownCtx)
+	shutdownServer(server)
 
 	return token, nil
+}
+
+func shutdownServer(server *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = server.Shutdown(ctx)
 }
 
 func generateState() (string, error) {
@@ -126,6 +172,29 @@ func generateState() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
+
+// rejectedHTML is the page shown in the browser when the user clicks Cancel.
+const rejectedHTML = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>unarr — Cancelled</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #0a0a0a; color: #fafafa; }
+    .card { text-align: center; padding: 3rem; }
+    .icon { font-size: 4rem; margin-bottom: 1rem; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+    p { color: #888; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">—</div>
+    <h1>Authorization cancelled</h1>
+    <p>You can close this tab. Use <code>unarr init</code> to try again.</p>
+  </div>
+</body>
+</html>`
 
 // callbackHTML is the page shown in the browser after successful authorization.
 const callbackHTML = `<!DOCTYPE html>

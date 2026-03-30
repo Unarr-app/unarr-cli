@@ -34,6 +34,72 @@ irm https://get.torrentclaw.com/install.ps1 | iex
 brew install torrentclaw/tap/unarr
 ```
 
+### Docker
+
+```bash
+docker run -d --name unarr \
+  --restart unless-stopped \
+  --network host \
+  --read-only --memory 512m \
+  -v ~/.config/torrentclaw:/config \
+  -v ~/Media:/downloads \
+  torrentclaw/unarr
+```
+
+Run setup first to configure your API key:
+
+```bash
+docker run -it --rm \
+  -v ~/.config/torrentclaw:/config \
+  torrentclaw/unarr setup
+```
+
+### Docker Compose
+
+```bash
+mkdir -p torrentclaw && cd torrentclaw
+curl -fsSL https://raw.githubusercontent.com/torrentclaw/unarr/main/docker-compose.yml -o docker-compose.yml
+docker compose up -d
+```
+
+<details>
+<summary>docker-compose.yml</summary>
+
+```yaml
+services:
+  unarr:
+    image: torrentclaw/unarr:latest
+    container_name: unarr
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - ./config:/config
+      - ~/Media:/downloads
+      - unarr-data:/data
+    environment:
+      - TZ=${TZ:-UTC}
+      # - UNARR_API_KEY=tc_your_key_here
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "2.0"
+    # Host network for full P2P performance
+    network_mode: host
+    # Or use bridge with ports:
+    # ports:
+    #   - "6881-6889:6881-6889/tcp"
+    #   - "6881-6889:6881-6889/udp"
+
+volumes:
+  unarr-data:
+```
+
+</details>
+
 ### Go install
 
 ```bash
