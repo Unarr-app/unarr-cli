@@ -1,11 +1,13 @@
 # unarr
 
+> **⚠️ Beta** — unarr is under active development. Features may change, and bugs are expected. [Report issues here](https://github.com/torrentclaw/unarr/issues).
+
 [![CI](https://github.com/torrentclaw/unarr/actions/workflows/ci.yml/badge.svg)](https://github.com/torrentclaw/unarr/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/torrentclaw/unarr)](https://goreportcard.com/report/github.com/torrentclaw/unarr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/torrentclaw/unarr)](go.mod)
 
-Powerful terminal tool for torrent search and management.
+Powerful terminal tool for torrent search and management. **Free and open source.**
 
 Search 30+ torrent sources, inspect torrent quality, discover popular content, find streaming providers, and manage your media collection — all from your terminal.
 
@@ -17,13 +19,13 @@ Search 30+ torrent sources, inspect torrent quality, discover popular content, f
 ### Quick install (Linux/macOS)
 
 ```bash
-curl -fsSL https://torrentclaw.com/install.sh | sh
+curl -fsSL https://get.torrentclaw.com/install.sh | sh
 ```
 
 ### PowerShell (Windows)
 
 ```powershell
-irm https://torrentclaw.com/install.ps1 | iex
+irm https://get.torrentclaw.com/install.ps1 | iex
 ```
 
 ### Homebrew (macOS/Linux)
