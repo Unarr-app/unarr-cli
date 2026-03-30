@@ -73,22 +73,20 @@ func (c *Client) Deregister(ctx context.Context, agentID string) error {
 	return nil
 }
 
-// ReportUpgradeResult reports the outcome of a self-upgrade attempt.
-func (c *Client) ReportUpgradeResult(ctx context.Context, result UpgradeResult) error {
-	var resp struct {
-		Success bool `json:"success"`
-	}
-	if err := c.doPost(ctx, "/api/internal/agent/upgrade-result", result, &resp); err != nil {
-		return fmt.Errorf("report upgrade: %w", err)
-	}
-	return nil
-}
-
 // ReportStatus reports download progress. Returns server-side flags the CLI must act on.
 func (c *Client) ReportStatus(ctx context.Context, update StatusUpdate) (*StatusResponse, error) {
 	var resp StatusResponse
 	if err := c.doPost(ctx, "/api/internal/agent/status", update, &resp); err != nil {
 		return nil, fmt.Errorf("report status: %w", err)
+	}
+	return &resp, nil
+}
+
+// BatchReportStatus sends multiple status updates in a single request.
+func (c *Client) BatchReportStatus(ctx context.Context, updates []StatusUpdate) (*BatchStatusResponse, error) {
+	var resp BatchStatusResponse
+	if err := c.doPost(ctx, "/api/internal/agent/status", BatchStatusRequest{Updates: updates}, &resp); err != nil {
+		return nil, fmt.Errorf("batch report status: %w", err)
 	}
 	return &resp, nil
 }

@@ -34,16 +34,16 @@ func (t *HTTPTransport) SendProgress(ctx context.Context, update StatusUpdate) (
 	return t.client.ReportStatus(ctx, update)
 }
 
+func (t *HTTPTransport) BatchReportStatus(ctx context.Context, updates []StatusUpdate) (*BatchStatusResponse, error) {
+	return t.client.BatchReportStatus(ctx, updates)
+}
+
 func (t *HTTPTransport) ClaimTasks(ctx context.Context, agentID string) (*TasksResponse, error) {
 	return t.client.ClaimTasks(ctx, agentID)
 }
 
 func (t *HTTPTransport) Deregister(ctx context.Context, agentID string) error {
 	return t.client.Deregister(ctx, agentID)
-}
-
-func (t *HTTPTransport) ReportUpgradeResult(ctx context.Context, result UpgradeResult) error {
-	return t.client.ReportUpgradeResult(ctx, result)
 }
 
 // Client returns the underlying HTTP client for direct use if needed.

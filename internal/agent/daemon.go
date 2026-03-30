@@ -25,22 +25,25 @@ type Daemon struct {
 	transport Transport
 
 	// Callbacks
-	OnTasksClaimed      func(tasks []Task)
-	OnStreamRequested   func(req StreamRequest)
-	OnUpgradeRequested  func(version string)
-	OnControlAction     func(action, taskID string)
+	OnTasksClaimed    func(tasks []Task)
+	OnStreamRequested func(req StreamRequest)
+	OnControlAction   func(action, taskID string)
 
 	// State
-	User              UserInfo
-	Features          FeatureFlags
-	Info              AgentInfo
-	State             DaemonState
-	upgradeInProgress bool
-	heartbeatFailures int
+	User                 UserInfo
+	Features             FeatureFlags
+	Info                 AgentInfo
+	State                DaemonState
+	heartbeatFailures    int
+	lastNotifiedVersion  string
 
 	// Callbacks for state tracking (set by cmd/daemon.go)
 	GetActiveCount    func() int
 	GetCleanableBytes func() int64
+
+	// Watching tracks whether a user is viewing download progress in the web UI.
+	// When false, the progress reporter skips detailed updates (only sends final states).
+	Watching bool
 
 	// Exposed tickers for hot-reload
 	PollTicker      *time.Ticker
@@ -191,20 +194,18 @@ func (d *Daemon) heartbeat(ctx context.Context) {
 		d.heartbeatFailures = 0
 	}
 
-	// Update state file
+	// Update watching flag and state file
+	d.Watching = resp.Watching
 	d.State.LastHeartbeat = time.Now()
 	if d.GetActiveCount != nil {
 		d.State.ActiveTasks = d.GetActiveCount()
 	}
 	WriteState(&d.State)
 
-	// Check for upgrade signal from server
-	if resp.Upgrade != nil && resp.Upgrade.Version != "" && !d.upgradeInProgress {
-		d.upgradeInProgress = true
-		log.Printf("Upgrade requested by server: %s → %s", d.cfg.Version, resp.Upgrade.Version)
-		if d.OnUpgradeRequested != nil {
-			go d.OnUpgradeRequested(resp.Upgrade.Version)
-		}
+	// Log once per version when server suggests an upgrade
+	if resp.Upgrade != nil && resp.Upgrade.Version != "" && resp.Upgrade.Version != d.lastNotifiedVersion {
+		d.lastNotifiedVersion = resp.Upgrade.Version
+		log.Printf("New version available: %s (run `unarr self-update` to upgrade)", resp.Upgrade.Version)
 	}
 }
 
@@ -225,12 +226,9 @@ func (d *Daemon) handleEvent(event ServerEvent) {
 		}
 
 	case "upgrade":
-		if event.Upgrade != nil && event.Upgrade.Version != "" && !d.upgradeInProgress {
-			d.upgradeInProgress = true
-			log.Printf("Upgrade requested via WebSocket: %s → %s", d.cfg.Version, event.Upgrade.Version)
-			if d.OnUpgradeRequested != nil {
-				go d.OnUpgradeRequested(event.Upgrade.Version)
-			}
+		if event.Upgrade != nil && event.Upgrade.Version != "" && event.Upgrade.Version != d.lastNotifiedVersion {
+			d.lastNotifiedVersion = event.Upgrade.Version
+			log.Printf("New version available: %s (run `unarr self-update` to upgrade)", event.Upgrade.Version)
 		}
 
 	case "control":
@@ -251,11 +249,6 @@ func (d *Daemon) TriggerPoll() {
 	case d.pollNow <- struct{}{}:
 	default: // already pending
 	}
-}
-
-// ClearUpgradeInProgress resets the upgrade flag so a retry can be attempted.
-func (d *Daemon) ClearUpgradeInProgress() {
-	d.upgradeInProgress = false
 }
 
 func (d *Daemon) deregister() {

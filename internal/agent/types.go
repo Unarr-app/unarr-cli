@@ -111,23 +111,26 @@ type StatusResponse struct {
 	StreamRequested bool `json:"streamRequested,omitempty"`
 }
 
+// BatchStatusRequest wraps multiple status updates in a single request.
+type BatchStatusRequest struct {
+	Updates []StatusUpdate `json:"updates"`
+}
+
+// BatchStatusResponse wraps per-task results from the batch endpoint.
+type BatchStatusResponse struct {
+	Results []StatusResponse `json:"results"`
+}
+
 // HeartbeatResponse is returned by the server on heartbeat.
 type HeartbeatResponse struct {
-	Success bool           `json:"success"`
-	Upgrade *UpgradeSignal `json:"upgrade,omitempty"`
+	Success  bool           `json:"success"`
+	Upgrade  *UpgradeSignal `json:"upgrade,omitempty"`
+	Watching bool           `json:"watching,omitempty"` // true when a user is viewing download progress in the web UI
 }
 
 // UpgradeSignal tells the agent to upgrade to a specific version.
 type UpgradeSignal struct {
 	Version string `json:"version"`
-}
-
-// UpgradeResult is sent by the agent after an upgrade attempt.
-type UpgradeResult struct {
-	AgentID string `json:"agentId"`
-	Success bool   `json:"success"`
-	Version string `json:"version,omitempty"`
-	Error   string `json:"error,omitempty"`
 }
 
 // ErrorResponse is returned on API errors.

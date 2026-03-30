@@ -120,18 +120,6 @@ func (h *HybridTransport) Deregister(ctx context.Context, agentID string) error 
 	return h.http.Deregister(ctx, agentID)
 }
 
-// ReportUpgradeResult delegates to the active transport.
-func (h *HybridTransport) ReportUpgradeResult(ctx context.Context, result UpgradeResult) error {
-	if h.mode.Load() == "ws" {
-		if err := h.ws.ReportUpgradeResult(ctx, result); err != nil {
-			h.switchToHTTP()
-			return h.http.ReportUpgradeResult(ctx, result)
-		}
-		return nil
-	}
-	return h.http.ReportUpgradeResult(ctx, result)
-}
-
 // ── Internal ─────────────────────────────────────────────────────────────────
 
 func (h *HybridTransport) switchToHTTP() {

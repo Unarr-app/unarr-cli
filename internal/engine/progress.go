@@ -18,11 +18,22 @@ type StatusReporter interface {
 	ReportStatus(ctx context.Context, update agent.StatusUpdate) (*agent.StatusResponse, error)
 }
 
+// BatchStatusReporter extends StatusReporter with batch support.
+// Transports that implement this send all updates in a single request.
+type BatchStatusReporter interface {
+	StatusReporter
+	BatchReportStatus(ctx context.Context, updates []agent.StatusUpdate) (*agent.BatchStatusResponse, error)
+}
+
+// WatchingFunc returns whether a user is actively viewing download progress.
+type WatchingFunc func() bool
+
 // ProgressReporter aggregates progress from downloads and reports to the API.
 // It batches updates to avoid flooding the server.
 type ProgressReporter struct {
-	reporter StatusReporter
-	interval time.Duration
+	reporter   StatusReporter
+	interval   time.Duration
+	isWatching WatchingFunc // nil = always report (backwards compatible)
 
 	onCancel          ActionFunc
 	onPause           ActionFunc
@@ -73,6 +84,9 @@ func (r *ProgressReporter) SetDeleteFilesHandler(fn ActionFunc) { r.onDeleteFile
 // SetStreamRequestedHandler sets the callback for stream activation.
 func (r *ProgressReporter) SetStreamRequestedHandler(fn ActionFunc) { r.onStreamRequested = fn }
 
+// SetWatchingFunc sets the function that checks if someone is viewing downloads.
+func (r *ProgressReporter) SetWatchingFunc(fn WatchingFunc) { r.isWatching = fn }
+
 // Track registers a task for progress tracking.
 func (r *ProgressReporter) Track(task *Task) {
 	r.mu.Lock()
@@ -111,43 +125,87 @@ func (r *ProgressReporter) flush(ctx context.Context) {
 	}
 	r.mu.Unlock()
 
+	// When nobody is watching, only report final states (completed/failed).
+	// This saves ~99% of API requests when the user isn't on the downloads page.
+	watching := r.isWatching == nil || r.isWatching()
+
+	var reportable []*Task
 	for _, task := range tasks {
 		status := task.GetStatus()
-		if status != StatusDownloading && status != StatusVerifying &&
-			status != StatusOrganizing && status != StatusSeeding &&
-			status != StatusCompleted && status != StatusFailed {
-			continue
+		isFinal := status == StatusCompleted || status == StatusFailed
+		isActive := status == StatusDownloading || status == StatusVerifying ||
+			status == StatusOrganizing || status == StatusSeeding
+		if isFinal || (watching && isActive) {
+			reportable = append(reportable, task)
 		}
+	}
 
+	if len(reportable) == 0 {
+		return
+	}
+
+	// Use batch when transport supports it
+	if batcher, ok := r.reporter.(BatchStatusReporter); ok {
+		r.flushBatch(ctx, batcher, reportable)
+		return
+	}
+
+	// Fallback: individual requests
+	for _, task := range reportable {
 		update := task.ToStatusUpdate()
 		resp, err := r.reporter.ReportStatus(ctx, update)
 		if err != nil {
 			log.Printf("[%s] progress report failed: %v", task.ID[:8], err)
 			continue
 		}
+		r.handleResponse(task, resp)
+	}
+}
 
-		// Handle server-side signals
-		if resp.Cancelled {
-			log.Printf("[%s] cancelled by user (via web)", task.ID[:8])
-			r.Untrack(task.ID)
-			if resp.DeleteFiles && r.onDeleteFiles != nil {
-				r.onDeleteFiles(task.ID)
-			} else if r.onCancel != nil {
-				r.onCancel(task.ID)
-			}
-		} else if resp.Paused {
-			log.Printf("[%s] paused by user (via web)", task.ID[:8])
-			r.Untrack(task.ID)
-			if r.onPause != nil {
-				r.onPause(task.ID)
-			}
+func (r *ProgressReporter) flushBatch(ctx context.Context, batcher BatchStatusReporter, tasks []*Task) {
+	updates := make([]agent.StatusUpdate, len(tasks))
+	for i, task := range tasks {
+		updates[i] = task.ToStatusUpdate()
+	}
+
+	resp, err := batcher.BatchReportStatus(ctx, updates)
+	if err != nil {
+		log.Printf("batch progress report failed: %v", err)
+		return
+	}
+
+	// Match results back to tasks by index (server returns in same order)
+	if len(resp.Results) != len(tasks) {
+		log.Printf("batch response mismatch: sent %d updates, got %d results", len(tasks), len(resp.Results))
+	}
+	for i, result := range resp.Results {
+		if i < len(tasks) {
+			r.handleResponse(tasks[i], &result)
 		}
+	}
+}
 
-		if resp.StreamRequested && task.GetStreamURL() == "" {
-			log.Printf("[%s] stream requested by user (via web)", task.ID[:8])
-			if r.onStreamRequested != nil {
-				r.onStreamRequested(task.ID)
-			}
+func (r *ProgressReporter) handleResponse(task *Task, resp *agent.StatusResponse) {
+	if resp.Cancelled {
+		log.Printf("[%s] cancelled by user (via web)", task.ID[:8])
+		r.Untrack(task.ID)
+		if resp.DeleteFiles && r.onDeleteFiles != nil {
+			r.onDeleteFiles(task.ID)
+		} else if r.onCancel != nil {
+			r.onCancel(task.ID)
+		}
+	} else if resp.Paused {
+		log.Printf("[%s] paused by user (via web)", task.ID[:8])
+		r.Untrack(task.ID)
+		if r.onPause != nil {
+			r.onPause(task.ID)
+		}
+	}
+
+	if resp.StreamRequested && task.GetStreamURL() == "" {
+		log.Printf("[%s] stream requested by user (via web)", task.ID[:8])
+		if r.onStreamRequested != nil {
+			r.onStreamRequested(task.ID)
 		}
 	}
 }

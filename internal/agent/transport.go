@@ -29,9 +29,6 @@ type Transport interface {
 	// Deregister notifies the server of graceful shutdown.
 	Deregister(ctx context.Context, agentID string) error
 
-	// ReportUpgradeResult reports upgrade outcome.
-	ReportUpgradeResult(ctx context.Context, result UpgradeResult) error
-
 	// Events returns a channel that emits server-initiated events.
 	// In HTTP mode this channel is never written to (polling handles it).
 	// In WS mode, tasks/upgrade/control arrive here.

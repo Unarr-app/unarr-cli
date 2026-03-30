@@ -17,6 +17,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/storage"
 	"github.com/torrentclaw/unarr/internal/config"
+	"golang.org/x/term"
 	"golang.org/x/time/rate"
 )
 
@@ -96,7 +97,7 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	tcfg.DataDir = cfg.DataDir
 	tcfg.Seed = cfg.SeedEnabled
 	tcfg.NoUpload = !cfg.SeedEnabled
-	tcfg.Logger = alog.Default.FilterLevel(alog.Warning)
+	tcfg.Logger = alog.Default.FilterLevel(alog.Critical)
 
 	// --- Performance optimizations ---
 
@@ -342,13 +343,20 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 	}
 	lastBytesAt := time.Now()
 	lastBytes := int64(0)
+	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
 
 	for {
 		select {
 		case <-ctx.Done():
+			if isTTY {
+				fmt.Fprintln(os.Stderr)
+			}
 			return nil, fmt.Errorf("cancelled")
 
 		case <-deadline:
+			if isTTY {
+				fmt.Fprintln(os.Stderr)
+			}
 			return nil, fmt.Errorf("max timeout %s exceeded", d.cfg.MaxTimeout)
 
 		case <-ticker.C:
@@ -381,12 +389,17 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 			// Peer stats
 			stats := t.Stats()
 
-			// Terminal progress (log.Printf for daemon-friendly output, no \r)
+			// Terminal progress
 			pct := int(float64(downloaded) / float64(totalBytes) * 100)
-			log.Printf("[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
+			line := fmt.Sprintf("[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
 				task.ID[:8], pct,
 				formatBytes(downloaded), formatBytes(totalBytes), formatBytes(speed),
 				stats.ActivePeers, stats.ConnectedSeeders)
+			if isTTY {
+				fmt.Fprintf(os.Stderr, "\r\033[K%s", line)
+			} else {
+				log.Print(line)
+			}
 
 			// Report progress
 			p := Progress{
@@ -407,6 +420,9 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 
 			// Check completion
 			if downloaded >= totalBytes {
+				if isTTY {
+					fmt.Fprintln(os.Stderr) // newline after \r progress
+				}
 				log.Printf("[%s] download complete: %s", task.ID[:8], fileName)
 				return &Result{}, nil
 			}

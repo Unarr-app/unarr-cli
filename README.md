@@ -3,7 +3,11 @@
 > **⚠️ Beta** — unarr is under active development. Features may change, and bugs are expected. [Report issues here](https://github.com/torrentclaw/unarr/issues).
 
 [![CI](https://github.com/torrentclaw/unarr/actions/workflows/ci.yml/badge.svg)](https://github.com/torrentclaw/unarr/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/torrentclaw/unarr)](https://github.com/torrentclaw/unarr/releases)
 [![Go Report Card](https://goreportcard.com/badge/github.com/torrentclaw/unarr)](https://goreportcard.com/report/github.com/torrentclaw/unarr)
+[![Coverage](https://img.shields.io/codecov/c/github/torrentclaw/unarr)](https://codecov.io/gh/torrentclaw/unarr)
+[![VirusTotal](https://img.shields.io/badge/VirusTotal-scanned-brightgreen?logo=virustotal)](https://github.com/torrentclaw/unarr/releases)
+[![Docker Pulls](https://img.shields.io/docker/pulls/torrentclaw/unarr)](https://hub.docker.com/r/torrentclaw/unarr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/torrentclaw/unarr)](go.mod)
 

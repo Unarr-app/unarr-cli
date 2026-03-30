@@ -209,22 +209,6 @@ func (t *WSTransport) Deregister(_ context.Context, _ string) error {
 	return t.Close()
 }
 
-// ReportUpgradeResult sends upgrade result to the DO.
-func (t *WSTransport) ReportUpgradeResult(_ context.Context, result UpgradeResult) error {
-	msg := struct {
-		Type    string `json:"type"`
-		Success bool   `json:"success"`
-		Version string `json:"version,omitempty"`
-		Error   string `json:"error,omitempty"`
-	}{
-		Type:    "upgrade-result",
-		Success: result.Success,
-		Version: result.Version,
-		Error:   result.Error,
-	}
-	return t.send(msg)
-}
-
 // ── Internal ─────────────────────────────────────────────────────────────────
 
 func (t *WSTransport) send(msg any) error {

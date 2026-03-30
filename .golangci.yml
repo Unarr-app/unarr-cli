@@ -1,10 +1,11 @@
+version: "2"
+
 run:
   timeout: 5m
 
 linters:
   enable:
     - errcheck
-    - gosimple
     - govet
     - ineffassign
     - staticcheck
@@ -16,29 +17,31 @@ linters:
     - errname
     - errorlint
     - exhaustive
-    - gofmt
-    - goimports
     - misspell
     - nilerr
     - prealloc
     - unconvert
     - unparam
     - wastedassign
+  settings:
+    gosec:
+      excludes:
+        - G104  # Allow unhandled errors in fire-and-forget (notifications)
+    errcheck:
+      exclude-functions:
+        - (*os/exec.Cmd).Start  # Fire-and-forget for notifications
+    exhaustive:
+      default-signifies-exhaustive: true
+    misspell:
+      locale: US
+  exclusions:
+    paths:
+      - dist
 
-linters-settings:
-  gosec:
-    excludes:
-      - G104  # Allow unhandled errors in fire-and-forget (notifications)
-  errcheck:
-    exclude-functions:
-      - (*os/exec.Cmd).Start  # Fire-and-forget for notifications
-  exhaustive:
-    default-signifies-exhaustive: true
-  misspell:
-    locale: US
-
-issues:
-  exclude-dirs:
-    - dist
-  max-issues-per-linter: 50
-  max-same-issues: 5
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    paths:
+      - dist

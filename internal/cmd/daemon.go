@@ -18,7 +18,6 @@ import (
 	"github.com/torrentclaw/unarr/internal/engine"
 	"github.com/torrentclaw/unarr/internal/library"
 	"github.com/torrentclaw/unarr/internal/usenet/download"
-	"github.com/torrentclaw/unarr/internal/upgrade"
 )
 
 // newStartCmd creates the top-level `unarr start` command.
@@ -92,7 +91,6 @@ func newDaemonCmd() *cobra.Command {
 
 	return cmd
 }
-
 
 func runDaemonStart() error {
 	cfg := loadConfig()
@@ -174,6 +172,7 @@ func runDaemonStart() error {
 
 	// Create progress reporter using transport
 	reporter := engine.NewProgressReporterWithTransport(transport, 3*time.Second)
+	reporter.SetWatchingFunc(func() bool { return d.Watching })
 
 	// Parse speed limits
 	maxDl, _ := config.ParseSpeed(cfg.Download.MaxDownloadSpeed)
@@ -187,7 +186,7 @@ func runDaemonStart() error {
 	torrentDl, err := engine.NewTorrentDownloader(engine.TorrentConfig{
 		DataDir:         cfg.Download.Dir,
 		MetadataTimeout: metaTimeout,  // 0 = unlimited (default)
-		StallTimeout:    stallTimeout,  // 0 = unlimited (default)
+		StallTimeout:    stallTimeout, // 0 = unlimited (default)
 		MaxTimeout:      0,            // unlimited
 		MaxDownloadRate: maxDl,
 		MaxUploadRate:   maxUl,
@@ -354,63 +353,6 @@ func runDaemonStart() error {
 			streamRegistry.mu.Unlock()
 			task.SetStreamURL(srv.URL())
 		}
-	}
-
-	// Wire: server-requested upgrade
-	d.OnUpgradeRequested = func(targetVersion string) {
-
-		// Wait for active downloads to finish
-		if active := manager.ActiveCount(); active > 0 {
-			log.Printf("Waiting for %d active download(s) to finish before upgrading...", active)
-			manager.Wait()
-		}
-
-		upgrader := &upgrade.Upgrader{CurrentVersion: Version}
-		result := upgrader.Execute(ctx, targetVersion)
-
-		// Report result to server
-		reportCtx, reportCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer reportCancel()
-		errMsg := ""
-		if result.Error != nil {
-			errMsg = result.Error.Error()
-		}
-		upgradeResult := agent.UpgradeResult{
-			AgentID: cfg.Agent.ID,
-			Success: result.Success,
-			Version: result.NewVersion,
-			Error:   errMsg,
-		}
-		_ = transport.ReportUpgradeResult(reportCtx, upgradeResult)
-
-		if !result.Success {
-			log.Printf("Upgrade failed: %v", result.Error)
-			d.ClearUpgradeInProgress()
-			return
-		}
-
-		// Restart: replace current process with the new binary
-		log.Printf("Upgrade successful (%s → %s), restarting...", result.OldVersion, result.NewVersion)
-
-		// Deregister first so the server knows we're restarting
-		deregCtx, deregCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer deregCancel()
-		_ = transport.Deregister(deregCtx, cfg.Agent.ID)
-
-		// Flush progress reporter
-		cancel()
-
-		// Re-exec with the same args — the new binary takes over
-		binPath, err := os.Executable()
-		if err != nil {
-			log.Printf("Could not determine executable path: %v", err)
-			os.Exit(75) // EX_TEMPFAIL
-		}
-		// syscall.Exec replaces the current process (Unix)
-		execErr := syscall.Exec(binPath, os.Args, os.Environ())
-		// If we get here, exec failed (e.g. Windows)
-		log.Printf("Exec failed: %v — exiting for service manager restart", execErr)
-		os.Exit(75)
 	}
 
 	// Config hot-reload (SIGUSR1 on Unix, no-op on Windows)

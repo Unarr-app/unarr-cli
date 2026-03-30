@@ -134,23 +134,13 @@ func TestE2EFullLifecycle(t *testing.T) {
 		t.Fatal("timeout waiting for cancel control")
 	}
 
-	// 6. Send upgrade result
-	err = tr.ReportUpgradeResult(ctx, UpgradeResult{
-		AgentID: "e2e-agent",
-		Success: true,
-		Version: "2.0.0",
-	})
-	if err != nil {
-		t.Fatalf("ReportUpgradeResult: %v", err)
-	}
-
 	// Verify server received all messages
 	time.Sleep(100 * time.Millisecond)
 	mu.Lock()
 	defer mu.Unlock()
 
-	if len(receivedMessages) < 4 {
-		t.Fatalf("expected at least 4 messages, got %d", len(receivedMessages))
+	if len(receivedMessages) < 3 {
+		t.Fatalf("expected at least 3 messages, got %d", len(receivedMessages))
 	}
 
 	types := make([]string, len(receivedMessages))
@@ -158,7 +148,7 @@ func TestE2EFullLifecycle(t *testing.T) {
 		types[i], _ = m["type"].(string)
 	}
 
-	expected := []string{"auth", "heartbeat", "progress", "upgrade-result"}
+	expected := []string{"auth", "heartbeat", "progress"}
 	for _, exp := range expected {
 		found := false
 		for _, got := range types {
