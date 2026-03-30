@@ -11,7 +11,7 @@ import (
 // On Windows, os.FindProcess + a zero-timeout wait is used since
 // signal 0 is not supported.
 func IsProcessAlive(pid int) bool {
-	p, err := os.FindProcess(pid)
+	_, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
