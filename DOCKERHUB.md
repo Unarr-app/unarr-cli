@@ -119,7 +119,7 @@ docker exec unarr unarr doctor
 
 ## Image Details
 
-- **Base image:** Alpine 3.21
+- **Base image:** Alpine 3.22
 - **User:** `unarr` (UID 1000, GID 1000)
 - **Entrypoint:** `unarr start` (daemon mode)
 - **Read-only filesystem** — only mounted volumes are writable

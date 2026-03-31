@@ -16,7 +16,7 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/torrentclaw/unarr/internal/cmd.Version=${VERSION}" -trimpath -o /unarr ./cmd/unarr/
 
 # ---- Runtime stage ----
-FROM alpine:3.21
+FROM alpine:3.22
 
 RUN apk upgrade --no-cache && \
     apk add --no-cache ca-certificates tzdata
