@@ -147,10 +147,6 @@ Source:         https://github.com/torrentclaw/unarr`,
 		newUpgradeCmd(),
 		// Stubs for future commands
 		newStubCmd("moreseed", "Find same quality with more seeders"),
-		newStubCmd("compare", "Compare two torrents side by side"),
-		newStubCmd("add", "Search and add torrents to your client"),
-		newStubCmd("monitor", "Watch for new episodes of a series"),
-		newStubCmd("open", "Open content in the browser"),
 	)
 }
 
