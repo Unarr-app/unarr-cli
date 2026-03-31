@@ -24,6 +24,20 @@ var streamRegistry = struct {
 	servers: make(map[string]*engine.StreamServer),
 }
 
+// cancelAllStreams cancels all active stream tasks and servers (only 1 stream at a time).
+func cancelAllStreams() {
+	streamRegistry.mu.Lock()
+	for taskID, cancel := range streamRegistry.cancels {
+		cancel()
+		delete(streamRegistry.cancels, taskID)
+	}
+	for taskID, srv := range streamRegistry.servers {
+		srv.Shutdown(context.Background())
+		delete(streamRegistry.servers, taskID)
+	}
+	streamRegistry.mu.Unlock()
+}
+
 // cancelStreamTask cancels a running stream task and shuts down any stream server.
 func cancelStreamTask(taskID string) {
 	streamRegistry.mu.Lock()
@@ -94,7 +108,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	}
 
 	// 4. Start HTTP server
-	srv := engine.NewStreamServer(eng, 0)
+	srv := engine.NewStreamServer(eng, cfg.Download.StreamPort)
 	streamURL, err := srv.Start(ctx)
 	if err != nil {
 		task.ErrorMessage = "start HTTP server: " + err.Error()
@@ -107,17 +121,27 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	task.StreamURL = streamURL
 	log.Printf("[%s] stream ready: %s", at.ID[:8], streamURL)
 
-	// 6. Progress loop
+	// 6. Unified progress + idle timeout loop
 	eng.StartProgressLoop(ctx)
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
+	progressTicker := time.NewTicker(3 * time.Second)
+	defer progressTicker.Stop()
+	idleCheck := time.NewTicker(60 * time.Second)
+	defer idleCheck.Stop()
+	completed := false
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Printf("[%s] stream stopped", at.ID[:8])
 			return
-		case <-ticker.C:
+
+		case <-idleCheck.C:
+			if srv.IdleSince() > 30*time.Minute {
+				log.Printf("[%s] stream idle timeout (30m no HTTP requests), shutting down", at.ID[:8])
+				return
+			}
+
+		case <-progressTicker.C:
 			p := eng.Progress()
 			task.UpdateProgress(engine.Progress{
 				DownloadedBytes: p.DownloadedBytes,
@@ -129,7 +153,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 			})
 
 			// Terminal progress
-			if p.TotalBytes > 0 {
+			if !completed && p.TotalBytes > 0 {
 				pct := int(float64(p.DownloadedBytes) / float64(p.TotalBytes) * 100)
 				fmt.Fprintf(os.Stderr, "\r[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
 					at.ID[:8], pct,
@@ -137,20 +161,11 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 					p.Peers, p.Seeds)
 			}
 
-			if p.DownloadedBytes >= p.TotalBytes && p.TotalBytes > 0 {
-				fmt.Fprint(os.Stderr, "\r\033[2K") // clear progress line
+			if !completed && p.DownloadedBytes >= p.TotalBytes && p.TotalBytes > 0 {
+				fmt.Fprint(os.Stderr, "\r\033[2K")
 				task.Transition(engine.StatusCompleted)
-				log.Printf("[%s] stream download complete, server stays up for 30m or until cancelled", at.ID[:8])
-				// Keep HTTP server running so the player can finish reading.
-				// Auto-shutdown after 30 minutes of idle to prevent resource leaks.
-				idleTimer := time.NewTimer(30 * time.Minute)
-				defer idleTimer.Stop()
-				select {
-				case <-ctx.Done():
-				case <-idleTimer.C:
-					log.Printf("[%s] stream idle timeout (30m), shutting down", at.ID[:8])
-				}
-				return
+				log.Printf("[%s] stream download complete, server stays up until idle (30m)", at.ID[:8])
+				completed = true
 			}
 		}
 	}

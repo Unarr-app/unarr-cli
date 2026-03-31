@@ -19,10 +19,13 @@ test:
 lint:
 	golangci-lint run ./...
 
-## Run tests with coverage report
+## Run tests with coverage report (excludes CLI layer — cmd/ is glue code)
+COVER_PKGS = $(shell go list ./... | grep -v '/cmd')
 coverage:
-	go test -race -coverprofile=coverage.out -covermode=atomic ./...
-	go tool cover -func=coverage.out
+	go test -race -coverprofile=coverage.out -covermode=atomic $(COVER_PKGS)
+	@echo "──────────────────────────────────────"
+	@go tool cover -func=coverage.out | tail -1
+	@echo "──────────────────────────────────────"
 	go tool cover -html=coverage.out -o coverage.html
 
 ## Format code

@@ -152,9 +152,13 @@ func (u *Upgrader) fail(format string, args ...any) Result {
 	}
 }
 
-// CheckLatest fetches the latest version from GitHub API.
+// CheckLatest fetches the latest version from GitHub API and updates the cache.
 func CheckLatest(ctx context.Context) (string, error) {
-	return fetchLatestVersion(ctx)
+	v, err := fetchLatestVersion(ctx)
+	if err == nil {
+		writeCachedVersion(v)
+	}
+	return v, err
 }
 
 // installBinary copies the new binary to the target path, preserving original permissions.

@@ -78,6 +78,12 @@ func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*Media
 		return nil, fmt.Errorf("ffprobe JSON parse failed: %w", err)
 	}
 
+	return parseFFprobeOutput(data)
+}
+
+// parseFFprobeOutput converts parsed ffprobe JSON into MediaInfo.
+// Separated from ExtractMediaInfo so it can be tested without running ffprobe.
+func parseFFprobeOutput(data ffprobeOutput) (*MediaInfo, error) {
 	if len(data.Streams) == 0 {
 		return nil, fmt.Errorf("ffprobe returned no streams")
 	}

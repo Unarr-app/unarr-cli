@@ -143,8 +143,9 @@ Source:         https://github.com/torrentclaw/unarr`,
 		completionCmd,
 		// Library
 		scanCmd,
+		// Alias: upgrade → self-update
+		newUpgradeCmd(),
 		// Stubs for future commands
-		newStubCmd("upgrade", "Find a better version of a torrent"),
 		newStubCmd("moreseed", "Find same quality with more seeders"),
 		newStubCmd("compare", "Compare two torrents side by side"),
 		newStubCmd("add", "Search and add torrents to your client"),

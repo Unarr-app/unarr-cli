@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -24,11 +25,12 @@ type fileProvider interface {
 
 // StreamServer serves a torrent file over HTTP with Range request support.
 type StreamServer struct {
-	provider    fileProvider
-	server      *http.Server
-	port        int
-	url         string
-	upnpMapping *UPnPMapping
+	provider     fileProvider
+	server       *http.Server
+	port         int
+	url          string
+	upnpMapping  *UPnPMapping
+	lastActivity atomic.Int64 // UnixNano of last HTTP request
 }
 
 // NewStreamServer creates a new HTTP server for streaming via StreamEngine.
@@ -93,11 +95,38 @@ func NewStreamServerFromDisk(filePath string, port int) *StreamServer {
 	}
 }
 
-// Start begins serving the file on all interfaces. Returns the best reachable URL:
-//  1. UPnP public IP (accessible from anywhere on the internet)
-//  2. Tailscale IP (accessible from any device in the tailnet)
-//  3. LAN IP (accessible from local network)
+// FindVideoFile scans a directory (recursively) for the largest video file.
+// Returns empty string if no video file found.
+func FindVideoFile(dir string) string {
+	var best string
+	var bestSize int64
+
+	filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		if !VideoExts[ext] {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if info.Size() > bestSize {
+			best = path
+			bestSize = info.Size()
+		}
+		return nil
+	})
+	return best
+}
+
+// Start begins serving the file on all interfaces. Returns the best reachable URL.
+// The file is served as-is — the user's media player (VLC, mpv, etc.) handles decoding.
 func (ss *StreamServer) Start(ctx context.Context) (string, error) {
+	ss.lastActivity.Store(time.Now().UnixNano())
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stream", ss.handler)
 
@@ -107,19 +136,9 @@ func (ss *StreamServer) Start(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("listen on %s: %w", addr, err)
 	}
 
-	// Extract actual port (important when port=0)
 	ss.port = listener.Addr().(*net.TCPAddr).Port
-
-	// Try UPnP for public internet access (like Plex Remote Access)
-	if mapping, upnpErr := setupUPnP(ss.port); upnpErr == nil {
-		ss.upnpMapping = mapping
-		ss.url = fmt.Sprintf("http://%s:%d/stream", mapping.ExternalIP, mapping.ExternalPort)
-		log.Printf("stream: UPnP mapped %s:%d -> local:%d", mapping.ExternalIP, mapping.ExternalPort, ss.port)
-	} else {
-		// Fallback: Tailscale IP > LAN IP > 127.0.0.1
-		ss.url = fmt.Sprintf("http://%s:%d/stream", reachableIP(), ss.port)
-		log.Printf("stream: UPnP unavailable (%v), using %s", upnpErr, ss.url)
-	}
+	ss.url = fmt.Sprintf("http://%s:%d/stream", reachableIP(), ss.port)
+	log.Printf("stream: serving on %s", ss.url)
 
 	ss.server = &http.Server{
 		Handler:           mux,
@@ -141,6 +160,15 @@ func (ss *StreamServer) URL() string { return ss.url }
 // Port returns the bound port.
 func (ss *StreamServer) Port() int { return ss.port }
 
+// IdleSince returns how long since the last HTTP request was received.
+func (ss *StreamServer) IdleSince() time.Duration {
+	last := ss.lastActivity.Load()
+	if last == 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, last))
+}
+
 // Shutdown gracefully stops the HTTP server and removes the UPnP port mapping.
 func (ss *StreamServer) Shutdown(ctx context.Context) error {
 	ss.upnpMapping.Remove()
@@ -151,6 +179,8 @@ func (ss *StreamServer) Shutdown(ctx context.Context) error {
 }
 
 func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
+	ss.lastActivity.Store(time.Now().UnixNano())
+
 	// CORS headers — only when browser sends Origin (HTTPS site → localhost)
 	if origin := r.Header.Get("Origin"); origin != "" {
 		w.Header().Set("Access-Control-Allow-Origin", "*")

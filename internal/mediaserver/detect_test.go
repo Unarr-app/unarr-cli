@@ -2,6 +2,8 @@ package mediaserver
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -66,6 +68,96 @@ func TestJellyfinParsing(t *testing.T) {
 	}
 	if len(paths) != 3 {
 		t.Fatalf("got %d paths, want 3", len(paths))
+	}
+}
+
+func TestPlexTokenFromPrefs(t *testing.T) {
+	t.Run("valid prefs", func(t *testing.T) {
+		dir := t.TempDir()
+		prefsPath := filepath.Join(dir, "Preferences.xml")
+		xml := `<?xml version="1.0" encoding="utf-8"?>
+<Preferences PlexOnlineToken="my-secret-token" OldestPreviousVersion="1.0"/>`
+		os.WriteFile(prefsPath, []byte(xml), 0o644)
+
+		token := plexTokenFromPrefs(prefsPath)
+		if token != "my-secret-token" {
+			t.Errorf("token = %q, want my-secret-token", token)
+		}
+	})
+
+	t.Run("no token attr", func(t *testing.T) {
+		dir := t.TempDir()
+		prefsPath := filepath.Join(dir, "Preferences.xml")
+		xml := `<?xml version="1.0"?><Preferences/>`
+		os.WriteFile(prefsPath, []byte(xml), 0o644)
+
+		token := plexTokenFromPrefs(prefsPath)
+		if token != "" {
+			t.Errorf("token = %q, want empty", token)
+		}
+	})
+
+	t.Run("file not found", func(t *testing.T) {
+		token := plexTokenFromPrefs("/nonexistent/Preferences.xml")
+		if token != "" {
+			t.Errorf("token = %q, want empty", token)
+		}
+	})
+
+	t.Run("invalid xml", func(t *testing.T) {
+		dir := t.TempDir()
+		prefsPath := filepath.Join(dir, "Preferences.xml")
+		os.WriteFile(prefsPath, []byte("not xml at all"), 0o644)
+
+		token := plexTokenFromPrefs(prefsPath)
+		if token != "" {
+			t.Errorf("token = %q, want empty", token)
+		}
+	})
+}
+
+func TestParsePlexSectionsMultipleLocations(t *testing.T) {
+	body := `{
+		"MediaContainer": {
+			"Directory": [
+				{
+					"title": "Movies",
+					"Location": [
+						{"path": "/media/movies"},
+						{"path": "/media/movies2"}
+					]
+				}
+			]
+		}
+	}`
+
+	paths := parsePlexSections([]byte(body))
+	if len(paths) != 2 {
+		t.Fatalf("expected 2 paths, got %d", len(paths))
+	}
+}
+
+func TestParsePlexSectionsEmptyPath(t *testing.T) {
+	body := `{
+		"MediaContainer": {
+			"Directory": [
+				{
+					"Location": [{"path": ""}, {"path": "/valid"}]
+				}
+			]
+		}
+	}`
+
+	paths := parsePlexSections([]byte(body))
+	if len(paths) != 1 {
+		t.Fatalf("expected 1 path (empty filtered), got %d: %v", len(paths), paths)
+	}
+}
+
+func TestCommonMediaDirs(t *testing.T) {
+	dirs := commonMediaDirs()
+	if len(dirs) == 0 {
+		t.Error("expected at least some common media dirs")
 	}
 }
 
