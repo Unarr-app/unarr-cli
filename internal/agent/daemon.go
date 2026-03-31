@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,7 +44,8 @@ type Daemon struct {
 
 	// Watching tracks whether a user is viewing download progress in the web UI.
 	// When false, the progress reporter skips detailed updates (only sends final states).
-	Watching bool
+	// Accessed from heartbeat goroutine, flush goroutine, and WatchingFunc closure — must be atomic.
+	Watching atomic.Bool
 
 	// Exposed tickers for hot-reload
 	PollTicker      *time.Ticker
@@ -195,7 +197,7 @@ func (d *Daemon) heartbeat(ctx context.Context) {
 	}
 
 	// Update watching flag and state file
-	d.Watching = resp.Watching
+	d.Watching.Store(resp.Watching)
 	d.State.LastHeartbeat = time.Now()
 	if d.GetActiveCount != nil {
 		d.State.ActiveTasks = d.GetActiveCount()

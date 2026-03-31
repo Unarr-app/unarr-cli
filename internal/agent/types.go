@@ -109,6 +109,7 @@ type StatusResponse struct {
 	Paused          bool `json:"paused,omitempty"`
 	DeleteFiles     bool `json:"deleteFiles,omitempty"`
 	StreamRequested bool `json:"streamRequested,omitempty"`
+	Watching        bool `json:"watching,omitempty"`
 }
 
 // BatchStatusRequest wraps multiple status updates in a single request.
@@ -118,7 +119,8 @@ type BatchStatusRequest struct {
 
 // BatchStatusResponse wraps per-task results from the batch endpoint.
 type BatchStatusResponse struct {
-	Results []StatusResponse `json:"results"`
+	Results  []StatusResponse `json:"results"`
+	Watching bool             `json:"watching,omitempty"`
 }
 
 // HeartbeatResponse is returned by the server on heartbeat.

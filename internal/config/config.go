@@ -44,6 +44,7 @@ type DownloadConfig struct {
 	MetadataTimeout  string `toml:"metadata_timeout"`   // e.g. "1h", "30m", "0" = unlimited (default: "0")
 	StallTimeout     string `toml:"stall_timeout"`      // e.g. "30m", "1h", "0" = unlimited (default: "30m")
 	ListenPort       int    `toml:"listen_port"`        // fixed port for incoming peer connections (default: 42069, 0 = random)
+	StreamPort       int    `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
 }
 
 type OrganizeConfig struct {
@@ -55,6 +56,7 @@ type OrganizeConfig struct {
 type DaemonConfig struct {
 	PollInterval      string `toml:"poll_interval"`
 	HeartbeatInterval string `toml:"heartbeat_interval"`
+	StatusInterval    string `toml:"status_interval"`
 }
 
 type NotificationsConfig struct {
@@ -85,6 +87,7 @@ func Default() Config {
 		Download: DownloadConfig{
 			PreferredMethod: "auto",
 			MaxConcurrent:   3,
+			StreamPort:      11818,
 		},
 		Organize: OrganizeConfig{
 			Enabled: true,
@@ -142,6 +145,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.General.Country == "" {
 		cfg.General.Country = "US"
+	}
+	if cfg.Download.StreamPort == 0 {
+		cfg.Download.StreamPort = 11818
 	}
 
 	return cfg, nil
