@@ -145,8 +145,6 @@ Source:         https://github.com/torrentclaw/unarr`,
 		scanCmd,
 		// Alias: upgrade → self-update
 		newUpgradeCmd(),
-		// Stubs for future commands
-		newStubCmd("moreseed", "Find same quality with more seeders"),
 	)
 }
 
