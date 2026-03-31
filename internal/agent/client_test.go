@@ -531,7 +531,7 @@ func TestBatchDownload(t *testing.T) {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		json.NewEncoder(w).Encode(BatchDownloadResponse{
-			Queued:  3,
+			Queued:   3,
 			NotFound: 1,
 		})
 	}))

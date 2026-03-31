@@ -14,12 +14,12 @@ func TestFindPar2File(t *testing.T) {
 	vol1 := filepath.Join(dir, "content.vol000+01.par2")
 	vol2 := filepath.Join(dir, "content.vol001+02.par2")
 
-	os.WriteFile(mainPar2, make([]byte, 100), 0o644)   // smallest
+	os.WriteFile(mainPar2, make([]byte, 100), 0o644) // smallest
 	os.WriteFile(vol1, make([]byte, 10000), 0o644)
 	os.WriteFile(vol2, make([]byte, 50000), 0o644)
 
 	files := map[string]string{
-		"content.par2":            mainPar2,
+		"content.par2":           mainPar2,
 		"content.vol000+01.par2": vol1,
 		"content.vol001+02.par2": vol2,
 	}

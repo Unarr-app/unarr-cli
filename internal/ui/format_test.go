@@ -275,7 +275,7 @@ func TestFormatTimeAgo(t *testing.T) {
 	now := time.Now()
 
 	tests := []struct {
-		name string
+		name  string
 		input string
 		want  string
 	}{
@@ -356,6 +356,6 @@ func TestPtr(t *testing.T) {
 	}
 }
 
-func ptr[T any](v T) *T  { return &v }
-func intPtr(v int) *int   { return &v }
+func ptr[T any](v T) *T       { return &v }
+func intPtr(v int) *int       { return &v }
 func strPtr(v string) *string { return &v }

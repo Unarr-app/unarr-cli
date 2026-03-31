@@ -9,8 +9,8 @@ func TestDeriveWSURL(t *testing.T) {
 		want    string
 	}{
 		{"https://torrentclaw.com", "agent-123", "wss://unarr.torrentclaw.com/ws/agent-123"},
-		{"http://localhost:3000", "a1", ""},        // localhost skipped
-		{"http://127.0.0.1:3000", "a1", ""},        // 127.0.0.1 skipped
+		{"http://localhost:3000", "a1", ""}, // localhost skipped
+		{"http://127.0.0.1:3000", "a1", ""}, // 127.0.0.1 skipped
 		{"https://torrentclaw.com/", "a1", "wss://unarr.torrentclaw.com/ws/a1"},
 		{"https://api.example.io", "x", "wss://unarr.api.example.io/ws/x"},
 		{"", "agent-123", ""},

@@ -301,6 +301,6 @@ func (m *slowMockDownloader) Download(ctx context.Context, _ *Task, _ string, _ 
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
-func (m *slowMockDownloader) Pause(_ string) error    { return nil }
-func (m *slowMockDownloader) Cancel(_ string) error    { return nil }
+func (m *slowMockDownloader) Pause(_ string) error             { return nil }
+func (m *slowMockDownloader) Cancel(_ string) error            { return nil }
 func (m *slowMockDownloader) Shutdown(_ context.Context) error { return nil }

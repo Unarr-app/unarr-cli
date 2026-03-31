@@ -230,10 +230,10 @@ func TestProgressReporter_HandleResponseDeleteFiles(t *testing.T) {
 
 	var deletedID string
 	pr := &ProgressReporter{
-		reporter:     reporter,
-		interval:     time.Second,
-		latest:       make(map[string]*Task),
-		lastReported: make(map[string]TaskStatus),
+		reporter:      reporter,
+		interval:      time.Second,
+		latest:        make(map[string]*Task),
+		lastReported:  make(map[string]TaskStatus),
 		onDeleteFiles: func(id string) { deletedID = id },
 	}
 
@@ -254,10 +254,10 @@ func TestProgressReporter_HandleResponseStream(t *testing.T) {
 
 	var streamID string
 	pr := &ProgressReporter{
-		reporter:     reporter,
-		interval:     time.Second,
-		latest:       make(map[string]*Task),
-		lastReported: make(map[string]TaskStatus),
+		reporter:          reporter,
+		interval:          time.Second,
+		latest:            make(map[string]*Task),
+		lastReported:      make(map[string]TaskStatus),
 		onStreamRequested: func(id string) { streamID = id },
 	}
 

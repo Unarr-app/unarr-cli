@@ -753,9 +753,9 @@ func TestIsSampleFile(t *testing.T) {
 		{"movie-sample-video.mkv", true},
 		{"movie_sample.mkv", true},
 		{"sample.mkv", true},
-		{"resampled.mkv", false},   // "sample" is part of "resampled"
+		{"resampled.mkv", false}, // "sample" is part of "resampled"
 		{"movie.mkv", false},
-		{"my.samples.zip", false},  // "sample" followed by 's' (alphanumeric)
+		{"my.samples.zip", false}, // "sample" followed by 's' (alphanumeric)
 	}
 	for _, tt := range tests {
 		if got := isSampleFile(tt.name); got != tt.want {
@@ -880,15 +880,15 @@ func TestIsRarFile_Extended(t *testing.T) {
 		name string
 		want bool
 	}{
-		{"file.RAR", true},       // case insensitive
+		{"file.RAR", true}, // case insensitive
 		{"file.Rar", true},
 		{"file.s01", true},
 		{"file.s99", true},
 		{"file.002", true},
 		{"file.999", true},
-		{"file.r0", false},       // too short extension
-		{"file.rXX", false},      // non-numeric
-		{"file", false},          // no extension
+		{"file.r0", false},  // too short extension
+		{"file.rXX", false}, // non-numeric
+		{"file", false},     // no extension
 		{"file.mp4", false},
 	}
 	for _, tt := range tests {

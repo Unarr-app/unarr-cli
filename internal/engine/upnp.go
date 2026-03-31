@@ -17,9 +17,9 @@ type UPnPMapping struct {
 	device       upnp.Device
 }
 
-// setupUPnP discovers the gateway, maps the port, and gets the public IP.
+// SetupUPnP discovers the gateway, maps the port, and gets the public IP.
 // Returns nil if UPnP is not available or fails.
-func setupUPnP(internalPort int) (*UPnPMapping, error) {
+func SetupUPnP(internalPort int) (*UPnPMapping, error) {
 	log.Println("stream: discovering UPnP gateway (10s timeout)...")
 	devices := upnp.Discover(0, 10*time.Second, alog.Logger{})
 	if len(devices) == 0 {

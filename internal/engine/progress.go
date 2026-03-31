@@ -41,10 +41,10 @@ type ProgressReporter struct {
 	onStreamRequested ActionFunc
 	onWatchingChanged func(watching bool)
 
-	mu             sync.Mutex
-	latest         map[string]*Task      // taskID -> task with latest progress
-	lastReported   map[string]TaskStatus // taskID -> last status sent to API
-	lastCheckAt    time.Time             // last time we reported for control-signal polling
+	mu           sync.Mutex
+	latest       map[string]*Task      // taskID -> task with latest progress
+	lastReported map[string]TaskStatus // taskID -> last status sent to API
+	lastCheckAt  time.Time             // last time we reported for control-signal polling
 }
 
 // NewProgressReporter creates a reporter that flushes every interval.
