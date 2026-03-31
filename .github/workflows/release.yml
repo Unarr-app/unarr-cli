@@ -62,6 +62,15 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_name }}
 
+      - name: Update Docker Hub description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: torrentclaw/unarr
+          readme-filepath: DOCKERHUB.md
+          short-description: "Powerful terminal tool for torrent search and management"
+
   virustotal:
     needs: release
     runs-on: ubuntu-latest
