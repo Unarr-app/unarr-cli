@@ -18,7 +18,8 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/torrentclaw/unarr/inter
 # ---- Runtime stage ----
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates tzdata
 
 # Non-root user (UID 1000 matches typical host user for volume permissions)
 RUN addgroup -g 1000 unarr && adduser -u 1000 -G unarr -D -h /home/unarr unarr
