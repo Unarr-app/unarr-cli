@@ -178,6 +178,15 @@ func (c *Client) SyncLibrary(ctx context.Context, req LibrarySyncRequest) (*Libr
 	return &resp, nil
 }
 
+// ReportWatchProgress sends playback position to the server for watch tracking.
+func (c *Client) ReportWatchProgress(ctx context.Context, update WatchProgressUpdate) error {
+	var resp WatchProgressResponse
+	if err := c.doPost(ctx, "/api/internal/agent/watch-progress", update, &resp); err != nil {
+		return fmt.Errorf("watch progress: %w", err)
+	}
+	return nil
+}
+
 // doPost sends a JSON POST request and decodes the response.
 func (c *Client) doPost(ctx context.Context, path string, body any, dst any) error {
 	jsonBody, err := json.Marshal(body)

@@ -304,3 +304,24 @@ type LibrarySyncResponse struct {
 	Matched int `json:"matched"`
 	Removed int `json:"removed"`
 }
+
+// ---------------------------------------------------------------------------
+// Watch progress types (used by stream tracking)
+// ---------------------------------------------------------------------------
+
+// WatchProgressUpdate reports playback position during streaming.
+// Two modes:
+//   - Estimated (range): set Progress (0-100). Position/Duration omitted.
+//   - Precise (browser): set Position + Duration in seconds. Progress computed server-side.
+type WatchProgressUpdate struct {
+	TaskID   string `json:"taskId"`
+	Source   string `json:"source"`             // "range" or "browser"
+	Progress *int   `json:"progress,omitempty"` // 0-100 (range source)
+	Position *int   `json:"position,omitempty"` // seconds (browser source)
+	Duration *int   `json:"duration,omitempty"` // seconds (browser source)
+}
+
+// WatchProgressResponse is returned after reporting watch progress.
+type WatchProgressResponse struct {
+	Success bool `json:"success"`
+}

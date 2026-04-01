@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -21,16 +22,19 @@ import (
 type fileProvider interface {
 	NewFileReader(ctx context.Context) io.ReadSeekCloser
 	FileName() string
+	FileSize() int64
 }
 
 // StreamServer serves a torrent file over HTTP with Range request support.
 type StreamServer struct {
-	provider     fileProvider
-	server       *http.Server
-	port         int
-	url          string
-	upnpMapping  *UPnPMapping
-	lastActivity atomic.Int64 // UnixNano of last HTTP request
+	provider      fileProvider
+	server        *http.Server
+	port          int
+	url           string
+	upnpMapping   *UPnPMapping
+	lastActivity  atomic.Int64 // UnixNano of last HTTP request
+	maxByteOffset atomic.Int64 // highest byte offset served (for watch progress estimation)
+	totalFileSize int64        // total file size in bytes (set on Start)
 }
 
 // NewStreamServer creates a new HTTP server for streaming via StreamEngine.
@@ -67,6 +71,10 @@ func (p *torrentFileProvider) FileName() string {
 	return filepath.Base(p.file.DisplayPath())
 }
 
+func (p *torrentFileProvider) FileSize() int64 {
+	return p.file.Length()
+}
+
 // diskFileProvider serves a file from disk.
 type diskFileProvider struct {
 	path string
@@ -83,6 +91,14 @@ func (p *diskFileProvider) NewFileReader(_ context.Context) io.ReadSeekCloser {
 }
 
 func (p *diskFileProvider) FileName() string { return p.name }
+
+func (p *diskFileProvider) FileSize() int64 {
+	fi, err := os.Stat(p.path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
 
 // NewStreamServerFromDisk creates a server that streams a file from disk.
 func NewStreamServerFromDisk(filePath string, port int) *StreamServer {
@@ -126,6 +142,7 @@ func FindVideoFile(dir string) string {
 // The file is served as-is — the user's media player (VLC, mpv, etc.) handles decoding.
 func (ss *StreamServer) Start(ctx context.Context) (string, error) {
 	ss.lastActivity.Store(time.Now().UnixNano())
+	ss.totalFileSize = ss.provider.FileSize()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stream", ss.handler)
@@ -181,6 +198,18 @@ func (ss *StreamServer) Shutdown(ctx context.Context) error {
 func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 	ss.lastActivity.Store(time.Now().UnixNano())
 
+	// Track Range header for watch progress estimation
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		if start := parseRangeStart(rangeHeader); start >= 0 {
+			for {
+				cur := ss.maxByteOffset.Load()
+				if start <= cur || ss.maxByteOffset.CompareAndSwap(cur, start) {
+					break
+				}
+			}
+		}
+	}
+
 	// CORS headers — only when browser sends Origin (HTTPS site → localhost)
 	if origin := r.Header.Get("Origin"); origin != "" {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -204,6 +233,39 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", mimeTypeFromExt(ss.provider.FileName()))
 
 	http.ServeContent(w, r, ss.provider.FileName(), time.Time{}, reader)
+}
+
+// EstimatedProgress returns an estimated watch progress based on HTTP Range requests.
+// Returns (position, duration) where both are 0-100 scale (percentage-based).
+func (ss *StreamServer) EstimatedProgress() (position int, duration int) {
+	total := ss.totalFileSize
+	if total <= 0 {
+		return 0, 0
+	}
+	maxOffset := ss.maxByteOffset.Load()
+	pct := int(float64(maxOffset) / float64(total) * 100)
+	if pct > 100 {
+		pct = 100
+	}
+	return pct, 100
+}
+
+// parseRangeStart extracts the start byte from a "Range: bytes=START-" header.
+func parseRangeStart(rangeHeader string) int64 {
+	// Format: "bytes=START-" or "bytes=START-END"
+	after, found := strings.CutPrefix(rangeHeader, "bytes=")
+	if !found {
+		return -1
+	}
+	dashIdx := strings.IndexByte(after, '-')
+	if dashIdx < 0 {
+		return -1
+	}
+	start, err := strconv.ParseInt(after[:dashIdx], 10, 64)
+	if err != nil {
+		return -1
+	}
+	return start
 }
 
 // reachableIP returns the best IP to use for the stream URL, in priority order:

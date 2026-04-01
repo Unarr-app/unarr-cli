@@ -174,6 +174,13 @@ func runDaemonStart() error {
 	// Create daemon — always uses Transport interface
 	d := agent.NewDaemon(daemonCfg, transport)
 
+	// Create agent client for watch progress reporting
+	agentClient := agent.NewClient(cfg.Auth.APIURL, cfg.Auth.APIKey, userAgent)
+
+	// Daemon-scoped context — cancelled on shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Create progress reporter using transport
 	reporter := engine.NewProgressReporterWithTransport(transport, statusInterval)
 	reporter.SetWatchingFunc(func() bool { return d.Watching.Load() })
@@ -266,18 +273,19 @@ func runDaemonStart() error {
 		streamRegistry.servers[taskID] = srv
 		streamRegistry.mu.Unlock()
 		task.SetStreamURL(srv.URL())
+
+		// Start watch progress reporter
+		go engine.NewWatchReporter(agentClient, srv, taskID).Run(ctx)
 	})
 
 	// Wire: daemon claimed tasks -> manager
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	d.OnTasksClaimed = func(tasks []agent.Task) {
 		for _, t := range tasks {
 			if t.Mode == "stream" {
 				// Only 1 stream at a time: cancel all existing streams
 				cancelAllStreams()
-				go handleStreamTask(ctx, t, reporter, cfg)
+				go handleStreamTask(ctx, t, reporter, cfg, agentClient)
 			} else if t.ForceStart || manager.HasCapacity() {
 				manager.Submit(ctx, t)
 			} else {
@@ -321,6 +329,9 @@ func runDaemonStart() error {
 		streamRegistry.mu.Unlock()
 
 		log.Printf("[%s] streaming from disk: %s → %s", sr.TaskID[:8], filepath.Base(sr.FilePath), streamURL)
+
+		// Start watch progress reporter
+		go engine.NewWatchReporter(agentClient, srv, sr.TaskID).Run(ctx)
 
 		// Report stream URL back to the server via transport
 		go func() {

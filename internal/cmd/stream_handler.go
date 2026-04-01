@@ -55,7 +55,7 @@ func cancelStreamTask(taskID string) {
 // handleStreamTask manages a streaming task lifecycle outside the Manager.
 // It creates a StreamEngine, buffers, starts an HTTP server, and reports
 // progress until the task is cancelled or the download completes.
-func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config) {
+func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
@@ -120,6 +120,12 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	// 5. Report stream URL — the reporter will send this to the web
 	task.StreamURL = streamURL
 	log.Printf("[%s] stream ready: %s", at.ID[:8], streamURL)
+
+	// 5b. Start watch progress reporter (tracks Range requests for playback position)
+	if agentClient != nil {
+		watchReporter := engine.NewWatchReporter(agentClient, srv, at.ID)
+		go watchReporter.Run(ctx)
+	}
 
 	// 6. Unified progress + idle timeout loop
 	eng.StartProgressLoop(ctx)
