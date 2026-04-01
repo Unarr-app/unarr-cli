@@ -14,6 +14,24 @@ import (
 	"github.com/torrentclaw/unarr/internal/ui"
 )
 
+// startIdleGuard monitors a stream server and cancels the task after 30 minutes of inactivity.
+func startIdleGuard(ctx context.Context, srv *engine.StreamServer, taskID string) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if srv.IdleSince() > 30*time.Minute {
+				log.Printf("[%s] stream idle timeout (30m no HTTP requests), shutting down", taskID[:8])
+				cancelStreamTask(taskID)
+				return
+			}
+		}
+	}
+}
+
 // streamRegistry tracks active stream tasks and servers for cancellation.
 var streamRegistry = struct {
 	mu      sync.Mutex
@@ -127,12 +145,11 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		go watchReporter.Run(ctx)
 	}
 
-	// 6. Unified progress + idle timeout loop
+	// 6. Start idle guard + progress loop
+	go startIdleGuard(ctx, srv, at.ID)
 	eng.StartProgressLoop(ctx)
 	progressTicker := time.NewTicker(3 * time.Second)
 	defer progressTicker.Stop()
-	idleCheck := time.NewTicker(60 * time.Second)
-	defer idleCheck.Stop()
 	completed := false
 
 	for {
@@ -140,12 +157,6 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		case <-ctx.Done():
 			log.Printf("[%s] stream stopped", at.ID[:8])
 			return
-
-		case <-idleCheck.C:
-			if srv.IdleSince() > 30*time.Minute {
-				log.Printf("[%s] stream idle timeout (30m no HTTP requests), shutting down", at.ID[:8])
-				return
-			}
 
 		case <-progressTicker.C:
 			p := eng.Progress()

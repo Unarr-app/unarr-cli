@@ -344,22 +344,7 @@ func runDaemonStart() error {
 		}()
 
 		// Auto-shutdown after 30 min of idle (no HTTP requests)
-		go func() {
-			ticker := time.NewTicker(60 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					if srv.IdleSince() > 30*time.Minute {
-						log.Printf("[%s] disk stream idle timeout (30m), shutting down", sr.TaskID[:8])
-						cancelStreamTask(sr.TaskID)
-						return
-					}
-				}
-			}
-		}()
+		go startIdleGuard(ctx, srv, sr.TaskID)
 	}
 
 	// Wire: WS control actions (pause/cancel/stream pushed from server)
@@ -437,7 +422,7 @@ func runDaemonStart() error {
 				scanInterval = parsed
 			}
 		}
-		go runAutoScan(ctx, cfg, scanInterval)
+		go runAutoScan(ctx, cfg, scanInterval, agentClient)
 	}
 
 	// Start daemon (blocks)
@@ -515,7 +500,7 @@ func formatSpeedLog(bps int64) string {
 }
 
 // runAutoScan runs a library scan + sync on a timer.
-func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration) {
+func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration, ac *agent.Client) {
 	log.Printf("[auto-scan] enabled: every %s, path: %s", interval, cfg.Library.ScanPath)
 
 	// Run first scan after a short delay (let daemon stabilize)
@@ -556,13 +541,6 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration)
 		}
 
 		// Sync to server
-		apiKey := cfg.Auth.APIKey
-		if apiKey == "" {
-			log.Printf("[auto-scan] no API key, skipping sync")
-			return
-		}
-
-		ac := agent.NewClient(cfg.Auth.APIURL, apiKey, "unarr/"+Version)
 		items := library.BuildSyncItems(cache)
 		if len(items) == 0 {
 			log.Printf("[auto-scan] no items to sync")
@@ -605,5 +583,3 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration)
 		}
 	}
 }
-
-// buildSyncItems moved to internal/library/sync.go as library.BuildSyncItems

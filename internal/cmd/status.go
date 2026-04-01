@@ -49,6 +49,43 @@ func runStatus() error {
 		return nil
 	}
 
+	// ── Account (async fetch) ──
+	type accountResult struct {
+		user agent.UserInfo
+		err  error
+	}
+	accountCh := make(chan accountResult, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		ac := agent.NewClient(cfg.Auth.APIURL, cfg.Auth.APIKey, "unarr/"+Version)
+		resp, err := ac.Register(ctx, agent.RegisterRequest{
+			AgentID: cfg.Agent.ID,
+			Name:    cfg.Agent.Name,
+			Version: Version,
+		})
+		if err != nil {
+			accountCh <- accountResult{err: err}
+			return
+		}
+		accountCh <- accountResult{user: resp.User}
+	}()
+
+	cyan.Println("  Account")
+	ar := <-accountCh
+	if ar.err != nil {
+		dim.Println("    Could not fetch account info")
+	} else {
+		fmt.Printf("    User:       %s\n", ar.user.Name)
+		fmt.Printf("    Email:      %s\n", ar.user.Email)
+		planColor := dim
+		if ar.user.IsPro {
+			planColor = green
+		}
+		planColor.Printf("    Plan:       %s\n", strings.ToUpper(ar.user.Plan))
+	}
+	fmt.Println()
+
 	cyan.Println("  Configuration")
 	agentID := cfg.Agent.ID
 	if len(agentID) > 8 {
@@ -81,6 +118,9 @@ func runStatus() error {
 			usedPct := float64(total-free) / float64(total) * 100
 			cyan.Println("  Disk")
 			fmt.Printf("    Free: %s / %s (%.0f%% used)\n", formatBytes(free), formatBytes(total), usedPct)
+			if dirSize, err := agent.DirSize(cfg.Download.Dir); err == nil {
+				fmt.Printf("    Downloads:  %s\n", formatBytes(dirSize))
+			}
 			if usedPct > 90 {
 				yellow.Println("    ⚠  Low disk space!")
 			}
@@ -161,6 +201,21 @@ func isDaemonAlive(state *agent.DaemonState) bool {
 		return false
 	}
 	return agent.IsProcessAlive(state.PID)
+}
+
+// formatFeatures returns a comma-separated list of available features, or "".
+func formatFeatures(f agent.FeatureFlags) string {
+	var features []string
+	if f.Torrent {
+		features = append(features, "Torrent")
+	}
+	if f.Debrid {
+		features = append(features, "Debrid")
+	}
+	if f.Usenet {
+		features = append(features, "Usenet")
+	}
+	return strings.Join(features, ", ")
 }
 
 // formatBytes formats bytes into human-readable string.

@@ -64,6 +64,8 @@ Source:         https://github.com/torrentclaw/unarr`,
 	// Getting Started
 	initCmd := newInitCmd()
 	initCmd.GroupID = "start"
+	loginCmd := newLoginCmd()
+	loginCmd.GroupID = "start"
 	configCmd := newConfigCmd()
 	configCmd.GroupID = "start"
 	migrateCmd := newMigrateCmd()
@@ -118,6 +120,7 @@ Source:         https://github.com/torrentclaw/unarr`,
 	rootCmd.AddCommand(
 		// Getting Started
 		initCmd,
+		loginCmd,
 		configCmd,
 		migrateCmd,
 		// Search & Discovery

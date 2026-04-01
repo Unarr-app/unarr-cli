@@ -360,18 +360,8 @@ func runInit(apiURLOverride string) error {
 	fmt.Println()
 
 	// Features summary
-	features := []string{}
-	if resp.Features.Torrent {
-		features = append(features, "Torrent")
-	}
-	if resp.Features.Debrid {
-		features = append(features, "Debrid")
-	}
-	if resp.Features.Usenet {
-		features = append(features, "Usenet")
-	}
-	if len(features) > 0 {
-		cyan.Printf("  Available:  %s\n", strings.Join(features, ", "))
+	if line := formatFeatures(resp.Features); line != "" {
+		cyan.Printf("  Available:  %s\n", line)
 	}
 
 	if !installDaemon {
