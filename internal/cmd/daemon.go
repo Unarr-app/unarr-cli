@@ -232,6 +232,7 @@ func runDaemonStart() error {
 			Enabled:    cfg.Organize.Enabled,
 			MoviesDir:  cfg.Organize.MoviesDir,
 			TVShowsDir: cfg.Organize.TVShowsDir,
+			OutputDir:  cfg.Download.Dir,
 		},
 	}, reporter, torrentDl, debridDl, engine.NewUsenetDownloader(httpT.Client()))
 

@@ -110,6 +110,7 @@ func runDownload(input, method string) error {
 			Enabled:    cfg.Organize.Enabled,
 			MoviesDir:  cfg.Organize.MoviesDir,
 			TVShowsDir: cfg.Organize.TVShowsDir,
+			OutputDir:  outputDir,
 		},
 	}, reporter, torrentDl, debridDl)
 

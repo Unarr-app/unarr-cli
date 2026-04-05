@@ -52,6 +52,12 @@ type Task struct {
 	NzbPassword     string // Password for encrypted NZB archives
 	ReplacePath     string // File to replace after download (upgrade mode)
 	LibraryItemID   int    // Library item being upgraded
+	ContentType     string // "movie" | "show" — from server metadata
+	ContentTitle    string // Clean title from TMDB
+	Season          *int   // Season number
+	Episode         *int   // Episode number
+	ContentYear     *int   // Year from TMDB (avoids regex on torrent title)
+	CollectionName  string // Collection name (e.g., "Harry Potter Collection")
 
 	// Runtime state
 	Status          TaskStatus
@@ -92,6 +98,12 @@ func NewTaskFromAgent(at agent.Task) *Task {
 		NzbPassword:     at.NzbPassword,
 		ReplacePath:     at.ReplacePath,
 		LibraryItemID:   at.LibraryItemID,
+		ContentType:     at.ContentType,
+		ContentTitle:    at.ContentTitle,
+		ContentYear:     at.ContentYear,
+		Season:          at.Season,
+		Episode:         at.Episode,
+		CollectionName:  at.CollectionName,
 		Mode:            mode,
 		Status:          StatusClaimed,
 		ClaimedAt:       time.Now(),

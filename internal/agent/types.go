@@ -71,6 +71,12 @@ type Task struct {
 	ReplacePath     string `json:"replacePath,omitempty"`    // File to replace after download (upgrade mode)
 	LibraryItemID   int    `json:"libraryItemId,omitempty"`  // Library item being upgraded
 	ForceStart      bool   `json:"forceStart,omitempty"`     // Bypass queue (like Transmission's Force Start)
+	ContentType     string `json:"contentType,omitempty"`    // "movie" | "show" — from server metadata
+	ContentTitle    string `json:"contentTitle,omitempty"`   // Clean title from TMDB (e.g., "Frieren: Beyond Journey's End")
+	Season          *int   `json:"season,omitempty"`         // Season number
+	Episode         *int   `json:"episode,omitempty"`        // Episode number
+	ContentYear     *int   `json:"contentYear,omitempty"`    // Year from TMDB (avoids regex on torrent title)
+	CollectionName  string `json:"collectionName,omitempty"` // Collection name (e.g., "Harry Potter Collection")
 }
 
 // TasksResponse wraps the array of tasks returned by the server.
