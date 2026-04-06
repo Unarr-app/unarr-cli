@@ -316,6 +316,16 @@ func swapHTTPClient(c *http.Client) func() {
 	return func() { httpClient = orig }
 }
 
+// swapCacheDir redirects the version cache to a temp directory to avoid
+// polluting the real ~/.local/share/unarr/latest-version.json during tests.
+func swapCacheDir(t *testing.T) func() {
+	t.Helper()
+	tmpDir := t.TempDir()
+	orig := cacheFilePathFn
+	cacheFilePathFn = func() string { return filepath.Join(tmpDir, "latest-version.json") }
+	return func() { cacheFilePathFn = orig }
+}
+
 // rewriteTransport redirects all requests to the given base URL,
 // preserving path and query.
 type rewriteTransport struct {
@@ -562,6 +572,10 @@ func TestFetchLatestVersionWithHTTPTest(t *testing.T) {
 				Transport: &rewriteTransport{url: srv.URL},
 			})
 			defer restore()
+
+			// Redirect cache to temp dir so tests don't pollute the real cache
+			restoreCache := swapCacheDir(t)
+			defer restoreCache()
 
 			ver, err := CheckLatest(context.Background())
 			if tt.wantErr {

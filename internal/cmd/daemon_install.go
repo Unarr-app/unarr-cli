@@ -22,11 +22,10 @@ Type=simple
 ExecStart={{.BinPath}} start
 Restart=always
 RestartSec=10
-User={{.User}}
 Environment=HOME={{.Home}}
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
 `
 
 const launchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>

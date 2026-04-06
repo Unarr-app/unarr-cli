@@ -18,15 +18,17 @@ type versionCache struct {
 	CheckedAt time.Time `json:"checkedAt"`
 }
 
-// cacheFilePath returns the path to the version cache file.
-func cacheFilePath() string {
+// cacheFilePathFn returns the path to the version cache file.
+// Overridable in tests to avoid polluting the real cache.
+// NOTE: not safe for parallel tests — callers must not use t.Parallel().
+var cacheFilePathFn = func() string {
 	return filepath.Join(config.DataDir(), "latest-version.json")
 }
 
 // ReadCachedVersion returns the cached latest version if it's fresh (< cacheTTL).
 // Returns empty string if cache is missing, stale, or corrupt.
 func ReadCachedVersion() string {
-	data, err := os.ReadFile(cacheFilePath())
+	data, err := os.ReadFile(cacheFilePathFn())
 	if err != nil {
 		return ""
 	}
@@ -50,14 +52,16 @@ func writeCachedVersion(version string) {
 	if err != nil {
 		return
 	}
-	path := cacheFilePath()
+	path := cacheFilePathFn()
 	os.MkdirAll(filepath.Dir(path), 0o755)
 	// Best-effort write — ignore errors
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return
 	}
-	os.Rename(tmp, path)
+	if os.Rename(tmp, path) != nil {
+		os.Remove(tmp)
+	}
 }
 
 // CheckLatestCached returns the latest version, using cache when fresh.
