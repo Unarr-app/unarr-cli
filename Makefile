@@ -1,4 +1,4 @@
-.PHONY: all build test lint coverage clean fmt vet check install-hooks
+.PHONY: all build test lint coverage clean fmt vet check install-hooks changelog release release-patch release-minor release-major release-dry
 
 BINARY = unarr
 SENTRY_DSN ?=
@@ -47,6 +47,29 @@ install-hooks:
 ## Install binary to GOPATH/bin
 install:
 	go install ./cmd/unarr/
+
+## Preview changelog for next release
+changelog:
+	@git-cliff --unreleased --strip header
+
+## Create a release: make release-patch, release-minor, release-major, or release V=0.5.0
+release:
+	@test -n "$(V)" || { echo "Usage: make release V=0.5.0"; exit 1; }
+	@./scripts/release.sh $(V)
+
+release-patch:
+	@./scripts/release.sh patch
+
+release-minor:
+	@./scripts/release.sh minor
+
+release-major:
+	@./scripts/release.sh major
+
+## Preview release without making changes
+release-dry:
+	@test -n "$(V)" || { echo "Usage: make release-dry V=patch|minor|major|0.5.0"; exit 1; }
+	@./scripts/release.sh --dry-run $(V)
 
 ## Remove generated files
 clean:
