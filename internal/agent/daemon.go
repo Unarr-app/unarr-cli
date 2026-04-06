@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -76,6 +78,7 @@ func NewDaemon(cfg DaemonConfig, transport Transport) *Daemon {
 func (d *Daemon) Transport() Transport { return d.transport }
 
 // Register registers the agent and fetches user info + features.
+// Retries with exponential backoff on transient errors (429, 5xx, network).
 func (d *Daemon) Register(ctx context.Context) error {
 	req := RegisterRequest{
 		AgentID:     d.cfg.AgentID,
@@ -90,9 +93,32 @@ func (d *Daemon) Register(ctx context.Context) error {
 		req.DiskTotalBytes = total
 	}
 
-	resp, err := d.transport.Register(ctx, req)
+	const maxRetries = 5
+	backoff := 5 * time.Second
+
+	var resp *RegisterResponse
+	var err error
+	for attempt := range maxRetries {
+		resp, err = d.transport.Register(ctx, req)
+		if err == nil {
+			break
+		}
+		// Only retry on transient errors (429, 5xx, network failures)
+		if !isTransientError(err) {
+			return fmt.Errorf("register: %w", err)
+		}
+		log.Printf("Register failed (attempt %d/%d): %v - retrying in %v", attempt+1, maxRetries, err, backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("register: %w", ctx.Err())
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, 60*time.Second)
+	}
 	if err != nil {
-		return fmt.Errorf("register: %w", err)
+		return fmt.Errorf("register: %w (after %d retries)", err, maxRetries)
 	}
 
 	d.User = resp.User
@@ -118,8 +144,14 @@ func (d *Daemon) Register(ctx context.Context) error {
 	return nil
 }
 
-// Run starts the main daemon loop. Blocks until ctx is cancelled.
+// Run connects the transport, registers the agent, and starts the main loop.
+// Blocks until ctx is cancelled. Callers must NOT call transport.Connect before Run.
 func (d *Daemon) Run(ctx context.Context) error {
+	// Connect transport (establishes WebSocket if available, falls back to HTTP)
+	if err := d.transport.Connect(ctx); err != nil {
+		return fmt.Errorf("connect transport: %w", err)
+	}
+
 	// Register
 	if err := d.Register(ctx); err != nil {
 		return err
@@ -263,6 +295,26 @@ func (d *Daemon) deregister() {
 		log.Println("Agent deregistered")
 	}
 	RemoveState()
+}
+
+// isTransientError returns true for errors worth retrying (429, 5xx, network).
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Structured check: HTTPError carries the status code directly
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == 429 || httpErr.StatusCode >= 500
+	}
+	// Fallback: network-level errors (no HTTP response received)
+	lower := strings.ToLower(err.Error())
+	for _, keyword := range []string{"connection refused", "no such host", "timeout", "request failed"} {
+		if strings.Contains(lower, keyword) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Daemon) poll(ctx context.Context) {

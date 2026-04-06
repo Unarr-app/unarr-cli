@@ -1,6 +1,9 @@
 package agent
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // RegisterRequest is sent by the CLI on startup to register itself.
 type RegisterRequest struct {
@@ -145,6 +148,17 @@ type UpgradeSignal struct {
 type ErrorResponse struct {
 	Error   string `json:"error"`
 	Details any    `json:"details,omitempty"`
+}
+
+// HTTPError represents an HTTP API error with a status code.
+// Use errors.As to extract the status code for retry decisions.
+type HTTPError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
 }
 
 // AgentInfo holds metadata about the running agent for display.

@@ -6,6 +6,7 @@ import "context"
 // Both WebSocket (via CF Durable Object) and HTTP (direct to origin) implement this.
 type Transport interface {
 	// Connect establishes the transport connection.
+	// Called internally by Daemon.Run — callers must NOT call Connect separately.
 	Connect(ctx context.Context) error
 
 	// Close tears down the connection gracefully.
