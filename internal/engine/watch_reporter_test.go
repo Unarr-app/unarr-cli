@@ -104,6 +104,7 @@ func TestStreamServerRangeTracking(t *testing.T) {
 	}
 
 	srv := NewStreamServerFromDisk(tmpFile, 0)
+	srv.disableUPnP = true
 	ctx := context.Background()
 	url, err := srv.Start(ctx)
 	if err != nil {

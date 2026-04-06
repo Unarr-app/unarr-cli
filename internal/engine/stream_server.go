@@ -32,6 +32,7 @@ type StreamServer struct {
 	port          int
 	url           string
 	upnpMapping   *UPnPMapping
+	disableUPnP   bool         // for testing
 	lastActivity  atomic.Int64 // UnixNano of last HTTP request
 	maxByteOffset atomic.Int64 // highest byte offset served (for watch progress estimation)
 	totalFileSize int64        // total file size in bytes (set on Start)
@@ -154,8 +155,20 @@ func (ss *StreamServer) Start(ctx context.Context) (string, error) {
 	}
 
 	ss.port = listener.Addr().(*net.TCPAddr).Port
-	ss.url = fmt.Sprintf("http://%s:%d/stream", reachableIP(), ss.port)
-	log.Printf("stream: serving on %s", ss.url)
+
+	// Try UPnP/NAT-PMP for public internet access (remote downloads)
+	if !ss.disableUPnP {
+		if mapping, err := SetupUPnP(ss.port); err == nil {
+			ss.upnpMapping = mapping
+			ss.url = fmt.Sprintf("http://%s:%d/stream", mapping.ExternalIP, mapping.ExternalPort)
+			log.Printf("stream: UPnP success — public URL: %s", ss.url)
+		} else {
+			log.Printf("stream: UPnP unavailable (%v), falling back to LAN", err)
+			ss.url = fmt.Sprintf("http://%s:%d/stream", reachableIP(), ss.port)
+		}
+	} else {
+		ss.url = fmt.Sprintf("http://%s:%d/stream", reachableIP(), ss.port)
+	}
 
 	ss.server = &http.Server{
 		Handler:           mux,
