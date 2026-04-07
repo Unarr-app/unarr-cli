@@ -304,6 +304,15 @@ func runDaemonStart() error {
 		info, err := os.Stat(filePath)
 		if err != nil {
 			log.Printf("[%s] stream request: file not found: %s", sr.TaskID[:8], filePath)
+			go func() {
+				if _, err := transport.SendProgress(ctx, agent.StatusUpdate{
+					TaskID:       sr.TaskID,
+					Status:       "failed",
+					ErrorMessage: fmt.Sprintf("file not found: %s", filePath),
+				}); err != nil {
+					log.Printf("[%s] stream error report failed: %v", sr.TaskID[:8], err)
+				}
+			}()
 			return
 		}
 
@@ -312,6 +321,15 @@ func runDaemonStart() error {
 			found := engine.FindVideoFile(filePath)
 			if found == "" {
 				log.Printf("[%s] stream request: no video file in directory: %s", sr.TaskID[:8], filePath)
+				go func() {
+					if _, err := transport.SendProgress(ctx, agent.StatusUpdate{
+						TaskID:       sr.TaskID,
+						Status:       "failed",
+						ErrorMessage: fmt.Sprintf("no video file in directory: %s", filePath),
+					}); err != nil {
+						log.Printf("[%s] stream error report failed: %v", sr.TaskID[:8], err)
+					}
+				}()
 				return
 			}
 			filePath = found
@@ -322,6 +340,15 @@ func runDaemonStart() error {
 		streamURL, err := srv.Start(context.Background())
 		if err != nil {
 			log.Printf("[%s] stream failed: %v", sr.TaskID[:8], err)
+			go func() {
+				if _, err := transport.SendProgress(ctx, agent.StatusUpdate{
+					TaskID:       sr.TaskID,
+					Status:       "failed",
+					ErrorMessage: fmt.Sprintf("stream server start failed: %v", err),
+				}); err != nil {
+					log.Printf("[%s] stream error report failed: %v", sr.TaskID[:8], err)
+				}
+			}()
 			return
 		}
 
