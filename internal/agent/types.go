@@ -15,6 +15,9 @@ type RegisterRequest struct {
 	DownloadDir    string `json:"downloadDir,omitempty"`
 	DiskFreeBytes  int64  `json:"diskFreeBytes,omitempty"`
 	DiskTotalBytes int64  `json:"diskTotalBytes,omitempty"`
+	StreamPort     int    `json:"streamPort,omitempty"`
+	LanIP          string `json:"lanIp,omitempty"`
+	TailscaleIP    string `json:"tailscaleIp,omitempty"`
 }
 
 // RegisterResponse is returned by the server after registration.
@@ -51,8 +54,8 @@ type UsenetServerInfo struct {
 type HeartbeatRequest struct {
 	AgentID        string `json:"agentId"`
 	Name           string `json:"name,omitempty"`
-	Version        string `json:"version,omitempty"`
 	OS             string `json:"os,omitempty"`
+	Version        string `json:"version,omitempty"`
 	DownloadDir    string `json:"downloadDir,omitempty"`
 	DiskFreeBytes  int64  `json:"diskFreeBytes,omitempty"`
 	DiskTotalBytes int64  `json:"diskTotalBytes,omitempty"`

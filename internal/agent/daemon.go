@@ -94,6 +94,9 @@ func (d *Daemon) Register(ctx context.Context) error {
 		Arch:        runtime.GOARCH,
 		Version:     d.cfg.Version,
 		DownloadDir: d.cfg.DownloadDir,
+		StreamPort:  d.cfg.StreamPort,
+		LanIP:       d.cfg.LanIP,
+		TailscaleIP: d.cfg.TailscaleIP,
 	}
 	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {
 		req.DiskFreeBytes = free
