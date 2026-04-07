@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,15 @@ import (
 	"github.com/anacrolix/torrent"
 )
 
+// StreamURLs holds all available stream URLs keyed by network type.
+// Serialized as JSON into the stream_url DB field so the web API can
+// pick the best URL based on the browser's IP address.
+type StreamURLs struct {
+	LAN       string `json:"lan,omitempty"`
+	Tailscale string `json:"ts,omitempty"`
+	Public    string `json:"pub,omitempty"`
+}
+
 // fileProvider abstracts where to get a file reader for streaming.
 type fileProvider interface {
 	NewFileReader(ctx context.Context) io.ReadSeekCloser
@@ -30,7 +40,8 @@ type StreamServer struct {
 	provider      fileProvider
 	server        *http.Server
 	port          int
-	url           string
+	url           string     // best single URL (backward compat)
+	urls          StreamURLs // all available URLs by network type
 	upnpMapping   *UPnPMapping
 	disableUPnP   bool         // for testing
 	lastActivity  atomic.Int64 // UnixNano of last HTTP request
@@ -157,18 +168,31 @@ func (ss *StreamServer) Start(ctx context.Context) (string, error) {
 
 	ss.port = listener.Addr().(*net.TCPAddr).Port
 
-	// Try UPnP/NAT-PMP for public internet access (remote downloads)
+	// Collect all reachable URLs by network type
+	if lanIP := lanIP(); lanIP != "" {
+		ss.urls.LAN = fmt.Sprintf("http://%s:%d/stream", lanIP, ss.port)
+	}
+	if tsIP := tailscaleIP(); tsIP != "" {
+		ss.urls.Tailscale = fmt.Sprintf("http://%s:%d/stream", tsIP, ss.port)
+	}
 	if !ss.disableUPnP {
 		if mapping, err := SetupUPnP(ss.port); err == nil {
 			ss.upnpMapping = mapping
-			ss.url = fmt.Sprintf("http://%s:%d/stream", mapping.ExternalIP, mapping.ExternalPort)
-			log.Printf("stream: UPnP success — public URL: %s", ss.url)
-		} else {
-			log.Printf("stream: UPnP unavailable (%v), falling back to LAN", err)
-			ss.url = fmt.Sprintf("http://%s:%d/stream", reachableIP(), ss.port)
+			ss.urls.Public = fmt.Sprintf("http://%s:%d/stream", mapping.ExternalIP, mapping.ExternalPort)
 		}
-	} else {
-		ss.url = fmt.Sprintf("http://%s:%d/stream", reachableIP(), ss.port)
+	}
+
+	// Best single URL for backward compat: Tailscale > LAN > Public > localhost
+	switch {
+	case ss.urls.Tailscale != "":
+		ss.url = ss.urls.Tailscale
+	case ss.urls.LAN != "":
+		ss.url = ss.urls.LAN
+	case ss.urls.Public != "":
+		ss.url = ss.urls.Public
+	default:
+		ss.url = fmt.Sprintf("http://127.0.0.1:%d/stream", ss.port)
+		ss.urls.LAN = ss.url
 	}
 
 	ss.server = &http.Server{
@@ -185,8 +209,16 @@ func (ss *StreamServer) Start(ctx context.Context) (string, error) {
 	return ss.url, nil
 }
 
-// URL returns the full stream URL.
+// URL returns the best single stream URL (backward compat).
 func (ss *StreamServer) URL() string { return ss.url }
+
+// URLsJSON returns all available stream URLs as a JSON string.
+// Stored in the stream_url DB field so the web API can resolve
+// the best URL based on the browser's network.
+func (ss *StreamServer) URLsJSON() string {
+	b, _ := json.Marshal(ss.urls)
+	return string(b)
+}
 
 // Port returns the bound port.
 func (ss *StreamServer) Port() int { return ss.port }
@@ -251,7 +283,12 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("download") == "1" {
 		disposition = "attachment"
 	}
-	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, ss.provider.FileName()))
+	downloadName := ss.provider.FileName()
+	if disposition == "attachment" {
+		ext := filepath.Ext(downloadName)
+		downloadName = strings.TrimSuffix(downloadName, ext) + " [TorrentClaw]" + ext
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, downloadName))
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	http.ServeContent(w, r, ss.provider.FileName(), time.Time{}, reader)
@@ -290,19 +327,11 @@ func parseRangeStart(rangeHeader string) int64 {
 	return start
 }
 
-// reachableIP returns the best IP to use for the stream URL, in priority order:
-//  1. Tailscale IP (100.x.x.x) — accessible from anywhere via Tailscale mesh
-//  2. LAN IP — accessible from local network
-//  3. 127.0.0.1 — fallback (same machine only)
-func reachableIP() string {
-	// 1. Try Tailscale — gives an IP reachable from any device in the tailnet
-	if ip := tailscaleIP(); ip != "" {
-		return ip
-	}
-	// 2. Fall back to LAN IP
+// lanIP returns the machine's LAN IP, or "" if unavailable.
+func lanIP() string {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
-		return "127.0.0.1"
+		return ""
 	}
 	defer conn.Close()
 	return conn.LocalAddr().(*net.UDPAddr).IP.String()

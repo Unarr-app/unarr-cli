@@ -166,9 +166,9 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		streamRegistry.mu.Unlock()
 	}()
 
-	// 5. Report stream URL — the reporter will send this to the web
-	task.StreamURL = streamURL
-	log.Printf("[%s] stream ready: %s", at.ID[:8], streamURL)
+	// 5. Report stream URLs — JSON with all network options for smart resolution
+	task.StreamURL = srv.URLsJSON()
+	log.Printf("[%s] stream ready: %s (primary: %s)", at.ID[:8], task.StreamURL, streamURL)
 
 	// 5b. Start watch progress reporter (tracks Range requests for playback position)
 	if agentClient != nil {
