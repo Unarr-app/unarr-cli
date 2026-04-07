@@ -14,7 +14,9 @@ import (
 	"github.com/torrentclaw/unarr/internal/ui"
 )
 
-// startIdleGuard monitors a stream server and cancels the task after 30 minutes of inactivity.
+const streamIdleTimeout = 30 * time.Minute
+
+// startIdleGuard monitors a stream server and cancels the task after inactivity.
 func startIdleGuard(ctx context.Context, srv *engine.StreamServer, taskID string) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
@@ -23,8 +25,8 @@ func startIdleGuard(ctx context.Context, srv *engine.StreamServer, taskID string
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if srv.IdleSince() > 30*time.Minute {
-				log.Printf("[%s] stream idle timeout (30m no HTTP requests), shutting down", taskID[:8])
+			if srv.IdleSince() > streamIdleTimeout {
+				log.Printf("[%s] stream idle timeout (%v no HTTP requests), shutting down", taskID[:8], streamIdleTimeout)
 				cancelStreamTask(taskID)
 				return
 			}
@@ -45,29 +47,50 @@ var streamRegistry = struct {
 // cancelAllStreams cancels all active stream tasks and servers (only 1 stream at a time).
 func cancelAllStreams() {
 	streamRegistry.mu.Lock()
-	for taskID, cancel := range streamRegistry.cancels {
-		cancel()
-		delete(streamRegistry.cancels, taskID)
+	cancels := make(map[string]context.CancelFunc, len(streamRegistry.cancels))
+	for k, v := range streamRegistry.cancels {
+		cancels[k] = v
+		delete(streamRegistry.cancels, k)
 	}
-	for taskID, srv := range streamRegistry.servers {
-		srv.Shutdown(context.Background())
-		delete(streamRegistry.servers, taskID)
+	servers := make(map[string]*engine.StreamServer, len(streamRegistry.servers))
+	for k, v := range streamRegistry.servers {
+		servers[k] = v
+		delete(streamRegistry.servers, k)
 	}
 	streamRegistry.mu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+	for _, srv := range servers {
+		srv.Shutdown(context.Background())
+	}
+}
+
+// isStreamingTask returns true if there is an active stream (goroutine or server) for the given task.
+func isStreamingTask(taskID string) bool {
+	streamRegistry.mu.Lock()
+	defer streamRegistry.mu.Unlock()
+	_, inCancels := streamRegistry.cancels[taskID]
+	_, inServers := streamRegistry.servers[taskID]
+	return inCancels || inServers
 }
 
 // cancelStreamTask cancels a running stream task and shuts down any stream server.
 func cancelStreamTask(taskID string) {
 	streamRegistry.mu.Lock()
-	if cancel, ok := streamRegistry.cancels[taskID]; ok {
-		cancel()
-		delete(streamRegistry.cancels, taskID)
-	}
-	if srv, ok := streamRegistry.servers[taskID]; ok {
-		srv.Shutdown(context.Background())
-		delete(streamRegistry.servers, taskID)
-	}
+	cancel, hasCancel := streamRegistry.cancels[taskID]
+	delete(streamRegistry.cancels, taskID)
+	srv, hasSrv := streamRegistry.servers[taskID]
+	delete(streamRegistry.servers, taskID)
 	streamRegistry.mu.Unlock()
+
+	if hasCancel {
+		cancel()
+	}
+	if hasSrv {
+		srv.Shutdown(context.Background())
+	}
 }
 
 // handleStreamTask manages a streaming task lifecycle outside the Manager.
@@ -133,7 +156,15 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		task.Transition(engine.StatusFailed)
 		return
 	}
-	defer srv.Shutdown(context.Background())
+	streamRegistry.mu.Lock()
+	streamRegistry.servers[at.ID] = srv
+	streamRegistry.mu.Unlock()
+	defer func() {
+		srv.Shutdown(context.Background())
+		streamRegistry.mu.Lock()
+		delete(streamRegistry.servers, at.ID)
+		streamRegistry.mu.Unlock()
+	}()
 
 	// 5. Report stream URL — the reporter will send this to the web
 	task.StreamURL = streamURL

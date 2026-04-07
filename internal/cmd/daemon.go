@@ -284,9 +284,19 @@ func runDaemonStart() error {
 	d.OnTasksClaimed = func(tasks []agent.Task) {
 		for _, t := range tasks {
 			if t.Mode == "stream" {
+				// Skip if already streaming this task
+				if isStreamingTask(t.ID) {
+					continue
+				}
 				// Only 1 stream at a time: cancel all existing streams
 				cancelAllStreams()
-				go handleStreamTask(ctx, t, reporter, cfg, agentClient)
+				// Reserve slot before spawning goroutine to prevent TOCTOU race.
+				// streamCancel is stored in streamRegistry and called by cancelAllStreams/cancelStreamTask.
+				streamCtx, streamCancel := context.WithCancel(ctx) //nolint:gosec // G118: cancel ownership transferred to streamRegistry
+				streamRegistry.mu.Lock()
+				streamRegistry.cancels[t.ID] = streamCancel
+				streamRegistry.mu.Unlock()
+				go handleStreamTask(streamCtx, t, reporter, cfg, agentClient)
 			} else if t.ForceStart || manager.HasCapacity() {
 				manager.Submit(ctx, t)
 			} else {
@@ -297,6 +307,11 @@ func runDaemonStart() error {
 
 	// Wire: stream requests for completed downloads → serve file from disk
 	d.OnStreamRequested = func(sr agent.StreamRequest) {
+		// Skip if already streaming this task
+		if isStreamingTask(sr.TaskID) {
+			return
+		}
+
 		// Only 1 stream at a time: cancel all existing streams
 		cancelAllStreams()
 
@@ -337,7 +352,7 @@ func runDaemonStart() error {
 		}
 
 		srv := engine.NewStreamServerFromDisk(filePath, cfg.Download.StreamPort)
-		streamURL, err := srv.Start(context.Background())
+		streamURL, err := srv.Start(ctx)
 		if err != nil {
 			log.Printf("[%s] stream failed: %v", sr.TaskID[:8], err)
 			go func() {
@@ -388,20 +403,16 @@ func runDaemonStart() error {
 			log.Printf("[%s] resume requested via WebSocket, triggering poll", taskID[:8])
 			d.TriggerPoll()
 		case "stream":
-			// Only 1 stream at a time: cancel all existing streams
-			cancelAllStreams()
-			// Use registry mutex to prevent TOCTOU race with HTTP-polled stream requests
-			streamRegistry.mu.Lock()
-			if _, exists := streamRegistry.servers[taskID]; exists {
-				streamRegistry.mu.Unlock()
+			// Skip if already streaming this task
+			if isStreamingTask(taskID) {
 				return
 			}
 			task := manager.GetTask(taskID)
 			if task == nil || task.GetStreamURL() != "" {
-				streamRegistry.mu.Unlock()
 				return
 			}
-			streamRegistry.mu.Unlock()
+			// Only 1 stream at a time: cancel all existing streams
+			cancelAllStreams()
 			srv, err := torrentDl.StartStream(taskID)
 			if err != nil {
 				log.Printf("[%s] stream failed: %v", taskID[:8], err)

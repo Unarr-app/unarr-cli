@@ -96,6 +96,7 @@ func (p *diskFileProvider) FileName() string { return p.name }
 func (p *diskFileProvider) FileSize() int64 {
 	fi, err := os.Stat(p.path)
 	if err != nil {
+		log.Printf("stream: failed to stat %q: %v", p.path, err)
 		return 0
 	}
 	return fi.Size()
@@ -244,6 +245,14 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 	defer reader.Close()
 
 	w.Header().Set("Content-Type", mimeTypeFromExt(ss.provider.FileName()))
+	// "inline" for play requests (VLC/mpv), "attachment" for download requests.
+	// Browser download via window.open() relies on "attachment" to trigger save dialog.
+	disposition := "inline"
+	if r.URL.Query().Get("download") == "1" {
+		disposition = "attachment"
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, ss.provider.FileName()))
+	w.Header().Set("Accept-Ranges", "bytes")
 
 	http.ServeContent(w, r, ss.provider.FileName(), time.Time{}, reader)
 }
