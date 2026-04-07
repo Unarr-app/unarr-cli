@@ -5,12 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-04-07
+
+
+### Added
+
+- **agent**: send stream port and IPs in register request
+- **stream**: report duration and position in watch progress
+- **stream**: trackingReader with byte-based progress and rate limiting
+
+### Fixed
+
+- **daemon**: cancel watch reporter on stream switch and re-notify ready
 ## [0.5.4] - 2026-04-07
 
 
 ### Fixed
 
 - **stream**: use platform-specific socket options for Windows cross-compilation
+
+### Other
+
+- **release**: 0.5.4
 ## [0.5.3] - 2026-04-07
 
 
@@ -137,6 +153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - remove UPX compression (antivirus false positives, startup penalty)
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[0.5.5]: https://github.com/torrentclaw/unarr/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/torrentclaw/unarr/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/torrentclaw/unarr/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/torrentclaw/unarr/compare/v0.5.1...v0.5.2
