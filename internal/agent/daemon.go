@@ -20,6 +20,9 @@ type DaemonConfig struct {
 	DownloadDir       string
 	PollInterval      time.Duration
 	HeartbeatInterval time.Duration
+	StreamPort        int    // port for the HTTP stream server (reported in heartbeat)
+	LanIP             string // LAN IP (reported in heartbeat for stream URL resolution)
+	TailscaleIP       string // Tailscale IP (reported in heartbeat for stream URL resolution)
 }
 
 // Daemon manages the main loop: register, heartbeat, poll tasks.
@@ -211,6 +214,9 @@ func (d *Daemon) heartbeat(ctx context.Context) {
 		Version:     d.cfg.Version,
 		OS:          runtime.GOOS,
 		DownloadDir: d.cfg.DownloadDir,
+		StreamPort:  d.cfg.StreamPort,
+		LanIP:       d.cfg.LanIP,
+		TailscaleIP: d.cfg.TailscaleIP,
 	}
 	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {
 		req.DiskFreeBytes = free
@@ -295,6 +301,12 @@ func (d *Daemon) handleEvent(event ServerEvent) {
 	case "disconnected":
 		log.Println("WebSocket disconnected, switching to HTTP polling")
 	}
+}
+
+// UpdateStreamPort updates the stream port reported in heartbeats.
+// Called after the persistent stream server binds (actual port may differ from configured).
+func (d *Daemon) UpdateStreamPort(port int) {
+	d.cfg.StreamPort = port
 }
 
 // TriggerPoll requests an immediate task poll cycle.

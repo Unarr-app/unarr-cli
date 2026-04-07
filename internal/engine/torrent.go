@@ -502,10 +502,9 @@ func (d *TorrentDownloader) SaveDhtNodes() {
 	saveDhtNodesBinary(d.client)
 }
 
-// StartStream starts an HTTP server for an active torrent download.
-// It selects the largest video file and serves it via HTTP Range requests.
-// Returns the running server (caller is responsible for shutdown).
-func (d *TorrentDownloader) StartStream(taskID string) (*StreamServer, error) {
+// GetStreamProvider returns a FileProvider for the largest video file in an active torrent.
+// Used with the persistent StreamServer's SetFile() method.
+func (d *TorrentDownloader) GetStreamProvider(taskID string) (FileProvider, error) {
 	d.activeMu.Lock()
 	t, ok := d.active[taskID]
 	d.activeMu.Unlock()
@@ -535,14 +534,7 @@ func (d *TorrentDownloader) StartStream(taskID string) (*StreamServer, error) {
 		return nil, fmt.Errorf("torrent has no files")
 	}
 
-	srv := NewStreamServerFromFile(video, 0)
-	url, err := srv.Start(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("start stream server: %w", err)
-	}
-
-	log.Printf("[%s] stream started: %s → %s", taskID[:8], filepath.Base(video.DisplayPath()), url)
-	return srv, nil
+	return NewTorrentFileProvider(video), nil
 }
 
 // VideoExts is the canonical set of video file extensions used for file selection.

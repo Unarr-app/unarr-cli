@@ -13,7 +13,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -28,151 +30,83 @@ type StreamURLs struct {
 	Public    string `json:"pub,omitempty"`
 }
 
-// fileProvider abstracts where to get a file reader for streaming.
-type fileProvider interface {
+// FileProvider abstracts where to get a file reader for streaming.
+type FileProvider interface {
 	NewFileReader(ctx context.Context) io.ReadSeekCloser
 	FileName() string
 	FileSize() int64
 }
 
-// StreamServer serves a torrent file over HTTP with Range request support.
+// StreamServer is a persistent HTTP server that serves one file at a time.
+// Start it once with Listen(), then swap files with SetFile()/ClearFile().
+// The server stays alive for the entire daemon lifecycle — no port churn.
 type StreamServer struct {
-	provider      fileProvider
-	server        *http.Server
-	port          int
-	url           string     // best single URL (backward compat)
-	urls          StreamURLs // all available URLs by network type
-	upnpMapping   *UPnPMapping
-	disableUPnP   bool         // for testing
-	lastActivity  atomic.Int64 // UnixNano of last HTTP request
-	maxByteOffset atomic.Int64 // highest byte offset served (for watch progress estimation)
-	totalFileSize int64        // total file size in bytes (set on Start)
+	mu       sync.RWMutex
+	provider FileProvider
+	taskID   string // current task being streamed
+
+	server      *http.Server
+	port        int
+	url         string     // best single URL (backward compat)
+	urls        StreamURLs // all available URLs by network type
+	upnpMapping *UPnPMapping
+	disableUPnP bool
+
+	lastActivity  atomic.Int64
+	maxByteOffset atomic.Int64
+	totalFileSize atomic.Int64
 }
 
-// NewStreamServer creates a new HTTP server for streaming via StreamEngine.
-func NewStreamServer(engine *StreamEngine, port int) *StreamServer {
-	return &StreamServer{
-		provider: engine,
-		port:     port,
-	}
+// NewStreamServer creates a stream server bound to the given port.
+// Call Listen() to start accepting connections, then SetFile() to serve content.
+func NewStreamServer(port int) *StreamServer {
+	return &StreamServer{port: port}
 }
 
-// NewStreamServerFromFile creates a server that streams directly from a torrent.File.
-// Used for streaming an active download without a separate StreamEngine.
-func NewStreamServerFromFile(file *torrent.File, port int) *StreamServer {
-	return &StreamServer{
-		provider: &torrentFileProvider{file: file},
-		port:     port,
-	}
-}
-
-// torrentFileProvider wraps a torrent.File to implement fileProvider.
-type torrentFileProvider struct {
-	file *torrent.File
-}
-
-func (p *torrentFileProvider) NewFileReader(ctx context.Context) io.ReadSeekCloser {
-	reader := p.file.NewReader()
-	reader.SetResponsive()
-	reader.SetReadahead(5 * 1024 * 1024)
-	reader.SetContext(ctx)
-	return reader
-}
-
-func (p *torrentFileProvider) FileName() string {
-	return filepath.Base(p.file.DisplayPath())
-}
-
-func (p *torrentFileProvider) FileSize() int64 {
-	return p.file.Length()
-}
-
-// diskFileProvider serves a file from disk.
-type diskFileProvider struct {
-	path string
-	name string
-}
-
-func (p *diskFileProvider) NewFileReader(_ context.Context) io.ReadSeekCloser {
-	f, err := os.Open(p.path)
-	if err != nil {
-		log.Printf("stream: failed to open %q: %v", p.path, err)
-		return nil
-	}
-	return f
-}
-
-func (p *diskFileProvider) FileName() string { return p.name }
-
-func (p *diskFileProvider) FileSize() int64 {
-	fi, err := os.Stat(p.path)
-	if err != nil {
-		log.Printf("stream: failed to stat %q: %v", p.path, err)
-		return 0
-	}
-	return fi.Size()
-}
-
-// NewStreamServerFromDisk creates a server that streams a file from disk.
-func NewStreamServerFromDisk(filePath string, port int) *StreamServer {
-	return &StreamServer{
-		provider: &diskFileProvider{
-			path: filePath,
-			name: filepath.Base(filePath),
-		},
-		port: port,
-	}
-}
-
-// FindVideoFile scans a directory (recursively) for the largest video file.
-// Returns empty string if no video file found.
-func FindVideoFile(dir string) string {
-	var best string
-	var bestSize int64
-
-	filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if !VideoExts[ext] {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		if info.Size() > bestSize {
-			best = path
-			bestSize = info.Size()
-		}
-		return nil
-	})
-	return best
-}
-
-// Start begins serving the file on all interfaces. Returns the best reachable URL.
-// The file is served as-is — the user's media player (VLC, mpv, etc.) handles decoding.
-func (ss *StreamServer) Start(ctx context.Context) (string, error) {
-	ss.lastActivity.Store(time.Now().UnixNano())
-	ss.totalFileSize = ss.provider.FileSize()
-
+// Listen starts the HTTP server on the configured port. Call once at daemon startup.
+func (ss *StreamServer) Listen(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stream", ss.handler)
 
-	addr := fmt.Sprintf("0.0.0.0:%d", ss.port)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return "", fmt.Errorf("listen on %s: %w", addr, err)
+	// SO_REUSEADDR allows immediate rebind if the port is in TIME_WAIT (e.g. after agent restart)
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+			})
+		},
+	}
+
+	// Try configured port; if busy, try next ports (heartbeat reports actual port to web)
+	var listener net.Listener
+	var listenErr error
+	basePort := ss.port
+	for attempt := 0; attempt < 10; attempt++ {
+		addr := fmt.Sprintf("0.0.0.0:%d", ss.port)
+		listener, listenErr = lc.Listen(ctx, "tcp", addr)
+		if listenErr == nil {
+			break
+		}
+		if !strings.Contains(listenErr.Error(), "address already in use") {
+			return fmt.Errorf("stream server listen on %s: %w", addr, listenErr)
+		}
+		ss.port++
+		log.Printf("[stream] port %d in use, trying %d", ss.port-1, ss.port)
+	}
+	if listenErr != nil {
+		return fmt.Errorf("stream server: all ports busy (%d-%d): %w", basePort, ss.port, listenErr)
+	}
+	if ss.port != basePort {
+		log.Printf("[stream] using port %d (configured %d was busy)", ss.port, basePort)
 	}
 
 	ss.port = listener.Addr().(*net.TCPAddr).Port
 
 	// Collect all reachable URLs by network type
-	if lanIP := lanIP(); lanIP != "" {
+	if lanIP := LanIP(); lanIP != "" {
 		ss.urls.LAN = fmt.Sprintf("http://%s:%d/stream", lanIP, ss.port)
 	}
-	if tsIP := tailscaleIP(); tsIP != "" {
+	if tsIP := TailscaleIP(); tsIP != "" {
 		ss.urls.Tailscale = fmt.Sprintf("http://%s:%d/stream", tsIP, ss.port)
 	}
 	if !ss.disableUPnP {
@@ -206,15 +140,49 @@ func (ss *StreamServer) Start(ctx context.Context) (string, error) {
 		}
 	}()
 
-	return ss.url, nil
+	log.Printf("[stream] server listening on port %d", ss.port)
+	return nil
+}
+
+// SetFile atomically swaps the file being served and resets progress tracking.
+func (ss *StreamServer) SetFile(provider FileProvider, taskID string) {
+	ss.mu.Lock()
+	ss.provider = provider
+	ss.taskID = taskID
+	ss.mu.Unlock()
+	ss.totalFileSize.Store(provider.FileSize())
+	ss.lastActivity.Store(time.Now().UnixNano())
+	ss.maxByteOffset.Store(0)
+}
+
+// ClearFile stops serving any file. Subsequent requests return 404.
+func (ss *StreamServer) ClearFile() {
+	ss.mu.Lock()
+	ss.provider = nil
+	ss.taskID = ""
+	ss.mu.Unlock()
+	ss.totalFileSize.Store(0)
+	ss.maxByteOffset.Store(0)
+}
+
+// CurrentTaskID returns the task ID of the file currently being served.
+func (ss *StreamServer) CurrentTaskID() string {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	return ss.taskID
+}
+
+// HasFile returns true if a file is currently being served.
+func (ss *StreamServer) HasFile() bool {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	return ss.provider != nil
 }
 
 // URL returns the best single stream URL (backward compat).
 func (ss *StreamServer) URL() string { return ss.url }
 
 // URLsJSON returns all available stream URLs as a JSON string.
-// Stored in the stream_url DB field so the web API can resolve
-// the best URL based on the browser's network.
 func (ss *StreamServer) URLsJSON() string {
 	b, _ := json.Marshal(ss.urls)
 	return string(b)
@@ -233,6 +201,7 @@ func (ss *StreamServer) IdleSince() time.Duration {
 }
 
 // Shutdown gracefully stops the HTTP server and removes the UPnP port mapping.
+// Call only at daemon shutdown — NOT between file swaps.
 func (ss *StreamServer) Shutdown(ctx context.Context) error {
 	ss.upnpMapping.Remove()
 	if ss.server != nil {
@@ -256,6 +225,16 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Get current provider (may be nil if no file is being served)
+	ss.mu.RLock()
+	provider := ss.provider
+	ss.mu.RUnlock()
+
+	if provider == nil {
+		http.Error(w, "no active stream", http.StatusNotFound)
+		return
+	}
+
 	// CORS headers — only when browser sends Origin (HTTPS site → localhost)
 	if origin := r.Header.Get("Origin"); origin != "" {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -269,21 +248,20 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	reader := ss.provider.NewFileReader(r.Context())
+	reader := provider.NewFileReader(r.Context())
 	if reader == nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
 	}
 	defer reader.Close()
 
-	w.Header().Set("Content-Type", mimeTypeFromExt(ss.provider.FileName()))
+	w.Header().Set("Content-Type", mimeTypeFromExt(provider.FileName()))
 	// "inline" for play requests (VLC/mpv), "attachment" for download requests.
-	// Browser download via window.open() relies on "attachment" to trigger save dialog.
 	disposition := "inline"
 	if r.URL.Query().Get("download") == "1" {
 		disposition = "attachment"
 	}
-	downloadName := ss.provider.FileName()
+	downloadName := provider.FileName()
 	if disposition == "attachment" {
 		ext := filepath.Ext(downloadName)
 		downloadName = strings.TrimSuffix(downloadName, ext) + " [TorrentClaw]" + ext
@@ -291,13 +269,12 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, downloadName))
 	w.Header().Set("Accept-Ranges", "bytes")
 
-	http.ServeContent(w, r, ss.provider.FileName(), time.Time{}, reader)
+	http.ServeContent(w, r, provider.FileName(), time.Time{}, reader)
 }
 
 // EstimatedProgress returns an estimated watch progress based on HTTP Range requests.
-// Returns (position, duration) where both are 0-100 scale (percentage-based).
 func (ss *StreamServer) EstimatedProgress() (position int, duration int) {
-	total := ss.totalFileSize
+	total := ss.totalFileSize.Load()
 	if total <= 0 {
 		return 0, 0
 	}
@@ -311,7 +288,6 @@ func (ss *StreamServer) EstimatedProgress() (position int, duration int) {
 
 // parseRangeStart extracts the start byte from a "Range: bytes=START-" header.
 func parseRangeStart(rangeHeader string) int64 {
-	// Format: "bytes=START-" or "bytes=START-END"
 	after, found := strings.CutPrefix(rangeHeader, "bytes=")
 	if !found {
 		return -1
@@ -327,8 +303,98 @@ func parseRangeStart(rangeHeader string) int64 {
 	return start
 }
 
-// lanIP returns the machine's LAN IP, or "" if unavailable.
-func lanIP() string {
+// --- File Providers ---
+
+// NewDiskFileProvider creates a FileProvider that serves a file from disk.
+func NewDiskFileProvider(filePath string) FileProvider {
+	return &diskFileProvider{
+		path: filePath,
+		name: filepath.Base(filePath),
+	}
+}
+
+// diskFileProvider serves a file from disk.
+type diskFileProvider struct {
+	path string
+	name string
+}
+
+func (p *diskFileProvider) NewFileReader(_ context.Context) io.ReadSeekCloser {
+	f, err := os.Open(p.path)
+	if err != nil {
+		log.Printf("stream: failed to open %q: %v", p.path, err)
+		return nil
+	}
+	return f
+}
+
+func (p *diskFileProvider) FileName() string { return p.name }
+
+func (p *diskFileProvider) FileSize() int64 {
+	fi, err := os.Stat(p.path)
+	if err != nil {
+		log.Printf("stream: failed to stat %q: %v", p.path, err)
+		return 0
+	}
+	return fi.Size()
+}
+
+// NewTorrentFileProvider creates a FileProvider from an active torrent file.
+func NewTorrentFileProvider(file *torrent.File) FileProvider {
+	return &torrentFileProvider{file: file}
+}
+
+// torrentFileProvider wraps a torrent.File to implement FileProvider.
+type torrentFileProvider struct {
+	file *torrent.File
+}
+
+func (p *torrentFileProvider) NewFileReader(ctx context.Context) io.ReadSeekCloser {
+	reader := p.file.NewReader()
+	reader.SetResponsive()
+	reader.SetReadahead(5 * 1024 * 1024)
+	reader.SetContext(ctx)
+	return reader
+}
+
+func (p *torrentFileProvider) FileName() string {
+	return filepath.Base(p.file.DisplayPath())
+}
+
+func (p *torrentFileProvider) FileSize() int64 {
+	return p.file.Length()
+}
+
+// --- Utility functions ---
+
+// FindVideoFile scans a directory (recursively) for the largest video file.
+func FindVideoFile(dir string) string {
+	var best string
+	var bestSize int64
+
+	filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		if !VideoExts[ext] {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if info.Size() > bestSize {
+			best = path
+			bestSize = info.Size()
+		}
+		return nil
+	})
+	return best
+}
+
+// LanIP returns the machine's LAN IP, or "" if unavailable.
+func LanIP() string {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
 		return ""
@@ -337,8 +403,8 @@ func lanIP() string {
 	return conn.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
-// tailscaleIP returns the Tailscale IPv4 address, or "" if Tailscale isn't running.
-func tailscaleIP() string {
+// TailscaleIP returns the Tailscale IPv4 address, or "" if Tailscale isn't running.
+func TailscaleIP() string {
 	out, err := exec.Command("tailscale", "ip", "-4").Output()
 	if err != nil {
 		return ""

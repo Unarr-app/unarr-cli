@@ -189,15 +189,27 @@ func TestStreamServerStartShutdown(t *testing.T) {
 		totalBytes: 1024,
 	}
 
-	srv := NewStreamServer(s, 0)
+	srv := NewStreamServer(0)
 	if srv.Port() != 0 {
 		t.Errorf("initial port should be 0, got %d", srv.Port())
 	}
 
-	// We can't Start() because NewFileReader needs a real torrent File
-	// But we can test that Shutdown on an un-started server doesn't panic
+	// Test that Shutdown on an un-started server doesn't panic
 	if err := srv.Shutdown(context.Background()); err != nil {
 		t.Errorf("shutdown of un-started server should not error: %v", err)
+	}
+
+	// Test SetFile/ClearFile
+	srv.SetFile(s, "test-task-id")
+	if !srv.HasFile() {
+		t.Error("HasFile should be true after SetFile")
+	}
+	if srv.CurrentTaskID() != "test-task-id" {
+		t.Errorf("CurrentTaskID = %q, want %q", srv.CurrentTaskID(), "test-task-id")
+	}
+	srv.ClearFile()
+	if srv.HasFile() {
+		t.Error("HasFile should be false after ClearFile")
 	}
 }
 

@@ -47,7 +47,8 @@ func TestEstimatedProgress_NoFile(t *testing.T) {
 }
 
 func TestEstimatedProgress_HalfWay(t *testing.T) {
-	ss := &StreamServer{totalFileSize: 1000}
+	ss := &StreamServer{}
+	ss.totalFileSize.Store(1000)
 	ss.maxByteOffset.Store(500)
 
 	pos, dur := ss.EstimatedProgress()
@@ -57,7 +58,8 @@ func TestEstimatedProgress_HalfWay(t *testing.T) {
 }
 
 func TestEstimatedProgress_CapsAt100(t *testing.T) {
-	ss := &StreamServer{totalFileSize: 1000}
+	ss := &StreamServer{}
+	ss.totalFileSize.Store(1000)
 	ss.maxByteOffset.Store(1500)
 
 	pos, dur := ss.EstimatedProgress()
@@ -71,7 +73,8 @@ func TestEstimatedProgress_CapsAt100(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMaxByteOffsetNeverRegresses(t *testing.T) {
-	ss := &StreamServer{totalFileSize: 10000}
+	ss := &StreamServer{}
+	ss.totalFileSize.Store(10000)
 
 	offsets := []int64{0, 2000, 5000, 3000, 8000, 4000}
 	for _, off := range offsets {
@@ -103,14 +106,15 @@ func TestStreamServerRangeTracking(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := NewStreamServerFromDisk(tmpFile, 0)
+	srv := NewStreamServer(0)
 	srv.disableUPnP = true
 	ctx := context.Background()
-	url, err := srv.Start(ctx)
-	if err != nil {
-		t.Fatalf("start: %v", err)
+	if err := srv.Listen(ctx); err != nil {
+		t.Fatalf("listen: %v", err)
 	}
 	defer srv.Shutdown(ctx)
+	srv.SetFile(NewDiskFileProvider(tmpFile), "test-task")
+	url := srv.URL()
 
 	// 1. Non-range GET — maxByteOffset stays 0
 	resp, err := http.Get(url)

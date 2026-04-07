@@ -178,6 +178,7 @@ func (t *WSTransport) SendProgress(_ context.Context, update StatusUpdate) (*Sta
 		FileName        string `json:"fileName,omitempty"`
 		FilePath        string `json:"filePath,omitempty"`
 		StreamURL       string `json:"streamUrl,omitempty"`
+		StreamReady     bool   `json:"streamReady,omitempty"`
 		ErrorMessage    string `json:"errorMessage,omitempty"`
 	}{
 		Type:            "progress",
@@ -192,6 +193,7 @@ func (t *WSTransport) SendProgress(_ context.Context, update StatusUpdate) (*Sta
 		FileName:        update.FileName,
 		FilePath:        update.FilePath,
 		StreamURL:       update.StreamURL,
+		StreamReady:     update.StreamReady,
 		ErrorMessage:    update.ErrorMessage,
 	}
 

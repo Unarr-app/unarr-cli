@@ -56,6 +56,9 @@ type HeartbeatRequest struct {
 	DownloadDir    string `json:"downloadDir,omitempty"`
 	DiskFreeBytes  int64  `json:"diskFreeBytes,omitempty"`
 	DiskTotalBytes int64  `json:"diskTotalBytes,omitempty"`
+	StreamPort     int    `json:"streamPort,omitempty"`
+	LanIP          string `json:"lanIp,omitempty"`
+	TailscaleIP    string `json:"tailscaleIp,omitempty"`
 }
 
 // Task represents a download task claimed from the server.
@@ -107,6 +110,7 @@ type StatusUpdate struct {
 	FileName        string `json:"fileName,omitempty"`
 	FilePath        string `json:"filePath,omitempty"`
 	StreamURL       string `json:"streamUrl,omitempty"`
+	StreamReady     bool   `json:"streamReady,omitempty"`
 	ErrorMessage    string `json:"errorMessage,omitempty"`
 }
 

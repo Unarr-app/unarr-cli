@@ -16,8 +16,8 @@ import (
 
 const streamIdleTimeout = 30 * time.Minute
 
-// startIdleGuard monitors a stream server and cancels the task after inactivity.
-func startIdleGuard(ctx context.Context, srv *engine.StreamServer, taskID string) {
+// startIdleGuard monitors the persistent stream server and clears the file after inactivity.
+func startIdleGuard(ctx context.Context, srv *engine.StreamServer) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -25,78 +25,69 @@ func startIdleGuard(ctx context.Context, srv *engine.StreamServer, taskID string
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if srv.IdleSince() > streamIdleTimeout {
-				log.Printf("[%s] stream idle timeout (%v no HTTP requests), shutting down", taskID[:8], streamIdleTimeout)
-				cancelStreamTask(taskID)
-				return
+			if srv.HasFile() && srv.IdleSince() > streamIdleTimeout {
+				taskID := srv.CurrentTaskID()
+				short := taskID
+				if len(short) > 8 {
+					short = short[:8]
+				}
+				log.Printf("[%s] stream idle timeout (%v no HTTP requests), clearing file", short, streamIdleTimeout)
+				cancelStreamContexts()
+				srv.ClearFile()
 			}
 		}
 	}
 }
 
-// streamRegistry tracks active stream tasks and servers for cancellation.
+// streamRegistry tracks active stream goroutine contexts for cancellation.
+// There is only ONE persistent StreamServer — no per-task servers.
 var streamRegistry = struct {
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
-	servers map[string]*engine.StreamServer // servers for active download streams
 }{
 	cancels: make(map[string]context.CancelFunc),
-	servers: make(map[string]*engine.StreamServer),
 }
 
-// cancelAllStreams cancels all active stream tasks and servers (only 1 stream at a time).
-func cancelAllStreams() {
+// cancelStreamContexts cancels all active stream goroutines (download engines, etc.).
+// Does NOT touch the persistent server — call srv.ClearFile() separately if needed.
+func cancelStreamContexts() {
 	streamRegistry.mu.Lock()
 	cancels := make(map[string]context.CancelFunc, len(streamRegistry.cancels))
 	for k, v := range streamRegistry.cancels {
 		cancels[k] = v
 		delete(streamRegistry.cancels, k)
 	}
-	servers := make(map[string]*engine.StreamServer, len(streamRegistry.servers))
-	for k, v := range streamRegistry.servers {
-		servers[k] = v
-		delete(streamRegistry.servers, k)
-	}
 	streamRegistry.mu.Unlock()
 
 	for _, cancel := range cancels {
 		cancel()
 	}
-	for _, srv := range servers {
-		srv.Shutdown(context.Background())
-	}
 }
 
-// isStreamingTask returns true if there is an active stream (goroutine or server) for the given task.
+// isStreamingTask returns true if there is an active stream goroutine for the given task.
 func isStreamingTask(taskID string) bool {
 	streamRegistry.mu.Lock()
 	defer streamRegistry.mu.Unlock()
-	_, inCancels := streamRegistry.cancels[taskID]
-	_, inServers := streamRegistry.servers[taskID]
-	return inCancels || inServers
+	_, ok := streamRegistry.cancels[taskID]
+	return ok
 }
 
-// cancelStreamTask cancels a running stream task and shuts down any stream server.
+// cancelStreamTask cancels a specific stream goroutine.
 func cancelStreamTask(taskID string) {
 	streamRegistry.mu.Lock()
-	cancel, hasCancel := streamRegistry.cancels[taskID]
+	cancel, ok := streamRegistry.cancels[taskID]
 	delete(streamRegistry.cancels, taskID)
-	srv, hasSrv := streamRegistry.servers[taskID]
-	delete(streamRegistry.servers, taskID)
 	streamRegistry.mu.Unlock()
 
-	if hasCancel {
+	if ok {
 		cancel()
-	}
-	if hasSrv {
-		srv.Shutdown(context.Background())
 	}
 }
 
-// handleStreamTask manages a streaming task lifecycle outside the Manager.
-// It creates a StreamEngine, buffers, starts an HTTP server, and reports
-// progress until the task is cancelled or the download completes.
-func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client) {
+// handleStreamTask manages a streaming task lifecycle for active torrent downloads.
+// It creates a StreamEngine, buffers, sets the file on the persistent server,
+// and reports progress until the task is cancelled or the download completes.
+func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client, srv *engine.StreamServer) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
@@ -108,6 +99,10 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		streamRegistry.mu.Lock()
 		delete(streamRegistry.cancels, at.ID)
 		streamRegistry.mu.Unlock()
+		// Clear file from persistent server if we're still the current task
+		if srv.CurrentTaskID() == at.ID {
+			srv.ClearFile()
+		}
 	}()
 
 	task := engine.NewTaskFromAgent(at)
@@ -148,36 +143,18 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		return
 	}
 
-	// 4. Start HTTP server
-	srv := engine.NewStreamServer(eng, cfg.Download.StreamPort)
-	streamURL, err := srv.Start(ctx)
-	if err != nil {
-		task.ErrorMessage = "start HTTP server: " + err.Error()
-		task.Transition(engine.StatusFailed)
-		return
-	}
-	streamRegistry.mu.Lock()
-	streamRegistry.servers[at.ID] = srv
-	streamRegistry.mu.Unlock()
-	defer func() {
-		srv.Shutdown(context.Background())
-		streamRegistry.mu.Lock()
-		delete(streamRegistry.servers, at.ID)
-		streamRegistry.mu.Unlock()
-	}()
-
-	// 5. Report stream URLs — JSON with all network options for smart resolution
+	// 4. Set file on the persistent stream server (instant, no port binding)
+	srv.SetFile(eng, at.ID)
 	task.StreamURL = srv.URLsJSON()
-	log.Printf("[%s] stream ready: %s (primary: %s)", at.ID[:8], task.StreamURL, streamURL)
+	log.Printf("[%s] stream ready: %s (url: %s)", at.ID[:8], eng.FileName(), srv.URL())
 
-	// 5b. Start watch progress reporter (tracks Range requests for playback position)
+	// 5. Start watch progress reporter
 	if agentClient != nil {
 		watchReporter := engine.NewWatchReporter(agentClient, srv, at.ID)
 		go watchReporter.Run(ctx)
 	}
 
-	// 6. Start idle guard + progress loop
-	go startIdleGuard(ctx, srv, at.ID)
+	// 6. Progress loop until download completes or cancelled
 	eng.StartProgressLoop(ctx)
 	progressTicker := time.NewTicker(3 * time.Second)
 	defer progressTicker.Stop()

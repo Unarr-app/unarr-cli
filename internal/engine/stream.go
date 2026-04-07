@@ -297,7 +297,7 @@ func (s *StreamEngine) FileName() string { return s.fileName }
 // FileLength returns the total size of the selected file in bytes.
 func (s *StreamEngine) FileLength() int64 { return s.totalBytes }
 
-// FileSize implements fileProvider for StreamServer compatibility.
+// FileSize implements FileProvider for StreamServer compatibility.
 func (s *StreamEngine) FileSize() int64 { return s.totalBytes }
 
 // BufferTarget returns the buffer threshold in bytes.

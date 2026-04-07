@@ -127,14 +127,14 @@ func runStream(input string, port int, noOpen bool, playerCmd string) error {
 	}
 
 	// Start HTTP server
-	srv := engine.NewStreamServer(eng, port)
-	streamURL, err := srv.Start(ctx)
-	if err != nil {
+	srv := engine.NewStreamServer(port)
+	if err := srv.Listen(ctx); err != nil {
 		eng.Shutdown(context.Background())
 		return fmt.Errorf("start server: %w", err)
 	}
+	srv.SetFile(eng, "cli-stream")
 
-	fmt.Printf("  URL: %s\n", streamURL)
+	fmt.Printf("  URL: %s\n", srv.URL())
 	fmt.Println()
 
 	// Buffer before opening player
@@ -159,15 +159,15 @@ func runStream(input string, port int, noOpen bool, playerCmd string) error {
 
 	// Open player
 	if !noOpen {
-		playerName, _, openErr := engine.OpenPlayer(streamURL, playerCmd)
+		playerName, _, openErr := engine.OpenPlayer(srv.URL(), playerCmd)
 		if openErr != nil {
 			yellow.Printf("  Could not open player: %s\n", openErr)
-			fmt.Printf("  Open this URL in your player: %s\n", streamURL)
+			fmt.Printf("  Open this URL in your player: %s\n", srv.URL())
 		} else {
 			green.Printf("  Opened in %s\n", playerName)
 		}
 	} else {
-		fmt.Printf("  Open this URL in your player: %s\n", streamURL)
+		fmt.Printf("  Open this URL in your player: %s\n", srv.URL())
 	}
 	fmt.Println()
 
