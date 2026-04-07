@@ -226,10 +226,51 @@ func (t *WSTransport) send(msg any) error {
 	if err != nil {
 		return err
 	}
+	_ = t.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return t.conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (t *WSTransport) readLoop(conn *websocket.Conn) {
+	// Cloudflare idle timeout is 100s. We send pings every 30s and expect
+	// either a pong or a server message within 45s. If neither arrives,
+	// the read deadline fires and we detect the zombie connection.
+	const (
+		pongWait   = 45 * time.Second
+		pingPeriod = 30 * time.Second
+	)
+
+	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	// Ping ticker goroutine — stops when readLoop returns.
+	pingDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				t.mu.Lock()
+				if t.conn != nil {
+					_ = t.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+					err := t.conn.WriteMessage(websocket.PingMessage, nil)
+					_ = t.conn.SetWriteDeadline(time.Time{})
+					if err != nil {
+						t.mu.Unlock()
+						return
+					}
+				}
+				t.mu.Unlock()
+			case <-pingDone:
+				return
+			}
+		}
+	}()
+	defer close(pingDone)
+
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
@@ -243,6 +284,9 @@ func (t *WSTransport) readLoop(conn *websocket.Conn) {
 			}
 			return
 		}
+
+		// Any message (text or pong) proves the connection is alive.
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 
 		var envelope struct {
 			Type string `json:"type"`
