@@ -286,8 +286,12 @@ func runDaemonStart() error {
 		task.SetStreamURL(streamSrv.URLsJSON())
 		log.Printf("[%s] streaming active download: %s", taskID[:8], provider.FileName())
 
-		// Start watch progress reporter
-		go engine.NewWatchReporter(agentClient, streamSrv, taskID).Run(ctx)
+		// Start watch progress reporter with cancellable context
+		watchCtx, watchCancel := context.WithCancel(ctx) //nolint:gosec // cancel stored in streamRegistry, called by cancelStreamContexts()
+		streamRegistry.mu.Lock()
+		streamRegistry.cancels["watch:"+taskID] = watchCancel
+		streamRegistry.mu.Unlock()
+		go engine.NewWatchReporter(agentClient, streamSrv, taskID).Run(watchCtx)
 	})
 
 	// Wire: daemon claimed tasks -> manager
@@ -318,8 +322,16 @@ func runDaemonStart() error {
 
 	// Wire: stream requests for completed downloads → set file on persistent server
 	d.OnStreamRequested = func(sr agent.StreamRequest) {
-		// Skip if already serving this task
+		// Already serving this task — just notify server it's ready
 		if streamSrv.CurrentTaskID() == sr.TaskID {
+			go func() {
+				if _, err := transport.SendProgress(ctx, agent.StatusUpdate{
+					TaskID:      sr.TaskID,
+					StreamReady: true,
+				}); err != nil {
+					log.Printf("[%s] stream ready re-notify failed: %v", sr.TaskID[:8], err)
+				}
+			}()
 			return
 		}
 
@@ -365,8 +377,13 @@ func runDaemonStart() error {
 
 		log.Printf("[%s] streaming from disk: %s → %s", sr.TaskID[:8], filepath.Base(filePath), streamSrv.URL())
 
-		// Start watch progress reporter
-		go engine.NewWatchReporter(agentClient, streamSrv, sr.TaskID).Run(ctx)
+		// Start watch progress reporter with a cancellable context
+		// so it stops when the user switches to a different stream.
+		watchCtx, watchCancel := context.WithCancel(ctx) //nolint:gosec // cancel stored in streamRegistry, called by cancelStreamContexts()
+		streamRegistry.mu.Lock()
+		streamRegistry.cancels["watch:"+sr.TaskID] = watchCancel
+		streamRegistry.mu.Unlock()
+		go engine.NewWatchReporter(agentClient, streamSrv, sr.TaskID).Run(watchCtx)
 
 		// Notify server that stream is ready (clears streamRequested flag)
 		go func() {
