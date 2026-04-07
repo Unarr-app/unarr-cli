@@ -47,7 +47,7 @@ func (wr *WatchReporter) Run(ctx context.Context) {
 }
 
 func (wr *WatchReporter) sendReport(ctx context.Context) {
-	pct, _ := wr.server.EstimatedProgress()
+	pct, durSec := wr.server.EstimatedProgress()
 	if pct == 0 || pct == wr.lastSentPct {
 		return
 	}
@@ -57,6 +57,11 @@ func (wr *WatchReporter) sendReport(ctx context.Context) {
 		TaskID:   wr.taskID,
 		Source:   "range",
 		Progress: &pct,
+	}
+	if durSec > 0 {
+		update.Duration = &durSec
+		pos := int(float64(pct) / 100 * float64(durSec))
+		update.Position = &pos
 	}
 
 	reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
