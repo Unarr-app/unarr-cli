@@ -55,6 +55,9 @@ type Daemon struct {
 
 	// pollNow triggers an immediate poll (e.g. on resume)
 	pollNow chan struct{}
+
+	// ScanNow triggers an immediate library scan (from heartbeat or WebSocket control event)
+	ScanNow chan struct{}
 }
 
 // NewDaemon creates a daemon with the given transport.
@@ -71,6 +74,7 @@ func NewDaemon(cfg DaemonConfig, transport Transport) *Daemon {
 		cfg:       cfg,
 		transport: transport,
 		pollNow:   make(chan struct{}, 1),
+		ScanNow:   make(chan struct{}, 1),
 	}
 }
 
@@ -236,6 +240,15 @@ func (d *Daemon) heartbeat(ctx context.Context) {
 	}
 	WriteState(&d.State)
 
+	// Trigger library scan if requested
+	if resp.Scan {
+		log.Printf("Library scan requested by server")
+		select {
+		case d.ScanNow <- struct{}{}:
+		default: // scan already pending
+		}
+	}
+
 	// Log once per version when server suggests an upgrade
 	if resp.Upgrade != nil && resp.Upgrade.Version != "" && resp.Upgrade.Version != d.lastNotifiedVersion {
 		d.lastNotifiedVersion = resp.Upgrade.Version
@@ -266,9 +279,17 @@ func (d *Daemon) handleEvent(event ServerEvent) {
 		}
 
 	case "control":
-		if event.Control != nil && d.OnControlAction != nil {
+		if event.Control != nil {
 			log.Printf("Control action via WebSocket: %s task %s", event.Control.Action, event.Control.TaskID)
-			d.OnControlAction(event.Control.Action, event.Control.TaskID)
+			if event.Control.Action == "scan" {
+				select {
+				case d.ScanNow <- struct{}{}:
+				default:
+				}
+			}
+			if d.OnControlAction != nil {
+				d.OnControlAction(event.Control.Action, event.Control.TaskID)
+			}
 		}
 
 	case "disconnected":

@@ -137,6 +137,7 @@ type HeartbeatResponse struct {
 	Success  bool           `json:"success"`
 	Upgrade  *UpgradeSignal `json:"upgrade,omitempty"`
 	Watching bool           `json:"watching,omitempty"` // true when a user is viewing download progress in the web UI
+	Scan     bool           `json:"scan,omitempty"`     // true when user triggered a library scan from the web UI
 }
 
 // UpgradeSignal tells the agent to upgrade to a specific version.
@@ -290,9 +291,10 @@ type DebridAccount struct {
 
 // LibrarySyncRequest sends scanned media items to the server.
 type LibrarySyncRequest struct {
-	Items       []LibrarySyncItem `json:"items"`
-	ScanPath    string            `json:"scanPath"`
-	IsLastBatch bool              `json:"isLastBatch"`
+	Items         []LibrarySyncItem `json:"items"`
+	ScanPath      string            `json:"scanPath"`
+	IsLastBatch   bool              `json:"isLastBatch"`
+	SyncStartedAt string            `json:"syncStartedAt,omitempty"` // ISO-8601; same for all batches in a session
 }
 
 // LibrarySyncItem is a single scanned media file with ffprobe metadata.

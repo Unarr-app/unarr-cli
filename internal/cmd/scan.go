@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -165,6 +166,7 @@ func syncToServer(ctx context.Context, cfg config.Config, cache *library.Library
 	totalSynced := 0
 	totalMatched := 0
 	totalRemoved := 0
+	syncStartedAt := time.Now().UTC().Format(time.RFC3339)
 
 	for i := 0; i < len(items); i += batchSize {
 		end := i + batchSize
@@ -177,9 +179,10 @@ func syncToServer(ctx context.Context, cfg config.Config, cache *library.Library
 		fmt.Fprintf(os.Stderr, "\r  Syncing %d/%d items...\033[K", end, len(items))
 
 		resp, err := ac.SyncLibrary(ctx, agent.LibrarySyncRequest{
-			Items:       batch,
-			ScanPath:    cache.Path,
-			IsLastBatch: isLast,
+			Items:         batch,
+			ScanPath:      cache.Path,
+			IsLastBatch:   isLast,
+			SyncStartedAt: syncStartedAt,
 		})
 		if err != nil {
 			return fmt.Errorf("sync failed: %w", err)

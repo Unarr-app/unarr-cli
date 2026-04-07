@@ -416,14 +416,21 @@ func runDaemonStart() error {
 	}()
 
 	// Start auto-scan goroutine (daily library scan + sync)
-	if cfg.Library.ScanPath != "" && cfg.Library.AutoScan {
+	// Default scan_path to download dir so auto-scan works out of the box.
+	scanPath := cfg.Library.ScanPath
+	if scanPath == "" {
+		scanPath = cfg.Download.Dir
+	}
+	if scanPath != "" && cfg.Library.AutoScan {
+		scanCfg := cfg
+		scanCfg.Library.ScanPath = scanPath
 		scanInterval := 24 * time.Hour
 		if cfg.Library.ScanInterval != "" {
 			if parsed, err := time.ParseDuration(cfg.Library.ScanInterval); err == nil && parsed > 0 {
 				scanInterval = parsed
 			}
 		}
-		go runAutoScan(ctx, cfg, scanInterval, agentClient)
+		go runAutoScan(ctx, scanCfg, scanInterval, agentClient, d.ScanNow)
 	}
 
 	// Start daemon (blocks)
@@ -500,13 +507,15 @@ func formatSpeedLog(bps int64) string {
 	}
 }
 
-// runAutoScan runs a library scan + sync on a timer.
-func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration, ac *agent.Client) {
+// runAutoScan runs a library scan + sync on a timer or on-demand via scanNow channel.
+func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration, ac *agent.Client, scanNow <-chan struct{}) {
 	log.Printf("[auto-scan] enabled: every %s, path: %s", interval, cfg.Library.ScanPath)
 
 	// Run first scan after a short delay (let daemon stabilize)
 	select {
 	case <-time.After(30 * time.Second):
+	case <-scanNow:
+		// Immediate scan requested before initial delay
 	case <-ctx.Done():
 		return
 	}
@@ -549,6 +558,7 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 		}
 
 		const batchSize = 100
+		syncStartedAt := time.Now().UTC().Format(time.RFC3339)
 		for i := 0; i < len(items); i += batchSize {
 			end := i + batchSize
 			if end > len(items) {
@@ -557,9 +567,10 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 			isLast := end >= len(items)
 
 			_, err := ac.SyncLibrary(ctx, agent.LibrarySyncRequest{
-				Items:       items[i:end],
-				ScanPath:    cache.Path,
-				IsLastBatch: isLast,
+				Items:         items[i:end],
+				ScanPath:      cache.Path,
+				IsLastBatch:   isLast,
+				SyncStartedAt: syncStartedAt,
 			})
 			if err != nil {
 				log.Printf("[auto-scan] sync failed: %v", err)
@@ -578,6 +589,10 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 	for {
 		select {
 		case <-ticker.C:
+			doScan()
+		case <-scanNow:
+			log.Printf("[auto-scan] on-demand scan triggered")
+			ticker.Reset(interval)
 			doScan()
 		case <-ctx.Done():
 			return
