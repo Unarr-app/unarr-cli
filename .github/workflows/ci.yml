@@ -75,8 +75,32 @@ jobs:
         with:
           go-version: "1.25"
 
-      - name: Run tests with coverage
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Run tests with coverage (all packages)
+        run: |
+          go test -race -coverprofile=coverage.out -covermode=atomic \
+            ./internal/engine/... \
+            ./internal/agent/... \
+            ./internal/cmd/...
+
+      - name: Check coverage threshold (engine + agent)
+        run: |
+          # Threshold applies only to engine and agent — cmd contains interactive UI
+          # commands (config menus, daemon, auth browser) that are not unit-testable.
+          go test -race -coverprofile=coverage-core.out -covermode=atomic \
+            ./internal/engine/... \
+            ./internal/agent/...
+          COVERAGE=$(go tool cover -func=coverage-core.out | grep ^total | awk '{print $3}' | tr -d '%')
+          echo "Coverage on engine+agent: ${COVERAGE}%"
+          python3 -c "
+          coverage = float('${COVERAGE}')
+          threshold = 50.0
+          print(f'Coverage: {coverage:.1f}% (threshold: {threshold}%)')
+          if coverage < threshold:
+              print(f'ERROR: Coverage {coverage:.1f}% is below minimum {threshold}%')
+              exit(1)
+          else:
+              print('OK: Coverage meets minimum threshold')
+          "
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6

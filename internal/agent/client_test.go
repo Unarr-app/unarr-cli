@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestRegister(t *testing.T) {
@@ -466,5 +468,260 @@ func TestHTMLErrorResponse(t *testing.T) {
 	_, err := c.Register(context.Background(), RegisterRequest{AgentID: "x"})
 	if err == nil {
 		t.Fatal("expected error for HTML error page")
+	}
+}
+
+func TestClient_ContextCancelled(t *testing.T) {
+	// Servidor que bloquea hasta que el cliente se desconecta
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelar inmediatamente
+
+	c := NewClient(srv.URL, "test-key", "unarr-test")
+	_, err := c.Register(ctx, RegisterRequest{AgentID: "x"})
+	if err == nil {
+		t.Fatal("expected error when context is cancelled")
+	}
+}
+
+func TestClient_SlowServer_Timeout(t *testing.T) {
+	// Servidor que tarda más que el timeout del cliente.
+	// Usa time.Sleep para que el handler termine limpiamente cuando el server cierra.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond) // más largo que el timeout del cliente (50ms)
+	}))
+	defer srv.Close()
+
+	// Crear cliente con timeout muy corto
+	c := &Client{
+		baseURL: srv.URL,
+		apiKey:  "test-key",
+		httpClient: &http.Client{
+			Timeout: 50 * time.Millisecond,
+		},
+		userAgent: "unarr-test",
+	}
+
+	_, err := c.Register(context.Background(), RegisterRequest{AgentID: "timeout-test"})
+	if err == nil {
+		t.Fatal("expected timeout error from slow server")
+	}
+}
+
+func TestClient_Sync_FullRequest(t *testing.T) {
+	var received SyncRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/internal/agent/sync" {
+			t.Errorf("path = %s, want /api/internal/agent/sync", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		json.NewDecoder(r.Body).Decode(&received)
+		json.NewEncoder(w).Encode(SyncResponse{
+			NewTasks: []Task{
+				{ID: "task-from-server", InfoHash: "abc123def456abc123def456abc123def456abc1"},
+			},
+			Watching: true,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-key", "unarr-test")
+	resp, err := c.Sync(context.Background(), SyncRequest{
+		AgentID:       "agent-sync-1",
+		Version:       "0.6.0",
+		OS:            "linux",
+		Arch:          "amd64",
+		FreeSlots:     2,
+		DiskFreeBytes: 10 << 30, // 10 GB
+	})
+	if err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+	if len(resp.NewTasks) != 1 {
+		t.Fatalf("expected 1 new task, got %d", len(resp.NewTasks))
+	}
+	if resp.NewTasks[0].ID != "task-from-server" {
+		t.Errorf("task ID = %q, want task-from-server", resp.NewTasks[0].ID)
+	}
+	if !resp.Watching {
+		t.Error("expected watching=true")
+	}
+	if received.AgentID != "agent-sync-1" {
+		t.Errorf("received.AgentID = %q, want agent-sync-1", received.AgentID)
+	}
+	if received.FreeSlots != 2 {
+		t.Errorf("received.FreeSlots = %d, want 2", received.FreeSlots)
+	}
+}
+
+func TestClient_ReportWatchProgress(t *testing.T) {
+	var received WatchProgressUpdate
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/internal/agent/watch-progress" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&received)
+		json.NewEncoder(w).Encode(WatchProgressResponse{Success: true})
+	}))
+	defer srv.Close()
+
+	pct := 42
+	c := NewClient(srv.URL, "test-key", "unarr-test")
+	err := c.ReportWatchProgress(context.Background(), WatchProgressUpdate{
+		TaskID:   "task-watch-001",
+		Source:   "range",
+		Progress: &pct,
+	})
+	if err != nil {
+		t.Fatalf("ReportWatchProgress failed: %v", err)
+	}
+	if received.TaskID != "task-watch-001" {
+		t.Errorf("taskID = %q, want task-watch-001", received.TaskID)
+	}
+	if received.Progress == nil || *received.Progress != 42 {
+		t.Errorf("progress = %v, want 42", received.Progress)
+	}
+}
+
+func TestClient_HTTPError_PlainText(t *testing.T) {
+	// Error 500 con body plano (no JSON ni HTML largo)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal server error"))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-key", "unarr-test")
+	_, err := c.Register(context.Background(), RegisterRequest{AgentID: "x"})
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected *HTTPError (possibly wrapped), got %T: %v", err, err)
+	}
+	if httpErr.StatusCode != 500 {
+		t.Errorf("StatusCode = %d, want 500", httpErr.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// WaitForWake tests
+// ---------------------------------------------------------------------------
+
+func TestWaitForWake_ReturnsTrue_OnWakeSignal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/internal/agent/wake" {
+			t.Errorf("path = %s, want /api/internal/agent/wake", r.URL.Path)
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Errorf("auth = %q", r.Header.Get("Authorization"))
+		}
+		json.NewEncoder(w).Encode(map[string]bool{"wake": true})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-key", "unarr-test")
+	woke, err := c.WaitForWake(context.Background())
+	if err != nil {
+		t.Fatalf("WaitForWake failed: %v", err)
+	}
+	if !woke {
+		t.Error("expected wake=true")
+	}
+}
+
+func TestWaitForWake_ReturnsFalse_OnTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Server returns wake=false (long-poll timeout)
+		json.NewEncoder(w).Encode(map[string]bool{"wake": false})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-key", "unarr-test")
+	woke, err := c.WaitForWake(context.Background())
+	if err != nil {
+		t.Fatalf("WaitForWake failed: %v", err)
+	}
+	if woke {
+		t.Error("expected wake=false on server timeout")
+	}
+}
+
+func TestWaitForWake_Error_OnUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid API key"})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "bad-key", "unarr-test")
+	_, err := c.WaitForWake(context.Background())
+	if err == nil {
+		t.Fatal("expected error for 401 response")
+	}
+}
+
+func TestWaitForWake_RespectsContextCancellation(t *testing.T) {
+	// Server blocks until client disconnects
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	c := NewClient(srv.URL, "test-key", "unarr-test")
+	_, err := c.WaitForWake(ctx)
+	if err == nil {
+		t.Fatal("expected error when context is cancelled")
+	}
+}
+
+func TestWaitForWake_SimulatesLongPoll(t *testing.T) {
+	// Server holds connection briefly then responds with wake=true
+	ready := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-ready:
+		case <-r.Context().Done():
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]bool{"wake": true})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-key", "unarr-test")
+
+	resultCh := make(chan bool, 1)
+	go func() {
+		woke, err := c.WaitForWake(context.Background())
+		if err != nil {
+			t.Errorf("WaitForWake failed: %v", err)
+		}
+		resultCh <- woke
+	}()
+
+	// Simulate server waking after 50ms
+	time.Sleep(50 * time.Millisecond)
+	close(ready)
+
+	select {
+	case woke := <-resultCh:
+		if !woke {
+			t.Error("expected wake=true")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForWake did not return in time")
 	}
 }

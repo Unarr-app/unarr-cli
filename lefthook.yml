@@ -23,6 +23,12 @@ pre-commit:
           echo "golangci-lint not installed, skipping (install: https://golangci-lint.run/welcome/install/)"
         fi
 
+pre-push:
+  commands:
+    go-test:
+      glob: "*.go"
+      run: go test -race -count=1 -timeout=120s ./...
+
 commit-msg:
   scripts:
     validate.sh:

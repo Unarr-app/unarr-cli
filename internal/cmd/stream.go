@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,20 @@ import (
 	"github.com/torrentclaw/unarr/internal/parser"
 	"github.com/torrentclaw/unarr/internal/ui"
 )
+
+// streamDeps agrupa las funciones constructoras usadas por runStream.
+// Pueden sobreescribirse en tests para inyectar mocks.
+type streamDeps struct {
+	newStreamEngine func(cfg engine.StreamConfig) (*engine.StreamEngine, error)
+	newStreamServer func(port int) *engine.StreamServer
+	openPlayer      func(url, override string) (string, *exec.Cmd, error)
+}
+
+var defaultStreamDeps = streamDeps{
+	newStreamEngine: engine.NewStreamEngine,
+	newStreamServer: engine.NewStreamServer,
+	openPlayer:      engine.OpenPlayer,
+}
 
 func newStreamCmd() *cobra.Command {
 	var (
@@ -56,6 +71,10 @@ download directory (or system temp if not configured).`,
 }
 
 func runStream(input string, port int, noOpen bool, playerCmd string) error {
+	return runStreamWithDeps(input, port, noOpen, playerCmd, defaultStreamDeps)
+}
+
+func runStreamWithDeps(input string, port int, noOpen bool, playerCmd string, deps streamDeps) error {
 	cfg := loadConfig()
 	bold := color.New(color.Bold)
 	green := color.New(color.FgGreen)
@@ -83,7 +102,7 @@ func runStream(input string, port int, noOpen bool, playerCmd string) error {
 	}
 
 	// Create engine
-	eng, err := engine.NewStreamEngine(engine.StreamConfig{
+	eng, err := deps.newStreamEngine(engine.StreamConfig{
 		DataDir:     dataDir,
 		Port:        port,
 		MetaTimeout: 60 * time.Second,
@@ -127,7 +146,7 @@ func runStream(input string, port int, noOpen bool, playerCmd string) error {
 	}
 
 	// Start HTTP server
-	srv := engine.NewStreamServer(port)
+	srv := deps.newStreamServer(port)
 	if err := srv.Listen(ctx); err != nil {
 		eng.Shutdown(context.Background())
 		return fmt.Errorf("start server: %w", err)
@@ -159,7 +178,7 @@ func runStream(input string, port int, noOpen bool, playerCmd string) error {
 
 	// Open player
 	if !noOpen {
-		playerName, _, openErr := engine.OpenPlayer(srv.URL(), playerCmd)
+		playerName, _, openErr := deps.openPlayer(srv.URL(), playerCmd)
 		if openErr != nil {
 			yellow.Printf("  Could not open player: %s\n", openErr)
 			fmt.Printf("  Open this URL in your player: %s\n", srv.URL())

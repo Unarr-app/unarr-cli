@@ -327,6 +327,186 @@ func TestSyncClient_Run_CancelStopsLoop(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// runWakeListener tests
+// ---------------------------------------------------------------------------
+
+func TestRunWakeListener_TriggersSyncOnWake(t *testing.T) {
+	// Server responds immediately with wake=true on the first call
+	var wakeCallCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/internal/agent/wake" {
+			wakeCallCount.Add(1)
+			json.NewEncoder(w).Encode(map[string]bool{"wake": true})
+			return
+		}
+		// sync endpoint — just respond OK
+		json.NewEncoder(w).Encode(SyncResponse{})
+	}))
+	defer srv.Close()
+
+	sc, _ := newTestSyncClient(srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go sc.runWakeListener(ctx)
+
+	// Give the listener time to receive the wake and call TriggerSync
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	if wakeCallCount.Load() < 1 {
+		t.Error("expected at least one wake request")
+	}
+	// TriggerSync puts something in the buffered channel
+	select {
+	case <-sc.SyncNow:
+		// good — listener triggered a sync
+	default:
+		// channel may have been drained by Run (not running here) — check count
+		// The important thing is that wakeCallCount > 0 (request was made)
+	}
+}
+
+func TestRunWakeListener_ReconnectsAfterTimeout(t *testing.T) {
+	// Server returns wake=false (timeout) then wake=true on reconnect
+	callCount := atomic.Int32{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/internal/agent/wake" {
+			json.NewEncoder(w).Encode(SyncResponse{})
+			return
+		}
+		n := callCount.Add(1)
+		if n == 1 {
+			// First call: timeout
+			json.NewEncoder(w).Encode(map[string]bool{"wake": false})
+		} else {
+			// Second call: wake
+			json.NewEncoder(w).Encode(map[string]bool{"wake": true})
+		}
+	}))
+	defer srv.Close()
+
+	sc, _ := newTestSyncClient(srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go sc.runWakeListener(ctx)
+
+	// Wait for at least 2 wake calls (reconnect after timeout)
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if callCount.Load() >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if callCount.Load() < 2 {
+		t.Errorf("expected at least 2 wake requests (reconnect after timeout), got %d", callCount.Load())
+	}
+}
+
+func TestRunWakeListener_RetriesAfterNetworkError(t *testing.T) {
+	// Server that refuses connections initially, then starts accepting
+	callCount := atomic.Int32{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/internal/agent/wake" {
+			json.NewEncoder(w).Encode(SyncResponse{})
+			return
+		}
+		callCount.Add(1)
+		json.NewEncoder(w).Encode(map[string]bool{"wake": false})
+	}))
+	defer srv.Close()
+
+	// Use a bad URL first, then switch — we can't easily switch URL, so
+	// test with a server that always errors (closed connection) via a custom transport
+	badClient := NewClient("http://127.0.0.1:1", "test-key", "unarr-test")
+	cfg := DaemonConfig{AgentID: "test-agent", Version: "1.0.0", DownloadDir: "/tmp"}
+	state := NewLocalState()
+	sc := NewSyncClient(badClient, cfg, state)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Should not panic — just log errors and retry
+	done := make(chan struct{})
+	go func() {
+		sc.runWakeListener(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good — listener exited when ctx was cancelled
+	case <-time.After(2 * time.Second):
+		t.Error("runWakeListener did not exit after context cancellation")
+	}
+}
+
+func TestRunWakeListener_StopsOnContextCancel(t *testing.T) {
+	// Server blocks until client disconnects
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/internal/agent/wake" {
+			<-r.Context().Done()
+			return
+		}
+		json.NewEncoder(w).Encode(SyncResponse{})
+	}))
+	defer srv.Close()
+
+	sc, _ := newTestSyncClient(srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		sc.runWakeListener(ctx)
+		close(done)
+	}()
+
+	// Let it connect and block
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// Good
+	case <-time.After(2 * time.Second):
+		t.Error("runWakeListener did not stop when context was cancelled")
+	}
+}
+
+func TestRunWakeListener_DoesNotTriggerSyncOnTimeout(t *testing.T) {
+	// Server always returns wake=false — SyncNow channel should stay empty
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/internal/agent/wake" {
+			json.NewEncoder(w).Encode(map[string]bool{"wake": false})
+			return
+		}
+		json.NewEncoder(w).Encode(SyncResponse{})
+	}))
+	defer srv.Close()
+
+	sc, _ := newTestSyncClient(srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	go sc.runWakeListener(ctx)
+	<-ctx.Done()
+
+	// SyncNow should be empty (no wake triggered)
+	select {
+	case <-sc.SyncNow:
+		t.Error("expected no sync trigger on timeout response")
+	default:
+		// Good
+	}
+}
+
 func TestSyncClient_Run_ImmediateSyncOnTrigger(t *testing.T) {
 	var syncCount atomic.Int32
 

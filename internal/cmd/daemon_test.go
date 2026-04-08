@@ -1,6 +1,70 @@
 package cmd
 
-import "testing"
+import (
+	"testing"
+)
+
+func TestIsAllowedStreamPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		filePath    string
+		allowedDirs []string
+		want        bool
+	}{
+		{
+			name:        "path inside download dir",
+			filePath:    "/downloads/movie.mkv",
+			allowedDirs: []string{"/downloads"},
+			want:        true,
+		},
+		{
+			name:        "path inside subdirectory",
+			filePath:    "/downloads/sub/movie.mkv",
+			allowedDirs: []string{"/downloads"},
+			want:        true,
+		},
+		{
+			name:        "path traversal attempt",
+			filePath:    "/downloads/../etc/passwd",
+			allowedDirs: []string{"/downloads"},
+			want:        false,
+		},
+		{
+			name:        "path outside all allowed dirs",
+			filePath:    "/etc/passwd",
+			allowedDirs: []string{"/downloads", "/movies"},
+			want:        false,
+		},
+		{
+			name:        "path inside second allowed dir",
+			filePath:    "/movies/action/movie.mkv",
+			allowedDirs: []string{"/downloads", "/movies"},
+			want:        true,
+		},
+		{
+			name:        "empty allowed dirs",
+			filePath:    "/downloads/movie.mkv",
+			allowedDirs: []string{"", ""},
+			want:        false,
+		},
+		{
+			name:        "path equals allowed dir exactly",
+			filePath:    "/downloads",
+			allowedDirs: []string{"/downloads"},
+			want:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isAllowedStreamPath(tt.filePath, tt.allowedDirs...)
+			if got != tt.want {
+				t.Errorf("isAllowedStreamPath(%q, %v) = %v, want %v",
+					tt.filePath, tt.allowedDirs, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestFormatSpeedLog(t *testing.T) {
 	tests := []struct {

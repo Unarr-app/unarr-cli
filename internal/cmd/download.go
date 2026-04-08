@@ -17,6 +17,26 @@ import (
 	"github.com/torrentclaw/unarr/internal/parser"
 )
 
+// downloadDeps agrupa las funciones constructoras usadas por runDownload.
+// Pueden sobreescribirse en tests para inyectar mocks.
+type downloadDeps struct {
+	newTorrentDl   func(cfg engine.TorrentConfig) (engine.Downloader, error)
+	newDebridDl    func() engine.Downloader
+	newAgentClient func(url, key, ua string) *agent.Client
+	newManager     func(cfg engine.ManagerConfig, reporter *engine.ProgressReporter, dls ...engine.Downloader) *engine.Manager
+}
+
+var defaultDownloadDeps = downloadDeps{
+	newTorrentDl: func(cfg engine.TorrentConfig) (engine.Downloader, error) {
+		return engine.NewTorrentDownloader(cfg)
+	},
+	newDebridDl: func() engine.Downloader {
+		return engine.NewDebridDownloader()
+	},
+	newAgentClient: agent.NewClient,
+	newManager:     engine.NewManager,
+}
+
 func newDownloadCmd() *cobra.Command {
 	var method string
 
@@ -48,6 +68,10 @@ daemon instead: 'unarr start'.`,
 }
 
 func runDownload(input, method string) error {
+	return runDownloadWithDeps(input, method, defaultDownloadDeps)
+}
+
+func runDownloadWithDeps(input, method string, deps downloadDeps) error {
 	cfg := loadConfig()
 	bold := color.New(color.Bold)
 	green := color.New(color.FgGreen)
@@ -84,7 +108,7 @@ func runDownload(input, method string) error {
 	fmt.Println()
 
 	// Create torrent downloader
-	torrentDl, err := engine.NewTorrentDownloader(engine.TorrentConfig{
+	torrentDl, err := deps.newTorrentDl(engine.TorrentConfig{
 		DataDir:         outputDir,
 		MetadataTimeout: 15 * time.Minute,
 		StallTimeout:    10 * time.Minute,
@@ -97,13 +121,13 @@ func runDownload(input, method string) error {
 
 	// Create a dummy reporter (no API reporting for one-shot)
 	reporter := engine.NewProgressReporter(
-		agent.NewClient(cfg.Auth.APIURL, cfg.Auth.APIKey, "unarr/"+Version),
+		deps.newAgentClient(cfg.Auth.APIURL, cfg.Auth.APIKey, "unarr/"+Version),
 		5*time.Second,
 	)
 
-	debridDl := engine.NewDebridDownloader()
+	debridDl := deps.newDebridDl()
 
-	manager := engine.NewManager(engine.ManagerConfig{
+	manager := deps.newManager(engine.ManagerConfig{
 		MaxConcurrent: 1,
 		OutputDir:     outputDir,
 		Organize: engine.OrganizeConfig{
