@@ -28,6 +28,15 @@ type Manager struct {
 
 	sem chan struct{}
 	wg  sync.WaitGroup
+
+	// OnTaskDone is called after a task completes or fails (slot freed).
+	// Used by the daemon to trigger an immediate sync.
+	OnTaskDone func()
+
+	// recentlyFinished holds tasks that completed/failed since the last sync read.
+	// The sync goroutine reads and clears this to include final states in the next sync.
+	recentMu       sync.Mutex
+	recentFinished []agent.TaskState
 }
 
 // NewManager creates a download manager.
@@ -67,7 +76,7 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 
 	// Force start: bypass semaphore (like Transmission's "Force Start")
 	if at.ForceStart {
-		log.Printf("[%s] force start: bypassing queue", task.ID[:8])
+		log.Printf("[%s] force start: bypassing queue", agent.ShortID(task.ID))
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
@@ -88,7 +97,12 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		defer func() { <-m.sem }()
+		defer func() {
+			<-m.sem
+			if m.OnTaskDone != nil {
+				m.OnTaskDone()
+			}
+		}()
 		defer taskCancel()
 		m.processTask(taskCtx, task)
 	}()
@@ -97,6 +111,11 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 // HasCapacity returns true if there's room for more downloads.
 func (m *Manager) HasCapacity() bool {
 	return len(m.sem) < cap(m.sem)
+}
+
+// FreeSlots returns the number of available download slots.
+func (m *Manager) FreeSlots() int {
+	return cap(m.sem) - len(m.sem)
 }
 
 // ActiveCount returns the number of in-progress downloads.
@@ -113,6 +132,17 @@ func (m *Manager) GetTask(taskID string) *Task {
 	return m.active[taskID]
 }
 
+// ActiveTaskIDs returns the IDs of all in-progress tasks.
+func (m *Manager) ActiveTaskIDs() []string {
+	m.activeMu.RLock()
+	defer m.activeMu.RUnlock()
+	ids := make([]string, 0, len(m.active))
+	for id := range m.active {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // ActiveTasks returns a snapshot of all active tasks.
 func (m *Manager) ActiveTasks() []*Task {
 	m.activeMu.RLock()
@@ -122,6 +152,37 @@ func (m *Manager) ActiveTasks() []*Task {
 		tasks = append(tasks, t)
 	}
 	return tasks
+}
+
+// TaskStates returns the current state of all active tasks plus any recently
+// finished tasks that haven't been synced yet. Called by the sync goroutine.
+func (m *Manager) TaskStates() []agent.TaskState {
+	// Collect active tasks
+	m.activeMu.RLock()
+	states := make([]agent.TaskState, 0, len(m.active))
+	for _, t := range m.active {
+		states = append(states, agent.TaskStateFromUpdate(t.ToStatusUpdate()))
+	}
+	m.activeMu.RUnlock()
+
+	// Drain recently finished tasks (consumed once per sync)
+	m.recentMu.Lock()
+	states = append(states, m.recentFinished...)
+	m.recentFinished = nil
+	m.recentMu.Unlock()
+
+	return states
+}
+
+// recordFinished stores a completed/failed task for the next sync cycle.
+func (m *Manager) recordFinished(update agent.StatusUpdate) {
+	m.recentMu.Lock()
+	defer m.recentMu.Unlock()
+	m.recentFinished = append(m.recentFinished, agent.TaskStateFromUpdate(update))
+	// Keep bounded
+	if len(m.recentFinished) > 20 {
+		m.recentFinished = m.recentFinished[len(m.recentFinished)-20:]
+	}
 }
 
 // CancelTask cancels an active download by task ID (keeps partial files).
@@ -150,7 +211,7 @@ func (m *Manager) CancelTask(taskID string) {
 	task.mu.Unlock()
 	task.Transition(StatusCancelled)
 
-	log.Printf("[%s] cancelled: %s", taskID[:8], task.Title)
+	log.Printf("[%s] cancelled: %s", agent.ShortID(taskID), task.Title)
 }
 
 // PauseTask pauses an active download (keeps partial files for resume).
@@ -173,7 +234,7 @@ func (m *Manager) PauseTask(taskID string) {
 	}
 
 	task.Transition(StatusCancelled) // will be re-created as pending by server
-	log.Printf("[%s] paused: %s", taskID[:8], task.Title)
+	log.Printf("[%s] paused: %s", agent.ShortID(taskID), task.Title)
 }
 
 // CancelAndDeleteFiles cancels a download and removes its files from disk.
@@ -200,7 +261,7 @@ func (m *Manager) CancelAndDeleteFiles(taskID string) {
 	task.mu.Unlock()
 	task.Transition(StatusCancelled)
 
-	log.Printf("[%s] cancelled + files deleted: %s", taskID[:8], task.Title)
+	log.Printf("[%s] cancelled + files deleted: %s", agent.ShortID(taskID), task.Title)
 }
 
 // Wait blocks until all active downloads finish.
@@ -261,7 +322,7 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 	}
 
 	task.ResolvedMethod = method
-	log.Printf("[%s] resolved method: %s", task.ID[:8], method)
+	log.Printf("[%s] resolved method: %s", agent.ShortID(task.ID), method)
 
 	// 2. Download
 	if err := task.Transition(StatusDownloading); err != nil {
@@ -285,7 +346,7 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 	if err != nil {
 		// Try fallback
 		if tryFallback(task, m.downloaders) {
-			log.Printf("[%s] %s failed, trying fallback: %v", task.ID[:8], method, err)
+			log.Printf("[%s] %s failed, trying fallback: %v", agent.ShortID(task.ID), method, err)
 			if err := task.Transition(StatusResolving); err == nil {
 				m.processTaskRetry(ctx, task)
 				return
@@ -295,61 +356,7 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 		return
 	}
 
-	// 3. Verify
-	if err := task.Transition(StatusVerifying); err != nil {
-		m.fail(ctx, task, "transition error: "+err.Error())
-		return
-	}
-
-	if err := verify(result); err != nil {
-		m.fail(ctx, task, "verification failed: "+err.Error())
-		return
-	}
-
-	// 4. Organize
-	if err := task.Transition(StatusOrganizing); err != nil {
-		m.fail(ctx, task, "transition error: "+err.Error())
-		return
-	}
-
-	finalPath, err := organize(result, task, m.cfg.Organize)
-	if err != nil {
-		log.Printf("[%s] organize warning: %v (keeping in download dir)", task.ID[:8], err)
-		finalPath = result.FilePath
-	}
-
-	task.mu.Lock()
-	task.FilePath = finalPath
-	task.mu.Unlock()
-
-	// 4b. Handle upgrade replacement (mode = "upgrade")
-	if task.ReplacePath != "" {
-		backupDir := "" // uses default ~/.local/share/unarr/replaced/
-		if err := replaceFile(task.ReplacePath, finalPath, backupDir); err != nil {
-			log.Printf("[%s] replace warning: %v (keeping new file at %s)", task.ID[:8], err, finalPath)
-		} else {
-			task.mu.Lock()
-			task.FilePath = task.ReplacePath
-			task.mu.Unlock()
-			log.Printf("[%s] upgraded: replaced %s", task.ID[:8], task.ReplacePath)
-		}
-	}
-
-	// 5. Complete
-	if method == MethodTorrent && m.cfg.Organize.Enabled {
-		// Could add seeding here in the future
-	}
-
-	if err := task.Transition(StatusCompleted); err != nil {
-		m.fail(ctx, task, "transition error: "+err.Error())
-		return
-	}
-
-	log.Printf("[%s] completed: %s -> %s", task.ID[:8], task.Title, finalPath)
-	if m.cfg.Notifications {
-		desktopNotify("Download complete", task.Title)
-	}
-	m.reporter.ReportFinal(ctx, task)
+	m.finalize(ctx, task, result)
 }
 
 // processTaskRetry handles fallback after a method failure.
@@ -361,7 +368,7 @@ func (m *Manager) processTaskRetry(ctx context.Context, task *Task) {
 	}
 
 	task.ResolvedMethod = method
-	log.Printf("[%s] fallback to: %s", task.ID[:8], method)
+	log.Printf("[%s] fallback to: %s", agent.ShortID(task.ID), method)
 
 	if err := task.Transition(StatusDownloading); err != nil {
 		m.fail(ctx, task, "transition error: "+err.Error())
@@ -383,15 +390,31 @@ func (m *Manager) processTaskRetry(ctx context.Context, task *Task) {
 		return
 	}
 
-	// Verify + Organize + Complete (same as processTask)
-	task.Transition(StatusVerifying)
+	m.finalize(ctx, task, result)
+}
+
+// finalize runs verify → organize → upgrade replacement → complete for a downloaded task.
+func (m *Manager) finalize(ctx context.Context, task *Task, result *Result) {
+	// Verify
+	if err := task.Transition(StatusVerifying); err != nil {
+		m.fail(ctx, task, "transition error: "+err.Error())
+		return
+	}
 	if err := verify(result); err != nil {
 		m.fail(ctx, task, "verification failed: "+err.Error())
 		return
 	}
 
-	task.Transition(StatusOrganizing)
-	finalPath, _ := organize(result, task, m.cfg.Organize)
+	// Organize
+	if err := task.Transition(StatusOrganizing); err != nil {
+		m.fail(ctx, task, "transition error: "+err.Error())
+		return
+	}
+	finalPath, err := organize(result, task, m.cfg.Organize)
+	if err != nil {
+		log.Printf("[%s] organize warning: %v (keeping in download dir)", agent.ShortID(task.ID), err)
+		finalPath = result.FilePath
+	}
 	if finalPath == "" {
 		finalPath = result.FilePath
 	}
@@ -399,8 +422,29 @@ func (m *Manager) processTaskRetry(ctx context.Context, task *Task) {
 	task.FilePath = finalPath
 	task.mu.Unlock()
 
-	task.Transition(StatusCompleted)
-	log.Printf("[%s] completed (fallback): %s -> %s", task.ID[:8], task.Title, finalPath)
+	// Handle upgrade replacement (mode = "upgrade")
+	if task.ReplacePath != "" {
+		backupDir := "" // uses default ~/.local/share/unarr/replaced/
+		if err := replaceFile(task.ReplacePath, finalPath, backupDir); err != nil {
+			log.Printf("[%s] replace warning: %v (keeping new file at %s)", agent.ShortID(task.ID), err, finalPath)
+		} else {
+			task.mu.Lock()
+			task.FilePath = task.ReplacePath
+			task.mu.Unlock()
+			log.Printf("[%s] upgraded: replaced %s", agent.ShortID(task.ID), task.ReplacePath)
+		}
+	}
+
+	// Complete
+	if err := task.Transition(StatusCompleted); err != nil {
+		m.fail(ctx, task, "transition error: "+err.Error())
+		return
+	}
+	log.Printf("[%s] completed: %s -> %s", agent.ShortID(task.ID), task.Title, finalPath)
+	if m.cfg.Notifications {
+		desktopNotify("Download complete", task.Title)
+	}
+	m.recordFinished(task.ToStatusUpdate())
 	m.reporter.ReportFinal(ctx, task)
 }
 
@@ -409,9 +453,10 @@ func (m *Manager) fail(ctx context.Context, task *Task, msg string) {
 	task.ErrorMessage = msg
 	task.mu.Unlock()
 	task.Transition(StatusFailed)
-	log.Printf("[%s] FAILED: %s — %s", task.ID[:8], task.Title, msg)
+	log.Printf("[%s] FAILED: %s — %s", agent.ShortID(task.ID), task.Title, msg)
 	if m.cfg.Notifications {
 		desktopNotify("Download failed", task.Title+": "+msg)
 	}
+	m.recordFinished(task.ToStatusUpdate())
 	m.reporter.ReportFinal(ctx, task)
 }

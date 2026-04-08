@@ -26,7 +26,6 @@ type Config struct {
 type AuthConfig struct {
 	APIKey string `toml:"api_key"`
 	APIURL string `toml:"api_url"`
-	WSURL  string `toml:"ws_url"` // optional, derived from api_url if empty
 }
 
 type AgentConfig struct {
@@ -54,9 +53,7 @@ type OrganizeConfig struct {
 }
 
 type DaemonConfig struct {
-	PollInterval      string `toml:"poll_interval"`
-	HeartbeatInterval string `toml:"heartbeat_interval"`
-	StatusInterval    string `toml:"status_interval"`
+	StatusInterval string `toml:"status_interval"`
 }
 
 type NotificationsConfig struct {
@@ -92,10 +89,7 @@ func Default() Config {
 		Organize: OrganizeConfig{
 			Enabled: true,
 		},
-		Daemon: DaemonConfig{
-			PollInterval:      "30s",
-			HeartbeatInterval: "30s",
-		},
+		Daemon: DaemonConfig{},
 		Notifications: NotificationsConfig{
 			Enabled: true,
 		},

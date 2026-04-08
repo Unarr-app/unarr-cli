@@ -40,27 +40,6 @@ func (c *Client) Register(ctx context.Context, req RegisterRequest) (*RegisterRe
 	return &resp, nil
 }
 
-// Heartbeat sends a periodic keep-alive signal and returns server directives.
-func (c *Client) Heartbeat(ctx context.Context, req HeartbeatRequest) (*HeartbeatResponse, error) {
-	var resp HeartbeatResponse
-	if err := c.doPost(ctx, "/api/internal/agent/heartbeat", req, &resp); err != nil {
-		return nil, fmt.Errorf("heartbeat: %w", err)
-	}
-	return &resp, nil
-}
-
-// ClaimTasks polls for pending download tasks and claims them atomically.
-// Also returns any stream requests for completed downloads.
-func (c *Client) ClaimTasks(ctx context.Context, agentID string) (*TasksResponse, error) {
-	url := fmt.Sprintf("/api/internal/agent/tasks?agentId=%s", agentID)
-	var resp TasksResponse
-	if err := c.doGet(ctx, url, &resp); err != nil {
-		return nil, fmt.Errorf("claim tasks: %w", err)
-	}
-	return &resp, nil
-}
-
-// ReportStatus reports download progress or completion for a task.
 // Deregister notifies the server that the agent is shutting down.
 func (c *Client) Deregister(ctx context.Context, agentID string) error {
 	req := struct {
@@ -87,6 +66,16 @@ func (c *Client) BatchReportStatus(ctx context.Context, updates []StatusUpdate) 
 	var resp BatchStatusResponse
 	if err := c.doPost(ctx, "/api/internal/agent/status", BatchStatusRequest{Updates: updates}, &resp); err != nil {
 		return nil, fmt.Errorf("batch report status: %w", err)
+	}
+	return &resp, nil
+}
+
+// Sync sends the CLI's full state and receives all pending server actions.
+// This is the single endpoint for bidirectional state synchronization.
+func (c *Client) Sync(ctx context.Context, req SyncRequest) (*SyncResponse, error) {
+	var resp SyncResponse
+	if err := c.doPost(ctx, "/api/internal/agent/sync", req, &resp); err != nil {
+		return nil, fmt.Errorf("sync: %w", err)
 	}
 	return &resp, nil
 }

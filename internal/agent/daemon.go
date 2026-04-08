@@ -14,75 +14,62 @@ import (
 
 // DaemonConfig holds daemon runtime settings.
 type DaemonConfig struct {
-	AgentID           string
-	AgentName         string
-	Version           string
-	DownloadDir       string
-	PollInterval      time.Duration
-	HeartbeatInterval time.Duration
-	StreamPort        int    // port for the HTTP stream server (reported in heartbeat)
-	LanIP             string // LAN IP (reported in heartbeat for stream URL resolution)
-	TailscaleIP       string // Tailscale IP (reported in heartbeat for stream URL resolution)
+	AgentID     string
+	AgentName   string
+	Version     string
+	DownloadDir string
+	StreamPort  int    // port for the HTTP stream server
+	LanIP       string // LAN IP (reported in sync for stream URL resolution)
+	TailscaleIP string // Tailscale IP (reported in sync for stream URL resolution)
 }
 
-// Daemon manages the main loop: register, heartbeat, poll tasks.
+// Daemon manages agent registration and the sync loop.
 type Daemon struct {
-	cfg       DaemonConfig
-	transport Transport
+	cfg    DaemonConfig
+	client *Client
+	sync   *SyncClient
+	state  *LocalState
 
-	// Callbacks
+	// Callbacks — set by cmd/daemon.go before calling Run.
 	OnTasksClaimed    func(tasks []Task)
 	OnStreamRequested func(req StreamRequest)
-	OnControlAction   func(action, taskID string)
+	OnControlAction   func(action, taskID string, deleteFiles bool)
+	GetActiveCount    func() int // returns number of active downloads (wired from manager)
 
 	// State
 	User                UserInfo
 	Features            FeatureFlags
 	Info                AgentInfo
 	State               DaemonState
-	heartbeatFailures   int
 	lastNotifiedVersion string
 
-	// Callbacks for state tracking (set by cmd/daemon.go)
-	GetActiveCount    func() int
-	GetCleanableBytes func() int64
-
 	// Watching tracks whether a user is viewing download progress in the web UI.
-	// When false, the progress reporter skips detailed updates (only sends final states).
-	// Accessed from heartbeat goroutine, flush goroutine, and WatchingFunc closure — must be atomic.
 	Watching atomic.Bool
 
-	// Exposed tickers for hot-reload
-	PollTicker      *time.Ticker
-	HeartbeatTicker *time.Ticker
-
-	// pollNow triggers an immediate poll (e.g. on resume)
-	pollNow chan struct{}
-
-	// ScanNow triggers an immediate library scan (from heartbeat or WebSocket control event)
+	// ScanNow triggers an immediate library scan.
 	ScanNow chan struct{}
 }
 
-// NewDaemon creates a daemon with the given transport.
-// Use NewHTTPTransport for HTTP-only, or NewHybridTransport for WS+HTTP.
-func NewDaemon(cfg DaemonConfig, transport Transport) *Daemon {
-	if cfg.PollInterval == 0 {
-		cfg.PollInterval = 30 * time.Second
-	}
-	if cfg.HeartbeatInterval == 0 {
-		cfg.HeartbeatInterval = 30 * time.Second
-	}
-
+// NewDaemon creates a daemon with an HTTP client for sync-based communication.
+func NewDaemon(cfg DaemonConfig, client *Client) *Daemon {
+	state := NewLocalState()
 	return &Daemon{
-		cfg:       cfg,
-		transport: transport,
-		pollNow:   make(chan struct{}, 1),
-		ScanNow:   make(chan struct{}, 1),
+		cfg:     cfg,
+		client:  client,
+		state:   state,
+		sync:    NewSyncClient(client, cfg, state),
+		ScanNow: make(chan struct{}, 1),
 	}
 }
 
-// Transport returns the configured transport.
-func (d *Daemon) Transport() Transport { return d.transport }
+// SyncClient returns the sync client for external wiring.
+func (d *Daemon) SyncClient() *SyncClient { return d.sync }
+
+// UpdateStreamPort updates the stream port reported in sync requests.
+func (d *Daemon) UpdateStreamPort(port int) {
+	d.cfg.StreamPort = port
+	d.sync.cfg.StreamPort = port
+}
 
 // Register registers the agent and fetches user info + features.
 // Retries with exponential backoff on transient errors (429, 5xx, network).
@@ -109,11 +96,10 @@ func (d *Daemon) Register(ctx context.Context) error {
 	var resp *RegisterResponse
 	var err error
 	for attempt := range maxRetries {
-		resp, err = d.transport.Register(ctx, req)
+		resp, err = d.client.Register(ctx, req)
 		if err == nil {
 			break
 		}
-		// Only retry on transient errors (429, 5xx, network failures)
 		if !isTransientError(err) {
 			return fmt.Errorf("register: %w", err)
 		}
@@ -154,14 +140,9 @@ func (d *Daemon) Register(ctx context.Context) error {
 	return nil
 }
 
-// Run connects the transport, registers the agent, and starts the main loop.
-// Blocks until ctx is cancelled. Callers must NOT call transport.Connect before Run.
+// Run registers the agent and starts the sync loop.
+// Blocks until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
-	// Connect transport (establishes WebSocket if available, falls back to HTTP)
-	if err := d.transport.Connect(ctx); err != nil {
-		return fmt.Errorf("connect transport: %w", err)
-	}
-
 	// Register
 	if err := d.Register(ctx); err != nil {
 		return err
@@ -169,163 +150,61 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	log.Printf("Agent registered: %s (%s) [%s]", d.User.Name, d.User.Email, d.User.Plan)
 	log.Printf("Features: torrent=%v debrid=%v usenet=%v", d.Features.Torrent, d.Features.Debrid, d.Features.Usenet)
-	log.Printf("Polling every %s, heartbeat every %s", d.cfg.PollInterval, d.cfg.HeartbeatInterval)
 
-	d.HeartbeatTicker = time.NewTicker(d.cfg.HeartbeatInterval)
-	defer d.HeartbeatTicker.Stop()
-
-	d.PollTicker = time.NewTicker(d.cfg.PollInterval)
-	defer d.PollTicker.Stop()
-
-	heartbeatTicker := d.HeartbeatTicker
-	pollTicker := d.PollTicker
-
-	// Initial poll immediately
-	d.poll(ctx)
-
-	eventsCh := d.transport.Events()
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("Daemon shutting down...")
-			d.deregister()
-			return nil
-
-		case event := <-eventsCh:
-			d.handleEvent(event)
-
-		case <-heartbeatTicker.C:
-			d.heartbeat(ctx)
-
-		case <-pollTicker.C:
-			// Only poll in HTTP mode — WS mode receives tasks via Events
-			if d.transport.Mode() == "http" {
-				d.poll(ctx)
-			}
-
-		case <-d.pollNow:
-			d.poll(ctx)
+	// Wire sync callbacks
+	d.sync.OnNewTasks = func(tasks []Task) {
+		if d.OnTasksClaimed != nil {
+			d.OnTasksClaimed(tasks)
 		}
 	}
-}
-
-func (d *Daemon) heartbeat(ctx context.Context) {
-	req := HeartbeatRequest{
-		AgentID:     d.cfg.AgentID,
-		Name:        d.cfg.AgentName,
-		Version:     d.cfg.Version,
-		OS:          runtime.GOOS,
-		DownloadDir: d.cfg.DownloadDir,
-		StreamPort:  d.cfg.StreamPort,
-		LanIP:       d.cfg.LanIP,
-		TailscaleIP: d.cfg.TailscaleIP,
-	}
-	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {
-		req.DiskFreeBytes = free
-		req.DiskTotalBytes = total
-	}
-
-	resp, err := d.transport.SendHeartbeat(ctx, req)
-	if err != nil {
-		d.heartbeatFailures++
-		if d.heartbeatFailures >= 5 && d.heartbeatFailures%5 == 0 {
-			log.Printf("CRITICAL: %d consecutive heartbeat failures — server may be unreachable", d.heartbeatFailures)
-		} else {
-			log.Printf("Heartbeat failed: %v", err)
+	d.sync.OnControl = func(action, taskID string, deleteFiles bool) {
+		if d.OnControlAction != nil {
+			d.OnControlAction(action, taskID, deleteFiles)
 		}
-		return
 	}
-	if d.heartbeatFailures > 0 {
-		log.Printf("Heartbeat recovered after %d failures", d.heartbeatFailures)
-		d.heartbeatFailures = 0
+	d.sync.OnStreamRequest = func(req StreamRequest) {
+		if d.OnStreamRequested != nil {
+			d.OnStreamRequested(req)
+		}
 	}
-
-	// Update watching flag and state file
-	d.Watching.Store(resp.Watching)
-	d.State.LastHeartbeat = time.Now()
-	if d.GetActiveCount != nil {
-		d.State.ActiveTasks = d.GetActiveCount()
+	d.sync.OnUpgrade = func(version string) {
+		if version != d.lastNotifiedVersion {
+			d.lastNotifiedVersion = version
+			log.Printf("New version available: %s (run `unarr self-update` to upgrade)", version)
+		}
 	}
-	WriteState(&d.State)
-
-	// Trigger library scan if requested
-	if resp.Scan {
+	d.sync.OnScan = func() {
 		log.Printf("Library scan requested by server")
 		select {
 		case d.ScanNow <- struct{}{}:
-		default: // scan already pending
+		default:
 		}
 	}
-
-	// Log once per version when server suggests an upgrade
-	if resp.Upgrade != nil && resp.Upgrade.Version != "" && resp.Upgrade.Version != d.lastNotifiedVersion {
-		d.lastNotifiedVersion = resp.Upgrade.Version
-		log.Printf("New version available: %s (run `unarr self-update` to upgrade)", resp.Upgrade.Version)
+	d.sync.OnWatchingChange = func(watching bool) {
+		d.Watching.Store(watching)
 	}
-}
-
-// handleEvent processes a server-initiated event from the WebSocket transport.
-func (d *Daemon) handleEvent(event ServerEvent) {
-	switch event.Type {
-	case "tasks":
-		if event.Tasks != nil && len(event.Tasks.Tasks) > 0 {
-			log.Printf("Received %d task(s) via WebSocket", len(event.Tasks.Tasks))
-			if d.OnTasksClaimed != nil {
-				d.OnTasksClaimed(event.Tasks.Tasks)
-			}
+	d.sync.OnSyncSuccess = func() {
+		d.State.LastHeartbeat = time.Now()
+		if d.GetActiveCount != nil {
+			d.State.ActiveTasks = d.GetActiveCount()
 		}
-		if event.Tasks != nil && d.OnStreamRequested != nil {
-			for _, sr := range event.Tasks.StreamRequests {
-				d.OnStreamRequested(sr)
-			}
-		}
-
-	case "upgrade":
-		if event.Upgrade != nil && event.Upgrade.Version != "" && event.Upgrade.Version != d.lastNotifiedVersion {
-			d.lastNotifiedVersion = event.Upgrade.Version
-			log.Printf("New version available: %s (run `unarr self-update` to upgrade)", event.Upgrade.Version)
-		}
-
-	case "control":
-		if event.Control != nil {
-			log.Printf("Control action via WebSocket: %s task %s", event.Control.Action, event.Control.TaskID)
-			if event.Control.Action == "scan" {
-				select {
-				case d.ScanNow <- struct{}{}:
-				default:
-				}
-			}
-			if d.OnControlAction != nil {
-				d.OnControlAction(event.Control.Action, event.Control.TaskID)
-			}
-		}
-
-	case "disconnected":
-		log.Println("WebSocket disconnected, switching to HTTP polling")
+		WriteState(&d.State)
 	}
+
+	// Start sync loop (blocks)
+	return d.sync.Run(ctx)
 }
 
-// UpdateStreamPort updates the stream port reported in heartbeats.
-// Called after the persistent stream server binds (actual port may differ from configured).
-func (d *Daemon) UpdateStreamPort(port int) {
-	d.cfg.StreamPort = port
+// TriggerSync requests an immediate sync cycle.
+func (d *Daemon) TriggerSync() {
+	d.sync.TriggerSync()
 }
 
-// TriggerPoll requests an immediate task poll cycle.
-// Used when a resume event is received to pick up re-pending tasks faster.
-func (d *Daemon) TriggerPoll() {
-	select {
-	case d.pollNow <- struct{}{}:
-	default: // already pending
-	}
-}
-
-func (d *Daemon) deregister() {
+// Deregister notifies the server of graceful shutdown.
+func (d *Daemon) Deregister() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := d.transport.Deregister(ctx, d.cfg.AgentID)
-	if err != nil {
+	if err := d.client.Deregister(ctx, d.cfg.AgentID); err != nil {
 		log.Printf("Deregister failed: %v", err)
 	} else {
 		log.Println("Agent deregistered")
@@ -338,12 +217,10 @@ func isTransientError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Structured check: HTTPError carries the status code directly
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
 		return httpErr.StatusCode == 429 || httpErr.StatusCode >= 500
 	}
-	// Fallback: network-level errors (no HTTP response received)
 	lower := strings.ToLower(err.Error())
 	for _, keyword := range []string{"connection refused", "no such host", "timeout", "request failed"} {
 		if strings.Contains(lower, keyword) {
@@ -351,28 +228,4 @@ func isTransientError(err error) bool {
 		}
 	}
 	return false
-}
-
-func (d *Daemon) poll(ctx context.Context) {
-	resp, err := d.transport.ClaimTasks(ctx, d.cfg.AgentID)
-	if err != nil {
-		log.Printf("Poll failed: %v", err)
-		return
-	}
-
-	d.Info.LastPollAt = time.Now()
-
-	if len(resp.Tasks) > 0 {
-		log.Printf("Claimed %d task(s)", len(resp.Tasks))
-		if d.OnTasksClaimed != nil {
-			d.OnTasksClaimed(resp.Tasks)
-		}
-	}
-
-	// Handle stream requests for completed downloads
-	if d.OnStreamRequested != nil {
-		for _, sr := range resp.StreamRequests {
-			d.OnStreamRequested(sr)
-		}
-	}
 }

@@ -72,70 +72,6 @@ func TestRegister(t *testing.T) {
 	}
 }
 
-func TestHeartbeat(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/internal/agent/heartbeat" {
-			t.Errorf("path = %s, want /api/internal/agent/heartbeat", r.URL.Path)
-		}
-		var req HeartbeatRequest
-		json.NewDecoder(r.Body).Decode(&req)
-		if req.AgentID != "agent-123" {
-			t.Errorf("agentId = %q, want agent-123", req.AgentID)
-		}
-		json.NewEncoder(w).Encode(HeartbeatResponse{Success: true})
-	}))
-	defer srv.Close()
-
-	c := NewClient(srv.URL, "test-key", "unarr-test")
-	resp, err := c.Heartbeat(context.Background(), HeartbeatRequest{AgentID: "agent-123"})
-	if err != nil {
-		t.Fatalf("Heartbeat failed: %v", err)
-	}
-	if !resp.Success {
-		t.Error("expected success=true")
-	}
-}
-
-func TestClaimTasks(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("method = %s, want GET", r.Method)
-		}
-		if r.URL.Query().Get("agentId") != "agent-123" {
-			t.Errorf("agentId param = %q, want agent-123", r.URL.Query().Get("agentId"))
-		}
-		json.NewEncoder(w).Encode(TasksResponse{
-			Tasks: []Task{
-				{
-					ID:              "task-uuid-1",
-					InfoHash:        "abc123def456abc123def456abc123def456abc1",
-					Title:           "The Matrix (1999)",
-					PreferredMethod: "auto",
-				},
-			},
-		})
-	}))
-	defer srv.Close()
-
-	c := NewClient(srv.URL, "test-key", "unarr-test")
-	resp, err := c.ClaimTasks(context.Background(), "agent-123")
-	if err != nil {
-		t.Fatalf("ClaimTasks failed: %v", err)
-	}
-	if len(resp.Tasks) != 1 {
-		t.Fatalf("len(tasks) = %d, want 1", len(resp.Tasks))
-	}
-	if resp.Tasks[0].ID != "task-uuid-1" {
-		t.Errorf("task.ID = %q, want task-uuid-1", resp.Tasks[0].ID)
-	}
-	if resp.Tasks[0].InfoHash != "abc123def456abc123def456abc123def456abc1" {
-		t.Errorf("task.InfoHash = %q", resp.Tasks[0].InfoHash)
-	}
-	if resp.Tasks[0].PreferredMethod != "auto" {
-		t.Errorf("task.PreferredMethod = %q, want auto", resp.Tasks[0].PreferredMethod)
-	}
-}
-
 func TestReportStatus(t *testing.T) {
 	var received StatusUpdate
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -170,22 +106,6 @@ func TestReportStatus(t *testing.T) {
 	}
 	if received.ResolvedMethod != "torrent" {
 		t.Errorf("resolvedMethod = %q, want torrent", received.ResolvedMethod)
-	}
-}
-
-func TestClaimTasksEmpty(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(TasksResponse{Tasks: []Task{}})
-	}))
-	defer srv.Close()
-
-	c := NewClient(srv.URL, "test-key", "unarr-test")
-	resp, err := c.ClaimTasks(context.Background(), "agent-123")
-	if err != nil {
-		t.Fatalf("ClaimTasks failed: %v", err)
-	}
-	if len(resp.Tasks) != 0 {
-		t.Errorf("expected empty tasks, got %d", len(resp.Tasks))
 	}
 }
 
@@ -279,50 +199,12 @@ func TestUserAgent(t *testing.T) {
 		if r.Header.Get("User-Agent") != "unarr/0.2.0" {
 			t.Errorf("User-Agent = %q, want unarr/0.2.0", r.Header.Get("User-Agent"))
 		}
-		json.NewEncoder(w).Encode(HeartbeatResponse{Success: true})
+		json.NewEncoder(w).Encode(RegisterResponse{Success: true})
 	}))
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-key", "unarr/0.2.0")
-	c.Heartbeat(context.Background(), HeartbeatRequest{AgentID: "x"})
-}
-
-func TestHeartbeatWithUpgradeSignal(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(HeartbeatResponse{
-			Success: true,
-			Upgrade: &UpgradeSignal{Version: "2.0.0"},
-		})
-	}))
-	defer srv.Close()
-
-	c := NewClient(srv.URL, "test-key", "unarr-test")
-	resp, err := c.Heartbeat(context.Background(), HeartbeatRequest{AgentID: "agent-1"})
-	if err != nil {
-		t.Fatalf("Heartbeat failed: %v", err)
-	}
-	if resp.Upgrade == nil {
-		t.Fatal("expected upgrade signal, got nil")
-	}
-	if resp.Upgrade.Version != "2.0.0" {
-		t.Errorf("upgrade version = %q, want 2.0.0", resp.Upgrade.Version)
-	}
-}
-
-func TestHeartbeatWithoutUpgradeSignal(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(HeartbeatResponse{Success: true})
-	}))
-	defer srv.Close()
-
-	c := NewClient(srv.URL, "test-key", "unarr-test")
-	resp, err := c.Heartbeat(context.Background(), HeartbeatRequest{AgentID: "agent-1"})
-	if err != nil {
-		t.Fatalf("Heartbeat failed: %v", err)
-	}
-	if resp.Upgrade != nil {
-		t.Errorf("expected no upgrade signal, got %+v", resp.Upgrade)
-	}
+	c.Register(context.Background(), RegisterRequest{AgentID: "x"})
 }
 
 func TestDeregister(t *testing.T) {

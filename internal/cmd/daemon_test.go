@@ -2,32 +2,6 @@ package cmd
 
 import "testing"
 
-func TestDeriveWSURL(t *testing.T) {
-	tests := []struct {
-		apiURL  string
-		agentID string
-		want    string
-	}{
-		{"https://torrentclaw.com", "agent-123", "wss://unarr.torrentclaw.com/ws/agent-123"},
-		{"http://localhost:3000", "a1", ""}, // localhost skipped
-		{"http://127.0.0.1:3000", "a1", ""}, // 127.0.0.1 skipped
-		{"https://torrentclaw.com/", "a1", "wss://unarr.torrentclaw.com/ws/a1"},
-		{"https://api.example.io", "x", "wss://unarr.api.example.io/ws/x"},
-		{"", "agent-123", ""},
-		{"https://torrentclaw.com", "", ""},
-		{"", "", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.apiURL+"_"+tt.agentID, func(t *testing.T) {
-			got := deriveWSURL(tt.apiURL, tt.agentID)
-			if got != tt.want {
-				t.Errorf("deriveWSURL(%q, %q) = %q, want %q", tt.apiURL, tt.agentID, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestFormatSpeedLog(t *testing.T) {
 	tests := []struct {
 		bps  int64

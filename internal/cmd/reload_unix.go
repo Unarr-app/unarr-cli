@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/torrentclaw/unarr/internal/agent"
 	"github.com/torrentclaw/unarr/internal/config"
@@ -19,7 +18,8 @@ type ReloadableConfig struct {
 }
 
 // startReloadWatcher listens for SIGUSR1 and reloads config.
-// Only intervals are hot-reloadable (speeds require torrent client restart).
+// With the sync-based architecture, intervals are fixed (3s watching, 60s idle).
+// Hot-reload now mainly serves as a signal to re-read config for future settings.
 func startReloadWatcher(rc *ReloadableConfig) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGUSR1)
@@ -28,23 +28,10 @@ func startReloadWatcher(rc *ReloadableConfig) {
 		for range sigCh {
 			log.Println("Received SIGUSR1, reloading config...")
 
-			cfg, err := config.Load("")
+			_, err := config.Load("")
 			if err != nil {
 				log.Printf("Config reload failed: %v", err)
 				continue
-			}
-			cfg.ApplyEnvOverrides()
-
-			// Update poll interval
-			if d, _ := time.ParseDuration(cfg.Daemon.PollInterval); d > 0 && rc.Daemon.PollTicker != nil {
-				rc.Daemon.PollTicker.Reset(d)
-				log.Printf("  Poll interval: %s", d)
-			}
-
-			// Update heartbeat interval
-			if d, _ := time.ParseDuration(cfg.Daemon.HeartbeatInterval); d > 0 && rc.Daemon.HeartbeatTicker != nil {
-				rc.Daemon.HeartbeatTicker.Reset(d)
-				log.Printf("  Heartbeat interval: %s", d)
 			}
 
 			log.Println("Config reloaded successfully")

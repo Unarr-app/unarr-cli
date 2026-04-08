@@ -311,21 +311,10 @@ func configConnection(cfg *config.Config) error {
 	).Run()
 }
 
-func configAdvanced(cfg *config.Config) error {
-	return huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Poll interval").
-				Description("How often to check for new tasks (e.g. 30s, 1m)").
-				Value(&cfg.Daemon.PollInterval).
-				Validate(validateDuration),
-			huh.NewInput().
-				Title("Heartbeat interval").
-				Description("How often to send heartbeat to server (e.g. 30s, 1m)").
-				Value(&cfg.Daemon.HeartbeatInterval).
-				Validate(validateDuration),
-		),
-	).Run()
+func configAdvanced(_ *config.Config) error {
+	// Sync intervals are adaptive (3s watching, 60s idle) — no user-facing config needed.
+	fmt.Println("No advanced settings to configure. Sync intervals are automatic.")
+	return nil
 }
 
 // ── Validators ──────────────────────────────────────────────────────

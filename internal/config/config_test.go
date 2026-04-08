@@ -21,8 +21,8 @@ func TestDefault(t *testing.T) {
 	if cfg.General.Country != "US" {
 		t.Errorf("default Country = %q, want US", cfg.General.Country)
 	}
-	if cfg.Daemon.HeartbeatInterval != "30s" {
-		t.Errorf("default HeartbeatInterval = %q, want 30s", cfg.Daemon.HeartbeatInterval)
+	if cfg.Daemon.StatusInterval != "" {
+		t.Errorf("default StatusInterval = %q, want empty", cfg.Daemon.StatusInterval)
 	}
 }
 

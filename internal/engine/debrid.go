@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/torrentclaw/unarr/internal/agent"
 )
 
 // httpClient is used for debrid HTTPS downloads with a reasonable header timeout.
@@ -17,13 +19,6 @@ var httpClient = &http.Client{
 	Transport: &http.Transport{
 		ResponseHeaderTimeout: 30 * time.Second,
 	},
-}
-
-func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
 }
 
 // DebridDownloader downloads files via HTTPS direct URLs resolved by the server.
@@ -129,7 +124,7 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 				var serverSize int64
 				if _, err := fmt.Sscanf(cr, "bytes */%d", &serverSize); err == nil && serverSize > 0 && existingSize != serverSize {
 					// Local file size doesn't match server — re-download from scratch
-					log.Printf("[%s] local size %s != server size %s, re-downloading", shortID(task.ID), formatBytes(existingSize), formatBytes(serverSize))
+					log.Printf("[%s] local size %s != server size %s, re-downloading", agent.ShortID(task.ID), formatBytes(existingSize), formatBytes(serverSize))
 					resp.Body.Close()
 					req2, err := http.NewRequestWithContext(dlCtx, http.MethodGet, task.DirectURL, nil)
 					if err != nil {
@@ -149,7 +144,7 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 					break // continue to download loop
 				}
 			}
-			log.Printf("[%s] file already complete: %s (%s)", shortID(task.ID), fileName, formatBytes(existingSize))
+			log.Printf("[%s] file already complete: %s (%s)", agent.ShortID(task.ID), fileName, formatBytes(existingSize))
 			return &Result{
 				FilePath: destPath,
 				FileName: fileName,
@@ -166,10 +161,10 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 	var flags int
 	if startOffset > 0 {
 		flags = os.O_WRONLY | os.O_APPEND
-		log.Printf("[%s] resuming debrid download at %s: %s", shortID(task.ID), formatBytes(startOffset), fileName)
+		log.Printf("[%s] resuming debrid download at %s: %s", agent.ShortID(task.ID), formatBytes(startOffset), fileName)
 	} else {
 		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-		log.Printf("[%s] starting debrid download: %s", shortID(task.ID), fileName)
+		log.Printf("[%s] starting debrid download: %s", agent.ShortID(task.ID), fileName)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
@@ -223,7 +218,7 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 			}
 
 			log.Printf("[%s] %d%% — %s/%s @ %s/s  (debrid)",
-				shortID(task.ID), pct,
+				agent.ShortID(task.ID), pct,
 				formatBytes(downloaded), formatBytes(totalBytes), formatBytes(speed))
 
 			p := Progress{
@@ -252,7 +247,7 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 		}
 	}
 
-	log.Printf("[%s] debrid download complete: %s (%s)", shortID(task.ID), fileName, formatBytes(downloaded))
+	log.Printf("[%s] debrid download complete: %s (%s)", agent.ShortID(task.ID), fileName, formatBytes(downloaded))
 
 	return &Result{
 		FilePath: destPath,
@@ -271,7 +266,7 @@ func (d *DebridDownloader) Pause(taskID string) error {
 
 	if ok {
 		cancel()
-		log.Printf("[%s] debrid download paused (file kept for resume)", shortID(taskID))
+		log.Printf("[%s] debrid download paused (file kept for resume)", agent.ShortID(taskID))
 	}
 	return nil
 }
@@ -285,7 +280,7 @@ func (d *DebridDownloader) Cancel(taskID string) error {
 
 	if ok {
 		cancel()
-		log.Printf("[%s] debrid download cancelled", shortID(taskID))
+		log.Printf("[%s] debrid download cancelled", agent.ShortID(taskID))
 	}
 	return nil
 }

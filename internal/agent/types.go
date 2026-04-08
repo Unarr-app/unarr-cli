@@ -50,20 +50,6 @@ type UsenetServerInfo struct {
 	SSL  bool   `json:"ssl"`
 }
 
-// HeartbeatRequest is sent every 30s to keep the agent alive.
-type HeartbeatRequest struct {
-	AgentID        string `json:"agentId"`
-	Name           string `json:"name,omitempty"`
-	OS             string `json:"os,omitempty"`
-	Version        string `json:"version,omitempty"`
-	DownloadDir    string `json:"downloadDir,omitempty"`
-	DiskFreeBytes  int64  `json:"diskFreeBytes,omitempty"`
-	DiskTotalBytes int64  `json:"diskTotalBytes,omitempty"`
-	StreamPort     int    `json:"streamPort,omitempty"`
-	LanIP          string `json:"lanIp,omitempty"`
-	TailscaleIP    string `json:"tailscaleIp,omitempty"`
-}
-
 // Task represents a download task claimed from the server.
 type Task struct {
 	ID              string `json:"id"`
@@ -86,12 +72,6 @@ type Task struct {
 	Episode         *int   `json:"episode,omitempty"`        // Episode number
 	ContentYear     *int   `json:"contentYear,omitempty"`    // Year from TMDB (avoids regex on torrent title)
 	CollectionName  string `json:"collectionName,omitempty"` // Collection name (e.g., "Harry Potter Collection")
-}
-
-// TasksResponse wraps the array of tasks returned by the server.
-type TasksResponse struct {
-	Tasks          []Task          `json:"tasks"`
-	StreamRequests []StreamRequest `json:"streamRequests,omitempty"`
 }
 
 // StreamRequest is a request to stream a completed download from disk.
@@ -139,14 +119,6 @@ type BatchStatusResponse struct {
 	Watching bool             `json:"watching,omitempty"`
 }
 
-// HeartbeatResponse is returned by the server on heartbeat.
-type HeartbeatResponse struct {
-	Success  bool           `json:"success"`
-	Upgrade  *UpgradeSignal `json:"upgrade,omitempty"`
-	Watching bool           `json:"watching,omitempty"` // true when a user is viewing download progress in the web UI
-	Scan     bool           `json:"scan,omitempty"`     // true when user triggered a library scan from the web UI
-}
-
 // UpgradeSignal tells the agent to upgrade to a specific version.
 type UpgradeSignal struct {
 	Version string `json:"version"`
@@ -176,7 +148,6 @@ type AgentInfo struct {
 	User        UserInfo
 	Features    FeatureFlags
 	StartedAt   time.Time
-	LastPollAt  time.Time
 	ActiveTasks int
 }
 
@@ -332,6 +303,45 @@ type LibrarySyncResponse struct {
 	Synced  int `json:"synced"`
 	Matched int `json:"matched"`
 	Removed int `json:"removed"`
+}
+
+// ---------------------------------------------------------------------------
+// Sync types (unified CLI ↔ Server communication)
+// ---------------------------------------------------------------------------
+
+// SyncRequest is sent by the CLI periodically to synchronize state with the server.
+// Contains the CLI's full execution state — the server responds with pending actions.
+type SyncRequest struct {
+	AgentID        string      `json:"agentId"`
+	Version        string      `json:"version,omitempty"`
+	OS             string      `json:"os,omitempty"`
+	Arch           string      `json:"arch,omitempty"`
+	Name           string      `json:"name,omitempty"`
+	DownloadDir    string      `json:"downloadDir,omitempty"`
+	DiskFreeBytes  int64       `json:"diskFreeBytes,omitempty"`
+	DiskTotalBytes int64       `json:"diskTotalBytes,omitempty"`
+	StreamPort     int         `json:"streamPort,omitempty"`
+	LanIP          string      `json:"lanIp,omitempty"`
+	TailscaleIP    string      `json:"tailscaleIp,omitempty"`
+	FreeSlots      int         `json:"freeSlots"`
+	Tasks          []TaskState `json:"tasks"`
+}
+
+// ControlAction represents a server-side control signal for a task.
+type ControlAction struct {
+	Action      string `json:"action"` // "pause", "resume", "cancel", "stream"
+	TaskID      string `json:"taskId"`
+	DeleteFiles bool   `json:"deleteFiles,omitempty"`
+}
+
+// SyncResponse is returned by the server with all pending actions for the CLI.
+type SyncResponse struct {
+	NewTasks       []Task          `json:"newTasks,omitempty"`
+	Controls       []ControlAction `json:"controls,omitempty"`
+	StreamRequests []StreamRequest `json:"streamRequests,omitempty"`
+	Watching       bool            `json:"watching"`
+	Upgrade        *UpgradeSignal  `json:"upgrade,omitempty"`
+	Scan           bool            `json:"scan,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

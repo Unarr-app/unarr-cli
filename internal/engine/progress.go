@@ -13,13 +13,11 @@ import (
 type ActionFunc func(taskID string)
 
 // StatusReporter is the interface used by ProgressReporter to send progress updates.
-// Both *agent.Client and agent.Transport implement this via their ReportStatus/SendProgress methods.
 type StatusReporter interface {
 	ReportStatus(ctx context.Context, update agent.StatusUpdate) (*agent.StatusResponse, error)
 }
 
 // BatchStatusReporter extends StatusReporter with batch support.
-// Transports that implement this send all updates in a single request.
 type BatchStatusReporter interface {
 	StatusReporter
 	BatchReportStatus(ctx context.Context, updates []agent.StatusUpdate) (*agent.BatchStatusResponse, error)
@@ -48,7 +46,6 @@ type ProgressReporter struct {
 }
 
 // NewProgressReporter creates a reporter that flushes every interval.
-// Accepts *agent.Client directly (backwards compatible).
 func NewProgressReporter(ac *agent.Client, interval time.Duration) *ProgressReporter {
 	return &ProgressReporter{
 		reporter:     ac,
@@ -56,25 +53,6 @@ func NewProgressReporter(ac *agent.Client, interval time.Duration) *ProgressRepo
 		latest:       make(map[string]*Task),
 		lastReported: make(map[string]TaskStatus),
 	}
-}
-
-// NewProgressReporterWithTransport creates a reporter using a Transport.
-func NewProgressReporterWithTransport(t agent.Transport, interval time.Duration) *ProgressReporter {
-	return &ProgressReporter{
-		reporter:     &transportStatusAdapter{t: t},
-		interval:     interval,
-		latest:       make(map[string]*Task),
-		lastReported: make(map[string]TaskStatus),
-	}
-}
-
-// transportStatusAdapter adapts agent.Transport to StatusReporter.
-type transportStatusAdapter struct {
-	t agent.Transport
-}
-
-func (a *transportStatusAdapter) ReportStatus(ctx context.Context, update agent.StatusUpdate) (*agent.StatusResponse, error) {
-	return a.t.SendProgress(ctx, update)
 }
 
 // SetCancelHandler sets the callback invoked when the server says a task is cancelled.
