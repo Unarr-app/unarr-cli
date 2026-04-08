@@ -300,8 +300,16 @@ func (u *UsenetDownloader) Pause(taskID string) error {
 
 // Cancel aborts an in-progress download and removes partial files + resume state.
 func (u *UsenetDownloader) Cancel(taskID string) error {
+	// Read all fields under the lock — Download() writes tracker and taskDir under
+	// the same lock, so we must hold it while reading to avoid a data race.
 	u.mu.Lock()
 	dl := u.active[taskID]
+	var tracker *download.ProgressTracker
+	var taskDir string
+	if dl != nil {
+		tracker = dl.tracker
+		taskDir = dl.taskDir
+	}
 	u.mu.Unlock()
 
 	if dl == nil {
@@ -312,13 +320,13 @@ func (u *UsenetDownloader) Cancel(taskID string) error {
 	dl.cancel()
 
 	// Remove resume state (best-effort)
-	if dl.tracker != nil {
-		dl.tracker.Remove()
+	if tracker != nil {
+		tracker.Remove()
 	}
 
 	// Remove partial download directory in background (can be slow for large dirs)
-	if dl.taskDir != "" {
-		go os.RemoveAll(dl.taskDir)
+	if taskDir != "" {
+		go os.RemoveAll(taskDir)
 	}
 
 	return nil

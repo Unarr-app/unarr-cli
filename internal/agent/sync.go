@@ -12,7 +12,8 @@ const (
 	// SyncIntervalWatching is the sync interval when someone is viewing the web UI.
 	SyncIntervalWatching = 3 * time.Second
 	// SyncIntervalIdle is the sync interval when nobody is watching.
-	SyncIntervalIdle = 60 * time.Second
+	// Keep this short enough to pick up stream requests quickly without hammering the server.
+	SyncIntervalIdle = 10 * time.Second
 )
 
 // SyncClient handles bidirectional state synchronization between the CLI and server.
@@ -68,6 +69,9 @@ func (sc *SyncClient) TriggerSync() {
 
 // Run starts the adaptive sync loop. Blocks until ctx is cancelled.
 func (sc *SyncClient) Run(ctx context.Context) error {
+	// Start wake listener in background — triggers immediate syncs on demand.
+	go sc.runWakeListener(ctx)
+
 	// Initial sync immediately
 	sc.doSync(ctx)
 
@@ -174,6 +178,38 @@ func (sc *SyncClient) processResponse(resp *SyncResponse) {
 	}
 }
 
+// runWakeListener holds a long-poll connection to /api/internal/agent/wake.
+// When the server resolves it with wake=true (e.g., a stream was requested),
+// it triggers an immediate sync so the CLI acts in <100ms instead of waiting
+// for the next scheduled interval. Reconnects immediately after each response
+// so coverage is continuous. Runs until ctx is cancelled.
+func (sc *SyncClient) runWakeListener(ctx context.Context) {
+	const retryDelay = 2 * time.Second
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		woke, err := sc.client.WaitForWake(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			log.Printf("wake listener: %v (retrying in %s)", err, retryDelay)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(retryDelay):
+			}
+			continue
+		}
+		if woke {
+			log.Printf("wake signal received — syncing immediately")
+			sc.TriggerSync()
+		}
+		// On timeout (woke=false) or after a wake, reconnect immediately.
+	}
+}
+
 func (sc *SyncClient) adjustInterval(watching bool) {
 	prev := sc.watching.Load()
 	sc.watching.Store(watching)
@@ -187,6 +223,12 @@ func (sc *SyncClient) adjustInterval(watching bool) {
 
 	if sc.interval.Swap(int64(newInterval)) != int64(newInterval) {
 		log.Printf("sync: interval=%s (watching=%v)", newInterval, watching)
+	}
+
+	// Trigger an immediate sync when entering watching mode so stream requests
+	// are picked up right away without waiting for the next scheduled interval.
+	if watching && !prev {
+		sc.TriggerSync()
 	}
 
 	if prev != watching && sc.OnWatchingChange != nil {

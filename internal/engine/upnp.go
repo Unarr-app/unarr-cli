@@ -338,16 +338,28 @@ func localIPFor(host string) string {
 }
 
 // Remove deletes the port mapping from the router.
+// It runs in a goroutine with a 5-second deadline so it never blocks shutdown.
 func (m *UPnPMapping) Remove() {
 	if m == nil {
 		return
 	}
 
-	switch m.protocol {
-	case "natpmp":
-		m.removeNATPMP()
-	case "upnp":
-		m.removeUPnP()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		switch m.protocol {
+		case "natpmp":
+			m.removeNATPMP()
+		case "upnp":
+			m.removeUPnP()
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		// removeNATPMP worst case: 3s dial + 5s natpmpMapPort deadline = 8s.
+		// 10s gives enough margin without blocking shutdown indefinitely.
+		log.Printf("stream: UPnP/NAT-PMP cleanup timed out after 10s — port %d may remain mapped", m.ExternalPort)
 	}
 }
 

@@ -207,10 +207,20 @@ func (t *Task) ToStatusUpdate() agent.StatusUpdate {
 		// StatusPending, StatusClaimed, StatusCancelled — not reported
 	}
 
+	// Compute percent inline — do NOT call t.Percent() here since we already hold RLock.
+	// Calling Percent() (which also RLocks) while holding RLock deadlocks when a writer is waiting.
+	percent := 0
+	if t.TotalBytes > 0 {
+		percent = int(float64(t.DownloadedBytes) / float64(t.TotalBytes) * 100)
+		if percent > 100 {
+			percent = 100
+		}
+	}
+
 	return agent.StatusUpdate{
 		TaskID:          t.ID,
 		Status:          apiStatus,
-		Progress:        t.Percent(),
+		Progress:        percent,
 		DownloadedBytes: t.DownloadedBytes,
 		TotalBytes:      t.TotalBytes,
 		SpeedBps:        t.SpeedBps,

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -316,7 +317,12 @@ func runDaemonStart() error {
 			return
 		}
 
-		filePath := sr.FilePath
+		filePath := filepath.Clean(sr.FilePath)
+		if !isAllowedStreamPath(filePath, cfg.Download.Dir, cfg.Library.ScanPath,
+			cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir) {
+			log.Printf("[%s] stream request rejected: path outside allowed dirs: %s", agent.ShortID(sr.TaskID), filePath)
+			return
+		}
 		info, err := os.Stat(filePath)
 		if err != nil {
 			log.Printf("[%s] stream request: file not found: %s", agent.ShortID(sr.TaskID), filePath)
@@ -441,6 +447,25 @@ func runDaemonStart() error {
 		cancel()
 		return err
 	}
+}
+
+// isAllowedStreamPath checks that filePath is within one of the directories
+// the daemon is configured to manage. This defends against a compromised API
+// server sending a path traversal payload (e.g. /etc/passwd) in StreamRequest.
+// isAllowedStreamPath reports whether filePath is contained within one of the
+// allowedDirs. filePath must already be cleaned (filepath.Clean) by the caller.
+// This defends against a compromised API server sending a path traversal payload.
+func isAllowedStreamPath(filePath string, allowedDirs ...string) bool {
+	for _, dir := range allowedDirs {
+		if dir == "" {
+			continue
+		}
+		rel, err := filepath.Rel(filepath.Clean(dir), filePath)
+		if err == nil && !strings.HasPrefix(rel, "..") {
+			return true
+		}
+	}
+	return false
 }
 
 func formatSpeedLog(bps int64) string {

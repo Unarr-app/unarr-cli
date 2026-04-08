@@ -16,6 +16,9 @@ type Client struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+	// wakeClient has no built-in timeout — used exclusively for the long-poll
+	// wake endpoint where the context controls cancellation.
+	wakeClient *http.Client
 	userAgent  string
 }
 
@@ -27,7 +30,10 @@ func NewClient(baseURL, apiKey, userAgent string) *Client {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		userAgent: userAgent,
+		// wakeClient has no built-in timeout — the context controls it.
+		// The server holds the connection for up to 28s before responding.
+		wakeClient: &http.Client{},
+		userAgent:  userAgent,
 	}
 }
 
@@ -174,6 +180,36 @@ func (c *Client) ReportWatchProgress(ctx context.Context, update WatchProgressUp
 		return fmt.Errorf("watch progress: %w", err)
 	}
 	return nil
+}
+
+// WaitForWake blocks until the server sends a wake signal, the long-poll
+// timeout elapses, or ctx is cancelled. Returns true when a wake signal
+// was received (caller should sync immediately), false on timeout/cancel.
+func (c *Client) WaitForWake(ctx context.Context) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/internal/agent/wake", nil)
+	if err != nil {
+		return false, fmt.Errorf("create wake request: %w", err)
+	}
+	c.setHeaders(req)
+
+	resp, err := c.wakeClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("wake request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+		return false, &HTTPError{StatusCode: resp.StatusCode, Message: string(body)}
+	}
+
+	var result struct {
+		Wake bool `json:"wake"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, fmt.Errorf("decode wake response: %w", err)
+	}
+	return result.Wake, nil
 }
 
 // doPost sends a JSON POST request and decodes the response.
