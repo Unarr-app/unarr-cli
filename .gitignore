@@ -39,3 +39,4 @@ dist/
 
 # Docker
 tmp/
+config/
