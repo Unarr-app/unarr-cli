@@ -5,12 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6] - 2026-04-09
+
+
+### Fixed
+
+- **stream**: fix black screen on remote/Tailscale streaming
 ## [0.6.5] - 2026-04-09
 
 
 ### Fixed
 
 - **upgrade**: retry download on transient network errors with user feedback
+
+### Other
+
+- **release**: 0.6.5
 ## [0.6.4] - 2026-04-09
 
 
@@ -218,6 +228,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - remove UPX compression (antivirus false positives, startup penalty)
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[0.6.6]: https://github.com/torrentclaw/unarr/compare/v0.6.5...v0.6.6
 [0.6.5]: https://github.com/torrentclaw/unarr/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/torrentclaw/unarr/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/torrentclaw/unarr/compare/v0.6.2...v0.6.3
