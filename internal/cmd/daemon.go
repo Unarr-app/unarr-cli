@@ -321,6 +321,15 @@ func runDaemonStart() error {
 		if !isAllowedStreamPath(filePath, cfg.Download.Dir, cfg.Library.ScanPath,
 			cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir) {
 			log.Printf("[%s] stream request rejected: path outside allowed dirs: %s", agent.ShortID(sr.TaskID), filePath)
+			go func() {
+				if _, err := agentClient.ReportStatus(ctx, agent.StatusUpdate{
+					TaskID:       sr.TaskID,
+					Status:       "failed",
+					ErrorMessage: fmt.Sprintf("path outside allowed dirs: %s", filePath),
+				}); err != nil {
+					log.Printf("[%s] stream error report failed: %v", agent.ShortID(sr.TaskID), err)
+				}
+			}()
 			return
 		}
 		info, err := os.Stat(filePath)
