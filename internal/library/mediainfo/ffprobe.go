@@ -251,7 +251,29 @@ func ResolveFFprobe(explicit string) (string, error) {
 		return p, nil
 	}
 
-	return "", fmt.Errorf("ffprobe not found. Install ffmpeg or provide --ffprobe path")
+	// Give an actionable error depending on whether we're running in Docker.
+	if isDocker() {
+		return "", fmt.Errorf(
+			"ffprobe not found and auto-download failed (read-only filesystem?).\n" +
+				"Options:\n" +
+				"  • Use the official image: torrentclaw/unarr (includes ffprobe)\n" +
+				"  • Set FFPROBE_PATH env var to point to a pre-installed ffprobe binary\n" +
+				"  • Add to config.toml: [library]\\nffprobe_path = \"/path/to/ffprobe\"",
+		)
+	}
+	return "", fmt.Errorf(
+		"ffprobe not found and auto-download failed.\n" +
+			"Options:\n" +
+			"  • Install ffmpeg: sudo apt install ffmpeg  (or brew install ffmpeg)\n" +
+			"  • Set FFPROBE_PATH env var to point to the ffprobe binary\n" +
+			"  • Add to config.toml: [library]\\nffprobe_path = \"/path/to/ffprobe\"",
+	)
+}
+
+// isDocker reports whether the process is running inside a Docker container.
+func isDocker() bool {
+	_, err := os.Stat("/.dockerenv")
+	return err == nil
 }
 
 // tagValue gets a tag value case-insensitively.

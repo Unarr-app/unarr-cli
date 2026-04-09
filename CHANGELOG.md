@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-04-08
+
+### Added
+
+- **library**: dedicated 10-minute HTTP client for library-sync — large libraries (hundreds/thousands of items) no longer time out during scan
+- **library**: actionable ffprobe-not-found error — detects Docker environment and shows install options (`FFPROBE_PATH`, `[library] ffprobe_path`, or package install)
+
 ## [0.6.1] - 2026-04-08
 
 ### Added

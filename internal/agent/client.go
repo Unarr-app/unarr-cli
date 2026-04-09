@@ -19,7 +19,10 @@ type Client struct {
 	// wakeClient has no built-in timeout — used exclusively for the long-poll
 	// wake endpoint where the context controls cancellation.
 	wakeClient *http.Client
-	userAgent  string
+	// librarySyncClient has a generous timeout for library-sync calls which can
+	// take several minutes when syncing hundreds or thousands of items.
+	librarySyncClient *http.Client
+	userAgent         string
 }
 
 // NewClient creates an agent API client.
@@ -33,7 +36,11 @@ func NewClient(baseURL, apiKey, userAgent string) *Client {
 		// wakeClient has no built-in timeout — the context controls it.
 		// The server holds the connection for up to 28s before responding.
 		wakeClient: &http.Client{},
-		userAgent:  userAgent,
+		// librarySyncClient uses a 10-minute timeout to handle large libraries
+		// (hundreds or thousands of items) where ffprobe scanning alone can take
+		// several minutes before the HTTP request is even sent.
+		librarySyncClient: &http.Client{Timeout: 10 * time.Minute},
+		userAgent:         userAgent,
 	}
 }
 
@@ -165,9 +172,10 @@ func (c *Client) BatchDownload(ctx context.Context, req BatchDownloadRequest) (*
 }
 
 // SyncLibrary sends scanned library items to the server for matching and upgrade discovery.
+// Uses a 10-minute timeout client to handle large libraries where scanning can take several minutes.
 func (c *Client) SyncLibrary(ctx context.Context, req LibrarySyncRequest) (*LibrarySyncResponse, error) {
 	var resp LibrarySyncResponse
-	if err := c.doPost(ctx, "/api/internal/agent/library-sync", req, &resp); err != nil {
+	if err := c.doPostWith(ctx, c.librarySyncClient, "/api/internal/agent/library-sync", req, &resp); err != nil {
 		return nil, fmt.Errorf("library sync: %w", err)
 	}
 	return &resp, nil
@@ -212,8 +220,14 @@ func (c *Client) WaitForWake(ctx context.Context) (bool, error) {
 	return result.Wake, nil
 }
 
-// doPost sends a JSON POST request and decodes the response.
+// doPost sends a JSON POST request using the default httpClient and decodes the response.
 func (c *Client) doPost(ctx context.Context, path string, body any, dst any) error {
+	return c.doPostWith(ctx, c.httpClient, path, body, dst)
+}
+
+// doPostWith sends a JSON POST request using the provided HTTP client and decodes the response.
+// Use this to override the default timeout for specific operations (e.g. librarySyncClient).
+func (c *Client) doPostWith(ctx context.Context, hc *http.Client, path string, body any, dst any) error {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal body: %w", err)
@@ -227,7 +241,7 @@ func (c *Client) doPost(ctx context.Context, path string, body any, dst any) err
 	c.setHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}

@@ -1,3 +1,23 @@
+# ---- ffprobe static binary stage ----
+# Download a static ffprobe-only build (~30MB) to avoid the full ffmpeg package (~1GB).
+# johnvansickle.com provides reliable static builds for amd64/arm64.
+FROM alpine:3.22 AS ffprobe-dl
+
+RUN apk add --no-cache curl xz
+
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in \
+      x86_64)  SLUG="amd64" ;; \
+      aarch64) SLUG="arm64" ;; \
+      *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${SLUG}-static.tar.xz" -o /tmp/ff.tar.xz && \
+    tar xJ -f /tmp/ff.tar.xz --strip-components=1 -C /tmp/ && \
+    mv /tmp/ffprobe /usr/local/bin/ffprobe && \
+    chmod +x /usr/local/bin/ffprobe && \
+    rm -rf /tmp/ff.tar.xz /tmp/ffmpeg /tmp/ffmpeg-* && \
+    ffprobe -version | head -1
+
 # ---- Build stage ----
 FROM golang:1.25-alpine AS builder
 
@@ -31,6 +51,7 @@ RUN mkdir -p /config /downloads /data && \
 USER unarr
 
 COPY --from=builder /unarr /usr/local/bin/unarr
+COPY --from=ffprobe-dl /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 
 # Environment: point config/data to container paths
 ENV UNARR_CONFIG_DIR=/config
