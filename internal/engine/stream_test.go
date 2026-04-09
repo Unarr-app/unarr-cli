@@ -380,3 +380,31 @@ func (r *responseRecorder) ReadFrom(src io.Reader) (int64, error) {
 	n, err := io.Copy(r.body, src)
 	return n, err
 }
+
+// TestPrioritizeTail_SmallFile verifica que PrioritizeTail no lanza goroutine
+// cuando el archivo es demasiado pequeño (≤ 2×tailBytes).
+func TestPrioritizeTail_SmallFile(t *testing.T) {
+	s := &StreamEngine{
+		totalBytes: 5 * 1024 * 1024, // 5 MB — menor que 2×5 MB
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// No debe entrar en pánico ni bloquear con file == nil
+	s.PrioritizeTail(ctx, 5*1024*1024)
+	// Si llega aquí sin pánico, el test pasa
+}
+
+// TestPrioritizeTail_NilFile verifica que PrioritizeTail es seguro cuando
+// file es nil (engine no inicializado).
+func TestPrioritizeTail_NilFile(t *testing.T) {
+	s := &StreamEngine{
+		totalBytes: 100 * 1024 * 1024,
+		file:       nil,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.PrioritizeTail(ctx, 5*1024*1024)
+	// No debe entrar en pánico
+}

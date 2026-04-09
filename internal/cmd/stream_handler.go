@@ -148,6 +148,13 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	task.StreamURL = srv.URLsJSON()
 	log.Printf("[%s] stream ready: %s (url: %s)", at.ID[:8], eng.FileName(), srv.URL())
 
+	// Pre-descargar los últimos 5 MB del archivo para que el moov atom (MP4)
+	// o el seekhead (MKV) estén disponibles cuando VLC los pida al abrir el
+	// stream. Sin esto, VLC busca el final del archivo, el lector bloquea
+	// esperando piezas no descargadas, y el resultado es pantalla negra en
+	// redes remotas donde la latencia amplifica el efecto.
+	eng.PrioritizeTail(ctx, 5*1024*1024)
+
 	// 5. Start watch progress reporter
 	if agentClient != nil {
 		watchReporter := engine.NewWatchReporter(agentClient, srv, at.ID)

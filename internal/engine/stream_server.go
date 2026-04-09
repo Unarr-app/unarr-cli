@@ -71,6 +71,7 @@ func NewStreamServer(port int) *StreamServer {
 func (ss *StreamServer) Listen(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stream", ss.handler)
+	mux.HandleFunc("/health", ss.healthHandler)
 
 	// SO_REUSEADDR allows immediate rebind if the port is in TIME_WAIT (e.g. after agent restart)
 	lc := net.ListenConfig{
@@ -234,8 +235,51 @@ func (ss *StreamServer) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// healthHandler responde con el estado del servidor en JSON.
+// Útil para diagnosticar conectividad desde redes remotas o Tailscale:
+//
+//	curl http://<tailscale-ip>:<port>/health
+func (ss *StreamServer) healthHandler(w http.ResponseWriter, r *http.Request) {
+	ss.mu.RLock()
+	provider := ss.provider
+	taskID := ss.taskID
+	ss.mu.RUnlock()
+
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+
+	type healthResponse struct {
+		Status    string `json:"status"`
+		Streaming bool   `json:"streaming"`
+		File      string `json:"file,omitempty"`
+		Task      string `json:"task,omitempty"`
+		Port      int    `json:"port"`
+		Client    string `json:"client"`
+	}
+	resp := healthResponse{
+		Status: "ok",
+		Port:   ss.port,
+		Client: clientIP,
+	}
+	if provider != nil {
+		resp.Streaming = true
+		resp.File = provider.FileName()
+		resp.Task = taskID
+		if len(resp.Task) > 8 {
+			resp.Task = resp.Task[:8]
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+}
+
 func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 	ss.lastActivity.Store(time.Now().UnixNano())
+
+	// Log every incoming request — essential for diagnosing remote/Tailscale issues.
+	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	log.Printf("[stream] %s /stream from %s Range:%q", r.Method, clientIP, r.Header.Get("Range"))
 
 	// Get current provider (may be nil if no file is being served)
 	ss.mu.RLock()

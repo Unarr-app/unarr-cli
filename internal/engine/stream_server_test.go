@@ -305,6 +305,80 @@ func TestStreamServer_SetFile_SwapsProvider(t *testing.T) {
 	}
 }
 
+// TestStreamServer_Health_NoFile verifica que /health devuelve streaming:false
+// cuando no hay archivo configurado.
+func TestStreamServer_Health_NoFile(t *testing.T) {
+	srv := NewStreamServer(0)
+	ctx := context.Background()
+
+	if err := srv.Listen(ctx); err != nil {
+		t.Fatalf("Listen() error: %v", err)
+	}
+	defer srv.Shutdown(ctx)
+
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", srv.Port())
+	resp, err := http.Get(healthURL)
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"streaming":false`) {
+		t.Errorf("body = %q, want streaming:false", bodyStr)
+	}
+	if !strings.Contains(bodyStr, `"status":"ok"`) {
+		t.Errorf("body = %q, want status:ok", bodyStr)
+	}
+}
+
+// TestStreamServer_Health_WithFile verifica que /health devuelve streaming:true
+// y el nombre del archivo cuando hay un archivo configurado.
+func TestStreamServer_Health_WithFile(t *testing.T) {
+	srv := NewStreamServer(0)
+	ctx := context.Background()
+
+	if err := srv.Listen(ctx); err != nil {
+		t.Fatalf("Listen() error: %v", err)
+	}
+	defer srv.Shutdown(ctx)
+
+	provider := newFakeProvider("pelicula.mkv", []byte("contenido de prueba"))
+	srv.SetFile(provider, "task-health-test")
+
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", srv.Port())
+	resp, err := http.Get(healthURL)
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"streaming":true`) {
+		t.Errorf("body = %q, want streaming:true", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "pelicula.mkv") {
+		t.Errorf("body = %q, want file name pelicula.mkv", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "task-hea") { // primeros 8 chars de "task-health-test"
+		t.Errorf("body = %q, want task short ID", bodyStr)
+	}
+}
+
 // TestStreamServer_MKV_ContentType verifica que el Content-Type para .mkv
 // es el correcto.
 func TestStreamServer_MKV_ContentType(t *testing.T) {

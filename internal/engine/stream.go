@@ -303,6 +303,38 @@ func (s *StreamEngine) FileSize() int64 { return s.totalBytes }
 // BufferTarget returns the buffer threshold in bytes.
 func (s *StreamEngine) BufferTarget() int64 { return s.bufferTarget }
 
+// PrioritizeTail abre un lector posicionado cerca del final del archivo para
+// forzar la descarga anticipada de los metadatos del container (moov atom en
+// MP4, seekhead en MKV). Sin esto, VLC busca el final del archivo al abrirlo
+// y el lector bloquea indefinidamente si esas piezas aún no están descargadas,
+// resultando en pantalla negra en redes lentas o remotas.
+//
+// Se ejecuta en una goroutine y se cancela cuando ctx expira.
+func (s *StreamEngine) PrioritizeTail(ctx context.Context, tailBytes int64) {
+	if s.file == nil || s.totalBytes <= tailBytes*2 {
+		return
+	}
+	go func() {
+		reader := s.file.NewReader()
+		defer reader.Close()
+
+		seekPos := s.totalBytes - tailBytes
+		reader.Seek(seekPos, io.SeekStart) //nolint:errcheck
+		reader.SetReadahead(tailBytes)
+		reader.SetContext(ctx)
+
+		// Leer continuamente para mantener las piezas priorizadas hasta que
+		// ctx se cancele o el final del archivo esté completamente descargado.
+		buf := make([]byte, 32*1024)
+		for {
+			_, err := reader.Read(buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+}
+
 // Shutdown gracefully closes the torrent and client.
 func (s *StreamEngine) Shutdown(_ context.Context) error {
 	if s.tor != nil {
