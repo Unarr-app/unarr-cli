@@ -5,19 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.2] - 2026-04-08
+## [0.6.2] - 2026-04-09
+
 
 ### Added
 
-- **library**: dedicated 10-minute HTTP client for library-sync — large libraries (hundreds/thousands of items) no longer time out during scan
-- **library**: actionable ffprobe-not-found error — detects Docker environment and shows install options (`FFPROBE_PATH`, `[library] ffprobe_path`, or package install)
+- **library**: resilient scan for large libraries and better ffprobe errors
 
+### Other
+
+- ignore local config/ directory
 ## [0.6.1] - 2026-04-08
 
+
 ### Added
 
-- **wake**: long-poll `/api/internal/agent/wake` endpoint — CLI holds connection open and syncs immediately (<100ms) when server sends a wake signal instead of waiting for the next poll interval
+- **wake**: long-poll wake listener for instant CLI sync
 
+### Fixed
+
+- resolve deadlock, data races and path traversal vulnerabilities
 ## [0.6.0] - 2026-04-08
 
 
@@ -28,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **ws**: add ping/pong keepalive and read deadline to detect zombie connections
+
+### Other
+
+- **release**: 0.6.0
 ## [0.5.5] - 2026-04-07
 
 
@@ -180,6 +191,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - remove UPX compression (antivirus false positives, startup penalty)
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[0.6.2]: https://github.com/torrentclaw/unarr/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/torrentclaw/unarr/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/torrentclaw/unarr/compare/v0.5.5...v0.6.0
 [0.5.5]: https://github.com/torrentclaw/unarr/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/torrentclaw/unarr/compare/v0.5.3...v0.5.4
