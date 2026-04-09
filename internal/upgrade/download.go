@@ -16,6 +16,43 @@ import (
 
 var httpClient = &http.Client{Timeout: 120 * time.Second}
 
+const (
+	maxDownloadRetries = 3
+	retryBaseDelay     = 5 * time.Second
+)
+
+// retryDelays returns the wait duration before the nth retry (1-based).
+// Delays: 5s, 15s — increasing gap to avoid hammering on transient failures.
+func retryDelay(attempt int) time.Duration {
+	return retryBaseDelay * time.Duration(attempt*attempt)
+}
+
+// downloadWithRetry fetches the release archive, retrying on transient errors.
+// onProgress is called with user-facing messages (may be nil).
+func downloadWithRetry(ctx context.Context, version string, onProgress func(string)) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= maxDownloadRetries; attempt++ {
+		path, err := download(ctx, version)
+		if err == nil {
+			return path, nil
+		}
+		lastErr = err
+		if attempt < maxDownloadRetries {
+			delay := retryDelay(attempt)
+			if onProgress != nil {
+				onProgress(fmt.Sprintf("Download failed (%v)", err))
+				onProgress(fmt.Sprintf("Retrying in %s... (attempt %d/%d)", delay, attempt+1, maxDownloadRetries))
+			}
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+	}
+	return "", lastErr
+}
+
 // download fetches the release archive to a temporary file.
 func download(ctx context.Context, version string) (string, error) {
 	url := releaseURL(version, archiveName(version))

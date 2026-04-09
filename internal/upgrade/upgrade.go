@@ -83,7 +83,7 @@ func (u *Upgrader) Execute(ctx context.Context, targetVersion string) Result {
 
 	// 4. Download archive
 	u.log(fmt.Sprintf("Downloading v%s...", targetVersion))
-	archivePath, err := download(ctx, targetVersion)
+	archivePath, err := downloadWithRetry(ctx, targetVersion, u.log)
 	if err != nil {
 		return u.fail("download: %v", err)
 	}
