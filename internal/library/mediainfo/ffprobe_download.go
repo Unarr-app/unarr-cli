@@ -38,6 +38,9 @@ func ffprobePlatformKey() (string, error) {
 			return "linux-arm64", nil
 		}
 	case "darwin":
+		if runtime.GOARCH == "arm64" {
+			return "osx-arm-64", nil
+		}
 		return "osx-64", nil
 	case "windows":
 		if runtime.GOARCH == "amd64" {
