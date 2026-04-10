@@ -46,27 +46,20 @@ To run as a background service, use 'unarr daemon install' instead.`,
 	}
 }
 
-// newStopCmd creates the top-level `unarr stop` placeholder.
+// newStopCmd creates the top-level `unarr stop` command.
 func newStopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the running daemon",
-		Long: `Stop the unarr daemon.
+		Long: `Stop the unarr daemon gracefully.
 
-If running in the foreground, press Ctrl+C in the terminal where it was started.
-If installed as a system service, use your OS service manager:
+Reads the daemon PID from the state file and sends a graceful stop signal.
+Works regardless of whether the daemon was started in the foreground or as a service.
 
-  Linux (systemd):   systemctl --user stop unarr
-  macOS (launchd):   launchctl unload ~/Library/LaunchAgents/com.torrentclaw.unarr.plist`,
+To stop a service-managed daemon and prevent auto-restart, use 'unarr daemon stop' instead.`,
 		Example: `  unarr stop`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("  Use Ctrl+C in the terminal where the daemon is running.")
-			fmt.Println()
-			fmt.Println("  If installed as a service:")
-			fmt.Println("    Linux:  systemctl --user stop unarr")
-			fmt.Println("    macOS:  launchctl unload ~/Library/LaunchAgents/com.torrentclaw.unarr.plist")
-			fmt.Println()
-			return nil
+			return stopDaemonByPID()
 		},
 	}
 }
@@ -76,17 +69,30 @@ func newDaemonCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon <command>",
 		Short: "Manage the daemon as a system service",
-		Long: `Install or remove unarr as a system service that starts automatically on boot.
+		Long: `Install, control and inspect the unarr daemon as a system service.
 
-  Linux:  Creates a systemd user service (~/.config/systemd/user/unarr.service)
-  macOS:  Creates a launchd agent (~/Library/LaunchAgents/com.torrentclaw.unarr.plist)`,
+  Linux:   systemd user service (~/.config/systemd/user/unarr.service)
+  macOS:   launchd agent (~/Library/LaunchAgents/com.torrentclaw.unarr.plist)
+  Windows: Task Scheduler task (runs at logon)`,
 		Example: `  unarr daemon install
+  unarr daemon start
+  unarr daemon status
+  unarr daemon logs -f
+  unarr daemon reload
+  unarr daemon restart
+  unarr daemon stop
   unarr daemon uninstall`,
 	}
 
 	cmd.AddCommand(
 		newDaemonInstallCmdReal(),
 		newDaemonUninstallCmdReal(),
+		newDaemonStartCmd(),
+		newDaemonStopCmd(),
+		newDaemonRestartCmd(),
+		newDaemonSvcStatusCmd(),
+		newDaemonLogsCmd(),
+		newDaemonReloadCmd(),
 	)
 
 	return cmd

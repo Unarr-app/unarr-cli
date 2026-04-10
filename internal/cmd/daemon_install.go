@@ -6,10 +6,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"text/template"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/torrentclaw/unarr/internal/config"
 )
 
 const systemdTemplate = `[Unit]
@@ -123,6 +127,8 @@ func runDaemonInstall() error {
 		return installSystemd(data, green)
 	case "darwin":
 		return installLaunchd(data, green)
+	case "windows":
+		return installWindowsTask(data, green)
 	default:
 		return fmt.Errorf("service installation not supported on %s yet", runtime.GOOS)
 	}
@@ -228,10 +234,63 @@ func runDaemonUninstall() error {
 		os.Remove(path)
 		green.Printf("  ✓ Removed %s\n", path)
 
+	case "windows":
+		// Stop the running process if any
+		if state := agent.ReadState(); state != nil {
+			exec.Command("taskkill", "/pid", strconv.Itoa(state.PID), "/f").Run()
+		}
+		out, err := exec.Command("schtasks", "/delete", "/tn", "unarr", "/f").CombinedOutput()
+		if err != nil && !strings.Contains(string(out), "cannot find") {
+			return fmt.Errorf("remove scheduled task: %w\n%s", err, strings.TrimSpace(string(out)))
+		}
+		green.Println("  ✓ Scheduled task removed")
+
 	default:
 		return fmt.Errorf("service uninstall not supported on %s yet", runtime.GOOS)
 	}
 
 	fmt.Println()
+	return nil
+}
+
+func installWindowsTask(data serviceData, green *color.Color) error {
+	logDir := config.DataDir()
+	os.MkdirAll(logDir, 0o755)
+
+	// Remove any existing task before (re)installing.
+	exec.Command("schtasks", "/delete", "/tn", "unarr", "/f").Run()
+
+	// Wrap with PowerShell so stdout/stderr are captured to a log file.
+	psScript := fmt.Sprintf(
+		`Start-Transcript -Path '%s\unarr.log' -Append -NoClobber; & '%s' start`,
+		logDir, data.BinPath,
+	)
+	taskCmd := fmt.Sprintf(`powershell.exe -NonInteractive -WindowStyle Hidden -Command "%s"`, psScript)
+
+	out, err := exec.Command("schtasks",
+		"/create",
+		"/tn", "unarr",
+		"/tr", taskCmd,
+		"/sc", "onlogon",
+		"/ru", data.User,
+		"/rl", "highest",
+		"/f",
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("create scheduled task: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+
+	fmt.Println()
+	green.Println("  ✓ Installed! Service will start automatically at next login.")
+	fmt.Println()
+	fmt.Println("  To start now:")
+	fmt.Println("    unarr daemon start")
+	fmt.Println()
+	fmt.Println("  Manage with:")
+	fmt.Println("    unarr daemon status")
+	fmt.Println("    unarr daemon stop")
+	fmt.Printf("    unarr daemon logs          (log: %s\\unarr.log)\n", logDir)
+	fmt.Println()
+
 	return nil
 }
