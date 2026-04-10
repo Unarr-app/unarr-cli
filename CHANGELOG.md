@@ -5,12 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-04-10
+
+
+### Added
+
+- **daemon**: enhance service management with start, stop, restart, and status commands for Windows
 ## [0.6.8] - 2026-04-10
 
 
 ### Added
 
 - **library**: add server-driven file deletion with allow_delete config
+
+### Other
+
+- **release**: 0.6.8
 ## [0.6.7] - 2026-04-10
 
 
@@ -249,6 +259,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - remove UPX compression (antivirus false positives, startup penalty)
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[0.7.0]: https://github.com/torrentclaw/unarr/compare/v0.6.8...v0.7.0
 [0.6.8]: https://github.com/torrentclaw/unarr/compare/v0.6.7...v0.6.8
 [0.6.7]: https://github.com/torrentclaw/unarr/compare/v0.6.6...v0.6.7
 [0.6.6]: https://github.com/torrentclaw/unarr/compare/v0.6.5...v0.6.6
