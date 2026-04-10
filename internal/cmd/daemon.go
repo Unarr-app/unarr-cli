@@ -401,20 +401,15 @@ func runDaemonStart() error {
 	}()
 
 	// Start auto-scan goroutine
-	scanPath := cfg.Library.ScanPath
-	if scanPath == "" {
-		scanPath = cfg.Download.Dir
-	}
-	if scanPath != "" && cfg.Library.AutoScan {
-		scanCfg := cfg
-		scanCfg.Library.ScanPath = scanPath
+	scanPaths := library.ResolveScanPaths(cfg.Download.Dir, cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir, cfg.Library.ScanPath)
+	if len(scanPaths) > 0 && cfg.Library.AutoScan {
 		scanInterval := 24 * time.Hour
 		if cfg.Library.ScanInterval != "" {
 			if parsed, err := time.ParseDuration(cfg.Library.ScanInterval); err == nil && parsed > 0 {
 				scanInterval = parsed
 			}
 		}
-		go runAutoScan(ctx, scanCfg, scanInterval, agentClient, d.ScanNow)
+		go runAutoScan(ctx, cfg, scanInterval, agentClient, d.ScanNow, scanPaths)
 	}
 
 	// Start reporter only for stream task handling
@@ -491,8 +486,10 @@ func formatSpeedLog(bps int64) string {
 }
 
 // runAutoScan runs a library scan + sync on a timer or on-demand via scanNow channel.
-func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration, ac *agent.Client, scanNow <-chan struct{}) {
-	log.Printf("[auto-scan] enabled: every %s, path: %s", interval, cfg.Library.ScanPath)
+// It scans all provided paths and syncs each independently so stale-item cleanup
+// is scoped to the correct directory prefix on the server.
+func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration, ac *agent.Client, scanNow <-chan struct{}, scanPaths []string) {
+	log.Printf("[auto-scan] enabled: every %s, paths: %v", interval, scanPaths)
 
 	select {
 	case <-time.After(30 * time.Second):
@@ -507,7 +504,7 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 				log.Printf("[auto-scan] panic recovered: %v", r)
 			}
 		}()
-		log.Printf("[auto-scan] starting scan of %s", cfg.Library.ScanPath)
+		log.Printf("[auto-scan] starting scan of %v", scanPaths)
 
 		existing, _ := library.LoadCache()
 
@@ -516,49 +513,67 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 			workers = 8
 		}
 
-		cache, err := library.Scan(ctx, cfg.Library.ScanPath, existing, library.ScanOptions{
+		scanOpts := library.ScanOptions{
 			Workers:     workers,
 			FFprobePath: cfg.Library.FFprobePath,
 			Incremental: existing != nil,
-		})
-		if err != nil {
-			log.Printf("[auto-scan] scan failed: %v", err)
-			return
 		}
 
-		if err := library.SaveCache(cache); err != nil {
-			log.Printf("[auto-scan] save cache failed: %v", err)
-			return
-		}
-
-		items := library.BuildSyncItems(cache)
-		if len(items) == 0 {
-			log.Printf("[auto-scan] no items to sync")
-			return
-		}
-
+		// Scan each path independently and sync per path so the server can
+		// scope stale-item deletion to the correct directory prefix.
 		const batchSize = 100
-		syncStartedAt := time.Now().UTC().Format(time.RFC3339)
-		for i := 0; i < len(items); i += batchSize {
-			end := i + batchSize
-			if end > len(items) {
-				end = len(items)
-			}
-			isLast := end >= len(items)
+		totalSynced := 0
+		var mergedItems []library.LibraryItem
 
-			_, err := ac.SyncLibrary(ctx, agent.LibrarySyncRequest{
-				Items:         items[i:end],
-				ScanPath:      cache.Path,
-				IsLastBatch:   isLast,
-				SyncStartedAt: syncStartedAt,
-			})
+		for _, scanPath := range scanPaths {
+			cache, err := library.Scan(ctx, scanPath, existing, scanOpts)
 			if err != nil {
-				log.Printf("[auto-scan] sync failed: %v", err)
-				return
+				log.Printf("[auto-scan] scan failed for %s: %v", scanPath, err)
+				continue
+			}
+			mergedItems = append(mergedItems, cache.Items...)
+
+			items := library.BuildSyncItems(cache)
+			if len(items) == 0 {
+				log.Printf("[auto-scan] no items under %s", scanPath)
+				continue
+			}
+
+			syncStartedAt := time.Now().UTC().Format(time.RFC3339)
+			for i := 0; i < len(items); i += batchSize {
+				end := i + batchSize
+				if end > len(items) {
+					end = len(items)
+				}
+				isLast := end >= len(items)
+
+				_, err := ac.SyncLibrary(ctx, agent.LibrarySyncRequest{
+					Items:         items[i:end],
+					ScanPath:      scanPath,
+					IsLastBatch:   isLast,
+					SyncStartedAt: syncStartedAt,
+				})
+				if err != nil {
+					log.Printf("[auto-scan] sync failed for %s: %v", scanPath, err)
+					break
+				}
+			}
+			totalSynced += len(items)
+		}
+
+		// Save merged cache for incremental scanning next time.
+		if len(mergedItems) > 0 {
+			mergedCache := &library.LibraryCache{
+				ScannedAt: time.Now().UTC().Format(time.RFC3339),
+				Path:      scanPaths[0],
+				Items:     mergedItems,
+			}
+			if err := library.SaveCache(mergedCache); err != nil {
+				log.Printf("[auto-scan] save cache failed: %v", err)
 			}
 		}
 
-		log.Printf("[auto-scan] synced %d items", len(items))
+		log.Printf("[auto-scan] synced %d items across %d path(s)", totalSynced, len(scanPaths))
 	}
 
 	doScan()

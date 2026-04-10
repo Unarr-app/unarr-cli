@@ -41,11 +41,16 @@ to see available quality upgrades.`,
 			}
 			if len(args) == 0 {
 				cfg := loadConfig()
-				if cfg.Library.ScanPath != "" {
-					args = append(args, cfg.Library.ScanPath)
-				} else {
-					return fmt.Errorf("usage: unarr scan <path>\n\nProvide a media folder to scan")
+				paths := library.ResolveScanPaths(cfg.Download.Dir, cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir, cfg.Library.ScanPath)
+				if len(paths) == 0 {
+					return fmt.Errorf("usage: unarr scan <path>\n\nNo scan paths configured. Provide a path or set up downloads.dir via 'unarr init'")
 				}
+				for _, p := range paths {
+					if err := runScan(p, workers, ffprobe, noSync); err != nil {
+						return err
+					}
+				}
+				return nil
 			}
 			return runScan(args[0], workers, ffprobe, noSync)
 		},
