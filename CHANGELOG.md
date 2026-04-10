@@ -5,12 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.7] - 2026-04-10
+
+
+### Added
+
+- **scan**: always scan downloads + organize dirs, deduplicate child paths
 ## [0.6.6] - 2026-04-09
 
 
 ### Fixed
 
+- **docker**: switch ffprobe download from johnvansickle.com to BtbN/FFmpeg-Builds
 - **stream**: fix black screen on remote/Tailscale streaming
+
+### Other
+
+- **release**: 0.6.6
 ## [0.6.5] - 2026-04-09
 
 
@@ -228,6 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - remove UPX compression (antivirus false positives, startup penalty)
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[0.6.7]: https://github.com/torrentclaw/unarr/compare/v0.6.6...v0.6.7
 [0.6.6]: https://github.com/torrentclaw/unarr/compare/v0.6.5...v0.6.6
 [0.6.5]: https://github.com/torrentclaw/unarr/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/torrentclaw/unarr/compare/v0.6.3...v0.6.4
