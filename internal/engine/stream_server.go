@@ -72,6 +72,7 @@ func (ss *StreamServer) Listen(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stream", ss.handler)
 	mux.HandleFunc("/health", ss.healthHandler)
+	mux.HandleFunc("/playlist.m3u", ss.playlistHandler)
 
 	// SO_REUSEADDR allows immediate rebind if the port is in TIME_WAIT (e.g. after agent restart)
 	lc := net.ListenConfig{
@@ -272,6 +273,74 @@ func (ss *StreamServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+}
+
+// playlistHandler generates an M3U playlist for VLC with #EXTVLCOPT language hints.
+// Query params: audioLangs (comma-sep), subLangs (comma-sep), resumeSec, title, streamUrl.
+// If streamUrl is omitted, uses the current best stream URL.
+//
+// VLC fetches this playlist and applies the EXTVLCOPT directives automatically,
+// enabling automatic audio/subtitle track selection on all VLC platforms (desktop + mobile).
+func (ss *StreamServer) playlistHandler(w http.ResponseWriter, r *http.Request) {
+	// CORS — handle preflight before doing any work (consistent with handler)
+	if origin := r.Header.Get("Origin"); origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Range")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+
+	q := r.URL.Query()
+
+	// Sanitize query params: strip CR/LF to prevent M3U directive injection.
+	sanitize := func(s string) string {
+		s = strings.ReplaceAll(s, "\n", "")
+		s = strings.ReplaceAll(s, "\r", "")
+		return s
+	}
+
+	audioLangs := sanitize(q.Get("audioLangs"))
+	subLangs := sanitize(q.Get("subLangs"))
+	resumeSec := sanitize(q.Get("resumeSec"))
+	title := sanitize(q.Get("title"))
+	streamURL := q.Get("streamUrl")
+	// Only accept http(s) URLs to prevent file:// or other URI schemes in the playlist.
+	if streamURL != "" && !strings.HasPrefix(streamURL, "http://") && !strings.HasPrefix(streamURL, "https://") {
+		streamURL = ""
+	}
+	if streamURL == "" {
+		streamURL = ss.url
+	}
+	if streamURL == "" {
+		http.Error(w, "no active stream", http.StatusNotFound)
+		return
+	}
+	if title == "" {
+		title = "TorrentClaw Stream"
+	}
+
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n")
+	b.WriteString(fmt.Sprintf("#EXTINF:-1,%s\n", title))
+	if audioLangs != "" {
+		b.WriteString(fmt.Sprintf("#EXTVLCOPT:audio-language=%s\n", audioLangs))
+	}
+	if subLangs != "" {
+		b.WriteString(fmt.Sprintf("#EXTVLCOPT:sub-language=%s\n", subLangs))
+	}
+	if resumeSec != "" && resumeSec != "0" {
+		b.WriteString(fmt.Sprintf("#EXTVLCOPT:start-time=%s\n", resumeSec))
+	}
+	b.WriteString("#EXTVLCOPT:network-caching=30000\n")
+	b.WriteString(streamURL + "\n")
+
+	w.Header().Set("Content-Type", "audio/x-mpegurl")
+	w.Header().Set("Content-Disposition", `inline; filename="stream.m3u"`)
+	w.Header().Set("Cache-Control", "no-cache")
+	fmt.Fprint(w, b.String()) //nolint:errcheck
 }
 
 func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {

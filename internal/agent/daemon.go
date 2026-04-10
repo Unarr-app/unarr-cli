@@ -18,9 +18,11 @@ type DaemonConfig struct {
 	AgentName   string
 	Version     string
 	DownloadDir string
-	StreamPort  int    // port for the HTTP stream server
-	LanIP       string // LAN IP (reported in sync for stream URL resolution)
-	TailscaleIP string // Tailscale IP (reported in sync for stream URL resolution)
+	StreamPort  int      // port for the HTTP stream server
+	LanIP       string   // LAN IP (reported in sync for stream URL resolution)
+	TailscaleIP string   // Tailscale IP (reported in sync for stream URL resolution)
+	CanDelete   bool     // library.allow_delete is enabled
+	ScanPaths   []string // configured scan paths for file deletion validation
 }
 
 // Daemon manages agent registration and the sync loop.

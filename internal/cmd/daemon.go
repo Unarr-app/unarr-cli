@@ -138,6 +138,8 @@ func runDaemonStart() error {
 		StreamPort:  cfg.Download.StreamPort,
 		LanIP:       engine.LanIP(),
 		TailscaleIP: engine.TailscaleIP(),
+		CanDelete:   cfg.Library.AllowDelete,
+		ScanPaths:   library.ResolveScanPaths(cfg.Download.Dir, cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir, cfg.Library.ScanPath),
 	}
 
 	// Create HTTP client — single communication channel
@@ -302,6 +304,13 @@ func runDaemonStart() error {
 		}
 	}
 
+	// Wire: sync receives file deletion requests from the server
+	if cfg.Library.AllowDelete && len(daemonCfg.ScanPaths) > 0 {
+		sc.OnDeleteFiles = func(items []agent.LibraryDeleteRequest) []int {
+			return library.DeleteFiles(items, daemonCfg.ScanPaths)
+		}
+	}
+
 	// Wire: sync receives stream requests for completed downloads
 	d.OnStreamRequested = func(sr agent.StreamRequest) {
 		if streamSrv.CurrentTaskID() == sr.TaskID {
@@ -401,7 +410,7 @@ func runDaemonStart() error {
 	}()
 
 	// Start auto-scan goroutine
-	scanPaths := library.ResolveScanPaths(cfg.Download.Dir, cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir, cfg.Library.ScanPath)
+	scanPaths := daemonCfg.ScanPaths
 	if len(scanPaths) > 0 && cfg.Library.AutoScan {
 		scanInterval := 24 * time.Hour
 		if cfg.Library.ScanInterval != "" {

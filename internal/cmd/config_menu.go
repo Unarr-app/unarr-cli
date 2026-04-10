@@ -14,7 +14,7 @@ import (
 	"github.com/torrentclaw/unarr/internal/config"
 )
 
-var configCategories = []string{"downloads", "organization", "notifications", "device", "region", "connection", "advanced"}
+var configCategories = []string{"downloads", "organization", "library", "notifications", "device", "region", "connection", "advanced"}
 
 func newConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -25,6 +25,7 @@ func newConfigCmd() *cobra.Command {
 Categories:
   downloads        Download directory, method, speed limits, concurrency
   organization     Auto-sort into Movies / TV Shows folders
+  library          Library scan settings and file deletion permissions
   notifications    Desktop notifications
   device           Agent name
   region           Country and language
@@ -95,6 +96,7 @@ func runConfigMenu(category string) error {
 					Options(
 						huh.NewOption("Downloads        — directory, method, speed limits", "downloads"),
 						huh.NewOption("Organization     — auto-sort Movies & TV Shows", "organization"),
+						huh.NewOption("Library          — scan settings & file deletion", "library"),
 						huh.NewOption("Notifications    — desktop notifications", "notifications"),
 						huh.NewOption("Device           — agent name", "device"),
 						huh.NewOption("Region           — country & language", "region"),
@@ -131,6 +133,8 @@ func runCategory(cfg *config.Config, category string) error {
 		return configDownloads(cfg)
 	case "organization":
 		return configOrganization(cfg)
+	case "library":
+		return configLibrary(cfg)
 	case "notifications":
 		return configNotifications(cfg)
 	case "device":
@@ -307,6 +311,17 @@ func configConnection(cfg *config.Config) error {
 				Description(keyDesc).
 				EchoMode(huh.EchoModePassword).
 				Value(&cfg.Auth.APIKey),
+		),
+	).Run()
+}
+
+func configLibrary(cfg *config.Config) error {
+	return huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Allow file deletion from web UI?").
+				Description("When enabled, the web library's Delete button can permanently remove files from disk.\nOnly activate this if you understand that deleted files cannot be recovered.").
+				Value(&cfg.Library.AllowDelete),
 		),
 	).Run()
 }

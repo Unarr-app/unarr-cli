@@ -312,19 +312,21 @@ type LibrarySyncResponse struct {
 // SyncRequest is sent by the CLI periodically to synchronize state with the server.
 // Contains the CLI's full execution state — the server responds with pending actions.
 type SyncRequest struct {
-	AgentID        string      `json:"agentId"`
-	Version        string      `json:"version,omitempty"`
-	OS             string      `json:"os,omitempty"`
-	Arch           string      `json:"arch,omitempty"`
-	Name           string      `json:"name,omitempty"`
-	DownloadDir    string      `json:"downloadDir,omitempty"`
-	DiskFreeBytes  int64       `json:"diskFreeBytes,omitempty"`
-	DiskTotalBytes int64       `json:"diskTotalBytes,omitempty"`
-	StreamPort     int         `json:"streamPort,omitempty"`
-	LanIP          string      `json:"lanIp,omitempty"`
-	TailscaleIP    string      `json:"tailscaleIp,omitempty"`
-	FreeSlots      int         `json:"freeSlots"`
-	Tasks          []TaskState `json:"tasks"`
+	AgentID         string      `json:"agentId"`
+	Version         string      `json:"version,omitempty"`
+	OS              string      `json:"os,omitempty"`
+	Arch            string      `json:"arch,omitempty"`
+	Name            string      `json:"name,omitempty"`
+	DownloadDir     string      `json:"downloadDir,omitempty"`
+	DiskFreeBytes   int64       `json:"diskFreeBytes,omitempty"`
+	DiskTotalBytes  int64       `json:"diskTotalBytes,omitempty"`
+	StreamPort      int         `json:"streamPort,omitempty"`
+	LanIP           string      `json:"lanIp,omitempty"`
+	TailscaleIP     string      `json:"tailscaleIp,omitempty"`
+	FreeSlots       int         `json:"freeSlots"`
+	Tasks           []TaskState `json:"tasks"`
+	CanDelete       bool        `json:"canDelete"`                 // library.allow_delete is enabled
+	DeleteConfirmed []int       `json:"deleteConfirmed,omitempty"` // library item IDs successfully deleted from disk
 }
 
 // ControlAction represents a server-side control signal for a task.
@@ -334,14 +336,21 @@ type ControlAction struct {
 	DeleteFiles bool   `json:"deleteFiles,omitempty"`
 }
 
+// LibraryDeleteRequest is a server-side request to delete a file from disk.
+type LibraryDeleteRequest struct {
+	ItemID   int    `json:"itemId"`
+	FilePath string `json:"filePath"`
+}
+
 // SyncResponse is returned by the server with all pending actions for the CLI.
 type SyncResponse struct {
-	NewTasks       []Task          `json:"newTasks,omitempty"`
-	Controls       []ControlAction `json:"controls,omitempty"`
-	StreamRequests []StreamRequest `json:"streamRequests,omitempty"`
-	Watching       bool            `json:"watching"`
-	Upgrade        *UpgradeSignal  `json:"upgrade,omitempty"`
-	Scan           bool            `json:"scan,omitempty"`
+	NewTasks       []Task                 `json:"newTasks,omitempty"`
+	Controls       []ControlAction        `json:"controls,omitempty"`
+	StreamRequests []StreamRequest        `json:"streamRequests,omitempty"`
+	Watching       bool                   `json:"watching"`
+	Upgrade        *UpgradeSignal         `json:"upgrade,omitempty"`
+	Scan           bool                   `json:"scan,omitempty"`
+	FilesToDelete  []LibraryDeleteRequest `json:"filesToDelete,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

@@ -73,6 +73,7 @@ type LibraryConfig struct {
 	BackupDir    string `toml:"backup_dir"`    // for replaced files
 	AutoScan     bool   `toml:"auto_scan"`     // enable daily auto-scan in daemon (default true)
 	ScanInterval string `toml:"scan_interval"` // e.g. "24h", "12h", "6h" (default "24h")
+	AllowDelete  bool   `toml:"allow_delete"`  // allow web UI to request file deletion from disk
 }
 
 // Default returns a Config with sensible defaults.

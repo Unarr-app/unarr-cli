@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -34,12 +35,22 @@ type SyncClient struct {
 	OnSyncSuccess    func() // called after each successful sync (e.g. to update state file)
 	GetFreeSlots     func() int
 	GetTaskStates    func() []TaskState // returns current state of all active + recently finished tasks
+	// OnDeleteFiles is called when the server requests file deletion from disk.
+	// It should delete the files and return the IDs of successfully deleted items.
+	OnDeleteFiles func(items []LibraryDeleteRequest) []int
 
 	// SyncNow triggers an immediate sync (e.g., on task completion).
 	SyncNow chan struct{}
 
 	watching atomic.Bool
 	interval atomic.Int64 // stored as nanoseconds
+
+	// pendingDeleteConfirmed holds item IDs to report as deleted in the next sync.
+	pendingDeleteMu        sync.Mutex
+	pendingDeleteConfirmed []int
+	// deleteInFlight tracks item IDs currently being processed or awaiting confirmation.
+	// Prevents the same file from being passed to OnDeleteFiles multiple times.
+	deleteInFlight map[int]struct{}
 }
 
 // NewSyncClient creates a sync client.
@@ -129,6 +140,7 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 		StreamPort:  sc.cfg.StreamPort,
 		LanIP:       sc.cfg.LanIP,
 		TailscaleIP: sc.cfg.TailscaleIP,
+		CanDelete:   sc.cfg.CanDelete,
 	}
 	if sc.GetTaskStates != nil {
 		req.Tasks = sc.GetTaskStates()
@@ -142,6 +154,18 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 	if sc.GetFreeSlots != nil {
 		req.FreeSlots = sc.GetFreeSlots()
 	}
+	// Flush confirmed deletions from previous cycle.
+	// Once flushed, remove IDs from deleteInFlight — the server will stop sending
+	// them after this sync, so deduplication protection is no longer needed.
+	sc.pendingDeleteMu.Lock()
+	if len(sc.pendingDeleteConfirmed) > 0 {
+		req.DeleteConfirmed = sc.pendingDeleteConfirmed
+		for _, id := range sc.pendingDeleteConfirmed {
+			delete(sc.deleteInFlight, id)
+		}
+		sc.pendingDeleteConfirmed = nil
+	}
+	sc.pendingDeleteMu.Unlock()
 	return req
 }
 
@@ -175,6 +199,35 @@ func (sc *SyncClient) processResponse(resp *SyncResponse) {
 	// Scan
 	if resp.Scan && sc.OnScan != nil {
 		sc.OnScan()
+	}
+
+	// File deletions requested by the server — deduplicate against in-flight items
+	if len(resp.FilesToDelete) > 0 && sc.OnDeleteFiles != nil {
+		sc.pendingDeleteMu.Lock()
+		if sc.deleteInFlight == nil {
+			sc.deleteInFlight = make(map[int]struct{})
+		}
+		var newItems []LibraryDeleteRequest
+		for _, item := range resp.FilesToDelete {
+			if _, inFlight := sc.deleteInFlight[item.ItemID]; !inFlight {
+				newItems = append(newItems, item)
+				sc.deleteInFlight[item.ItemID] = struct{}{}
+			}
+		}
+		sc.pendingDeleteMu.Unlock()
+
+		if len(newItems) > 0 {
+			// Run deletions off the sync goroutine — disk I/O must not block the
+			// next sync tick. Confirmations are picked up on the next regular cycle.
+			go func(items []LibraryDeleteRequest) {
+				confirmed := sc.OnDeleteFiles(items)
+				if len(confirmed) > 0 {
+					sc.pendingDeleteMu.Lock()
+					sc.pendingDeleteConfirmed = append(sc.pendingDeleteConfirmed, confirmed...)
+					sc.pendingDeleteMu.Unlock()
+				}
+			}(newItems)
+		}
 	}
 }
 
