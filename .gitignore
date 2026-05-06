@@ -36,6 +36,7 @@ Thumbs.db
 
 # GoReleaser
 dist/
+dist-ffbinaries/
 
 # Docker
 tmp/

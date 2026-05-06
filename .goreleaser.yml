@@ -2,6 +2,14 @@ version: 2
 
 project_name: unarr
 
+# Pre-build hook: fetch static ffmpeg + ffprobe per platform so each
+# release tarball ships them adjacent to the unarr binary. ResolveFFmpeg /
+# ResolveFFprobe pick them up via the "adjacent to executable" branch — no
+# system install or runtime download needed.
+before:
+  hooks:
+    - bash scripts/download-ffmpeg-static.sh
+
 builds:
   - main: ./cmd/unarr/
     binary: unarr
@@ -20,11 +28,21 @@ builds:
       - -X github.com/torrentclaw/unarr/internal/sentry.dsn={{ .Env.SENTRY_DSN }}
 
 archives:
-  - format: tar.gz
+  - formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
+    files:
+      - LICENSE*
+      - README*
+      # Bundle the matching ffmpeg + ffprobe (filename includes .exe on Windows
+      # because download-ffmpeg-static.sh writes ffmpeg.exe / ffprobe.exe there).
+      - src: "dist-ffbinaries/{{ .Os }}-{{ .Arch }}/*"
+        dst: .
+        strip_parent: true
+        info:
+          mode: 0o755
 
 checksum:
   name_template: "checksums.txt"

@@ -1,25 +1,3 @@
-# ---- ffprobe static binary stage ----
-# Download a static ffprobe build from BtbN/FFmpeg-Builds (GitHub CDN, reliable).
-FROM alpine:3.22 AS ffprobe-dl
-
-RUN apk add --no-cache curl xz
-
-RUN ARCH=$(uname -m) && \
-    case "$ARCH" in \
-      x86_64)  SLUG="linux64" ;; \
-      aarch64) SLUG="linuxarm64" ;; \
-      *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
-    esac && \
-    curl -fsSL --retry 3 --retry-delay 5 \
-      "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-${SLUG}-gpl.tar.xz" \
-      -o /tmp/ff.tar.xz && \
-    mkdir /tmp/ffbuild && \
-    tar xJ -f /tmp/ff.tar.xz --strip-components=1 -C /tmp/ffbuild/ && \
-    mv /tmp/ffbuild/bin/ffprobe /usr/local/bin/ffprobe && \
-    chmod +x /usr/local/bin/ffprobe && \
-    rm -rf /tmp/ff.tar.xz /tmp/ffbuild && \
-    ffprobe -version | head -1
-
 # ---- Build stage ----
 FROM golang:1.25-alpine AS builder
 
@@ -40,8 +18,13 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/torrentclaw/unarr/inter
 # ---- Runtime stage ----
 FROM alpine:3.22
 
+# Use Alpine's native musl ffmpeg + ffprobe instead of the johnvansickle /
+# BtbN static glibc builds — those need a glibc shim on Alpine and the
+# vector-math symbols the GPL builds reference are not satisfiable by
+# gcompat. Alpine ships ffmpeg ~7.x which is fine for the WebRTC
+# transcoding pipeline (libx264 + libfdk-aac alternatives included).
 RUN apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates tzdata
+    apk add --no-cache ca-certificates tzdata ffmpeg
 
 # Non-root user (UID 1000 matches typical host user for volume permissions)
 RUN addgroup -g 1000 unarr && adduser -u 1000 -G unarr -D -h /home/unarr unarr
@@ -53,7 +36,6 @@ RUN mkdir -p /config /downloads /data && \
 USER unarr
 
 COPY --from=builder /unarr /usr/local/bin/unarr
-COPY --from=ffprobe-dl /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 
 # Environment: point config/data to container paths
 ENV UNARR_CONFIG_DIR=/config
