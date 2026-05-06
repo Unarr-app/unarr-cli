@@ -110,7 +110,7 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	// behaviour but unconditionally allow upload while WebRTC is on so an
 	// active download can still serve to a watching browser.
 	tcfg.NoUpload = !cfg.SeedEnabled && !cfg.WebRTCEnabled
-	tcfg.Logger = alog.Default.FilterLevel(alog.Critical)
+	tcfg.Logger = alog.Default.FilterLevel(alog.Warning) // bumped from Critical for WebRTC peer + tracker announce visibility
 
 	// WebRTC / WebTorrent peer: anacrolix auto-routes ws://+wss:// trackers
 	// to the bundled webtorrent.TrackerClient. We only need to populate the
