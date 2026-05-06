@@ -189,6 +189,9 @@ func runDaemonStart() error {
 		MaxUploadRate:   maxUl,
 		ListenPort:      cfg.Download.ListenPort,
 		SeedEnabled:     false,
+		WebRTCEnabled:   cfg.Download.WebRTC.Enabled,
+		WebRTCTrackers:  cfg.Download.WebRTC.Trackers,
+		ICEServers:      engine.BuildICEServers(cfg.Download.WebRTC),
 	})
 	if err != nil {
 		return fmt.Errorf("create torrent downloader: %w", err)

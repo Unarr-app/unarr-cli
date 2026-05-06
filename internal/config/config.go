@@ -34,16 +34,30 @@ type AgentConfig struct {
 }
 
 type DownloadConfig struct {
-	Dir              string `toml:"dir"`
-	PreferredMethod  string `toml:"preferred_method"`
-	PreferredQuality string `toml:"preferred_quality"` // "2160p", "1080p", "720p" — hint for auto-selection
-	MaxConcurrent    int    `toml:"max_concurrent"`
-	MaxDownloadSpeed string `toml:"max_download_speed"` // e.g. "10MB", "500KB", "0" = unlimited
-	MaxUploadSpeed   string `toml:"max_upload_speed"`   // e.g. "1MB", "0" = unlimited
-	MetadataTimeout  string `toml:"metadata_timeout"`   // e.g. "1h", "30m", "0" = unlimited (default: "0")
-	StallTimeout     string `toml:"stall_timeout"`      // e.g. "30m", "1h", "0" = unlimited (default: "30m")
-	ListenPort       int    `toml:"listen_port"`        // fixed port for incoming peer connections (default: 42069, 0 = random)
-	StreamPort       int    `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
+	Dir              string       `toml:"dir"`
+	PreferredMethod  string       `toml:"preferred_method"`
+	PreferredQuality string       `toml:"preferred_quality"` // "2160p", "1080p", "720p" — hint for auto-selection
+	MaxConcurrent    int          `toml:"max_concurrent"`
+	MaxDownloadSpeed string       `toml:"max_download_speed"` // e.g. "10MB", "500KB", "0" = unlimited
+	MaxUploadSpeed   string       `toml:"max_upload_speed"`   // e.g. "1MB", "0" = unlimited
+	MetadataTimeout  string       `toml:"metadata_timeout"`   // e.g. "1h", "30m", "0" = unlimited (default: "0")
+	StallTimeout     string       `toml:"stall_timeout"`      // e.g. "30m", "1h", "0" = unlimited (default: "30m")
+	ListenPort       int          `toml:"listen_port"`        // fixed port for incoming peer connections (default: 42069, 0 = random)
+	StreamPort       int          `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
+	WebRTC           WebRTCConfig `toml:"webrtc"`
+}
+
+// WebRTCConfig opts the daemon into acting as a WebTorrent peer so browsers
+// can fetch pieces via WebRTC data channels — required by the in-browser
+// player on torrentclaw.com. Disabled by default; enabling implies upload
+// is allowed for active torrents (browsers can't download otherwise).
+type WebRTCConfig struct {
+	Enabled     bool     `toml:"enabled"`      // master switch
+	Trackers    []string `toml:"trackers"`     // wss:// signaling trackers
+	STUNServers []string `toml:"stun_servers"` // stun:host:port
+	TURNServers []string `toml:"turn_servers"` // turn:host:port (no auth) — see TURNCredentials for authed
+	TURNUser    string   `toml:"turn_user"`    // optional, applied to all TURNServers
+	TURNPass    string   `toml:"turn_pass"`    // optional
 }
 
 type OrganizeConfig struct {
@@ -86,6 +100,11 @@ func Default() Config {
 			PreferredMethod: "auto",
 			MaxConcurrent:   3,
 			StreamPort:      11818,
+			WebRTC: WebRTCConfig{
+				Enabled:     false,
+				Trackers:    []string{"wss://tracker.torrentclaw.com"},
+				STUNServers: []string{"stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"},
+			},
 		},
 		Organize: OrganizeConfig{
 			Enabled: true,
@@ -143,6 +162,19 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Download.StreamPort == 0 {
 		cfg.Download.StreamPort = 11818
+	}
+	// Re-apply WebRTC defaults only when the user enabled WebRTC but didn't
+	// supply trackers/STUN — leave both empty if disabled to keep config diffs clean.
+	if cfg.Download.WebRTC.Enabled {
+		if len(cfg.Download.WebRTC.Trackers) == 0 {
+			cfg.Download.WebRTC.Trackers = []string{"wss://tracker.torrentclaw.com"}
+		}
+		if len(cfg.Download.WebRTC.STUNServers) == 0 {
+			cfg.Download.WebRTC.STUNServers = []string{
+				"stun:stun.l.google.com:19302",
+				"stun:stun1.l.google.com:19302",
+			}
+		}
 	}
 
 	return cfg, nil

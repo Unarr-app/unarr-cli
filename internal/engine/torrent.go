@@ -16,6 +16,7 @@ import (
 	alog "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/storage"
+	"github.com/pion/webrtc/v4"
 	"github.com/torrentclaw/unarr/internal/config"
 	"golang.org/x/term"
 	"golang.org/x/time/rate"
@@ -70,6 +71,14 @@ type TorrentConfig struct {
 	SeedEnabled     bool
 	SeedRatio       float64       // target seed ratio (default 0, meaning seed until SeedTime)
 	SeedTime        time.Duration // min seed time after completion (default 0)
+
+	// WebRTC peer (WebTorrent protocol) for browser ↔ unarr P2P streaming.
+	// When enabled, anacrolix/torrent's built-in webtorrent package handles
+	// the WSS signaling + WebRTC data channels. Implies upload allowed for
+	// every torrent in the client (browsers can't pull pieces otherwise).
+	WebRTCEnabled  bool
+	WebRTCTrackers []string           // wss://… signaling trackers added to every magnet
+	ICEServers     []webrtc.ICEServer // STUN + TURN servers for NAT traversal
 }
 
 // TorrentDownloader downloads torrents via BitTorrent P2P.
@@ -96,8 +105,26 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	tcfg := torrent.NewDefaultClientConfig()
 	tcfg.DataDir = cfg.DataDir
 	tcfg.Seed = cfg.SeedEnabled
-	tcfg.NoUpload = !cfg.SeedEnabled
+	// WebRTC peers (browsers) can only pull pieces from us if upload is
+	// enabled. We honour SeedEnabled for the long-tail seed-after-complete
+	// behaviour but unconditionally allow upload while WebRTC is on so an
+	// active download can still serve to a watching browser.
+	tcfg.NoUpload = !cfg.SeedEnabled && !cfg.WebRTCEnabled
 	tcfg.Logger = alog.Default.FilterLevel(alog.Critical)
+
+	// WebRTC / WebTorrent peer: anacrolix auto-routes ws://+wss:// trackers
+	// to the bundled webtorrent.TrackerClient. We only need to populate the
+	// ICE server list so the SDP offers we send carry usable candidates.
+	if cfg.WebRTCEnabled {
+		tcfg.DisableWebtorrent = false
+		if len(cfg.ICEServers) > 0 {
+			tcfg.ICEServerList = cfg.ICEServers
+		}
+		log.Printf("[torrent] WebRTC peer enabled (trackers=%d ice_servers=%d)",
+			len(cfg.WebRTCTrackers), len(cfg.ICEServers))
+	} else {
+		tcfg.DisableWebtorrent = true
+	}
 
 	// --- Performance optimizations ---
 
@@ -235,7 +262,7 @@ func (d *TorrentDownloader) Available(_ context.Context, task *Task) (bool, erro
 }
 
 func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir string, progressCh chan<- Progress) (*Result, error) {
-	magnet := buildMagnet(task.InfoHash)
+	magnet := d.buildMagnet(task.InfoHash)
 
 	t, err := d.client.AddMagnet(magnet)
 	if err != nil {
@@ -604,12 +631,31 @@ func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) (tota
 	return totalBytes, fileName
 }
 
-func buildMagnet(infoHash string) string {
+// buildMagnet composes a magnet URI for the info hash. extraTrackers (e.g.
+// wss://… for WebRTC peer signaling) are prepended so anacrolix's
+// webtorrent.TrackerClient picks them up first; the static UDP list
+// follows. Empty / whitespace entries in extraTrackers are skipped.
+func buildMagnet(infoHash string, extraTrackers ...string) string {
 	params := []string{"xt=urn:btih:" + infoHash}
+	for _, t := range extraTrackers {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		params = append(params, "tr="+url.QueryEscape(t))
+	}
 	for _, tracker := range defaultTrackers {
 		params = append(params, "tr="+url.QueryEscape(tracker))
 	}
 	return "magnet:?" + strings.Join(params, "&")
+}
+
+// buildMagnet on the downloader injects its WebRTC trackers when enabled.
+func (d *TorrentDownloader) buildMagnet(infoHash string) string {
+	if d != nil && d.cfg.WebRTCEnabled {
+		return buildMagnet(infoHash, d.cfg.WebRTCTrackers...)
+	}
+	return buildMagnet(infoHash)
 }
 
 func formatBytes(b int64) string {
