@@ -35,6 +35,7 @@ type Daemon struct {
 	// Callbacks — set by cmd/daemon.go before calling Run.
 	OnTasksClaimed    func(tasks []Task)
 	OnStreamRequested func(req StreamRequest)
+	OnWebRTCSession   func(sess WebRTCSession)
 	OnControlAction   func(action, taskID string, deleteFiles bool)
 	GetActiveCount    func() int // returns number of active downloads (wired from manager)
 
@@ -167,6 +168,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.sync.OnStreamRequest = func(req StreamRequest) {
 		if d.OnStreamRequested != nil {
 			d.OnStreamRequested(req)
+		}
+	}
+	d.sync.OnWebRTCSession = func(sess WebRTCSession) {
+		if d.OnWebRTCSession != nil {
+			d.OnWebRTCSession(sess)
 		}
 	}
 	d.sync.OnUpgrade = func(version string) {

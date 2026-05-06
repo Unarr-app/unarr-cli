@@ -351,11 +351,25 @@ type LibraryDeleteRequest struct {
 	FilePath string `json:"filePath"`
 }
 
+// WebRTCSession is a request to open a custom WebRTC DataChannel byte-stream
+// to a browser player. The CLI must POST an SDP answer to
+// /api/internal/stream/signal/<sessionId> and serve bytes from FilePath
+// (or, when only InfoHash is set, from a download_task on disk).
+type WebRTCSession struct {
+	SessionID string `json:"sessionId"`
+	FilePath  string `json:"filePath,omitempty"`
+	InfoHash  string `json:"infoHash,omitempty"`
+	TaskID    string `json:"taskId,omitempty"`
+	FileName  string `json:"fileName,omitempty"`
+	FileSize  int64  `json:"fileSize,omitempty"`
+}
+
 // SyncResponse is returned by the server with all pending actions for the CLI.
 type SyncResponse struct {
 	NewTasks       []Task                 `json:"newTasks,omitempty"`
 	Controls       []ControlAction        `json:"controls,omitempty"`
 	StreamRequests []StreamRequest        `json:"streamRequests,omitempty"`
+	WebRTCSessions []WebRTCSession        `json:"webrtcSessions,omitempty"`
 	Watching       bool                   `json:"watching"`
 	Upgrade        *UpgradeSignal         `json:"upgrade,omitempty"`
 	Scan           bool                   `json:"scan,omitempty"`

@@ -29,6 +29,7 @@ type SyncClient struct {
 	OnNewTasks       func(tasks []Task)
 	OnControl        func(action, taskID string, deleteFiles bool)
 	OnStreamRequest  func(req StreamRequest)
+	OnWebRTCSession  func(sess WebRTCSession)
 	OnUpgrade        func(version string)
 	OnScan           func()
 	OnWatchingChange func(watching bool)
@@ -188,6 +189,13 @@ func (sc *SyncClient) processResponse(resp *SyncResponse) {
 	for _, sr := range resp.StreamRequests {
 		if sc.OnStreamRequest != nil {
 			sc.OnStreamRequest(sr)
+		}
+	}
+
+	// WebRTC streaming sessions
+	for _, ws := range resp.WebRTCSessions {
+		if sc.OnWebRTCSession != nil {
+			sc.OnWebRTCSession(ws)
 		}
 	}
 

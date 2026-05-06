@@ -410,6 +410,65 @@ func runDaemonStart() error {
 		}()
 	}
 
+	// Wire: sync receives custom WebRTC streaming session requests.
+	// Each session is a one-shot browser↔daemon DataChannel. Validate the
+	// FilePath against allowed dirs to prevent path traversal abuse from a
+	// compromised server, then spawn the pion peer in its own goroutine.
+	d.OnWebRTCSession = func(sess agent.WebRTCSession) {
+		if webrtcRegistry.has(sess.SessionID) {
+			return // already running
+		}
+		if !cfg.Download.WebRTC.Enabled {
+			log.Printf("webrtc session %s rejected: webrtc disabled in config", agent.ShortID(sess.SessionID))
+			return
+		}
+		filePath := sess.FilePath
+		if filePath == "" {
+			log.Printf("webrtc session %s rejected: empty file path", agent.ShortID(sess.SessionID))
+			return
+		}
+		filePath = filepath.Clean(filePath)
+		if !isAllowedStreamPath(filePath, cfg.Download.Dir, cfg.Library.ScanPath,
+			cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir) {
+			log.Printf("webrtc session %s rejected: path outside allowed dirs: %s",
+				agent.ShortID(sess.SessionID), filePath)
+			return
+		}
+		// Resolve directory → first video file (matches StreamRequest behavior).
+		if info, err := os.Stat(filePath); err == nil && info.IsDir() {
+			found := engine.FindVideoFile(filePath)
+			if found == "" {
+				log.Printf("webrtc session %s rejected: no video file in dir %s",
+					agent.ShortID(sess.SessionID), filePath)
+				return
+			}
+			filePath = found
+		}
+		sessCtx, sessCancel := context.WithCancel(ctx) //nolint:gosec // G118 cancel stored in registry
+		webrtcRegistry.add(sess.SessionID, sessCancel)
+		go func() {
+			defer func() {
+				webrtcRegistry.remove(sess.SessionID)
+				sessCancel()
+			}()
+			runCfg := engine.WebRTCStreamConfig{
+				SessionID:  sess.SessionID,
+				FilePath:   filePath,
+				FileName:   sess.FileName,
+				FileSize:   sess.FileSize,
+				ICEServers: engine.BuildICEServers(cfg.Download.WebRTC),
+				Signal:     agentClient,
+				Logger:     stdLogger{},
+			}
+			log.Printf("[wrtc %s] starting session: %s", agent.ShortID(sess.SessionID), filepath.Base(filePath))
+			if err := engine.RunWebRTCStream(sessCtx, runCfg); err != nil {
+				if sessCtx.Err() == nil {
+					log.Printf("[wrtc %s] ended: %v", agent.ShortID(sess.SessionID), err)
+				}
+			}
+		}()
+	}
+
 	// Periodic DHT node persistence (every 5 min)
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
@@ -457,6 +516,7 @@ func runDaemonStart() error {
 	case sig := <-sigCh:
 		fmt.Printf("\n  Received %s, shutting down...\n", sig)
 		cancelStreamContexts()
+		cancelAllWebRTCSessions()
 		streamSrv.Shutdown(context.Background())
 		cancel()
 
@@ -471,6 +531,7 @@ func runDaemonStart() error {
 
 	case err := <-errCh:
 		cancelStreamContexts()
+		cancelAllWebRTCSessions()
 		streamSrv.Shutdown(context.Background())
 		cancel()
 		return err
