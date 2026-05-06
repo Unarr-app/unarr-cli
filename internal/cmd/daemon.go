@@ -243,7 +243,13 @@ func runDaemonStart() error {
 	// Wire: sync receives new tasks → submit to manager or handle stream
 	d.OnTasksClaimed = func(tasks []agent.Task) {
 		for _, t := range tasks {
-			if t.Mode == "stream" {
+			if t.Mode == "seed_file" {
+				// Browser asked us to wrap an arbitrary on-disk file as
+				// a single-file torrent + seed it via WebRTC. Runs in
+				// its own goroutine so a slow / failing seed can't
+				// stall the rest of the claim batch.
+				go handleSeedFileTask(t, torrentDl, agentClient)
+			} else if t.Mode == "stream" {
 				if isStreamingTask(t.ID) {
 					continue
 				}

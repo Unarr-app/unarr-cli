@@ -72,6 +72,12 @@ type Task struct {
 	Episode         *int   `json:"episode,omitempty"`        // Episode number
 	ContentYear     *int   `json:"contentYear,omitempty"`    // Year from TMDB (avoids regex on torrent title)
 	CollectionName  string `json:"collectionName,omitempty"` // Collection name (e.g., "Harry Potter Collection")
+
+	// FilePath is the on-disk path of the file the agent is being asked
+	// to operate on. Currently used by mode=seed_file to know which
+	// arbitrary file to wrap as a single-file torrent for browser
+	// streaming; populated by the server from libraryItem.filePath.
+	FilePath string `json:"filePath,omitempty"`
 }
 
 // StreamRequest is a request to stream a completed download from disk.
@@ -95,6 +101,9 @@ type StatusUpdate struct {
 	StreamURL       string `json:"streamUrl,omitempty"`
 	StreamReady     bool   `json:"streamReady,omitempty"`
 	ErrorMessage    string `json:"errorMessage,omitempty"`
+	// mode=seed_file: agent computes the info_hash from the local file
+	// and reports it back so the web player can target /stream/<hash>.
+	InfoHash string `json:"infoHash,omitempty"`
 }
 
 // StatusResponse is returned by the status endpoint.
