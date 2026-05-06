@@ -84,6 +84,7 @@ type LibraryConfig struct {
 	ScanPath     string `toml:"scan_path"`     // remembered from last scan
 	Workers      int    `toml:"workers"`       // concurrent ffprobe (default 8)
 	FFprobePath  string `toml:"ffprobe_path"`  // optional explicit path
+	FFmpegPath   string `toml:"ffmpeg_path"`   // optional explicit path (used by WebRTC streaming transcoder)
 	BackupDir    string `toml:"backup_dir"`    // for replaced files
 	AutoScan     bool   `toml:"auto_scan"`     // enable daily auto-scan in daemon (default true)
 	ScanInterval string `toml:"scan_interval"` // e.g. "24h", "12h", "6h" (default "24h")
