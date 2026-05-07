@@ -15,6 +15,7 @@ type StreamProbe struct {
 	// VideoCodec lowercased — e.g. "h264", "hevc", "av1", "vp9", "mpeg4".
 	VideoCodec string
 	// AudioCodec lowercased — e.g. "aac", "ac3", "dts", "eac3", "opus".
+	// Reflects the default/first audio track for legacy single-track callers.
 	AudioCodec string
 	// Width / Height of the primary video stream.
 	Width  int
@@ -27,6 +28,43 @@ type StreamProbe struct {
 	DurationSec float64
 	// Container is the file extension lowercased (".mp4", ".mkv", ".avi").
 	Container string
+	// AudioTracks lists every audio stream in source order. Index in this
+	// slice == ffmpeg `-map 0:a:N` index (where N starts at 0).
+	AudioTracks []ProbeAudioTrack
+	// SubtitleTracks lists every subtitle stream in source order. Index in
+	// this slice == ffmpeg `-map 0:s:N` index.
+	SubtitleTracks []ProbeSubtitleTrack
+}
+
+// ProbeAudioTrack is a slimmed AudioTrack view tied to ffmpeg stream index.
+type ProbeAudioTrack struct {
+	Index    int    // 0-based audio stream index (ffmpeg -map 0:a:Index)
+	Lang     string // ISO 639-1
+	Codec    string // lowercased
+	Channels int
+	Title    string
+	Default  bool
+}
+
+// ProbeSubtitleTrack is a slimmed SubtitleTrack view tied to ffmpeg stream index.
+// Codec discriminates text (srt/ass/webvtt → extract to WebVTT) vs bitmap
+// (pgs/dvbsub → require burn-in).
+type ProbeSubtitleTrack struct {
+	Index  int    // 0-based subtitle stream index (ffmpeg -map 0:s:Index)
+	Lang   string // ISO 639-1
+	Codec  string // lowercased — "subrip", "ass", "webvtt", "hdmv_pgs_subtitle", ...
+	Title  string
+	Forced bool
+}
+
+// IsTextSubtitle reports whether a subtitle codec can be extracted to WebVTT
+// without re-rendering. Bitmap subs (PGS, DVB) need burn-in.
+func (s ProbeSubtitleTrack) IsTextSubtitle() bool {
+	switch s.Codec {
+	case "subrip", "srt", "ass", "ssa", "webvtt", "mov_text":
+		return true
+	}
+	return false
 }
 
 // TranscodeAction tells the streaming pipeline how to feed the file to
@@ -74,6 +112,29 @@ func ProbeFile(ctx context.Context, ffprobePath, filePath string) (*StreamProbe,
 			}
 		}
 		probe.AudioCodec = strings.ToLower(picked.Codec)
+		probe.AudioTracks = make([]ProbeAudioTrack, 0, len(mi.Audio))
+		for i, a := range mi.Audio {
+			probe.AudioTracks = append(probe.AudioTracks, ProbeAudioTrack{
+				Index:    i,
+				Lang:     a.Lang,
+				Codec:    strings.ToLower(a.Codec),
+				Channels: a.Channels,
+				Title:    a.Title,
+				Default:  a.Default,
+			})
+		}
+	}
+	if len(mi.Subtitles) > 0 {
+		probe.SubtitleTracks = make([]ProbeSubtitleTrack, 0, len(mi.Subtitles))
+		for i, s := range mi.Subtitles {
+			probe.SubtitleTracks = append(probe.SubtitleTracks, ProbeSubtitleTrack{
+				Index:  i,
+				Lang:   s.Lang,
+				Codec:  strings.ToLower(s.Codec),
+				Title:  s.Title,
+				Forced: s.Forced,
+			})
+		}
 	}
 	return probe, nil
 }

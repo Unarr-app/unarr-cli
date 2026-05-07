@@ -351,12 +351,19 @@ type LibraryDeleteRequest struct {
 	FilePath string `json:"filePath"`
 }
 
-// WebRTCSession is a request to open a custom WebRTC DataChannel byte-stream
-// to a browser player. The CLI must POST an SDP answer to
-// /api/internal/stream/signal/<sessionId> and serve bytes from FilePath
-// (or, when only InfoHash is set, from a download_task on disk).
+// WebRTCSession is a request to open a streaming session for a browser
+// player. Transport selects the on-the-wire protocol: empty/"webrtc" runs the
+// legacy custom WebRTC DataChannel pipeline; "hls" spawns an HLS session
+// (ffmpeg producing fragmented MP4 served over HTTP). The CLI must POST an
+// SDP answer to /api/internal/stream/signal/<sessionId> for WebRTC sessions
+// and register the HLS session in the StreamServer's HLS registry for HLS
+// sessions; either way the source bytes come from FilePath (or, when only
+// InfoHash is set, from a download_task on disk).
 type WebRTCSession struct {
 	SessionID string `json:"sessionId"`
+	// Transport selects the streaming protocol. "" or "webrtc" → legacy
+	// WebRTC + MSE pipeline (Phase 1). "hls" → HLS over HTTP (Phase 2).
+	Transport string `json:"transport,omitempty"`
 	FilePath  string `json:"filePath,omitempty"`
 	InfoHash  string `json:"infoHash,omitempty"`
 	TaskID    string `json:"taskId,omitempty"`
@@ -365,6 +372,9 @@ type WebRTCSession struct {
 	// Quality target the daemon should aim for when transcoding. One of
 	// "2160p" | "1080p" | "720p" | "480p" | "original" | "" (defer to config).
 	Quality string `json:"quality,omitempty"`
+	// AudioIndex selects the source audio track (-map 0:a:N). -1 means
+	// "use the default/first track" (HLS) or ignored (WebRTC).
+	AudioIndex int `json:"audioIndex,omitempty"`
 }
 
 // SyncResponse is returned by the server with all pending actions for the CLI.

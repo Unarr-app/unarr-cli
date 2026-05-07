@@ -52,6 +52,8 @@ type StreamServer struct {
 	upnpMapping *UPnPMapping
 	disableUPnP bool
 
+	hls *HLSSessionRegistry // HLS sessions served on /hls/<id>/...
+
 	lastActivity  atomic.Int64
 	maxByteOffset atomic.Int64 // highest sequential read position (main playback connection)
 	totalFileSize atomic.Int64
@@ -64,8 +66,12 @@ type StreamServer struct {
 // NewStreamServer creates a stream server bound to the given port.
 // Call Listen() to start accepting connections, then SetFile() to serve content.
 func NewStreamServer(port int) *StreamServer {
-	return &StreamServer{port: port}
+	return &StreamServer{port: port, hls: NewHLSSessionRegistry()}
 }
+
+// HLS returns the HLS session registry for this server. Daemon code uses it
+// to register a session when the backend asks for HLS playback.
+func (ss *StreamServer) HLS() *HLSSessionRegistry { return ss.hls }
 
 // Listen starts the HTTP server on the configured port. Call once at daemon startup.
 func (ss *StreamServer) Listen(ctx context.Context) error {
@@ -73,6 +79,7 @@ func (ss *StreamServer) Listen(ctx context.Context) error {
 	mux.HandleFunc("/stream", ss.handler)
 	mux.HandleFunc("/health", ss.healthHandler)
 	mux.HandleFunc("/playlist.m3u", ss.playlistHandler)
+	mux.HandleFunc("/hls/", ss.hlsHandler)
 
 	// SO_REUSEADDR allows immediate rebind if the port is in TIME_WAIT (e.g. after agent restart)
 	lc := net.ListenConfig{
@@ -230,10 +237,144 @@ func (ss *StreamServer) IdleSince() time.Duration {
 // Call only at daemon shutdown — NOT between file swaps.
 func (ss *StreamServer) Shutdown(ctx context.Context) error {
 	ss.upnpMapping.Remove()
+	if ss.hls != nil {
+		ss.hls.CloseAll()
+	}
 	if ss.server != nil {
 		return ss.server.Shutdown(ctx)
 	}
 	return nil
+}
+
+// hlsBaseURLs returns the per-network HLS base URLs for a given session.
+// The web client picks the first reachable one — same fallback strategy as
+// the legacy /stream URLs.
+func (ss *StreamServer) hlsBaseURLs(sessionID string) StreamURLs {
+	var out StreamURLs
+	if ss.urls.LAN != "" {
+		out.LAN = strings.Replace(ss.urls.LAN, "/stream", "/hls/"+sessionID, 1)
+	}
+	if ss.urls.Tailscale != "" {
+		out.Tailscale = strings.Replace(ss.urls.Tailscale, "/stream", "/hls/"+sessionID, 1)
+	}
+	if ss.urls.Public != "" {
+		out.Public = strings.Replace(ss.urls.Public, "/stream", "/hls/"+sessionID, 1)
+	}
+	return out
+}
+
+// HLSURLsJSON returns base URLs for an HLS session as a JSON string for the
+// session response payload.
+func (ss *StreamServer) HLSURLsJSON(sessionID string) string {
+	urls := ss.hlsBaseURLs(sessionID)
+	b, _ := json.Marshal(urls)
+	return string(b)
+}
+
+// hlsHandler routes /hls/<sessionID>/<resource> to the matching HLSSession.
+//
+// Recognised resources:
+//
+//	master.m3u8                — top-level playlist
+//	video/index.m3u8           — video media playlist
+//	video/init.mp4             — fMP4 init segment
+//	video/seg-<n>.m4s          — video segment
+//	subs/sub-<n>.m3u8          — per-subtitle media playlist (synthesised)
+//	subs/sub-<n>.vtt           — WebVTT subtitle (extracted by ffmpeg)
+func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
+	ss.lastActivity.Store(time.Now().UnixNano())
+
+	// CORS for app.torrentclaw.com → 127.0.0.1/Tailscale daemon.
+	if origin := r.Header.Get("Origin"); origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Range")
+		w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+
+	rest := strings.TrimPrefix(r.URL.Path, "/hls/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		http.Error(w, "missing session id", http.StatusNotFound)
+		return
+	}
+	sessionID := parts[0]
+	session := ss.hls.Get(sessionID)
+	if session == nil {
+		http.Error(w, "hls session not found", http.StatusNotFound)
+		return
+	}
+	if len(parts) == 1 {
+		http.Error(w, "missing resource", http.StatusNotFound)
+		return
+	}
+	resource := parts[1]
+
+	switch {
+	case resource == "master.m3u8":
+		session.ServeMaster(w, r)
+	case resource == "video/index.m3u8":
+		session.ServeVideoPlaylist(w, r)
+	case resource == "video/init.mp4":
+		session.ServeInit(w, r)
+	case strings.HasPrefix(resource, "video/seg-") && strings.HasSuffix(resource, ".m4s"):
+		idxStr := strings.TrimSuffix(strings.TrimPrefix(resource, "video/seg-"), ".m4s")
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil {
+			http.Error(w, "bad segment index", http.StatusBadRequest)
+			return
+		}
+		session.ServeSegment(w, r, idx)
+	case strings.HasPrefix(resource, "subs/sub-") && strings.HasSuffix(resource, ".m3u8"):
+		idxStr := strings.TrimSuffix(strings.TrimPrefix(resource, "subs/sub-"), ".m3u8")
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil {
+			http.Error(w, "bad subtitle index", http.StatusBadRequest)
+			return
+		}
+		ss.serveSubtitlePlaylist(w, r, session, idx)
+	case strings.HasPrefix(resource, "subs/sub-") && strings.HasSuffix(resource, ".vtt"):
+		idxStr := strings.TrimSuffix(strings.TrimPrefix(resource, "subs/sub-"), ".vtt")
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil {
+			http.Error(w, "bad subtitle index", http.StatusBadRequest)
+			return
+		}
+		session.ServeSubtitle(w, r, idx)
+	default:
+		http.Error(w, "unknown hls resource", http.StatusNotFound)
+	}
+}
+
+// serveSubtitlePlaylist generates a single-VTT-segment HLS playlist on the
+// fly so hls.js can consume it as a regular subtitle rendition. The VTT file
+// itself is extracted asynchronously by HLSSession.extractSubtitles.
+func (ss *StreamServer) serveSubtitlePlaylist(w http.ResponseWriter, r *http.Request, session *HLSSession, idx int) {
+	if idx < 0 || idx >= len(session.probe.SubtitleTracks) {
+		http.Error(w, "subtitle out of range", http.StatusNotFound)
+		return
+	}
+	dur := session.durationSec
+	if dur < 1 {
+		dur = 1
+	}
+	body := strings.Builder{}
+	body.WriteString("#EXTM3U\n")
+	body.WriteString("#EXT-X-VERSION:3\n")
+	body.WriteString("#EXT-X-PLAYLIST-TYPE:VOD\n")
+	body.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(dur)+1))
+	body.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
+	body.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", dur))
+	body.WriteString(fmt.Sprintf("sub-%d.vtt\n", idx))
+	body.WriteString("#EXT-X-ENDLIST\n")
+
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = io.WriteString(w, body.String())
 }
 
 // healthHandler responde con el estado del servidor en JSON.

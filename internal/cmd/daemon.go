@@ -444,6 +444,33 @@ func runDaemonStart() error {
 			}
 			filePath = found
 		}
+
+		// Branch on transport: HLS sessions register with the StreamServer
+		// HLS registry and serve over HTTP; default ("" or "webrtc") runs
+		// the legacy DataChannel pipeline.
+		if strings.EqualFold(sess.Transport, "hls") {
+			tcRuntime := buildTranscodeRuntime(ctx, cfg)
+			if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
+				log.Printf("[hls %s] rejected: ffmpeg/ffprobe unavailable", agent.ShortID(sess.SessionID))
+				return
+			}
+			hlsCfg := engine.HLSSessionConfig{
+				SessionID:  sess.SessionID,
+				SourcePath: filePath,
+				FileName:   sess.FileName,
+				Quality:    sess.Quality,
+				AudioIndex: sess.AudioIndex,
+				Transcode:  tcRuntime,
+			}
+			hsess, err := engine.StartHLSSession(ctx, hlsCfg)
+			if err != nil {
+				log.Printf("[hls %s] start failed: %v", agent.ShortID(sess.SessionID), err)
+				return
+			}
+			streamSrv.HLS().Register(hsess)
+			return
+		}
+
 		sessCtx, sessCancel := context.WithCancel(ctx) //nolint:gosec // G118 cancel stored in registry
 		webrtcRegistry.add(sess.SessionID, sessCancel)
 		go func() {
