@@ -317,6 +317,10 @@ func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case resource == "master.m3u8":
 		session.ServeMaster(w, r)
+	case resource == "probe.json":
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache")
+		_ = json.NewEncoder(w).Encode(session.ProbeInfo())
 	case resource == "video/index.m3u8":
 		session.ServeVideoPlaylist(w, r)
 	case resource == "video/init.mp4":

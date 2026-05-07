@@ -513,6 +513,25 @@ func runDaemonStart() error {
 		}
 	}()
 
+	// Periodic HLS session sweeper (every 5 min). Closes sessions whose last
+	// segment fetch was over 30 min ago — kills the orphan ffmpeg + removes
+	// the per-session tmpdir, so a tab that died mid-stream doesn't leak
+	// disk space until daemon shutdown.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if n := streamSrv.HLS().SweepIdle(); n > 0 {
+					log.Printf("[hls] swept %d idle session(s)", n)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	// Start auto-scan goroutine
 	scanPaths := daemonCfg.ScanPaths
 	if len(scanPaths) > 0 && cfg.Library.AutoScan {
