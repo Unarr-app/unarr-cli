@@ -457,6 +457,7 @@ func runDaemonStart() error {
 				FilePath:   filePath,
 				FileName:   sess.FileName,
 				FileSize:   sess.FileSize,
+				Quality:    sess.Quality,
 				ICEServers: engine.BuildICEServers(cfg.Download.WebRTC),
 				Signal:     agentClient,
 				Logger:     stdLogger{},

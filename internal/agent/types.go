@@ -362,6 +362,9 @@ type WebRTCSession struct {
 	TaskID    string `json:"taskId,omitempty"`
 	FileName  string `json:"fileName,omitempty"`
 	FileSize  int64  `json:"fileSize,omitempty"`
+	// Quality target the daemon should aim for when transcoding. One of
+	// "2160p" | "1080p" | "720p" | "480p" | "original" | "" (defer to config).
+	Quality string `json:"quality,omitempty"`
 }
 
 // SyncResponse is returned by the server with all pending actions for the CLI.

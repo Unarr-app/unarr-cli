@@ -199,6 +199,32 @@ func Load(path string) (Config, error) {
 				"stun:stun1.l.google.com:19302",
 			}
 		}
+		// Auto-enable transcode for the in-browser player when WebRTC is on
+		// AND the user hasn't explicitly opted out. The struct's Enabled
+		// field is `false` for legacy configs because the field didn't
+		// exist when they were written; we treat "no transcode section at
+		// all" as "use defaults" rather than "off".
+		tc := &cfg.Download.Transcode
+		if !tc.Enabled && tc.HWAccel == "" && tc.Preset == "" && tc.VideoBitrate == "" {
+			tc.Enabled = true
+		}
+		if tc.Enabled {
+			if tc.HWAccel == "" {
+				tc.HWAccel = "auto"
+			}
+			if tc.Preset == "" {
+				tc.Preset = "veryfast"
+			}
+			if tc.VideoBitrate == "" {
+				tc.VideoBitrate = "5M"
+			}
+			if tc.AudioBitrate == "" {
+				tc.AudioBitrate = "192k"
+			}
+			if tc.MaxConcurrent == 0 {
+				tc.MaxConcurrent = 2
+			}
+		}
 	}
 
 	return cfg, nil

@@ -64,6 +64,10 @@ type WebRTCStreamConfig struct {
 	// Transcode steers on-the-fly transcoding when source codecs are not
 	// browser-decodable (HEVC/AV1/AC3/DTS). Empty FFmpegPath disables it.
 	Transcode TranscodeRuntime
+	// Quality overrides the cap from Transcode for this session. One of
+	// "2160p" | "1080p" | "720p" | "480p" | "original" | "" (= defer to
+	// Transcode defaults).
+	Quality string
 }
 
 // TranscodeRuntime carries the resolved ffmpeg/ffprobe paths + tunables so
@@ -102,9 +106,37 @@ func logger(l StreamLogger) StreamLogger {
 	return l
 }
 
+// qualityCap maps a session's Quality label to a (MaxHeight, VideoBitrate)
+// pair. An empty label or "original" returns zero-values, signalling "no
+// override" to the caller.
+type qualityCap struct {
+	MaxHeight    int
+	VideoBitrate string // ffmpeg -b:v string, e.g. "3500k"
+}
+
+func resolveQualityCap(label string) qualityCap {
+	switch label {
+	case "2160p":
+		return qualityCap{MaxHeight: 2160, VideoBitrate: "25000k"}
+	case "1080p":
+		return qualityCap{MaxHeight: 1080, VideoBitrate: "6000k"}
+	case "720p":
+		return qualityCap{MaxHeight: 720, VideoBitrate: "3500k"}
+	case "480p":
+		return qualityCap{MaxHeight: 480, VideoBitrate: "1500k"}
+	default:
+		// "original", "auto", "" → defer to config.
+		return qualityCap{}
+	}
+}
+
 // buildStreamSource picks between passthrough and transcoded source. ffprobe
 // failure or missing ffmpeg falls back to passthrough — the browser surfaces
 // a clearer codec error than us refusing to start.
+//
+// Quality override (cfg.Quality) can force a downscale even when the source
+// codec is browser-friendly: a 4K h264 file watched on a phone with quality
+// "720p" must transcode (otherwise we'd ship 4K bytes for a 6" screen).
 func buildStreamSource(
 	ctx context.Context,
 	abs string,
@@ -113,6 +145,8 @@ func buildStreamSource(
 	log StreamLogger,
 ) (streamSource, error) {
 	tc := cfg.Transcode
+	cap := resolveQualityCap(cfg.Quality)
+
 	if tc.Disabled || tc.FFmpegPath == "" || tc.FFprobePath == "" {
 		return newDiskFileSource(abs)
 	}
@@ -123,25 +157,54 @@ func buildStreamSource(
 		return newDiskFileSource(abs)
 	}
 	action := DecideAction(probe)
+
+	// Quality cap can promote a passthrough/remux decision into a full video
+	// transcode when the source resolution exceeds the requested cap.
+	forcedByQuality := false
+	if cap.MaxHeight > 0 && probe.Height > 0 && probe.Height > cap.MaxHeight {
+		if action != ActionTranscodeVideo {
+			log.Infof("[wrtc %s] quality=%s caps height %d→%d — forcing video transcode",
+				agent.ShortID(cfg.SessionID), cfg.Quality, probe.Height, cap.MaxHeight)
+			action = ActionTranscodeVideo
+			forcedByQuality = true
+		}
+	}
+
 	if action == ActionPassthrough {
 		log.Infof("[wrtc %s] codec passthrough (%s + %s in %s)",
 			agent.ShortID(cfg.SessionID), probe.VideoCodec, probe.AudioCodec, probe.Container)
 		return newDiskFileSource(abs)
 	}
 
-	log.Infof("[wrtc %s] transcoding %s/%s/%s → h264+aac (%s)",
-		agent.ShortID(cfg.SessionID), probe.Container, probe.VideoCodec, probe.AudioCodec, action)
+	log.Infof("[wrtc %s] transcoding %s/%s/%s → h264+aac (%s, quality=%s)",
+		agent.ShortID(cfg.SessionID), probe.Container, probe.VideoCodec, probe.AudioCodec,
+		action, coalesceLabel(cfg.Quality))
+
+	maxHeight := tc.MaxHeight
+	videoBitrate := tc.VideoBitrate
+	if cap.MaxHeight > 0 {
+		maxHeight = cap.MaxHeight
+		videoBitrate = cap.VideoBitrate
+	}
+	_ = forcedByQuality // reserved for future telemetry
 
 	opts := TranscodeOpts{
 		Action:       action,
 		HWAccel:      tc.HWAccel,
 		Preset:       tc.Preset,
-		VideoBitrate: tc.VideoBitrate,
+		VideoBitrate: videoBitrate,
 		AudioBitrate: tc.AudioBitrate,
-		MaxHeight:    tc.MaxHeight,
+		MaxHeight:    maxHeight,
 		FFmpegPath:   tc.FFmpegPath,
 	}
 	return newTranscodeSource(ctx, abs, probe, action, opts, displayName)
+}
+
+func coalesceLabel(s string) string {
+	if s == "" {
+		return "default"
+	}
+	return s
 }
 
 // RunWebRTCStream blocks until the session ends — either the DataChannel
