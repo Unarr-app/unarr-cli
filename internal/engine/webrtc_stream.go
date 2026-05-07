@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -62,6 +61,25 @@ type WebRTCStreamConfig struct {
 	Signal     *agent.Client
 	// Logger receives diagnostic events; a nil logger swallows everything.
 	Logger StreamLogger
+	// Transcode steers on-the-fly transcoding when source codecs are not
+	// browser-decodable (HEVC/AV1/AC3/DTS). Empty FFmpegPath disables it.
+	Transcode TranscodeRuntime
+}
+
+// TranscodeRuntime carries the resolved ffmpeg/ffprobe paths + tunables so
+// each session can decide whether to passthrough or pipe through ffmpeg.
+type TranscodeRuntime struct {
+	FFmpegPath   string
+	FFprobePath  string
+	HWAccel      HWAccel
+	Preset       string
+	VideoBitrate string
+	AudioBitrate string
+	MaxHeight    int
+	// Disabled forces passthrough for every file even when codecs are not
+	// browser-friendly. Useful when the user explicitly turns transcoding
+	// off in config.
+	Disabled bool
 }
 
 // StreamLogger is an injectable logger so tests can capture events.
@@ -84,6 +102,48 @@ func logger(l StreamLogger) StreamLogger {
 	return l
 }
 
+// buildStreamSource picks between passthrough and transcoded source. ffprobe
+// failure or missing ffmpeg falls back to passthrough — the browser surfaces
+// a clearer codec error than us refusing to start.
+func buildStreamSource(
+	ctx context.Context,
+	abs string,
+	displayName string,
+	cfg WebRTCStreamConfig,
+	log StreamLogger,
+) (streamSource, error) {
+	tc := cfg.Transcode
+	if tc.Disabled || tc.FFmpegPath == "" || tc.FFprobePath == "" {
+		return newDiskFileSource(abs)
+	}
+
+	probe, err := ProbeFile(ctx, tc.FFprobePath, abs)
+	if err != nil {
+		log.Warnf("[wrtc %s] probe failed (%v) — passthrough", agent.ShortID(cfg.SessionID), err)
+		return newDiskFileSource(abs)
+	}
+	action := DecideAction(probe)
+	if action == ActionPassthrough {
+		log.Infof("[wrtc %s] codec passthrough (%s + %s in %s)",
+			agent.ShortID(cfg.SessionID), probe.VideoCodec, probe.AudioCodec, probe.Container)
+		return newDiskFileSource(abs)
+	}
+
+	log.Infof("[wrtc %s] transcoding %s/%s/%s → h264+aac (%s)",
+		agent.ShortID(cfg.SessionID), probe.Container, probe.VideoCodec, probe.AudioCodec, action)
+
+	opts := TranscodeOpts{
+		Action:       action,
+		HWAccel:      tc.HWAccel,
+		Preset:       tc.Preset,
+		VideoBitrate: tc.VideoBitrate,
+		AudioBitrate: tc.AudioBitrate,
+		MaxHeight:    tc.MaxHeight,
+		FFmpegPath:   tc.FFmpegPath,
+	}
+	return newTranscodeSource(ctx, abs, probe, action, opts, displayName)
+}
+
 // RunWebRTCStream blocks until the session ends — either the DataChannel
 // closes, the peer connection drops, or ctx is cancelled. Always returns a
 // non-nil error explaining the termination reason.
@@ -101,24 +161,20 @@ func RunWebRTCStream(ctx context.Context, cfg WebRTCStreamConfig) error {
 	if err != nil {
 		return fmt.Errorf("webrtc_stream: resolve path: %w", err)
 	}
-	file, err := os.Open(abs)
-	if err != nil {
-		return fmt.Errorf("webrtc_stream: open file: %w", err)
-	}
-	defer file.Close()
 
-	stat, err := file.Stat()
+	displayName := cfg.FileName
+	if displayName == "" {
+		displayName = filepath.Base(abs)
+	}
+
+	// Decide passthrough vs transcoding. Probe is best-effort: if ffprobe
+	// is missing or fails we fall back to passthrough (the browser will
+	// surface a clearer error than us guessing wrong).
+	source, err := buildStreamSource(ctx, abs, displayName, cfg, log)
 	if err != nil {
-		return fmt.Errorf("webrtc_stream: stat: %w", err)
+		return fmt.Errorf("webrtc_stream: build source: %w", err)
 	}
-	fileSize := stat.Size()
-	if cfg.FileSize > 0 && cfg.FileSize != fileSize {
-		log.Warnf("webrtc_stream: declared size %d != actual %d", cfg.FileSize, fileSize)
-	}
-	fileName := cfg.FileName
-	if fileName == "" {
-		fileName = filepath.Base(abs)
-	}
+	defer source.Close()
 
 	// 1. Build PeerConnection.
 	api := webrtc.NewAPI()
@@ -188,10 +244,17 @@ func RunWebRTCStream(ctx context.Context, cfg WebRTCStreamConfig) error {
 		}
 	})
 
-	// 2. Drive the SDP exchange.
+	// 2. Drive the SDP exchange. Any error from the loop (browser sent
+	// "bye", signal stream closed, etc.) cancels the session so we don't
+	// dangle on the DC waiting for a peer that's already gone.
 	sdpDone := make(chan error, 1)
 	go func() {
-		sdpDone <- runSDPExchange(sessionCtx, pc, cfg)
+		err := runSDPExchange(sessionCtx, pc, cfg)
+		sdpDone <- err
+		if err != nil && sessionCtx.Err() == nil {
+			log.Infof("[wrtc %s] signal loop ended: %v", agent.ShortID(cfg.SessionID), err)
+			cancelSession()
+		}
 	}()
 
 	// 3. Wait for either SDP error or DataChannel open.
@@ -217,7 +280,7 @@ func RunWebRTCStream(ctx context.Context, cfg WebRTCStreamConfig) error {
 	}
 
 	// 4. Wire up the data channel pump.
-	pump := newDataChannelPump(dc, file, fileSize, fileName, log, cancelSession)
+	pump := newDataChannelPump(dc, source, log, cancelSession)
 	dc.OnOpen(pump.onOpen)
 	dc.OnMessage(pump.onMessage)
 	dc.OnClose(func() {
@@ -346,14 +409,12 @@ func handleSignal(
 	return nil
 }
 
-// dataChannelPump owns the DC + file handle and serves wire-protocol frames.
+// dataChannelPump owns the DC + stream source and serves wire-protocol frames.
 type dataChannelPump struct {
-	dc       *webrtc.DataChannel
-	file     *os.File
-	fileSize int64
-	fileName string
-	log      StreamLogger
-	cancel   context.CancelFunc
+	dc     *webrtc.DataChannel
+	source streamSource
+	log    StreamLogger
+	cancel context.CancelFunc
 
 	// Flow control: writers wait on resumeCh when bufferedAmount goes high.
 	paused   atomic.Bool
@@ -372,17 +433,13 @@ type dataChannelPump struct {
 
 func newDataChannelPump(
 	dc *webrtc.DataChannel,
-	file *os.File,
-	fileSize int64,
-	fileName string,
+	source streamSource,
 	log StreamLogger,
 	cancel context.CancelFunc,
 ) *dataChannelPump {
 	p := &dataChannelPump{
 		dc:       dc,
-		file:     file,
-		fileSize: fileSize,
-		fileName: fileName,
+		source:   source,
 		log:      log,
 		cancel:   cancel,
 		resumeCh: make(chan struct{}, 1),
@@ -395,16 +452,25 @@ func newDataChannelPump(
 }
 
 func (p *dataChannelPump) onOpen() {
+	// Use estimated size for transcoded streams so the browser scrubber has
+	// something to anchor on. Real size is reflected by Range responses as
+	// ffmpeg writes more bytes; the estimate just bootstraps the UI.
+	announceSize := p.source.EstimatedSize()
+	transcoding := p.source.Transcoded()
+	// Seekable=true even for transcoded sources because we read from a tmp
+	// file (random access). Seek backwards just works; seek forward beyond
+	// what ffmpeg has produced will block briefly inside ReadAt.
+	seekable := true
 	hello := wire.HelloPayload{
-		FileSize:    uint64(p.fileSize),
-		Transcoding: false,
-		Seekable:    true,
-		FileName:    p.fileName,
+		FileSize:    uint64(announceSize),
+		Transcoding: transcoding,
+		Seekable:    seekable,
+		FileName:    p.source.FileName(),
 	}
 	payload := wire.EncodeHello(hello)
 	frame := wire.EncodeFrame(wire.Header{
 		Type:     wire.FrameHello,
-		Flags:    wire.HelloFlags(false, true),
+		Flags:    wire.HelloFlags(transcoding, seekable),
 		StreamID: 0,
 		Length:   uint32(len(payload)),
 	}, payload)
@@ -487,8 +553,16 @@ func (p *dataChannelPump) serveRange(streamID uint32, req wire.RangeReqPayload) 
 	// Reject offsets above MaxInt64 — uint64→int64 narrowing would wrap to a
 	// negative value and bypass the bounds check, then ReadAt would be called
 	// with a negative offset.
-	if req.Offset > math.MaxInt64 || int64(req.Offset) >= p.fileSize {
+	currentSize := p.source.Size()
+	finalSize := p.source.EstimatedSize()
+	if req.Offset > math.MaxInt64 {
 		p.sendRangeEnd(streamID, 2) // out of range
+		return
+	}
+	// For transcoded streams `currentSize` grows over time; only reject when
+	// the offset is past the *estimated* final size.
+	if int64(req.Offset) >= finalSize && p.source.Final() {
+		p.sendRangeEnd(streamID, 2)
 		return
 	}
 
@@ -496,9 +570,24 @@ func (p *dataChannelPump) serveRange(streamID uint32, req wire.RangeReqPayload) 
 	if req.Length > math.MaxInt64 {
 		want = 0 // treat absurd length as "remainder of file"
 	}
-	remaining := p.fileSize - int64(req.Offset)
+	// "Remainder" target: prefer current known size, fall back to estimate
+	// for transcoded streams so the browser can keep scrolling forward as
+	// ffmpeg produces output.
+	knownEnd := currentSize
+	if p.source.Final() {
+		knownEnd = finalSize
+	}
+	if knownEnd < int64(req.Offset) {
+		knownEnd = int64(req.Offset)
+	}
+	remaining := knownEnd - int64(req.Offset)
 	if want <= 0 || want > remaining {
 		want = remaining
+	}
+	if want <= 0 {
+		// Nothing to serve right now (transcoder hasn't reached this offset).
+		p.sendRangeEnd(streamID, 0)
+		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -527,7 +616,7 @@ func (p *dataChannelPump) serveRange(streamID uint32, req wire.RangeReqPayload) 
 		if end-offset < chunkLen {
 			chunkLen = end - offset
 		}
-		n, rerr := p.file.ReadAt(buf[:chunkLen], offset)
+		n, rerr := p.source.ReadAt(buf[:chunkLen], offset)
 		if n > 0 {
 			// EOF on a short read means this is the final chunk — flag it so the
 			// browser doesn't wait for more data before processing RangeEnd.

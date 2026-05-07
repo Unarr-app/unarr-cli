@@ -451,6 +451,7 @@ func runDaemonStart() error {
 				webrtcRegistry.remove(sess.SessionID)
 				sessCancel()
 			}()
+			tcRuntime := buildTranscodeRuntime(ctx, cfg)
 			runCfg := engine.WebRTCStreamConfig{
 				SessionID:  sess.SessionID,
 				FilePath:   filePath,
@@ -459,6 +460,7 @@ func runDaemonStart() error {
 				ICEServers: engine.BuildICEServers(cfg.Download.WebRTC),
 				Signal:     agentClient,
 				Logger:     stdLogger{},
+				Transcode:  tcRuntime,
 			}
 			log.Printf("[wrtc %s] starting session: %s", agent.ShortID(sess.SessionID), filepath.Base(filePath))
 			if err := engine.RunWebRTCStream(sessCtx, runCfg); err != nil {

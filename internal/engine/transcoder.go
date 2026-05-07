@@ -64,6 +64,26 @@ func NewTranscoder(ctx context.Context, filePath string, opts TranscodeOpts) (*T
 	return t, nil
 }
 
+// startTranscoderToFile spawns ffmpeg with a pre-built argv where the last
+// argument is an output file path (instead of pipe:1). Used by streamSource
+// when we want random-access reads against a growing temp file rather than
+// sequential pipe consumption.
+func startTranscoderToFile(ctx context.Context, ffmpegPath string, args []string, t *Transcoder) (*Transcoder, error) {
+	if ffmpegPath == "" {
+		return nil, fmt.Errorf("transcoder: empty ffmpeg path")
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	if t == nil {
+		t = &Transcoder{}
+	}
+	t.cmd = cmd
+	cmd.Stderr = &errWriter{t: t}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("transcoder: start ffmpeg: %w", err)
+	}
+	return t, nil
+}
+
 // Read implements io.Reader.
 func (t *Transcoder) Read(p []byte) (int, error) { return t.out.Read(p) }
 

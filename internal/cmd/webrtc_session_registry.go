@@ -4,6 +4,10 @@ import (
 	"context"
 	"log"
 	"sync"
+
+	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/torrentclaw/unarr/internal/engine"
+	"github.com/torrentclaw/unarr/internal/library/mediainfo"
 )
 
 // webrtcRegistry tracks per-session cancel funcs for active custom WebRTC
@@ -60,3 +64,43 @@ type stdLogger struct{}
 func (stdLogger) Infof(format string, args ...any)  { log.Printf(format, args...) }
 func (stdLogger) Warnf(format string, args ...any)  { log.Printf("WARN: "+format, args...) }
 func (stdLogger) Errorf(format string, args ...any) { log.Printf("ERROR: "+format, args...) }
+
+// buildTranscodeRuntime resolves the ffmpeg/ffprobe binaries + config knobs
+// for the WebRTC streaming pipeline. Failure to resolve a binary returns a
+// runtime with empty paths so engine.RunWebRTCStream falls back to
+// passthrough — the user gets a clearer codec error from the browser than a
+// daemon-side abort.
+func buildTranscodeRuntime(ctx context.Context, cfg config.Config) engine.TranscodeRuntime {
+	if !cfg.Download.Transcode.Enabled {
+		return engine.TranscodeRuntime{Disabled: true}
+	}
+	ffmpegPath, errF := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath)
+	ffprobePath, errP := mediainfo.ResolveFFprobe(cfg.Library.FFprobePath)
+	if errF != nil || errP != nil {
+		return engine.TranscodeRuntime{Disabled: true}
+	}
+	hw := engine.HWAccelNone
+	switch cfg.Download.Transcode.HWAccel {
+	case "auto":
+		hw = engine.DetectHWAccel(ctx, ffmpegPath)
+	case "nvenc":
+		hw = engine.HWAccelNVENC
+	case "qsv":
+		hw = engine.HWAccelQSV
+	case "vaapi":
+		hw = engine.HWAccelVAAPI
+	case "videotoolbox":
+		hw = engine.HWAccelVideoToolbox
+	case "none", "":
+		hw = engine.HWAccelNone
+	}
+	return engine.TranscodeRuntime{
+		FFmpegPath:   ffmpegPath,
+		FFprobePath:  ffprobePath,
+		HWAccel:      hw,
+		Preset:       cfg.Download.Transcode.Preset,
+		VideoBitrate: cfg.Download.Transcode.VideoBitrate,
+		AudioBitrate: cfg.Download.Transcode.AudioBitrate,
+		MaxHeight:    cfg.Download.Transcode.MaxHeight,
+	}
+}

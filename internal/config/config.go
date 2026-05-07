@@ -34,17 +34,32 @@ type AgentConfig struct {
 }
 
 type DownloadConfig struct {
-	Dir              string       `toml:"dir"`
-	PreferredMethod  string       `toml:"preferred_method"`
-	PreferredQuality string       `toml:"preferred_quality"` // "2160p", "1080p", "720p" — hint for auto-selection
-	MaxConcurrent    int          `toml:"max_concurrent"`
-	MaxDownloadSpeed string       `toml:"max_download_speed"` // e.g. "10MB", "500KB", "0" = unlimited
-	MaxUploadSpeed   string       `toml:"max_upload_speed"`   // e.g. "1MB", "0" = unlimited
-	MetadataTimeout  string       `toml:"metadata_timeout"`   // e.g. "1h", "30m", "0" = unlimited (default: "0")
-	StallTimeout     string       `toml:"stall_timeout"`      // e.g. "30m", "1h", "0" = unlimited (default: "30m")
-	ListenPort       int          `toml:"listen_port"`        // fixed port for incoming peer connections (default: 42069, 0 = random)
-	StreamPort       int          `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
-	WebRTC           WebRTCConfig `toml:"webrtc"`
+	Dir              string          `toml:"dir"`
+	PreferredMethod  string          `toml:"preferred_method"`
+	PreferredQuality string          `toml:"preferred_quality"` // "2160p", "1080p", "720p" — hint for auto-selection
+	MaxConcurrent    int             `toml:"max_concurrent"`
+	MaxDownloadSpeed string          `toml:"max_download_speed"` // e.g. "10MB", "500KB", "0" = unlimited
+	MaxUploadSpeed   string          `toml:"max_upload_speed"`   // e.g. "1MB", "0" = unlimited
+	MetadataTimeout  string          `toml:"metadata_timeout"`   // e.g. "1h", "30m", "0" = unlimited (default: "0")
+	StallTimeout     string          `toml:"stall_timeout"`      // e.g. "30m", "1h", "0" = unlimited (default: "30m")
+	ListenPort       int             `toml:"listen_port"`        // fixed port for incoming peer connections (default: 42069, 0 = random)
+	StreamPort       int             `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
+	WebRTC           WebRTCConfig    `toml:"webrtc"`
+	Transcode        TranscodeConfig `toml:"transcode"`
+}
+
+// TranscodeConfig controls real-time transcoding for the in-browser player
+// when source codecs aren't browser-decodable (HEVC, AV1, AC3, DTS, etc.).
+// Disabled by default; enabling requires ffmpeg + ffprobe on PATH (or
+// explicit paths via the library config).
+type TranscodeConfig struct {
+	Enabled       bool   `toml:"enabled"`        // master switch
+	HWAccel       string `toml:"hw_accel"`       // "auto" | "none" | "nvenc" | "qsv" | "vaapi" | "videotoolbox"
+	Preset        string `toml:"preset"`         // libx264 preset; "veryfast" by default
+	VideoBitrate  string `toml:"video_bitrate"`  // e.g. "5M"
+	AudioBitrate  string `toml:"audio_bitrate"`  // e.g. "192k"
+	MaxHeight     int    `toml:"max_height"`     // optional downscale cap (e.g. 720)
+	MaxConcurrent int    `toml:"max_concurrent"` // safety cap on simultaneous transcoder processes
 }
 
 // WebRTCConfig opts the daemon into acting as a WebTorrent peer so browsers
@@ -105,6 +120,14 @@ func Default() Config {
 				Enabled:     false,
 				Trackers:    []string{"wss://tracker.torrentclaw.com"},
 				STUNServers: []string{"stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"},
+			},
+			Transcode: TranscodeConfig{
+				Enabled:       true,
+				HWAccel:       "auto",
+				Preset:        "veryfast",
+				VideoBitrate:  "5M",
+				AudioBitrate:  "192k",
+				MaxConcurrent: 2,
 			},
 		},
 		Organize: OrganizeConfig{
