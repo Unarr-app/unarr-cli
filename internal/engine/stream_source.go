@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -80,11 +80,11 @@ type transcodeSource struct {
 	name     string
 	estimate int64
 
-	mu        sync.Mutex
-	cond      *sync.Cond
+	ctx       context.Context
+	notify    chan struct{} // size grew or final flipped; cap=1, non-blocking send
 	size      atomic.Int64
 	final     atomic.Bool
-	failure   error
+	failure   atomic.Pointer[error]
 	startedAt time.Time
 }
 
@@ -119,8 +119,7 @@ func newTranscodeSource(
 
 	// Spawn ffmpeg directly (not via NewTranscoder pipe) so it writes to
 	// disk in real time. We re-use the rest of TranscodeOpts wiring.
-	cmd := &Transcoder{}
-	cmd, err = startTranscoderToFile(ctx, opts.FFmpegPath, args, cmd)
+	cmd, err := startTranscoderToFile(ctx, opts.FFmpegPath, args, nil)
 	if err != nil {
 		os.Remove(tmpPath)
 		return nil, err
@@ -133,9 +132,10 @@ func newTranscodeSource(
 		cmd:       cmd,
 		name:      displayName,
 		estimate:  estimate,
+		ctx:       ctx,
+		notify:    make(chan struct{}, 1),
 		startedAt: time.Now(),
 	}
-	t.cond = sync.NewCond(&t.mu)
 
 	// Re-open the tmp file for reading; ffmpeg keeps writing to it.
 	rf, err := os.Open(tmpPath)
@@ -151,6 +151,17 @@ func newTranscodeSource(
 	return t, nil
 }
 
+// signalNotify wakes any goroutine blocked in ReadAt. Non-blocking: if a
+// notification is already pending the new event is folded into it (callers
+// always re-check size + final after waking, so a coalesced signal still
+// produces correct behaviour).
+func (t *transcodeSource) signalNotify() {
+	select {
+	case t.notify <- struct{}{}:
+	default:
+	}
+}
+
 // watchSize polls the temp file size every 200 ms and wakes any blocked
 // ReadAt callers once new bytes arrive.
 func (t *transcodeSource) watchSize(ctx context.Context) {
@@ -159,16 +170,12 @@ func (t *transcodeSource) watchSize(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			t.mu.Lock()
-			t.cond.Broadcast()
-			t.mu.Unlock()
+			t.signalNotify()
 			return
 		case <-ticker.C:
 		}
 		if t.final.Load() {
-			t.mu.Lock()
-			t.cond.Broadcast()
-			t.mu.Unlock()
+			t.signalNotify()
 			return
 		}
 		stat, err := os.Stat(t.tmpPath)
@@ -178,91 +185,83 @@ func (t *transcodeSource) watchSize(ctx context.Context) {
 		current := stat.Size()
 		if current > t.size.Load() {
 			t.size.Store(current)
-			t.mu.Lock()
-			t.cond.Broadcast()
-			t.mu.Unlock()
+			t.signalNotify()
 		}
 	}
 }
 
-// watchExit waits for ffmpeg to exit and locks in the final size.
+// watchExit waits for ffmpeg to exit (via Transcoder's single-Wait goroutine)
+// and locks in the final size. A kill triggered by Close() is NOT a failure.
 func (t *transcodeSource) watchExit() {
-	err := t.cmd.cmd.Wait()
-	if err != nil && !isExpectedExit(err) {
-		t.mu.Lock()
-		t.failure = fmt.Errorf("ffmpeg exited: %w (%s)", err, t.cmd.Stderr())
-		t.mu.Unlock()
+	<-t.cmd.Done()
+	err := t.cmd.WaitErr()
+	if err != nil && !t.cmd.IsClosing() {
+		failure := fmt.Errorf("ffmpeg exited: %w (%s)", err, t.cmd.Stderr())
+		t.failure.Store(&failure)
 	}
 	if stat, err := os.Stat(t.tmpPath); err == nil {
 		t.size.Store(stat.Size())
 	}
 	t.final.Store(true)
-	t.mu.Lock()
-	t.cond.Broadcast()
-	t.mu.Unlock()
+	t.signalNotify()
 }
 
-func isExpectedExit(err error) bool {
-	// Killed by Close() — pion DC closed, that's fine.
-	if err == nil {
-		return true
+// loadFailure returns the current failure (or nil) without taking a lock.
+func (t *transcodeSource) loadFailure() error {
+	if p := t.failure.Load(); p != nil {
+		return *p
 	}
-	return false
+	return nil
 }
 
 func (t *transcodeSource) ReadAt(p []byte, off int64) (int, error) {
-	if t.failure != nil {
-		return 0, t.failure
+	if err := t.loadFailure(); err != nil {
+		return 0, err
 	}
-	if int64(len(p)) == 0 {
+	if len(p) == 0 {
 		return 0, nil
 	}
-	deadline := time.Now().Add(readBlockTimeout)
+	if off < 0 {
+		return 0, fmt.Errorf("transcode source: negative offset %d", off)
+	}
+	want := int64(len(p))
 
+	deadline := time.Now().Add(readBlockTimeout)
 	for {
+		if t.final.Load() {
+			break
+		}
 		size := t.size.Load()
-		if off+int64(len(p)) <= size || t.final.Load() {
+		// Overflow-safe form of "off + want <= size":
+		if size >= off && size-off >= want {
 			break
 		}
-		// Need to wait for ffmpeg to write more.
-		t.mu.Lock()
-		// Check again under lock to avoid lost wakeup.
-		size = t.size.Load()
-		if off+int64(len(p)) <= size || t.final.Load() {
-			t.mu.Unlock()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
 			break
 		}
-		// Wait with timeout via a small sleep loop — sync.Cond doesn't
-		// support timed wait, and a goroutine-per-sleep pattern works fine
-		// for our scale.
-		waited := time.NewTimer(500 * time.Millisecond)
-		done := make(chan struct{})
-		go func() {
-			t.cond.Wait()
-			close(done)
-		}()
-		t.mu.Unlock()
+		wait := 500 * time.Millisecond
+		if remaining < wait {
+			wait = remaining
+		}
 		select {
-		case <-done:
-		case <-waited.C:
-			t.mu.Lock()
-			t.cond.Broadcast() // wake the goroutine so it can return
-			t.mu.Unlock()
-			<-done
-		}
-		if time.Now().After(deadline) {
-			break
+		case <-t.ctx.Done():
+			return 0, t.ctx.Err()
+		case <-t.notify:
+		case <-time.After(wait):
 		}
 	}
 
-	if t.failure != nil {
-		return 0, t.failure
+	if err := t.loadFailure(); err != nil {
+		return 0, err
 	}
 
 	n, err := t.tmpFile.ReadAt(p, off)
-	// On growing file ReadAt returns io.EOF when reading past current size.
-	// Convert to io.ErrUnexpectedEOF only when we actually exceeded the
-	// final size; otherwise return n, nil so the pump sends what we have.
+	// On a growing file ReadAt returns io.EOF when reading past current size.
+	// Translate that into "send what we have, RangeEnd will follow" by
+	// returning (n, nil) so the pump treats the data as a partial chunk and
+	// caller re-requests once more bytes appear. Only true EOF (final=true)
+	// propagates as io.EOF.
 	if err == io.EOF && !t.final.Load() {
 		if n > 0 {
 			return n, nil
@@ -281,23 +280,26 @@ func (t *transcodeSource) EstimatedSize() int64 {
 	return t.estimate
 }
 func (t *transcodeSource) FileName() string {
-	// Keep the original extension stripped — output is always fragmented MP4.
-	base := t.name
-	if i := lastIndexByte(base, '.'); i >= 0 {
-		base = base[:i]
-	}
-	return base + ".mp4"
+	// Output is always fragmented MP4 regardless of source extension.
+	return strings.TrimSuffix(t.name, filepath.Ext(t.name)) + ".mp4"
 }
 func (t *transcodeSource) Transcoded() bool { return true }
 func (t *transcodeSource) Close() error {
-	_ = t.cmd.Close()
+	var errs []error
+	if err := t.cmd.Close(); err != nil {
+		errs = append(errs, err)
+	}
 	if t.tmpFile != nil {
-		_ = t.tmpFile.Close()
+		if err := t.tmpFile.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if t.tmpPath != "" {
-		_ = os.Remove(t.tmpPath)
+		if err := os.Remove(t.tmpPath); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // estimateOutputSize converts probed bitrate × duration into a byte estimate
@@ -342,13 +344,4 @@ func parseBitrateKbps(s string, fallback int) int {
 		return fallback
 	}
 	return v * mult
-}
-
-func lastIndexByte(s string, c byte) int {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
 }

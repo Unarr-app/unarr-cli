@@ -145,7 +145,7 @@ func buildStreamSource(
 	log StreamLogger,
 ) (streamSource, error) {
 	tc := cfg.Transcode
-	cap := resolveQualityCap(cfg.Quality)
+	qcap := resolveQualityCap(cfg.Quality)
 
 	if tc.Disabled || tc.FFmpegPath == "" || tc.FFprobePath == "" {
 		return newDiskFileSource(abs)
@@ -160,14 +160,10 @@ func buildStreamSource(
 
 	// Quality cap can promote a passthrough/remux decision into a full video
 	// transcode when the source resolution exceeds the requested cap.
-	forcedByQuality := false
-	if cap.MaxHeight > 0 && probe.Height > 0 && probe.Height > cap.MaxHeight {
-		if action != ActionTranscodeVideo {
-			log.Infof("[wrtc %s] quality=%s caps height %d→%d — forcing video transcode",
-				agent.ShortID(cfg.SessionID), cfg.Quality, probe.Height, cap.MaxHeight)
-			action = ActionTranscodeVideo
-			forcedByQuality = true
-		}
+	if qcap.MaxHeight > 0 && probe.Height > 0 && probe.Height > qcap.MaxHeight && action != ActionTranscodeVideo {
+		log.Infof("[wrtc %s] quality=%s caps height %d→%d — forcing video transcode",
+			agent.ShortID(cfg.SessionID), cfg.Quality, probe.Height, qcap.MaxHeight)
+		action = ActionTranscodeVideo
 	}
 
 	if action == ActionPassthrough {
@@ -178,15 +174,14 @@ func buildStreamSource(
 
 	log.Infof("[wrtc %s] transcoding %s/%s/%s → h264+aac (%s, quality=%s)",
 		agent.ShortID(cfg.SessionID), probe.Container, probe.VideoCodec, probe.AudioCodec,
-		action, coalesceLabel(cfg.Quality))
+		action, coalesce(cfg.Quality, "default"))
 
 	maxHeight := tc.MaxHeight
 	videoBitrate := tc.VideoBitrate
-	if cap.MaxHeight > 0 {
-		maxHeight = cap.MaxHeight
-		videoBitrate = cap.VideoBitrate
+	if qcap.MaxHeight > 0 {
+		maxHeight = qcap.MaxHeight
+		videoBitrate = qcap.VideoBitrate
 	}
-	_ = forcedByQuality // reserved for future telemetry
 
 	opts := TranscodeOpts{
 		Action:       action,
@@ -198,13 +193,6 @@ func buildStreamSource(
 		FFmpegPath:   tc.FFmpegPath,
 	}
 	return newTranscodeSource(ctx, abs, probe, action, opts, displayName)
-}
-
-func coalesceLabel(s string) string {
-	if s == "" {
-		return "default"
-	}
-	return s
 }
 
 // RunWebRTCStream blocks until the session ends — either the DataChannel
@@ -520,6 +508,13 @@ func (p *dataChannelPump) onOpen() {
 	// ffmpeg writes more bytes; the estimate just bootstraps the UI.
 	announceSize := p.source.EstimatedSize()
 	transcoding := p.source.Transcoded()
+	// Browsers refuse to start playback when Content-Length is 0. If we don't
+	// have a duration estimate (e.g. ffprobe couldn't tag the source), declare
+	// a large sentinel so the browser issues range requests; the Transcoding
+	// flag tells it the value is provisional.
+	if transcoding && announceSize <= 0 {
+		announceSize = math.MaxInt64
+	}
 	// Seekable=true even for transcoded sources because we read from a tmp
 	// file (random access). Seek backwards just works; seek forward beyond
 	// what ffmpeg has produced will block briefly inside ReadAt.
@@ -633,22 +628,35 @@ func (p *dataChannelPump) serveRange(streamID uint32, req wire.RangeReqPayload) 
 	if req.Length > math.MaxInt64 {
 		want = 0 // treat absurd length as "remainder of file"
 	}
-	// "Remainder" target: prefer current known size, fall back to estimate
-	// for transcoded streams so the browser can keep scrolling forward as
-	// ffmpeg produces output.
-	knownEnd := currentSize
-	if p.source.Final() {
-		knownEnd = finalSize
+	// Cap by *final* size, not currentSize. For a still-transcoding stream
+	// currentSize grows over time and ReadAt below already blocks until
+	// ffmpeg produces the requested bytes (with a deadline). If we cap
+	// `want` by currentSize here we'll send an empty RangeEnd whenever the
+	// browser asks for bytes faster than ffmpeg writes them — which is
+	// always true on the first few seconds — and the browser then aborts
+	// playback with "Format error".
+	cap := finalSize
+	if !p.source.Final() && cap < int64(req.Offset)+1 {
+		// Estimate too small: serve as much as the browser asked for and
+		// let ReadAt block.
+		cap = int64(req.Offset) + want
 	}
-	if knownEnd < int64(req.Offset) {
-		knownEnd = int64(req.Offset)
+	if int64(req.Offset) >= cap && p.source.Final() {
+		// Past true end of a finished file.
+		p.sendRangeEnd(streamID, 0)
+		return
 	}
-	remaining := knownEnd - int64(req.Offset)
+	remaining := cap - int64(req.Offset)
+	if remaining < 0 {
+		remaining = 0
+	}
 	if want <= 0 || want > remaining {
 		want = remaining
 	}
+	p.log.Infof("dc: range_req sid=%d offset=%d wantReq=%d wantServe=%d currentSize=%d final=%v",
+		streamID, req.Offset, req.Length, want, currentSize, p.source.Final())
 	if want <= 0 {
-		// Nothing to serve right now (transcoder hasn't reached this offset).
+		// Only happens for a finished file when offset is at/past EOF.
 		p.sendRangeEnd(streamID, 0)
 		return
 	}
