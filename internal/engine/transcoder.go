@@ -97,9 +97,17 @@ func (t *Transcoder) Close() error {
 	t.closed = true
 	t.mu.Unlock()
 
-	_ = t.out.Close()
-	if t.cmd.Process != nil {
+	// out is nil for the file-output flow (startTranscoderToFile) — that
+	// pipeline writes directly to a temp file via -i ... output_path so we
+	// never wired a stdout pipe. Only close when present.
+	if t.out != nil {
+		_ = t.out.Close()
+	}
+	if t.cmd != nil && t.cmd.Process != nil {
 		_ = t.cmd.Process.Kill()
+	}
+	if t.cmd == nil {
+		return nil
 	}
 	done := make(chan error, 1)
 	go func() { done <- t.cmd.Wait() }()
@@ -137,7 +145,12 @@ func (w *errWriter) Write(p []byte) (int, error) {
 // Exposed package-level so tests can lock the flag matrix independently of
 // process spawning.
 func buildFFmpegArgs(filePath string, opts TranscodeOpts) []string {
-	args := []string{"-hide_banner", "-loglevel", "warning"}
+	// -y: overwrite output without asking (the file-output flow uses an
+	// already-created tmp file from os.CreateTemp, so the default "do you
+	// want to overwrite?" prompt would deadlock on stdin and ffmpeg dies
+	// before producing a single byte). Pipe flow doesn't need it but it's
+	// harmless there.
+	args := []string{"-y", "-hide_banner", "-loglevel", "warning"}
 
 	// Seek BEFORE input (-ss before -i) for fast keyframe-aligned start.
 	if opts.StartSeconds > 0 {
@@ -174,10 +187,18 @@ func buildFFmpegArgs(filePath string, opts TranscodeOpts) []string {
 		}
 		args = append(args, "-b:v", coalesce(opts.VideoBitrate, "5M"))
 		if opts.MaxHeight > 0 {
+			// `-2:H` scales to height H, derives width preserving aspect ratio,
+			// and rounds to a multiple of 2 (libx264 refuses odd dimensions).
+			// `force_original_aspect_ratio=decrease` keeps shorter sources
+			// untouched instead of upscaling. `pix_fmt yuv420p` keeps 10-bit
+			// HEVC sources playable in browsers (8-bit only).
 			args = append(args,
 				"-vf",
-				fmt.Sprintf("scale='min(iw,iw*%d/ih)':'min(ih,%d)'", opts.MaxHeight, opts.MaxHeight),
+				fmt.Sprintf("scale=-2:%d:force_original_aspect_ratio=decrease", opts.MaxHeight),
+				"-pix_fmt", "yuv420p",
 			)
+		} else {
+			args = append(args, "-pix_fmt", "yuv420p")
 		}
 		args = append(args, "-c:a", "aac", "-b:a", coalesce(opts.AudioBitrate, "192k"))
 	}
