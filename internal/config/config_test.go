@@ -190,6 +190,76 @@ func TestParseSpeed(t *testing.T) {
 	}
 }
 
+func TestLoadMinimalTOMLAppliesStreamingDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+
+	// Minimal config — only auth + agent. Nothing about webrtc / transcode.
+	os.WriteFile(path, []byte(`[auth]
+api_key = "tc_minimal"
+
+[agent]
+id = "agent-uuid"
+name = "Test"
+`), 0o644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	// WebRTC should be on by default for fresh installs.
+	if !cfg.Download.WebRTC.Enabled {
+		t.Error("WebRTC.Enabled should default to true when [downloads.webrtc] is absent")
+	}
+	if len(cfg.Download.WebRTC.Trackers) == 0 {
+		t.Error("WebRTC.Trackers should default to torrentclaw tracker when absent")
+	}
+	if len(cfg.Download.WebRTC.STUNServers) == 0 {
+		t.Error("WebRTC.STUNServers should default to public STUN list when absent")
+	}
+
+	// Transcode should be on by default.
+	if !cfg.Download.Transcode.Enabled {
+		t.Error("Transcode.Enabled should default to true when [downloads.transcode] is absent")
+	}
+	if cfg.Download.Transcode.HWAccel != "auto" {
+		t.Errorf("Transcode.HWAccel = %q, want auto", cfg.Download.Transcode.HWAccel)
+	}
+	if cfg.Download.Transcode.Preset != "veryfast" {
+		t.Errorf("Transcode.Preset = %q, want veryfast", cfg.Download.Transcode.Preset)
+	}
+	if cfg.Download.Transcode.MaxConcurrent != 2 {
+		t.Errorf("Transcode.MaxConcurrent = %d, want 2", cfg.Download.Transcode.MaxConcurrent)
+	}
+}
+
+func TestLoadRespectsExplicitlyDisabledStreaming(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+
+	// User explicitly opted out of webrtc + transcode. Defaults must NOT
+	// override them — that would silently re-enable features the user disabled.
+	os.WriteFile(path, []byte(`[downloads.webrtc]
+enabled = false
+
+[downloads.transcode]
+enabled = false
+`), 0o644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if cfg.Download.WebRTC.Enabled {
+		t.Error("WebRTC.Enabled = true, want false (user explicitly disabled)")
+	}
+	if cfg.Download.Transcode.Enabled {
+		t.Error("Transcode.Enabled = true, want false (user explicitly disabled)")
+	}
+}
+
 func TestLoadInvalidTOML(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "config.toml")

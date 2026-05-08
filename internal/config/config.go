@@ -106,7 +106,9 @@ type LibraryConfig struct {
 	AllowDelete  bool   `toml:"allow_delete"`  // allow web UI to request file deletion from disk
 }
 
-// Default returns a Config with sensible defaults.
+// Default returns a Config with sensible defaults. Used both for fresh
+// installs (no config file yet) and as the baseline for Load — fields not
+// present in the user's TOML keep their Default() value.
 func Default() Config {
 	return Config{
 		Auth: AuthConfig{
@@ -117,7 +119,7 @@ func Default() Config {
 			MaxConcurrent:   3,
 			StreamPort:      11818,
 			WebRTC: WebRTCConfig{
-				Enabled:     false,
+				Enabled:     true,
 				Trackers:    []string{"wss://tracker.torrentclaw.com"},
 				STUNServers: []string{"stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"},
 			},
@@ -125,7 +127,6 @@ func Default() Config {
 				Enabled:       true,
 				HWAccel:       "auto",
 				Preset:        "veryfast",
-				VideoBitrate:  "5M",
 				AudioBitrate:  "192k",
 				MaxConcurrent: 2,
 			},
@@ -167,67 +168,66 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("read config: %w", err)
 	}
 
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	meta, err := toml.Decode(string(data), &cfg)
+	if err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
 
-	// Re-apply defaults for zero values that should have defaults
-	if cfg.Auth.APIURL == "" {
+	applyDefaults(&cfg, meta)
+	return cfg, nil
+}
+
+// applyDefaults fills in sensible defaults for keys that the user did not
+// define in the TOML file. We use MetaData (rather than zero-value checks) so
+// that explicitly setting a field to its zero value (e.g. `enabled = false`)
+// is respected — only truly missing keys get defaulted. This lets a fresh
+// install work out of the box for streaming without forcing every user to
+// edit the TOML, while still letting power users disable features.
+func applyDefaults(cfg *Config, meta toml.MetaData) {
+	if !meta.IsDefined("auth", "api_url") {
 		cfg.Auth.APIURL = "https://torrentclaw.com"
 	}
-	if cfg.Download.PreferredMethod == "" {
+	if !meta.IsDefined("downloads", "preferred_method") {
 		cfg.Download.PreferredMethod = "auto"
 	}
-	if cfg.Download.MaxConcurrent == 0 {
+	if !meta.IsDefined("downloads", "max_concurrent") {
 		cfg.Download.MaxConcurrent = 3
 	}
-	if cfg.General.Country == "" {
-		cfg.General.Country = "US"
-	}
-	if cfg.Download.StreamPort == 0 {
+	if !meta.IsDefined("downloads", "stream_port") {
 		cfg.Download.StreamPort = 11818
 	}
-	// Re-apply WebRTC defaults only when the user enabled WebRTC but didn't
-	// supply trackers/STUN — leave both empty if disabled to keep config diffs clean.
-	if cfg.Download.WebRTC.Enabled {
-		if len(cfg.Download.WebRTC.Trackers) == 0 {
-			cfg.Download.WebRTC.Trackers = []string{"wss://tracker.torrentclaw.com"}
-		}
-		if len(cfg.Download.WebRTC.STUNServers) == 0 {
-			cfg.Download.WebRTC.STUNServers = []string{
-				"stun:stun.l.google.com:19302",
-				"stun:stun1.l.google.com:19302",
-			}
-		}
-		// Auto-enable transcode for the in-browser player when WebRTC is on
-		// AND the user hasn't explicitly opted out. The struct's Enabled
-		// field is `false` for legacy configs because the field didn't
-		// exist when they were written; we treat "no transcode section at
-		// all" as "use defaults" rather than "off".
-		tc := &cfg.Download.Transcode
-		if !tc.Enabled && tc.HWAccel == "" && tc.Preset == "" && tc.VideoBitrate == "" {
-			tc.Enabled = true
-		}
-		if tc.Enabled {
-			if tc.HWAccel == "" {
-				tc.HWAccel = "auto"
-			}
-			if tc.Preset == "" {
-				tc.Preset = "veryfast"
-			}
-			if tc.VideoBitrate == "" {
-				tc.VideoBitrate = "5M"
-			}
-			if tc.AudioBitrate == "" {
-				tc.AudioBitrate = "192k"
-			}
-			if tc.MaxConcurrent == 0 {
-				tc.MaxConcurrent = 2
-			}
+	if !meta.IsDefined("general", "country") {
+		cfg.General.Country = "US"
+	}
+
+	if !meta.IsDefined("downloads", "webrtc", "enabled") {
+		cfg.Download.WebRTC.Enabled = true
+	}
+	if !meta.IsDefined("downloads", "webrtc", "trackers") {
+		cfg.Download.WebRTC.Trackers = []string{"wss://tracker.torrentclaw.com"}
+	}
+	if !meta.IsDefined("downloads", "webrtc", "stun_servers") {
+		cfg.Download.WebRTC.STUNServers = []string{
+			"stun:stun.l.google.com:19302",
+			"stun:stun1.l.google.com:19302",
 		}
 	}
 
-	return cfg, nil
+	if !meta.IsDefined("downloads", "transcode", "enabled") {
+		cfg.Download.Transcode.Enabled = true
+	}
+	if !meta.IsDefined("downloads", "transcode", "hw_accel") {
+		cfg.Download.Transcode.HWAccel = "auto"
+	}
+	if !meta.IsDefined("downloads", "transcode", "preset") {
+		cfg.Download.Transcode.Preset = "veryfast"
+	}
+	if !meta.IsDefined("downloads", "transcode", "audio_bitrate") {
+		cfg.Download.Transcode.AudioBitrate = "192k"
+	}
+	if !meta.IsDefined("downloads", "transcode", "max_concurrent") {
+		cfg.Download.Transcode.MaxConcurrent = 2
+	}
 }
 
 // Save writes config to the default or specified path using atomic write.

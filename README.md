@@ -382,6 +382,62 @@ enabled = true
 country = "US"
 ```
 
+### Streaming reference
+
+The in-browser player on torrentclaw.com streams from the daemon over WebRTC
+(low-latency P2P) or HLS (HTTP fragments + ffmpeg transcode for codecs the
+browser can't decode natively). Both are enabled by default — a fresh install
+"just works" without editing the TOML. Disable surgically only if you have a
+reason.
+
+```toml
+[downloads.webrtc]
+enabled       = true                                    # master switch
+trackers      = ["wss://tracker.torrentclaw.com"]      # signaling trackers
+stun_servers  = [                                       # NAT traversal
+  "stun:stun.l.google.com:19302",
+  "stun:stun1.l.google.com:19302",
+]
+turn_servers  = []                                      # optional TURN relays
+turn_user     = ""
+turn_pass     = ""
+
+[downloads.transcode]
+enabled        = true        # master switch
+hw_accel       = "auto"      # auto | none | nvenc | qsv | vaapi | videotoolbox
+preset         = "veryfast"  # libx264 preset
+video_bitrate  = ""          # e.g. "5M" caps -b:v; empty = engine fallback (5M)
+audio_bitrate  = "192k"      # e.g. "128k", "192k", "256k"
+max_height     = 0           # 0 = no cap; e.g. 720 forces 720p max
+max_concurrent = 2           # max simultaneous ffmpeg processes
+```
+
+#### `[downloads.webrtc]`
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `true` | Browser↔daemon WebRTC peer for the in-browser P2P player. Disable to skip WebRTC tracker signalling (saves ~5MB RAM, blocks WebRTC streaming — HLS still works). |
+| `trackers` | `[]string` | `["wss://tracker.torrentclaw.com"]` | Signaling trackers for peer discovery. |
+| `stun_servers` | `[]string` | Google public STUN ×2 | ICE candidate gathering. |
+| `turn_servers` | `[]string` | `[]` | Optional TURN relays for symmetric-NAT users. |
+| `turn_user` / `turn_pass` | string | `""` | Credentials for authed TURN servers. Applied to all `turn_servers`. |
+
+#### `[downloads.transcode]`
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `true` | Real-time HLS transcoding when source codec is browser-incompatible (HEVC, AV1, AC3, DTS). Requires `ffmpeg` + `ffprobe` on PATH. |
+| `hw_accel` | string | `"auto"` | Hardware accel: `"auto"`, `"none"`, `"nvenc"` (NVIDIA), `"qsv"` (Intel), `"vaapi"` (Linux), `"videotoolbox"` (macOS). |
+| `preset` | string | `"veryfast"` | libx264 preset. Slower preset = smaller files but higher CPU. Options: `ultrafast`, `superfast`, `veryfast`, `faster`, `fast`, `medium`, `slow`, `slower`, `veryslow`. |
+| `video_bitrate` | string | `""` | E.g. `"5M"` caps `-b:v`. Empty falls back to the engine default (`5M`). |
+| `audio_bitrate` | string | `"192k"` | E.g. `"128k"`, `"256k"`. |
+| `max_height` | int | `0` | `0` = no cap. E.g. `720` forces 720p max — useful on weak GPUs. |
+| `max_concurrent` | int | `2` | Max simultaneous ffmpeg processes. Increase if hosting multiple users on a beefy box. |
+
+If `transcode.enabled = true` but `ffmpeg` / `ffprobe` aren't on PATH, the
+daemon logs a warning at startup and HLS sessions are rejected at runtime
+with a clear error — install ffmpeg or set `enabled = false`.
+
 ### Environment variables
 
 Environment variables override config file values:
