@@ -1,4 +1,4 @@
 package cmd
 
 // Version is the CLI version. Overridden by goreleaser ldflags at release time.
-var Version = "0.7.0"
+var Version = "0.8.0"

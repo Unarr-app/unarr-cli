@@ -5,12 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-05-08
+
+
+### Added
+
+- **mediainfo**: ResolveFFmpeg + DownloadFFmpeg mirroring ffprobe pattern
+- **release**: bundle ffmpeg + ffprobe in tarballs and Docker image
+- **seed-file**: unarr-side handler for browser-on-demand seeding (Fase 4.7.c)
+- **stream**: per-session quality cap from web
+- **stream**: real-time transcoding for non-browser-decodable codecs
+- **stream**: pion-based WebRTC byte streamer for browser playback
+- **streaming**: seek-restart, single-session, idle sweeper, probe.json
+- **streaming**: add HLS transport pipeline (daemon side)
+- **streaming**: ffmpeg transcoding pipeline (direct play / fMP4 / HW accel)
+- **torrent**: act as WebTorrent peer for browser ↔ unarr P2P streaming
+- **wstracker-probe**: -seed FILE mode for browser ↔ unarr e2e validation
+
+### Fixed
+
+- **streaming**: bounded ffmpeg auto-restart + tmpdir gc + probe/stderr safety
+- **transcoder**: force aac stereo 48khz + frag_duration for mse compat
+- **transcoder**: force main profile + setparams Rec.709 + serveRange wait
+- **transcoder**: correct scale filter + always force yuv420p
+
+### Other
+
+- **streaming**: post-review fixes — race lock, dead branch, stderr cap
+- **torrent**: bump anacrolix log level Critical → Warning for visibility
 ## [0.7.0] - 2026-04-10
 
 
 ### Added
 
 - **daemon**: enhance service management with start, stop, restart, and status commands for Windows
+
+### Other
+
+- **release**: 0.7.0
 ## [0.6.8] - 2026-04-10
 
 
@@ -259,6 +291,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - remove UPX compression (antivirus false positives, startup penalty)
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[0.8.0]: https://github.com/torrentclaw/unarr/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/torrentclaw/unarr/compare/v0.6.8...v0.7.0
 [0.6.8]: https://github.com/torrentclaw/unarr/compare/v0.6.7...v0.6.8
 [0.6.7]: https://github.com/torrentclaw/unarr/compare/v0.6.6...v0.6.7
