@@ -169,7 +169,11 @@ func (s *SignalEventStream) read() {
 			if eventName == "" || eventName == "signal" {
 				var msg SignalMessage
 				if err := json.Unmarshal(dataBuf.Bytes(), &msg); err == nil {
-					s.events <- msg
+					select {
+					case s.events <- msg:
+					case <-s.resp.Request.Context().Done():
+						return
+					}
 				}
 			}
 			dataBuf.Reset()

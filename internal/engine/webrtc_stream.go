@@ -663,6 +663,12 @@ func (p *dataChannelPump) serveRange(streamID uint32, req wire.RangeReqPayload) 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.activeMu.Lock()
+	if p.active == nil {
+		p.activeMu.Unlock()
+		cancel()
+		p.sendRangeEnd(streamID, 3)
+		return
+	}
 	p.active[streamID] = cancel
 	p.activeMu.Unlock()
 	defer func() {

@@ -455,11 +455,16 @@ func runDaemonStart() error {
 		// HLS registry and serve over HTTP; default ("" or "webrtc") runs
 		// the legacy DataChannel pipeline.
 		if strings.EqualFold(sess.Transport, "hls") {
+			if webrtcRegistry.has(sess.SessionID) {
+				return
+			}
 			tcRuntime := buildTranscodeRuntime(ctx, cfg)
 			if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
 				log.Printf("[hls %s] rejected: ffmpeg/ffprobe unavailable", agent.ShortID(sess.SessionID))
 				return
 			}
+			hlsCtx, hlsCancel := context.WithCancel(ctx)
+			webrtcRegistry.add(sess.SessionID, hlsCancel)
 			hlsCfg := engine.HLSSessionConfig{
 				SessionID:  sess.SessionID,
 				SourcePath: filePath,
@@ -468,8 +473,10 @@ func runDaemonStart() error {
 				AudioIndex: sess.AudioIndex,
 				Transcode:  tcRuntime,
 			}
-			hsess, err := engine.StartHLSSession(ctx, hlsCfg)
+			hsess, err := engine.StartHLSSession(hlsCtx, hlsCfg)
 			if err != nil {
+				webrtcRegistry.remove(sess.SessionID)
+				hlsCancel()
 				log.Printf("[hls %s] start failed: %v", agent.ShortID(sess.SessionID), err)
 				return
 			}
