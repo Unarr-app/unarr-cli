@@ -424,10 +424,6 @@ func runDaemonStart() error {
 		if webrtcRegistry.has(sess.SessionID) {
 			return // already running
 		}
-		if !cfg.Download.WebRTC.Enabled {
-			log.Printf("webrtc session %s rejected: webrtc disabled in config", agent.ShortID(sess.SessionID))
-			return
-		}
 		filePath := sess.FilePath
 		if filePath == "" {
 			log.Printf("webrtc session %s rejected: empty file path", agent.ShortID(sess.SessionID))
@@ -451,13 +447,10 @@ func runDaemonStart() error {
 			filePath = found
 		}
 
-		// Branch on transport: HLS sessions register with the StreamServer
-		// HLS registry and serve over HTTP; default ("" or "webrtc") runs
-		// the legacy DataChannel pipeline.
+		// Branch on transport: HLS sessions only need ffmpeg + StreamServer,
+		// not a WebRTC peer, so they must bypass the WebRTC.Enabled gate.
+		// Default ("" or "webrtc") runs the DataChannel pipeline and requires it.
 		if strings.EqualFold(sess.Transport, "hls") {
-			if webrtcRegistry.has(sess.SessionID) {
-				return
-			}
 			tcRuntime := buildTranscodeRuntime(ctx, cfg)
 			if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
 				log.Printf("[hls %s] rejected: ffmpeg/ffprobe unavailable", agent.ShortID(sess.SessionID))
@@ -481,6 +474,12 @@ func runDaemonStart() error {
 				return
 			}
 			streamSrv.HLS().Register(hsess)
+			return
+		}
+
+		// Non-HLS transport requires WebRTC peer support.
+		if !cfg.Download.WebRTC.Enabled {
+			log.Printf("webrtc session %s rejected: webrtc disabled in config", agent.ShortID(sess.SessionID))
 			return
 		}
 
