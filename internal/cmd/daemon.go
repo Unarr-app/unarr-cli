@@ -226,6 +226,12 @@ func runDaemonStart() error {
 
 	// Create persistent stream server
 	streamSrv := engine.NewStreamServer(cfg.Download.StreamPort)
+	// Reap HLS tmpdirs left over from a previous daemon run before we start
+	// accepting new sessions. The in-memory registry doesn't survive a
+	// restart, so without this disk usage grows unbounded across restarts.
+	if err := engine.CleanupHLSOrphanDirs(); err != nil {
+		log.Printf("[hls] orphan tmpdir cleanup: %v", err)
+	}
 	if err := streamSrv.Listen(ctx); err != nil {
 		return fmt.Errorf("start stream server: %w", err)
 	}
