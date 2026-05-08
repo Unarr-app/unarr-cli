@@ -845,9 +845,21 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	case "h264_qsv":
 		args = append(args, "-preset", "medium", "-look_ahead", "0")
 	}
-	args = append(args, "-profile:v", "main", "-level:v", "4.0")
-
+	// Derive H.264 level from the actual output height. A fixed "4.0" caps the
+	// encoder at 1080p — anything taller (1440p, 4K source on quality=original)
+	// fails libx264 with "frame MB size > level limit" and emits unplayable
+	// segments. The output height matches qcap.MaxHeight when the source is
+	// downscaled, otherwise probe.Height (already populated by ffprobe).
 	qcap := resolveQualityCap(cfg.Quality)
+	outputHeight := qcap.MaxHeight
+	if outputHeight == 0 {
+		outputHeight = cfg.Transcode.MaxHeight
+	}
+	if outputHeight == 0 || (probe.Height > 0 && probe.Height < outputHeight) {
+		outputHeight = probe.Height
+	}
+	args = append(args, "-profile:v", "main", "-level:v", H264LevelForHeight(outputHeight))
+
 	bitrate := qcap.VideoBitrate
 	if bitrate == "" {
 		bitrate = cfg.Transcode.VideoBitrate

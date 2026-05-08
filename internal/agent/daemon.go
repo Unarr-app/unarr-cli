@@ -14,15 +14,17 @@ import (
 
 // DaemonConfig holds daemon runtime settings.
 type DaemonConfig struct {
-	AgentID     string
-	AgentName   string
-	Version     string
-	DownloadDir string
-	StreamPort  int      // port for the HTTP stream server
-	LanIP       string   // LAN IP (reported in sync for stream URL resolution)
-	TailscaleIP string   // Tailscale IP (reported in sync for stream URL resolution)
-	CanDelete   bool     // library.allow_delete is enabled
-	ScanPaths   []string // configured scan paths for file deletion validation
+	AgentID            string
+	AgentName          string
+	Version            string
+	DownloadDir        string
+	StreamPort         int      // port for the HTTP stream server
+	LanIP              string   // LAN IP (reported in sync for stream URL resolution)
+	TailscaleIP        string   // Tailscale IP (reported in sync for stream URL resolution)
+	CanDelete          bool     // library.allow_delete is enabled
+	ScanPaths          []string // configured scan paths for file deletion validation
+	HWAccel            string   // detected encoder backend ("nvenc"/"qsv"/"vaapi"/"videotoolbox"/"none")
+	MaxTranscodeHeight int      // resolution cap the agent can transcode comfortably (px)
 }
 
 // Daemon manages agent registration and the sync loop.
@@ -78,15 +80,17 @@ func (d *Daemon) UpdateStreamPort(port int) {
 // Retries with exponential backoff on transient errors (429, 5xx, network).
 func (d *Daemon) Register(ctx context.Context) error {
 	req := RegisterRequest{
-		AgentID:     d.cfg.AgentID,
-		Name:        d.cfg.AgentName,
-		OS:          runtime.GOOS,
-		Arch:        runtime.GOARCH,
-		Version:     d.cfg.Version,
-		DownloadDir: d.cfg.DownloadDir,
-		StreamPort:  d.cfg.StreamPort,
-		LanIP:       d.cfg.LanIP,
-		TailscaleIP: d.cfg.TailscaleIP,
+		AgentID:            d.cfg.AgentID,
+		Name:               d.cfg.AgentName,
+		OS:                 runtime.GOOS,
+		Arch:               runtime.GOARCH,
+		Version:            d.cfg.Version,
+		DownloadDir:        d.cfg.DownloadDir,
+		StreamPort:         d.cfg.StreamPort,
+		LanIP:              d.cfg.LanIP,
+		TailscaleIP:        d.cfg.TailscaleIP,
+		HWAccel:            d.cfg.HWAccel,
+		MaxTranscodeHeight: d.cfg.MaxTranscodeHeight,
 	}
 	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {
 		req.DiskFreeBytes = free

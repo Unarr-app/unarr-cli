@@ -128,3 +128,31 @@ func (h HWAccel) FFmpegVideoCodec(target string) string {
 		return "libx264"
 	}
 }
+
+// H264LevelForHeight returns the lowest H.264 profile level capable of encoding
+// a stream at the given output pixel height (assumes ~16:9, ≤30 fps). The
+// previous code used a fixed "4.0" which silently rejects anything above 1080p
+// — libx264 logs "frame MB size > level limit" and emits a corrupt stream.
+// Returning a tighter level on smaller outputs keeps player compatibility on
+// older devices where the encoder can't auto-pick.
+func H264LevelForHeight(height int) string {
+	switch {
+	case height <= 0:
+		// Unknown source — pick a level that covers up to 4K so we never
+		// re-introduce the silent-failure mode that motivated this helper.
+		return "5.1"
+	case height <= 480:
+		return "3.0"
+	case height <= 720:
+		return "3.1"
+	case height <= 1080:
+		return "4.0"
+	case height <= 1440:
+		return "5.0"
+	case height <= 2160:
+		return "5.1"
+	default:
+		// 4K @ 60 fps and 8K all fall under 6.x.
+		return "6.0"
+	}
+}

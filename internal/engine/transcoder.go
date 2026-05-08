@@ -25,6 +25,7 @@ type TranscodeOpts struct {
 	VideoBitrate string // e.g. "5M"
 	AudioBitrate string // e.g. "192k"
 	MaxHeight    int    // optional downscale cap (e.g. 720)
+	SourceHeight int    // probed source height — used to derive a sane H.264 level
 	StartSeconds float64
 	FFmpegPath   string
 }
@@ -235,7 +236,16 @@ func buildFFmpegArgs(filePath string, opts TranscodeOpts) []string {
 		// can fail with "VaapiWrapper: failed initializing" on Linux boxes
 		// where VA-API isn't fully wired up. `main` keeps a clean software
 		// decode fallback on every desktop + mobile platform.
-		args = append(args, "-profile:v", "main", "-level:v", "4.0")
+		//
+		// Level is derived from the actual output height — a fixed "4.0"
+		// silently rejects 4K and 1440p sources at the libx264 macroblock
+		// limits and produces unplayable streams. opts.MaxHeight is the
+		// downscale cap when set; falling through means "encode at source".
+		levelHeight := opts.MaxHeight
+		if levelHeight == 0 || (opts.SourceHeight > 0 && opts.SourceHeight < levelHeight) {
+			levelHeight = opts.SourceHeight
+		}
+		args = append(args, "-profile:v", "main", "-level:v", H264LevelForHeight(levelHeight))
 		args = append(args, "-b:v", coalesce(opts.VideoBitrate, "5M"))
 		// Filter chain:
 		//   1. scale (optional) — cap height + force even width.

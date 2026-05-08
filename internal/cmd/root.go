@@ -104,6 +104,8 @@ Source:         https://github.com/torrentclaw/unarr`,
 	statsCmd.GroupID = "system"
 	doctorCmd := newDoctorCmd()
 	doctorCmd.GroupID = "system"
+	probeHWAccelCmd := newProbeHWAccelCmd()
+	probeHWAccelCmd.GroupID = "system"
 	cleanCmd := newCleanCmd()
 	cleanCmd.GroupID = "system"
 	selfUpdateCmd := newSelfUpdateCmd()
@@ -140,6 +142,7 @@ Source:         https://github.com/torrentclaw/unarr`,
 		// System & Diagnostics
 		statsCmd,
 		doctorCmd,
+		probeHWAccelCmd,
 		cleanCmd,
 		selfUpdateCmd,
 		versionCmd,

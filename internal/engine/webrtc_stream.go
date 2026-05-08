@@ -190,6 +190,7 @@ func buildStreamSource(
 		VideoBitrate: videoBitrate,
 		AudioBitrate: tc.AudioBitrate,
 		MaxHeight:    maxHeight,
+		SourceHeight: probe.Height,
 		FFmpegPath:   tc.FFmpegPath,
 	}
 	return newTranscodeSource(ctx, abs, probe, action, opts, displayName)

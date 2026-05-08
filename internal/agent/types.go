@@ -18,6 +18,14 @@ type RegisterRequest struct {
 	StreamPort     int    `json:"streamPort,omitempty"`
 	LanIP          string `json:"lanIp,omitempty"`
 	TailscaleIP    string `json:"tailscaleIp,omitempty"`
+	// Transcode capabilities — let the web side suggest a smarter quality
+	// before the player even starts. HWAccel is the picked backend
+	// ("nvenc"/"qsv"/"vaapi"/"videotoolbox"/"none"). MaxTranscodeHeight is
+	// the largest output resolution the agent can encode comfortably; for
+	// software-only ffmpeg this is 1080p, with a real GPU encoder it goes
+	// up to 2160p.
+	HWAccel            string `json:"hwAccel,omitempty"`
+	MaxTranscodeHeight int    `json:"maxTranscodeHeight,omitempty"`
 }
 
 // RegisterResponse is returned by the server after registration.

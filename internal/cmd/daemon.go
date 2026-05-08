@@ -17,6 +17,7 @@ import (
 	"github.com/torrentclaw/unarr/internal/config"
 	"github.com/torrentclaw/unarr/internal/engine"
 	"github.com/torrentclaw/unarr/internal/library"
+	"github.com/torrentclaw/unarr/internal/library/mediainfo"
 	"github.com/torrentclaw/unarr/internal/usenet/download"
 )
 
@@ -135,17 +136,29 @@ func runDaemonStart() error {
 
 	userAgent := "unarr/" + Version
 
+	// Probe HW accel + derive a sensible transcode resolution cap. The cap
+	// is what the web side uses to decide whether the user should pre-empt
+	// transcoding by downloading a smaller version (4K source on a software
+	// libx264-only host is the canonical case where pre-download wins).
+	hwAccelPick := engine.DetectHWAccel(context.Background(), cfg.Library.FFmpegPath)
+	maxTranscodeHeight := 1080
+	if hwAccelPick != engine.HWAccelNone {
+		maxTranscodeHeight = 2160
+	}
+
 	// Create daemon config
 	daemonCfg := agent.DaemonConfig{
-		AgentID:     cfg.Agent.ID,
-		AgentName:   cfg.Agent.Name,
-		Version:     Version,
-		DownloadDir: cfg.Download.Dir,
-		StreamPort:  cfg.Download.StreamPort,
-		LanIP:       engine.LanIP(),
-		TailscaleIP: engine.TailscaleIP(),
-		CanDelete:   cfg.Library.AllowDelete,
-		ScanPaths:   library.ResolveScanPaths(cfg.Download.Dir, cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir, cfg.Library.ScanPath),
+		AgentID:            cfg.Agent.ID,
+		AgentName:          cfg.Agent.Name,
+		Version:            Version,
+		DownloadDir:        cfg.Download.Dir,
+		StreamPort:         cfg.Download.StreamPort,
+		LanIP:              engine.LanIP(),
+		TailscaleIP:        engine.TailscaleIP(),
+		CanDelete:          cfg.Library.AllowDelete,
+		ScanPaths:          library.ResolveScanPaths(cfg.Download.Dir, cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir, cfg.Library.ScanPath),
+		HWAccel:            string(hwAccelPick),
+		MaxTranscodeHeight: maxTranscodeHeight,
 	}
 
 	// Create HTTP client — single communication channel
@@ -236,6 +249,18 @@ func runDaemonStart() error {
 		return fmt.Errorf("start stream server: %w", err)
 	}
 	d.UpdateStreamPort(streamSrv.Port())
+
+	// Warn at startup if transcode is enabled but ffmpeg/ffprobe are missing.
+	// HLS sessions get rejected at runtime (see daemon.go ~line 455), but
+	// surfacing it here gives the operator a chance to install ffmpeg before
+	// a user hits a confusing "rejected" line in the logs.
+	if cfg.Download.Transcode.Enabled {
+		if _, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err != nil {
+			log.Printf("[hls] transcode enabled but ffmpeg/ffprobe not found — install ffmpeg to use HLS")
+		} else if _, err := mediainfo.ResolveFFprobe(cfg.Library.FFprobePath); err != nil {
+			log.Printf("[hls] transcode enabled but ffmpeg/ffprobe not found — install ffmpeg to use HLS")
+		}
+	}
 
 	// Wire sync client callbacks
 	sc := d.SyncClient()
