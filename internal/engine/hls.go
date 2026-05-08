@@ -447,7 +447,10 @@ func (s *HLSSession) waitFFmpeg() {
 		s.mu.Unlock()
 		return
 	}
-	if !s.lastRestartAt.IsZero() && time.Since(s.lastRestartAt) > restartWindow {
+	// Reset the counter when the previous restart was outside the window;
+	// the IsZero check is unnecessary because zero time is well in the past
+	// and would also satisfy the "outside window" branch.
+	if time.Since(s.lastRestartAt) > restartWindow {
 		s.restartCount = 0
 	}
 	if s.restartCount >= maxRestarts {
@@ -674,7 +677,13 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 		s.mu.Unlock()
 		return errors.New("hls: session closed")
 	}
-	if targetIdx == s.ffmpegSegStart && !s.exited {
+	// `s.exited` lives under s.readyMu (see field comment near declaration);
+	// take that lock briefly so the read-modify-write composite check below
+	// is consistent with `pollSegments` / `waitFFmpeg` writers.
+	s.readyMu.Lock()
+	exited := s.exited
+	s.readyMu.Unlock()
+	if targetIdx == s.ffmpegSegStart && !exited {
 		// Already writing from this point — nothing to do.
 		s.mu.Unlock()
 		return nil
@@ -974,20 +983,13 @@ func renderMasterPlaylist(probe *StreamProbe, qualityLabel string) string {
 	b.WriteString("#EXTM3U\n")
 	b.WriteString("#EXT-X-VERSION:7\n")
 
-	// Never set DEFAULT=YES on any subtitle rendition. Anime files routinely
-	// ship with a forced "signs only" English track that has cues only every
-	// few minutes (movie titles, location captions, etc.); auto-enabling
-	// that track makes users think the subtitles are broken because nothing
-	// renders during opening dialogue. Forcing the user to pick the track
-	// explicitly avoids the false-negative report and is in line with how
-	// Plex/Jellyfin ship by default. The HLS spec also requires at most
-	// one DEFAULT per GROUP-ID; "none" trivially satisfies it.
-	defaultIdx := -1
-
-	// Subtitle renditions. Names disambiguate when several tracks share the
-	// same language: a numeric suffix gets appended ("ES", "ES 2"...) so the
-	// captions menu in the player isn't a list of duplicate "Nirvana sub"
-	// entries.
+	// Subtitle renditions. We never set DEFAULT=YES or AUTOSELECT=YES on any
+	// rendition: anime files routinely ship a forced "signs only" English
+	// track with cues only every few minutes, and stacking that track plus
+	// the user's locale auto-select produced the "subs broken" report. The
+	// HLS spec also caps DEFAULT to one per GROUP-ID — "none" trivially
+	// satisfies it. Names disambiguate when several tracks share the same
+	// language ("ES", "ES 2", forced suffix).
 	hasSubs := false
 	langCounts := make(map[string]int)
 	for i, s := range probe.SubtitleTracks {
@@ -999,8 +1001,6 @@ func renderMasterPlaylist(probe *StreamProbe, qualityLabel string) string {
 		if lang == "" {
 			lang = "und"
 		}
-		// Build a unique display name: title if present, else lang code,
-		// disambiguated with a numeric suffix when duplicated.
 		base := s.Title
 		if base == "" {
 			base = strings.ToUpper(lang)
@@ -1012,22 +1012,11 @@ func renderMasterPlaylist(probe *StreamProbe, qualityLabel string) string {
 			name = fmt.Sprintf("%s %d", base, langCounts[key])
 		}
 		if s.Forced {
-			name = name + " (forzados)"
-		}
-		def := "NO"
-		if i == defaultIdx {
-			def = "YES"
-		}
-		// AUTOSELECT only on the default — otherwise some players activate
-		// every track tagged AUTOSELECT for the user's preferred language,
-		// stacking captions on screen.
-		auto := "NO"
-		if i == defaultIdx {
-			auto = "YES"
+			name = name + " (forced)"
 		}
 		b.WriteString(fmt.Sprintf(
-			`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME=%q,LANGUAGE=%q,DEFAULT=%s,AUTOSELECT=%s,FORCED=%s,URI="subs/sub-%d.m3u8"`+"\n",
-			name, lang, def, auto, ynBool(s.Forced), i,
+			`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME=%q,LANGUAGE=%q,DEFAULT=NO,AUTOSELECT=NO,FORCED=%s,URI="subs/sub-%d.m3u8"`+"\n",
+			name, lang, ynBool(s.Forced), i,
 		))
 	}
 
@@ -1114,7 +1103,13 @@ type hlsStderrCapture struct {
 const maxStderrBuf = 64 * 1024
 
 func (c *hlsStderrCapture) Write(p []byte) (int, error) {
-	if c.buf.Len()+len(p) > maxStderrBuf {
+	// If the incoming chunk alone exceeds the cap (very long unterminated
+	// line), drop the buffered prefix AND truncate p so a single multi-MB
+	// write can't grow memory.
+	if len(p) > maxStderrBuf {
+		c.buf.Reset()
+		p = p[len(p)-maxStderrBuf:]
+	} else if c.buf.Len()+len(p) > maxStderrBuf {
 		// Drop the unterminated partial line; we'll resync on the next \n.
 		c.buf.Reset()
 	}
