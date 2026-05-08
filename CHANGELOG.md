@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-05-08
+
+
+### Added
+
+- **config**: set default values for WebRTC and transcoding in minimal TOML config
+- **transcode**: dynamic H.264 level + HW probe + capability reporting
+
+### Changed
+
+- **streaming**: improve signal handling and remove unused components
+
+### Fixed
+
+- **self-update**: auto-restart live daemon after upgrade
+- **streaming**: allow HLS sessions when webrtc disabled
+
+### Other
+
+- **gitignore**: add dist-ffbinaries to ignored files
 ## [0.8.0] - 2026-05-08
 
 
@@ -31,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- **release**: 0.8.0
 - **streaming**: post-review fixes — race lock, dead branch, stderr cap
 - **torrent**: bump anacrolix log level Critical → Warning for visibility
 ## [0.7.0] - 2026-04-10
@@ -291,6 +312,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - remove UPX compression (antivirus false positives, startup penalty)
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[0.8.1]: https://github.com/torrentclaw/unarr/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/torrentclaw/unarr/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/torrentclaw/unarr/compare/v0.6.8...v0.7.0
 [0.6.8]: https://github.com/torrentclaw/unarr/compare/v0.6.7...v0.6.8
