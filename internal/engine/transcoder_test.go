@@ -132,6 +132,65 @@ func TestBuildFFmpegArgsAddsStartSeek(t *testing.T) {
 	}
 }
 
+func TestTranscoderZeroValueLifecycle(t *testing.T) {
+	var tr Transcoder
+	if tr.IsClosing() {
+		t.Errorf("zero-value Transcoder should not report IsClosing")
+	}
+	if tr.Stderr() != "" {
+		t.Errorf("zero-value Stderr should be empty")
+	}
+	if err := tr.WaitErr(); err != nil {
+		t.Errorf("WaitErr without started cmd should be nil, got %v", err)
+	}
+	if err := tr.Close(); err != nil {
+		t.Errorf("Close without started cmd should be nil, got %v", err)
+	}
+	// Second Close is idempotent and must remain nil.
+	if err := tr.Close(); err != nil {
+		t.Errorf("repeat Close should be nil, got %v", err)
+	}
+	if !tr.IsClosing() {
+		t.Errorf("after Close, IsClosing should be true")
+	}
+	if tr.Done() != nil {
+		t.Errorf("Done() should be nil for never-started Transcoder")
+	}
+}
+
+func TestErrWriterCapturesStderr(t *testing.T) {
+	tr := &Transcoder{}
+	w := &errWriter{t: tr}
+	n, err := w.Write([]byte("ffmpeg failed: bad codec"))
+	if err != nil || n != 24 {
+		t.Errorf("Write returned (%d,%v)", n, err)
+	}
+	if got := tr.Stderr(); got != "ffmpeg failed: bad codec" {
+		t.Errorf("Stderr captured %q", got)
+	}
+}
+
+func TestErrWriterCapsBuffer(t *testing.T) {
+	tr := &Transcoder{}
+	w := &errWriter{t: tr}
+	// Write a chunk under the cap, then a huge chunk: total should stop growing past 64KB.
+	w.Write(make([]byte, 32*1024)) //nolint:errcheck
+	w.Write(make([]byte, 32*1024)) //nolint:errcheck
+	w.Write(make([]byte, 32*1024)) //nolint:errcheck
+	if got := len(tr.Stderr()); got > 64*1024 {
+		t.Errorf("stderr exceeded 64KB cap: %d bytes", got)
+	}
+}
+
+func TestCoalesce(t *testing.T) {
+	if got := coalesce("", "fallback"); got != "fallback" {
+		t.Errorf("empty -> fallback, got %q", got)
+	}
+	if got := coalesce("value", "fallback"); got != "value" {
+		t.Errorf("non-empty -> value, got %q", got)
+	}
+}
+
 func TestBuildFFmpegArgsDownscale(t *testing.T) {
 	args := buildFFmpegArgs("/tmp/movie.mkv", TranscodeOpts{
 		Action:     ActionTranscodeVideo,

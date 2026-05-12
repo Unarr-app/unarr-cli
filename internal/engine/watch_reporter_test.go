@@ -2,10 +2,16 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/torrentclaw/unarr/internal/agent"
 )
 
 // ---------------------------------------------------------------------------
@@ -68,6 +74,105 @@ func TestMaxByteOffsetNeverRegresses(t *testing.T) {
 // ---------------------------------------------------------------------------
 // End-to-end: real HTTP server with Range requests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// WatchReporter.sendReport via the agent API
+// ---------------------------------------------------------------------------
+
+func TestWatchReporter_NewWatchReporter(t *testing.T) {
+	c := agent.NewClient("http://localhost", "", "test")
+	ss := &StreamServer{}
+	wr := NewWatchReporter(c, ss, "task-1")
+	if wr.taskID != "task-1" || wr.client != c || wr.server != ss {
+		t.Errorf("NewWatchReporter fields not wired: %+v", wr)
+	}
+}
+
+func TestWatchReporter_sendReportSkipsZeroProgress(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+
+	ss := &StreamServer{}
+	// totalFileSize == 0 → EstimatedProgress returns (0, 0) → sendReport skips.
+	c := agent.NewClient(srv.URL, "", "test")
+	wr := NewWatchReporter(c, ss, "task-1")
+	wr.sendReport(context.Background())
+	if hits.Load() != 0 {
+		t.Errorf("expected no API calls when progress=0, got %d", hits.Load())
+	}
+}
+
+func TestWatchReporter_sendReportPostsProgress(t *testing.T) {
+	var captured atomic.Pointer[agent.WatchProgressUpdate]
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var update agent.WatchProgressUpdate
+		_ = json.NewDecoder(r.Body).Decode(&update)
+		captured.Store(&update)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	ss := &StreamServer{}
+	ss.totalFileSize.Store(1000)
+	ss.maxByteOffset.Store(250) // 25%
+	ss.durationSec.Store(120)
+
+	c := agent.NewClient(srv.URL, "", "test")
+	wr := NewWatchReporter(c, ss, "task-12345678")
+	wr.sendReport(context.Background())
+
+	got := captured.Load()
+	if got == nil {
+		t.Fatal("expected a watch-progress POST")
+	}
+	if got.TaskID != "task-12345678" {
+		t.Errorf("TaskID = %q", got.TaskID)
+	}
+	if got.Progress == nil || *got.Progress != 25 {
+		t.Errorf("Progress = %v, want 25", got.Progress)
+	}
+	if got.Duration == nil || *got.Duration != 120 {
+		t.Errorf("Duration = %v, want 120", got.Duration)
+	}
+	if got.Position == nil || *got.Position != 30 {
+		t.Errorf("Position = %v, want 30", got.Position)
+	}
+
+	// Repeat report at same percentage — should NOT POST again.
+	captured.Store(nil)
+	wr.sendReport(context.Background())
+	if captured.Load() != nil {
+		t.Errorf("repeat sendReport at same pct should be a no-op")
+	}
+}
+
+func TestWatchReporter_RunStopsOnContextCancel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	ss := &StreamServer{}
+	c := agent.NewClient(srv.URL, "", "test")
+	wr := NewWatchReporter(c, ss, "task-x")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		wr.Run(ctx)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after context cancellation")
+	}
+}
 
 func TestStreamServerByteTracking(t *testing.T) {
 	// Create temp file (10 KB)

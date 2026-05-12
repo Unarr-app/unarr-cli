@@ -215,3 +215,56 @@ func TestLocalState_EmptySnapshot(t *testing.T) {
 		t.Errorf("expected 0 tasks, got %d", len(snap))
 	}
 }
+
+func TestTaskStateFromUpdate(t *testing.T) {
+	u := StatusUpdate{
+		TaskID:          "task-1",
+		Status:          "downloading",
+		Progress:        42,
+		DownloadedBytes: 1024,
+		TotalBytes:      4096,
+		SpeedBps:        100,
+		ETA:             30,
+		ResolvedMethod:  "torrent",
+		FileName:        "movie.mkv",
+		FilePath:        "/tmp/movie.mkv",
+		StreamURL:       "http://localhost/stream",
+		ErrorMessage:    "",
+	}
+	got := TaskStateFromUpdate(u)
+	if got.TaskID != "task-1" || got.Status != "downloading" || got.Progress != 42 {
+		t.Errorf("basic fields wrong: %+v", got)
+	}
+	if got.DownloadedBytes != 1024 || got.TotalBytes != 4096 || got.SpeedBps != 100 {
+		t.Errorf("byte fields wrong: %+v", got)
+	}
+	if got.ResolvedMethod != "torrent" || got.FileName != "movie.mkv" {
+		t.Errorf("method/name fields wrong: %+v", got)
+	}
+}
+
+func TestShortID(t *testing.T) {
+	if got := ShortID("abcdef1234567890"); got != "abcdef12" {
+		t.Errorf("ShortID = %q", got)
+	}
+	if got := ShortID("short"); got != "short" {
+		t.Errorf("ShortID short = %q", got)
+	}
+	if got := ShortID(""); got != "" {
+		t.Errorf("ShortID empty = %q", got)
+	}
+}
+
+func TestStateFilePath(t *testing.T) {
+	if got := StateFilePath(); got == "" {
+		t.Errorf("StateFilePath should not be empty")
+	}
+}
+
+func TestHTTPError(t *testing.T) {
+	e := &HTTPError{StatusCode: 404, Message: "not found"}
+	got := e.Error()
+	if got == "" || got == "API error 0: " {
+		t.Errorf("HTTPError.Error() unexpected: %q", got)
+	}
+}

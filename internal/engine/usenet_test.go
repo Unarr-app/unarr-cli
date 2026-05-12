@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -72,5 +73,65 @@ func TestUsenetDownloader_Pause_NonExistent(t *testing.T) {
 	u := NewUsenetDownloader(agent.NewClient("http://localhost", "", "test"))
 	if err := u.Pause("no-such-task"); err != nil {
 		t.Errorf("Pause non-existent task = %v, want nil", err)
+	}
+}
+
+func TestUsenetDownloader_MethodAndAvailable(t *testing.T) {
+	u := NewUsenetDownloader(agent.NewClient("http://localhost", "", "test"))
+	if got := u.Method(); got != MethodUsenet {
+		t.Errorf("Method = %v, want %v", got, MethodUsenet)
+	}
+
+	// Disabled → never available, no error.
+	u.SetEnabled(false)
+	ok, err := u.Available(context.Background(), &Task{Title: "Foo"})
+	if err != nil || ok {
+		t.Errorf("disabled Available = (%v,%v), want (false,nil)", ok, err)
+	}
+
+	u.SetEnabled(true)
+	// No IMDb / no title → not available, no error.
+	ok, err = u.Available(context.Background(), &Task{})
+	if err != nil || ok {
+		t.Errorf("empty task Available = (%v,%v), want (false,nil)", ok, err)
+	}
+
+	// Pre-resolved NzbID → available immediately.
+	ok, err = u.Available(context.Background(), &Task{NzbID: "preresolved", Title: "Bar"})
+	if err != nil || !ok {
+		t.Errorf("preresolved NzbID Available = (%v,%v), want (true,nil)", ok, err)
+	}
+}
+
+func TestUsenetDownloader_Shutdown(t *testing.T) {
+	u := NewUsenetDownloader(agent.NewClient("http://localhost", "", "test"))
+	// Inject a fake active download — Shutdown should cancel it and clear the map.
+	_, cancel := context.WithCancel(context.Background())
+	u.active["t1"] = &activeDownload{cancel: cancel}
+	if err := u.Shutdown(context.Background()); err != nil {
+		t.Errorf("Shutdown = %v, want nil", err)
+	}
+	if len(u.active) != 0 {
+		t.Errorf("Shutdown should clear active downloads, got %d", len(u.active))
+	}
+}
+
+func TestSanitizeDir(t *testing.T) {
+	cases := map[string]string{
+		"":                          "usenet_download",
+		"normal_name":               "normal_name",
+		"path/with/slashes":         "path_with_slashes",
+		`win\\bad:name*?"<>|`:       "win__bad_name______",
+		"con:tains/all\\bad?chars*": "con_tains_all_bad_chars_",
+	}
+	for in, want := range cases {
+		if got := sanitizeDir(in); got != want {
+			t.Errorf("sanitizeDir(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	long := strings.Repeat("a", 300)
+	if got := sanitizeDir(long); len(got) != 200 {
+		t.Errorf("expected sanitizeDir to truncate to 200, got %d", len(got))
 	}
 }
