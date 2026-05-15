@@ -1,6 +1,7 @@
 package postprocess
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -8,7 +9,24 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
+
+// extractTimeout caps how long a single extractor invocation may run. Without
+// a cap, an encrypted archive that triggers a TTY-only prompt (or a corrupt
+// archive that confuses the tool) hangs the post-process pipeline forever.
+const extractTimeout = 30 * time.Minute
+
+// validatePassword rejects passwords containing control characters that could
+// inject extra answers into unrar/7z prompts via stdin (e.g. a newline lets an
+// attacker-controlled NZB password feed a second response to overwrite or
+// rename prompts).
+func validatePassword(password string) error {
+	if strings.ContainsAny(password, "\r\n\x00") {
+		return fmt.Errorf("invalid password: contains control characters")
+	}
+	return nil
+}
 
 // ExtractorType identifies which extraction tool is available.
 type ExtractorType string
@@ -50,18 +68,35 @@ func Extract(archivePath string, outputDir string, password string) ([]string, e
 }
 
 // extractUnrar extracts using unrar.
+//
+// Security: when a password is supplied it is sent via stdin rather than via
+// the `-p<password>` switch so it does not appear in `/proc/<pid>/cmdline`
+// (visible to any other process on the host). unrar prompts for the password
+// when no `-p` switch is given, and reads the prompt response from stdin when
+// no controlling TTY is attached (the usual case for a daemon-spawned child).
 func extractUnrar(unrarPath, archivePath, outputDir, password string) ([]string, error) {
+	if err := validatePassword(password); err != nil {
+		return nil, err
+	}
 	args := []string{"x", "-o+", "-y"}
-	if password != "" {
-		args = append(args, "-p"+password)
-	} else {
-		args = append(args, "-p-") // no password, skip asking
+	if password == "" {
+		// Tell unrar there is no password so it skips the prompt and fails
+		// fast on encrypted archives instead of hanging.
+		args = append(args, "-p-")
 	}
 	args = append(args, archivePath, outputDir+"/")
 
-	cmd := exec.Command(unrarPath, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), extractTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, unrarPath, args...)
 	cmd.Dir = outputDir
+	if password != "" {
+		cmd.Stdin = strings.NewReader(password + "\n")
+	}
 	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("unrar: timed out after %s", extractTimeout)
+	}
 	if err != nil {
 		// Check for password error
 		outStr := string(output)
@@ -75,18 +110,33 @@ func extractUnrar(unrarPath, archivePath, outputDir, password string) ([]string,
 }
 
 // extract7z extracts using 7z.
+//
+// Security: same rationale as extractUnrar — passwords go through stdin to
+// avoid `/proc/<pid>/cmdline` exposure. 7z reads the password from stdin when
+// no `-p` switch is given and the archive is encrypted.
 func extract7z(szPath, archivePath, outputDir, password string) ([]string, error) {
+	if err := validatePassword(password); err != nil {
+		return nil, err
+	}
 	args := []string{"x", "-y", "-o" + outputDir}
-	if password != "" {
-		args = append(args, "-p"+password)
-	} else {
-		args = append(args, "-p") // empty password
+	if password == "" {
+		// `-p` with no value tells 7z the password is empty so encrypted
+		// archives fail fast instead of waiting for a prompt.
+		args = append(args, "-p")
 	}
 	args = append(args, archivePath)
 
-	cmd := exec.Command(szPath, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), extractTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, szPath, args...)
 	cmd.Dir = outputDir
+	if password != "" {
+		cmd.Stdin = strings.NewReader(password + "\n")
+	}
 	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("7z: timed out after %s", extractTimeout)
+	}
 	if err != nil {
 		outStr := string(output)
 		if strings.Contains(outStr, "Wrong password") || strings.Contains(outStr, "incorrect password") {

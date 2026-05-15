@@ -303,6 +303,12 @@ func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := parts[0]
+	// Reject malformed IDs with the same 404 we return for unknown sessions —
+	// no oracle for the accepted format.
+	if !validSessionID.MatchString(sessionID) {
+		http.Error(w, "hls session not found", http.StatusNotFound)
+		return
+	}
 	session := ss.hls.Get(sessionID)
 	if session == nil {
 		http.Error(w, "hls session not found", http.StatusNotFound)
@@ -392,6 +398,17 @@ func (ss *StreamServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 	ss.mu.RUnlock()
 
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	// Only expose filename/taskID/client to loopback callers (local diagnostics).
+	// Remote callers (LAN, Tailscale, UPnP public) get a minimal probe response
+	// so that scanners and unauthenticated peers cannot fingerprint the active
+	// download. The web stream-probe only checks HTTP 200 + Content-Type.
+	//
+	// Use net.IP.IsLoopback so we also accept ::ffff:127.0.0.1 (Linux dual-stack
+	// IPv4-mapped form) and reject the empty-string fallthrough when
+	// SplitHostPort fails on a malformed RemoteAddr — both would otherwise
+	// silently bypass the disclosure boundary.
+	parsedIP := net.ParseIP(clientIP)
+	isLocal := parsedIP != nil && parsedIP.IsLoopback()
 
 	type healthResponse struct {
 		Status    string `json:"status"`
@@ -399,19 +416,23 @@ func (ss *StreamServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 		File      string `json:"file,omitempty"`
 		Task      string `json:"task,omitempty"`
 		Port      int    `json:"port"`
-		Client    string `json:"client"`
+		Client    string `json:"client,omitempty"`
 	}
 	resp := healthResponse{
 		Status: "ok",
 		Port:   ss.port,
-		Client: clientIP,
 	}
 	if provider != nil {
 		resp.Streaming = true
-		resp.File = provider.FileName()
-		resp.Task = taskID
-		if len(resp.Task) > 8 {
-			resp.Task = resp.Task[:8]
+	}
+	if isLocal {
+		resp.Client = clientIP
+		if provider != nil {
+			resp.File = provider.FileName()
+			resp.Task = taskID
+			if len(resp.Task) > 8 {
+				resp.Task = resp.Task[:8]
+			}
 		}
 	}
 
