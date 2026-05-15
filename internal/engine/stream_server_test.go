@@ -429,6 +429,71 @@ func TestStreamServer_Health_NonLoopback_NoLeak(t *testing.T) {
 	}
 }
 
+// TestStreamServer_CORS_Allowlist verifica que sólo los origenes en la
+// allowlist reciben Access-Control-Allow-Origin y que ningún otro origen
+// es eco-reflejado.
+func TestStreamServer_CORS_Allowlist(t *testing.T) {
+	srv := NewStreamServer(0)
+	ctx := context.Background()
+	if err := srv.Listen(ctx); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer srv.Shutdown(ctx)
+
+	cases := []struct {
+		origin    string
+		wantAllow bool
+	}{
+		{"https://app.torrentclaw.com", true},
+		{"https://torrentclaw.com", true},
+		{"http://localhost:3030", true},
+		{"http://127.0.0.1:3030", true},
+		{"https://evil.example", false},
+		{"null", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.origin, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodOptions, "/health", nil)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			srv.healthHandler(rr, req)
+			got := rr.Header().Get("Access-Control-Allow-Origin")
+			if tc.wantAllow {
+				if got != tc.origin {
+					t.Errorf("origin %q: ACAO = %q, want %q", tc.origin, got, tc.origin)
+				}
+			} else if got != "" {
+				t.Errorf("origin %q: ACAO leaked as %q, expected empty", tc.origin, got)
+			}
+		})
+	}
+}
+
+// TestStreamServer_CORS_ExtraOrigin verifica que SetCORSAllowedOrigins añade
+// origins al baseline sin removerlos.
+func TestStreamServer_CORS_ExtraOrigin(t *testing.T) {
+	srv := NewStreamServer(0)
+	srv.SetCORSAllowedOrigins([]string{"https://custom.example"})
+	ctx := context.Background()
+	if err := srv.Listen(ctx); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer srv.Shutdown(ctx)
+
+	for _, origin := range []string{"https://custom.example", "https://torrentclaw.com"} {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.Header.Set("Origin", origin)
+		srv.healthHandler(rr, req)
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != origin {
+			t.Errorf("origin %q: ACAO = %q", origin, got)
+		}
+	}
+}
+
 // TestStreamServer_HLS_InvalidSessionID verifica que el hlsHandler rechaza
 // session IDs con caracteres ilegales devolviendo 404 (uniforme con sesión
 // inexistente) para no filtrar el formato aceptado a un attacker.

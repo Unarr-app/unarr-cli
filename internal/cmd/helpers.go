@@ -9,17 +9,32 @@ import (
 )
 
 // openBrowser opens a URL in the default browser.
+//
+// The URL is restricted to http(s) so that a hostile caller cannot trick
+// xdg-open/open into interpreting it as a flag (a leading "-" would otherwise
+// match a switch on every helper we shell out to). Where the helper supports
+// it we also append "--" to terminate switch parsing as belt-and-braces.
 func openBrowser(url string) {
+	if !isSafeBrowserURL(url) {
+		return
+	}
 	var c *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		c = exec.Command("open", url)
+		c = exec.Command("open", "--", url)
 	case "windows":
+		// rundll32 does not parse switches from positional args.
 		c = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	default: // linux, freebsd
 		c = exec.Command("xdg-open", url)
 	}
 	_ = c.Start() // fire and forget; best-effort
+}
+
+// isSafeBrowserURL accepts only http(s) URLs. Other schemes (file://, javascript:,
+// data:, ...) and flag-shaped strings ("--help") are rejected.
+func isSafeBrowserURL(url string) bool {
+	return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
 }
 
 // defaultDownloadDir returns a sensible default download directory.

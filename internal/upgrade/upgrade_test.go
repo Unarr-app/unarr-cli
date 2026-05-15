@@ -1085,3 +1085,40 @@ func TestDownloadSetsUserAgent(t *testing.T) {
 		t.Errorf("User-Agent = %q, want 'unarr-updater'", gotUA)
 	}
 }
+
+func TestSafeZipPath(t *testing.T) {
+	dest := t.TempDir()
+	absDest, err := filepath.Abs(dest)
+	if err != nil {
+		t.Fatalf("abs dest: %v", err)
+	}
+
+	// Names that must extract successfully.
+	good := []string{
+		"unarr.exe",
+		"bin/unarr.exe",
+		"./unarr.exe",
+		"folder/sub/unarr.exe",
+	}
+	for _, name := range good {
+		if _, ok := safeZipPath(name, "unarr.exe", absDest); !ok {
+			t.Errorf("safeZipPath(%q) = ok:false, want ok:true", name)
+		}
+	}
+
+	// Names that must be rejected for path-traversal reasons.
+	bad := []string{
+		"../unarr.exe",
+		"..",
+		"foo/../../unarr.exe",
+		"/etc/passwd",
+		"/abs/unarr.exe",
+		`..\..\windows\system32\unarr.exe`, // backslash entries that escape
+		"../../bin/unarr.exe",
+	}
+	for _, name := range bad {
+		if _, ok := safeZipPath(name, "unarr.exe", absDest); ok {
+			t.Errorf("safeZipPath(%q) = ok:true, want ok:false", name)
+		}
+	}
+}

@@ -50,6 +50,7 @@ type DownloadConfig struct {
 	ListenPort       int             `toml:"listen_port"`        // fixed port for incoming peer connections (default: 42069, 0 = random)
 	StreamPort       int             `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
 	EnableUPnP       bool            `toml:"enable_upnp"`        // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in because it exposes the unauthenticated /stream + /hls endpoints to the public internet)
+	CORSExtraOrigins []string        `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
 	WebRTC           WebRTCConfig    `toml:"webrtc"`
 	Transcode        TranscodeConfig `toml:"transcode"`
 }

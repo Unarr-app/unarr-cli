@@ -37,7 +37,17 @@ type MirrorsResponse struct {
 // Hard-coded here (not loaded from config) because the whole point is to
 // have something to consult when config-driven URLs all fail.
 //
-// Keep in sync with src/lib/mirrors-config.ts → STATIC_FALLBACKS on the web.
+// Today there is one provider (GitHub Pages). The slice is intentionally
+// shaped to take more — a second independent host (Cloudflare Pages,
+// IPFS-Fleek, etc.) should be added as soon as it is provisioned. Keep
+// any addition in sync with `STATIC_FALLBACKS` in
+// `torrentclaw-web/src/lib/mirrors-config.ts` and `Docs/plans/security-stream-token.md`.
+//
+// Future hardening: sign mirrors.json with the same ed25519 release key
+// (or a sibling) so a hijack of any single static host cannot serve a
+// malicious mirror list. Today the only signal is "agreement between
+// independent providers" via cross-checking, which we leave to the
+// operator.
 var DefaultStaticFallbackURLs = []string{
 	"https://torrentclaw.github.io/mirrors/mirrors.json",
 }

@@ -31,6 +31,32 @@ func TestExpandHome(t *testing.T) {
 	}
 }
 
+func TestIsSafeBrowserURL(t *testing.T) {
+	good := []string{
+		"http://localhost:3000",
+		"https://torrentclaw.com/some/path?q=1",
+	}
+	bad := []string{
+		"--help",
+		"-version",
+		"file:///etc/passwd",
+		"javascript:alert(1)",
+		"data:text/html,foo",
+		"ftp://example.com",
+		"",
+	}
+	for _, u := range good {
+		if !isSafeBrowserURL(u) {
+			t.Errorf("isSafeBrowserURL(%q) = false, want true", u)
+		}
+	}
+	for _, u := range bad {
+		if isSafeBrowserURL(u) {
+			t.Errorf("isSafeBrowserURL(%q) = true, want false", u)
+		}
+	}
+}
+
 func TestDefaultDownloadDir(t *testing.T) {
 	dir := defaultDownloadDir()
 	if dir == "" {
