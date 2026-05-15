@@ -50,7 +50,12 @@ type StreamServer struct {
 	url         string     // best single URL (backward compat)
 	urls        StreamURLs // all available URLs by network type
 	upnpMapping *UPnPMapping
-	disableUPnP bool
+	// enableUPnP gates whether Listen() asks the gateway to publish the
+	// stream port to the WAN. UPnP is opt-in (false by default) because
+	// /stream and /hls have no auth — exposing them on the public internet
+	// would let any scanner enumerate active downloads. LAN and Tailscale
+	// access keep working without UPnP.
+	enableUPnP bool
 
 	hls *HLSSessionRegistry // HLS sessions served on /hls/<id>/...
 
@@ -65,8 +70,20 @@ type StreamServer struct {
 
 // NewStreamServer creates a stream server bound to the given port.
 // Call Listen() to start accepting connections, then SetFile() to serve content.
+//
+// UPnP is opt-in: call SetUPnPEnabled(true) before Listen() to publish the
+// stream port on the WAN. Without it, only LAN and Tailscale clients can
+// reach the server. This matches the security default — /stream and /hls
+// have no auth, so exposing them to the public internet is something the
+// operator must explicitly request.
 func NewStreamServer(port int) *StreamServer {
 	return &StreamServer{port: port, hls: NewHLSSessionRegistry()}
+}
+
+// SetUPnPEnabled toggles WAN publishing of the stream port. Call before
+// Listen(); changes after Listen() are ignored for the active server.
+func (ss *StreamServer) SetUPnPEnabled(enabled bool) {
+	ss.enableUPnP = enabled
 }
 
 // HLS returns the HLS session registry for this server. Daemon code uses it
@@ -122,11 +139,16 @@ func (ss *StreamServer) Listen(ctx context.Context) error {
 	if tsIP := TailscaleIP(); tsIP != "" {
 		ss.urls.Tailscale = fmt.Sprintf("http://%s:%d/stream", tsIP, ss.port)
 	}
-	if !ss.disableUPnP {
-		if mapping, err := SetupUPnP(ss.port); err == nil {
+	if ss.enableUPnP {
+		mapping, err := SetupUPnP(ss.port)
+		if err != nil {
+			log.Printf("[stream] UPnP setup failed: %v (only LAN/Tailscale clients will reach port %d)", err, ss.port)
+		} else {
 			ss.upnpMapping = mapping
 			ss.urls.Public = fmt.Sprintf("http://%s:%d/stream", mapping.ExternalIP, mapping.ExternalPort)
 		}
+	} else {
+		log.Printf("[stream] UPnP disabled — port %d not published to WAN (set downloads.enable_upnp = true to opt in)", ss.port)
 	}
 
 	// Best single URL for backward compat: Tailscale > LAN > Public > localhost

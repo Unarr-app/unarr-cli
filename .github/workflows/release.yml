@@ -27,6 +27,28 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          # Empty when RELEASE_SIGNING_PUBKEY variable is unset — goreleaser
+          # accepts it and the resulting binary disables signature checks
+          # (back-compat: pre-signing releases continue to update). Set
+          # RELEASE_SIGNING_PUBKEY (variable) + RELEASE_SIGNING_KEY (secret)
+          # to turn verification on.
+          RELEASE_SIGNING_PUBKEY: ${{ vars.RELEASE_SIGNING_PUBKEY }}
+
+      - name: Sign checksums.txt with ed25519
+        # Reference secrets.X directly — step-level env defined in this same
+        # step is unreliable to read from this step's own if: expression.
+        if: ${{ vars.RELEASE_SIGNING_PUBKEY != '' && secrets.RELEASE_SIGNING_KEY != '' }}
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          go run ./scripts/sign-checksums \
+            -key "$RELEASE_SIGNING_KEY" \
+            -in  dist/checksums.txt \
+            -out dist/checksums.txt.sig
+          gh release upload "$RELEASE_TAG" dist/checksums.txt.sig --clobber
 
   docker:
     needs: release

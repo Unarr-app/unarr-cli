@@ -2,6 +2,7 @@ package upgrade
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -88,7 +89,23 @@ func download(ctx context.Context, version string) (string, error) {
 }
 
 // verifyChecksum downloads checksums.txt and verifies the archive's SHA256.
+// When a release public key is embedded at build time (releasePubKeyBase64),
+// the function also verifies an ed25519 signature over checksums.txt before
+// trusting any hash inside it — this turns the checksum file from a passive
+// integrity check into an authenticated artifact that a maintainer or CI key
+// compromise cannot trivially forge.
 func verifyChecksum(ctx context.Context, version, archivePath string) error {
+	return verifyChecksumWithOptions(ctx, version, archivePath, true)
+}
+
+// verifyChecksumOnly skips the ed25519 signature step. Used by Upgrader
+// when --allow-unsigned is set and the release is known to predate signing
+// (or when a release accidentally shipped without a .sig file).
+func verifyChecksumOnly(ctx context.Context, version, archivePath string) error {
+	return verifyChecksumWithOptions(ctx, version, archivePath, false)
+}
+
+func verifyChecksumWithOptions(ctx context.Context, version, archivePath string, verifySignature bool) error {
 	// Download checksums.txt
 	url := releaseURL(version, "checksums.txt")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -107,11 +124,28 @@ func verifyChecksum(ctx context.Context, version, archivePath string) error {
 		return fmt.Errorf("fetch checksums: HTTP %d", resp.StatusCode)
 	}
 
+	// Read the entire checksums.txt content first so we can both parse and
+	// verify the signature over the same bytes.
+	checksumsContent, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read checksums: %w", err)
+	}
+
+	// Verify ed25519 signature over checksums.txt before trusting its
+	// contents. Skipped silently when no key is embedded (handled by the
+	// caller via SignatureVerificationConfigured) or when the caller
+	// explicitly opts out via --allow-unsigned.
+	if verifySignature {
+		if err := verifyChecksumsSignature(ctx, version, checksumsContent); err != nil {
+			return fmt.Errorf("verify signature: %w", err)
+		}
+	}
+
 	// Parse checksums.txt — format: "<sha256>  <filename>"
 	expectedName := archiveName(version)
 	var expectedHash string
 
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(bytes.NewReader(checksumsContent))
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Fields(line)

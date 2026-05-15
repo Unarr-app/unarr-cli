@@ -384,8 +384,7 @@ func TestStreamServer_Health_WithFile(t *testing.T) {
 // nombre de fichero, taskID ni client IP cuando el caller no es loopback.
 // Protección contra reconnaissance vía LAN / UPnP / Tailscale.
 func TestStreamServer_Health_NonLoopback_NoLeak(t *testing.T) {
-	srv := NewStreamServer(0)
-	srv.disableUPnP = true
+	srv := NewStreamServer(0) // UPnP off by default — keep test hermetic
 	ctx := context.Background()
 	if err := srv.Listen(ctx); err != nil {
 		t.Fatalf("Listen() error: %v", err)
@@ -434,8 +433,7 @@ func TestStreamServer_Health_NonLoopback_NoLeak(t *testing.T) {
 // session IDs con caracteres ilegales devolviendo 404 (uniforme con sesión
 // inexistente) para no filtrar el formato aceptado a un attacker.
 func TestStreamServer_HLS_InvalidSessionID(t *testing.T) {
-	srv := NewStreamServer(0)
-	srv.disableUPnP = true
+	srv := NewStreamServer(0) // UPnP off by default — keep test hermetic
 	ctx := context.Background()
 	if err := srv.Listen(ctx); err != nil {
 		t.Fatalf("Listen() error: %v", err)

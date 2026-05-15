@@ -13,6 +13,7 @@ import (
 
 func newSelfUpdateCmd() *cobra.Command {
 	var force bool
+	var allowUnsigned bool
 
 	cmd := &cobra.Command{
 		Use:   "self-update",
@@ -26,18 +27,20 @@ If the daemon is running, it is automatically restarted so the new
 version is loaded into memory (otherwise heartbeat would keep
 reporting the old version until a manual restart).`,
 		Example: `  unarr self-update
-  unarr self-update --force`,
+  unarr self-update --force
+  unarr self-update --allow-unsigned   # accept releases missing checksums.txt.sig`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSelfUpdate(force)
+			return runSelfUpdate(force, allowUnsigned)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "reinstall even if already up to date")
+	cmd.Flags().BoolVar(&allowUnsigned, "allow-unsigned", false, "continue with SHA256-only verification when checksums.txt.sig is missing")
 
 	return cmd
 }
 
-func runSelfUpdate(force bool) error {
+func runSelfUpdate(force, allowUnsigned bool) error {
 	bold := color.New(color.Bold)
 	green := color.New(color.FgGreen)
 	yellow := color.New(color.FgYellow)
@@ -74,6 +77,7 @@ func runSelfUpdate(force bool) error {
 
 	upgrader := &upgrade.Upgrader{
 		CurrentVersion: currentClean,
+		AllowUnsigned:  allowUnsigned,
 		OnProgress: func(msg string) {
 			fmt.Printf("  %s\n", msg)
 		},

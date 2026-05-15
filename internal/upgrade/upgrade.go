@@ -13,6 +13,7 @@ package upgrade
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -43,6 +44,13 @@ type Upgrader struct {
 	CurrentVersion string
 	// OnProgress is called with status messages during the upgrade process.
 	OnProgress func(msg string)
+	// AllowUnsigned downgrades a missing checksums.txt.sig to a warning and
+	// continues with SHA256-only verification. Required to downgrade to a
+	// release published before signing was introduced, or to recover from
+	// an accidental release where the workflow's signing step was skipped.
+	// Default false — signature missing is a hard failure when a public
+	// key is embedded.
+	AllowUnsigned bool
 }
 
 func (u *Upgrader) log(msg string) {
@@ -89,10 +97,21 @@ func (u *Upgrader) Execute(ctx context.Context, targetVersion string) Result {
 	}
 	defer os.Remove(archivePath)
 
-	// 5. Verify checksum
-	u.log("Verifying checksum...")
+	// 5. Verify checksum (and signature, if configured)
+	if SignatureVerificationConfigured() {
+		u.log("Verifying checksum + ed25519 signature...")
+	} else {
+		u.log("Verifying checksum (release signature verification not configured for this build)...")
+	}
 	if err := verifyChecksum(ctx, targetVersion, archivePath); err != nil {
-		return u.fail("checksum: %v", err)
+		if errors.Is(err, ErrMissingSignature) && u.AllowUnsigned {
+			u.log("WARNING: release is unsigned and --allow-unsigned was passed; continuing with SHA256-only verification")
+			if err := verifyChecksumOnly(ctx, targetVersion, archivePath); err != nil {
+				return u.fail("checksum: %v", err)
+			}
+		} else {
+			return u.fail("checksum: %v", err)
+		}
 	}
 
 	// 6. Extract binary
@@ -224,7 +243,12 @@ func archiveName(version string) string {
 	return fmt.Sprintf("%s_%s_%s_%s.%s", binaryName, version, runtime.GOOS, runtime.GOARCH, ext)
 }
 
+// githubReleaseHost is the base URL used to build release asset URLs. Exposed
+// as a var (not a const) so tests can point it at an httptest.Server without
+// touching production behaviour.
+var githubReleaseHost = "https://github.com"
+
 // releaseURL returns the download URL for a release asset.
 func releaseURL(version, filename string) string {
-	return fmt.Sprintf("https://github.com/%s/releases/download/v%s/%s", githubRepo, version, filename)
+	return fmt.Sprintf("%s/%s/releases/download/v%s/%s", githubReleaseHost, githubRepo, version, filename)
 }

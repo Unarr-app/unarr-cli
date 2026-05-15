@@ -140,26 +140,29 @@ func (c *Client) OpenSignalStream(ctx context.Context, sessionID string) (*Signa
 	return stream, nil
 }
 
+// sseMaxLineBytes caps the size of a single SSE line. Real signalling lines
+// are JSON payloads of a few hundred bytes; 256 KiB is generous enough to
+// survive a future schema bump but small enough that a hostile or buggy
+// server cannot grow daemon memory by streaming a single line forever.
+const sseMaxLineBytes = 256 * 1024
+
+// sseMaxEventBytes caps the total bytes buffered across the lines of one
+// SSE event. Without a cap, a peer could send unbounded `data:` continuation
+// lines and OOM the daemon between blank-line dispatches.
+const sseMaxEventBytes = 1024 * 1024
+
 func (s *SignalEventStream) read() {
 	defer close(s.done)
 	defer close(s.events)
 
-	reader := bufio.NewReaderSize(s.resp.Body, 16*1024)
+	scanner := bufio.NewScanner(s.resp.Body)
+	scanner.Buffer(make([]byte, 16*1024), sseMaxLineBytes)
+
 	var dataBuf bytes.Buffer
 	var eventName string
 
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err != io.EOF {
-				select {
-				case s.errs <- err:
-				default:
-				}
-			}
-			return
-		}
-		line = strings.TrimRight(line, "\r\n")
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
 		if line == "" {
 			// End of an event — dispatch if we have data.
 			if dataBuf.Len() == 0 {
@@ -190,6 +193,18 @@ func (s *SignalEventStream) read() {
 		}
 		if strings.HasPrefix(line, "data:") {
 			payload := strings.TrimSpace(line[len("data:"):])
+			// Refuse to grow the event buffer past the cap. Reset so a
+			// well-formed event after the offender can still be parsed,
+			// and surface an error so SignalLoop reconnects.
+			if dataBuf.Len()+len(payload)+1 > sseMaxEventBytes {
+				dataBuf.Reset()
+				eventName = ""
+				select {
+				case s.errs <- fmt.Errorf("sse: event exceeded %d bytes", sseMaxEventBytes):
+				default:
+				}
+				return
+			}
 			if dataBuf.Len() > 0 {
 				dataBuf.WriteByte('\n')
 			}
@@ -197,6 +212,12 @@ func (s *SignalEventStream) read() {
 			continue
 		}
 		// id:, retry:, anything else — ignore for now.
+	}
+	if err := scanner.Err(); err != nil {
+		select {
+		case s.errs <- err:
+		default:
+		}
 	}
 }
 

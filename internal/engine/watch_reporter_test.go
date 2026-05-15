@@ -185,8 +185,7 @@ func TestStreamServerByteTracking(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := NewStreamServer(0)
-	srv.disableUPnP = true
+	srv := NewStreamServer(0) // UPnP off by default — keep test hermetic
 	ctx := context.Background()
 	if err := srv.Listen(ctx); err != nil {
 		t.Fatalf("listen: %v", err)

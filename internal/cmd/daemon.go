@@ -240,6 +240,7 @@ func runDaemonStart() error {
 
 	// Create persistent stream server
 	streamSrv := engine.NewStreamServer(cfg.Download.StreamPort)
+	streamSrv.SetUPnPEnabled(cfg.Download.EnableUPnP)
 	// Reap HLS tmpdirs left over from a previous daemon run before we start
 	// accepting new sessions. The in-memory registry doesn't survive a
 	// restart, so without this disk usage grows unbounded across restarts.

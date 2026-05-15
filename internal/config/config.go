@@ -49,6 +49,7 @@ type DownloadConfig struct {
 	StallTimeout     string          `toml:"stall_timeout"`      // e.g. "30m", "1h", "0" = unlimited (default: "30m")
 	ListenPort       int             `toml:"listen_port"`        // fixed port for incoming peer connections (default: 42069, 0 = random)
 	StreamPort       int             `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
+	EnableUPnP       bool            `toml:"enable_upnp"`        // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in because it exposes the unauthenticated /stream + /hls endpoints to the public internet)
 	WebRTC           WebRTCConfig    `toml:"webrtc"`
 	Transcode        TranscodeConfig `toml:"transcode"`
 }

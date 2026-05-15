@@ -26,6 +26,10 @@ builds:
       - -s -w
       - -X github.com/torrentclaw/unarr/internal/cmd.Version={{.Version}}
       - -X github.com/torrentclaw/unarr/internal/sentry.dsn={{ .Env.SENTRY_DSN }}
+      # Release-signing public key — verified by the self-updater against
+      # checksums.txt.sig. Empty when not configured; in that case
+      # signature verification is skipped and a warning is logged.
+      - -X github.com/torrentclaw/unarr/internal/upgrade.releasePubKeyBase64={{ .Env.RELEASE_SIGNING_PUBKEY }}
 
 archives:
   - formats: [tar.gz]
