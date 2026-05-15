@@ -498,8 +498,8 @@ func TestClient_SlowServer_Timeout(t *testing.T) {
 
 	// Crear cliente con timeout muy corto
 	c := &Client{
-		baseURL: srv.URL,
-		apiKey:  "test-key",
+		pool:   NewMirrorPool(srv.URL, nil),
+		apiKey: "test-key",
 		httpClient: &http.Client{
 			Timeout: 50 * time.Millisecond,
 		},

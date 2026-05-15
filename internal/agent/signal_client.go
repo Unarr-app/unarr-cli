@@ -103,7 +103,7 @@ func (s *SignalEventStream) Close() error {
 func (c *Client) OpenSignalStream(ctx context.Context, sessionID string) (*SignalEventStream, error) {
 	streamCtx, cancel := context.WithCancel(ctx)
 
-	url := fmt.Sprintf("%s/api/internal/stream/signal/%s/events", c.baseURL, sessionID)
+	url := fmt.Sprintf("%s/api/internal/stream/signal/%s/events", c.baseURL(), sessionID)
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, url, nil)
 	if err != nil {
 		cancel()

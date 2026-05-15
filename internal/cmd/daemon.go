@@ -161,9 +161,10 @@ func runDaemonStart() error {
 		MaxTranscodeHeight: maxTranscodeHeight,
 	}
 
-	// Create HTTP client — single communication channel
-	agentClient := agent.NewClient(cfg.Auth.APIURL, cfg.Auth.APIKey, userAgent)
-	log.Printf("Transport: HTTP sync → %s", cfg.Auth.APIURL)
+	// Create HTTP client with mirror failover so a `.com` block-out rolls
+	// over to `.to` / .onion without restarting the daemon.
+	agentClient := newAgentClientFromConfig(cfg, userAgent)
+	log.Printf("Transport: HTTP sync → %s (mirrors: %d)", cfg.Auth.APIURL, len(cfg.Auth.Mirrors))
 
 	// Create daemon
 	d := agent.NewDaemon(daemonCfg, agentClient)

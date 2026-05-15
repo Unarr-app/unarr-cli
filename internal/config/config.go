@@ -26,6 +26,11 @@ type Config struct {
 type AuthConfig struct {
 	APIKey string `toml:"api_key"`
 	APIURL string `toml:"api_url"`
+	// Mirrors lists alternate base URLs the agent will fall back to when the
+	// primary api_url is unreachable. Ordered by preference. Refreshed at
+	// runtime by `unarr mirrors update` against /api/v1/mirrors so a long-
+	// running agent survives a primary takedown without a new release.
+	Mirrors []string `toml:"mirrors"`
 }
 
 type AgentConfig struct {
@@ -113,6 +118,12 @@ func Default() Config {
 	return Config{
 		Auth: AuthConfig{
 			APIURL: "https://torrentclaw.com",
+			// Default mirror list. Kept in sync with src/lib/mirrors-config.ts
+			// on the server. Users can override with `unarr mirrors update`,
+			// which pulls the live list from /api/v1/mirrors.
+			Mirrors: []string{
+				"https://torrentclaw.to",
+			},
 		},
 		Download: DownloadConfig{
 			PreferredMethod: "auto",
@@ -186,6 +197,9 @@ func Load(path string) (Config, error) {
 func applyDefaults(cfg *Config, meta toml.MetaData) {
 	if !meta.IsDefined("auth", "api_url") {
 		cfg.Auth.APIURL = "https://torrentclaw.com"
+	}
+	if !meta.IsDefined("auth", "mirrors") {
+		cfg.Auth.Mirrors = []string{"https://torrentclaw.to"}
 	}
 	if !meta.IsDefined("downloads", "preferred_method") {
 		cfg.Download.PreferredMethod = "auto"

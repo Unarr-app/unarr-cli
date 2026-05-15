@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -58,7 +59,7 @@ func runStatus() error {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		ac := agent.NewClient(cfg.Auth.APIURL, cfg.Auth.APIKey, "unarr/"+Version)
+		ac := newAgentClientFromConfig(cfg, "unarr/"+Version)
 		resp, err := ac.Register(ctx, agent.RegisterRequest{
 			AgentID: cfg.Agent.ID,
 			Name:    cfg.Agent.Name,
@@ -74,7 +75,17 @@ func runStatus() error {
 	cyan.Println("  Account")
 	ar := <-accountCh
 	if ar.err != nil {
-		dim.Println("    Could not fetch account info")
+		var httpErr *agent.HTTPError
+		switch {
+		case errors.As(ar.err, &httpErr) && httpErr.StatusCode == 401:
+			yellow.Println("    API key invalid or revoked")
+			fmt.Printf("    Run %s to re-authenticate\n", cyan.Sprint("unarr login"))
+		case errors.As(ar.err, &httpErr) && httpErr.StatusCode == 403:
+			yellow.Println("    API key lacks permission for this server")
+			fmt.Printf("    Check plan or run %s\n", cyan.Sprint("unarr login"))
+		default:
+			dim.Printf("    Could not fetch account info (%v)\n", ar.err)
+		}
 	} else {
 		fmt.Printf("    User:       %s\n", ar.user.Name)
 		fmt.Printf("    Email:      %s\n", ar.user.Email)

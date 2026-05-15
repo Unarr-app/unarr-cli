@@ -12,8 +12,13 @@ import (
 )
 
 // Client communicates with the /api/internal/agent/* endpoints.
+//
+// The client owns a MirrorPool: when a request fails with a transient
+// network error (DNS, refused, timeout, 5xx) it rotates to the next mirror
+// and retries up to `len(mirrors)-1` times so a single agent run survives
+// a primary-domain takedown without user intervention.
 type Client struct {
-	baseURL    string
+	pool       *MirrorPool
 	apiKey     string
 	httpClient *http.Client
 	// wakeClient has no built-in timeout — used exclusively for the long-poll
@@ -25,11 +30,20 @@ type Client struct {
 	userAgent         string
 }
 
-// NewClient creates an agent API client.
+// NewClient creates an agent API client targeting a single base URL.
+// Equivalent to NewClientWithMirrors(baseURL, nil, ...) — kept for callers
+// that don't yet care about mirror failover.
 func NewClient(baseURL, apiKey, userAgent string) *Client {
+	return NewClientWithMirrors(baseURL, nil, apiKey, userAgent)
+}
+
+// NewClientWithMirrors creates an agent API client that can fail over from
+// the primary base URL to any of the extras when the primary is unreachable.
+// The order of `extras` matters: they're tried left-to-right after a failure.
+func NewClientWithMirrors(baseURL string, extras []string, apiKey, userAgent string) *Client {
 	return &Client{
-		baseURL: baseURL,
-		apiKey:  apiKey,
+		pool:   NewMirrorPool(baseURL, extras),
+		apiKey: apiKey,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -42,6 +56,18 @@ func NewClient(baseURL, apiKey, userAgent string) *Client {
 		librarySyncClient: &http.Client{Timeout: 10 * time.Minute},
 		userAgent:         userAgent,
 	}
+}
+
+// MirrorPool exposes the underlying pool so callers (e.g. the `unarr mirrors`
+// subcommand) can swap the list at runtime after fetching /api/v1/mirrors.
+func (c *Client) MirrorPool() *MirrorPool {
+	return c.pool
+}
+
+// baseURL returns the currently-active mirror. Routed through this helper so
+// future changes (e.g. per-endpoint mirror affinity) only need one edit.
+func (c *Client) baseURL() string {
+	return c.pool.Current()
 }
 
 // Register registers the CLI agent with the server and returns user info + features.
@@ -109,30 +135,35 @@ func (c *Client) SearchNzbs(ctx context.Context, params NzbSearchParams) (*NzbSe
 // DownloadNzb downloads the NZB file for the given nzbId.
 // Returns the raw NZB XML bytes.
 func (c *Client) DownloadNzb(ctx context.Context, nzbID string) ([]byte, error) {
-	url := fmt.Sprintf("/api/internal/agent/nzb-download?nzbId=%s", nzbID)
+	path := fmt.Sprintf("/api/internal/agent/nzb-download?nzbId=%s", nzbID)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	c.setHeaders(req)
+	var out []byte
+	err := c.withMirrorFailover(func(base string) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
+		c.setHeaders(req)
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("request failed: %w", err)
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-		return nil, fmt.Errorf("nzb download error %d: %s", resp.StatusCode, string(body))
-	}
+		if resp.StatusCode >= 400 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+			return &HTTPError{StatusCode: resp.StatusCode, Message: string(body)}
+		}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 100<<20)) // 100MB limit
-	if err != nil {
-		return nil, fmt.Errorf("read nzb: %w", err)
-	}
-	return data, nil
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 100<<20)) // 100MB limit
+		if err != nil {
+			return fmt.Errorf("read nzb: %w", err)
+		}
+		out = data
+		return nil
+	})
+	return out, err
 }
 
 // GetUsenetCredentials fetches NNTP connection credentials.
@@ -193,31 +224,41 @@ func (c *Client) ReportWatchProgress(ctx context.Context, update WatchProgressUp
 // WaitForWake blocks until the server sends a wake signal, the long-poll
 // timeout elapses, or ctx is cancelled. Returns true when a wake signal
 // was received (caller should sync immediately), false on timeout/cancel.
+//
+// Wake is a long-poll on a single mirror — failover here would just drop
+// the connection and try again immediately, which the server already
+// handles with a fresh wait loop. We only retry against the next mirror
+// when the current one is definitively unreachable (DNS / refused / TLS).
 func (c *Client) WaitForWake(ctx context.Context) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/internal/agent/wake", nil)
-	if err != nil {
-		return false, fmt.Errorf("create wake request: %w", err)
-	}
-	c.setHeaders(req)
+	var wake bool
+	err := c.withMirrorFailover(func(base string) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/internal/agent/wake", nil)
+		if err != nil {
+			return fmt.Errorf("create wake request: %w", err)
+		}
+		c.setHeaders(req)
 
-	resp, err := c.wakeClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("wake request failed: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := c.wakeClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("wake request failed: %w", err)
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
-		return false, &HTTPError{StatusCode: resp.StatusCode, Message: string(body)}
-	}
+		if resp.StatusCode >= 400 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+			return &HTTPError{StatusCode: resp.StatusCode, Message: string(body)}
+		}
 
-	var result struct {
-		Wake bool `json:"wake"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return false, fmt.Errorf("decode wake response: %w", err)
-	}
-	return result.Wake, nil
+		var result struct {
+			Wake bool `json:"wake"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("decode wake response: %w", err)
+		}
+		wake = result.Wake
+		return nil
+	})
+	return wake, err
 }
 
 // doPost sends a JSON POST request using the default httpClient and decodes the response.
@@ -227,45 +268,89 @@ func (c *Client) doPost(ctx context.Context, path string, body any, dst any) err
 
 // doPostWith sends a JSON POST request using the provided HTTP client and decodes the response.
 // Use this to override the default timeout for specific operations (e.g. librarySyncClient).
+// Wrapped in withMirrorFailover so a transient connection failure on the
+// active mirror retries against the next one.
 func (c *Client) doPostWith(ctx context.Context, hc *http.Client, path string, body any, dst any) error {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(jsonBody))
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
+	return c.withMirrorFailover(func(base string) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(jsonBody))
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
 
-	c.setHeaders(req)
-	req.Header.Set("Content-Type", "application/json")
+		c.setHeaders(req)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := hc.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := hc.Do(req)
+		if err != nil {
+			return fmt.Errorf("request failed: %w", err)
+		}
+		defer resp.Body.Close()
 
-	return c.handleResponse(resp, dst)
+		return c.handleResponse(resp, dst)
+	})
 }
 
 // doGet sends a GET request and decodes the response.
 func (c *Client) doGet(ctx context.Context, path string, dst any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+	return c.withMirrorFailover(func(base string) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
+		}
+
+		c.setHeaders(req)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		return c.handleResponse(resp, dst)
+	})
+}
+
+// withMirrorFailover runs `fn` against the current mirror; on a transient
+// error it rotates the pool and retries up to `len(mirrors)-1` times.
+//
+// The active mirror is updated on rotation so subsequent unrelated calls
+// stick to the working host until that host fails too — this avoids
+// hammering a known-bad primary on every request, while still trying it
+// again next time the agent reloads (no permanent demotion).
+func (c *Client) withMirrorFailover(fn func(base string) error) error {
+	attempts := c.pool.Len()
+	if attempts < 1 {
+		attempts = 1
 	}
 
-	c.setHeaders(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		base := c.baseURL()
+		err := fn(base)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !IsTransient(err) {
+			return err
+		}
+		// Last attempt: don't bother rotating, just surface the error.
+		if i == attempts-1 {
+			break
+		}
+		next, rotated := c.pool.Rotate()
+		if !rotated {
+			break
+		}
+		_ = next // mirror rotation logging is left to higher layers (cmd/) so the
+		// pool stays log-free for tests.
 	}
-	defer resp.Body.Close()
-
-	return c.handleResponse(resp, dst)
+	return lastErr
 }
 
 func (c *Client) setHeaders(req *http.Request) {

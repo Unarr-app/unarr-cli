@@ -108,6 +108,8 @@ Source:         https://github.com/torrentclaw/unarr`,
 	probeHWAccelCmd.GroupID = "system"
 	cleanCmd := newCleanCmd()
 	cleanCmd.GroupID = "system"
+	mirrorsCmd := newMirrorsCmd()
+	mirrorsCmd.GroupID = "system"
 	selfUpdateCmd := newSelfUpdateCmd()
 	selfUpdateCmd.GroupID = "system"
 	versionCmd := newVersionCmd()
@@ -144,6 +146,7 @@ Source:         https://github.com/torrentclaw/unarr`,
 		doctorCmd,
 		probeHWAccelCmd,
 		cleanCmd,
+		mirrorsCmd,
 		selfUpdateCmd,
 		versionCmd,
 		completionCmd,
