@@ -53,6 +53,16 @@ type DownloadConfig struct {
 	CORSExtraOrigins []string        `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
 	WebRTC           WebRTCConfig    `toml:"webrtc"`
 	Transcode        TranscodeConfig `toml:"transcode"`
+	VPN              VPNConfig       `toml:"vpn"`
+}
+
+// VPNConfig gates the managed-VPN add-on split-tunnel. When enabled, the daemon
+// fetches a WireGuard config from the web (/api/internal/agent/vpn-config) and
+// routes only the torrent client's peer/tracker traffic through an in-process
+// userspace tunnel (no root, no OS routing changes). Requires an active VPN
+// add-on on the account; otherwise the daemon logs and downloads in the clear.
+type VPNConfig struct {
+	Enabled bool `toml:"enabled"`
 }
 
 // TranscodeConfig controls real-time transcoding for the in-browser player

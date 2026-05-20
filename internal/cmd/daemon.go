@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/torrentclaw/unarr/internal/library"
 	"github.com/torrentclaw/unarr/internal/library/mediainfo"
 	"github.com/torrentclaw/unarr/internal/usenet/download"
+	"github.com/torrentclaw/unarr/internal/vpn"
 )
 
 // newStartCmd creates the top-level `unarr start` command.
@@ -193,6 +195,35 @@ func runDaemonStart() error {
 	reporter := engine.NewProgressReporter(agentClient, statusInterval)
 	reporter.SetWatchingFunc(func() bool { return d.Watching.Load() })
 
+	// Managed-VPN add-on: bring up the in-process WireGuard split-tunnel before
+	// the torrent client so peer + tracker traffic routes through it. Failure is
+	// non-fatal — log and download in the clear (better than refusing to run).
+	var vpnTunnel *vpn.Tunnel
+	if cfg.Download.VPN.Enabled {
+		apiURL := cfg.Auth.APIURL
+		if apiURL == "" {
+			apiURL = "https://torrentclaw.com"
+		}
+		fetchCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		conf, ferr := vpn.FetchConfig(fetchCtx, apiURL, cfg.Auth.APIKey, "unarr/"+Version)
+		cancel()
+		var fe *vpn.FetchError
+		switch {
+		case ferr != nil && errors.As(ferr, &fe) && fe.Code == vpn.ErrSlotOnDevice:
+			log.Printf("[vpn] slot is active on one of your devices — downloads will NOT use the VPN. Switch the slot to unarr in your profile to protect downloads.")
+		case ferr != nil:
+			log.Printf("[vpn] could not enable VPN (%v) — downloading in the clear", ferr)
+		default:
+			if t, uerr := vpn.Up(conf); uerr != nil {
+				log.Printf("[vpn] tunnel failed to start (%v) — downloading in the clear", uerr)
+			} else {
+				vpnTunnel = t
+				defer vpnTunnel.Close()
+				log.Printf("[vpn] managed VPN active — torrent traffic split-tunnelled through WireGuard")
+			}
+		}
+	}
+
 	// Create torrent downloader
 	torrentDl, err := engine.NewTorrentDownloader(engine.TorrentConfig{
 		DataDir:         cfg.Download.Dir,
@@ -206,6 +237,7 @@ func runDaemonStart() error {
 		WebRTCEnabled:   cfg.Download.WebRTC.Enabled,
 		WebRTCTrackers:  cfg.Download.WebRTC.Trackers,
 		ICEServers:      engine.BuildICEServers(cfg.Download.WebRTC),
+		VPNTunnel:       vpnTunnel,
 	})
 	if err != nil {
 		return fmt.Errorf("create torrent downloader: %w", err)
