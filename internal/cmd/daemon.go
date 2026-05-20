@@ -199,7 +199,19 @@ func runDaemonStart() error {
 	// the torrent client so peer + tracker traffic routes through it. Failure is
 	// non-fatal — log and download in the clear (better than refusing to run).
 	var vpnTunnel *vpn.Tunnel
-	if cfg.Download.VPN.Enabled {
+	if cfg.Download.VPN.ConfigFile != "" {
+		// Self-hosted / personal-VPN mode: read a local .conf directly.
+		raw, rerr := os.ReadFile(cfg.Download.VPN.ConfigFile)
+		if rerr != nil {
+			log.Printf("[vpn] could not read config_file %q (%v) — downloading in the clear", cfg.Download.VPN.ConfigFile, rerr)
+		} else if t, uerr := vpn.Up(string(raw)); uerr != nil {
+			log.Printf("[vpn] tunnel failed to start from config_file (%v) — downloading in the clear", uerr)
+		} else {
+			vpnTunnel = t
+			defer vpnTunnel.Close()
+			log.Printf("[vpn] managed VPN active (local config_file) — torrent traffic split-tunnelled through WireGuard")
+		}
+	} else if cfg.Download.VPN.Enabled {
 		apiURL := cfg.Auth.APIURL
 		if apiURL == "" {
 			apiURL = "https://torrentclaw.com"

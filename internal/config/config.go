@@ -63,6 +63,11 @@ type DownloadConfig struct {
 // add-on on the account; otherwise the daemon logs and downloads in the clear.
 type VPNConfig struct {
 	Enabled bool `toml:"enabled"`
+	// ConfigFile, when set, makes the daemon read a local WireGuard .conf instead
+	// of fetching one from the web API. For self-hosted / personal-VPN testing:
+	// point it at a peer .conf from your own WireGuard server and the torrent
+	// client split-tunnels through it with no web/provider plumbing.
+	ConfigFile string `toml:"config_file"`
 }
 
 // TranscodeConfig controls real-time transcoding for the in-browser player
