@@ -241,6 +241,9 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	if cfg.SessionID == "" {
 		return nil, errors.New("hls: empty session id")
 	}
+	if !validSessionID.MatchString(cfg.SessionID) {
+		return nil, errors.New("hls: invalid session id")
+	}
 	if cfg.SourcePath == "" {
 		return nil, errors.New("hls: empty source path")
 	}

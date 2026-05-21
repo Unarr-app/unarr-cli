@@ -1,18 +1,29 @@
 # unarr
 
-Powerful terminal tool for torrent search and management. Search 30+ sources, inspect quality, discover popular content, find streaming providers, and manage downloads — all from your terminal.
+**The single binary that replaces your whole *arr stack.** Search 30+ torrent
+sources, inspect real quality before you download, grab subtitles, and manage
+your media library — all from one terminal tool or a headless daemon.
 
-**[GitHub](https://github.com/torrentclaw/unarr)** | **[Documentation](https://github.com/torrentclaw/unarr#readme)** | **[Releases](https://github.com/torrentclaw/unarr/releases)**
+**[Website & docs](https://torrentclaw.com/unarr)** · **[Install guide](https://torrentclaw.com/cli)** · **[Get an API key](https://torrentclaw.com)**
 
-## Quick Start
+> Powered by [TorrentClaw](https://torrentclaw.com) — an aggregator that unifies
+> YTS, EZTV, Knaben, Torrentio, Bitmagnet and more, enriched with TMDB metadata
+> and a 0–100 quality score per release.
 
-### 1. Setup (interactive wizard)
+---
+
+## Quick start
+
+### 1. First-time setup (interactive wizard)
 
 ```bash
 docker run -it --rm \
   -v ~/.config/unarr:/config \
   torrentclaw/unarr setup
 ```
+
+The wizard asks for your TorrentClaw API key (free at
+[torrentclaw.com](https://torrentclaw.com)) and your download directory.
 
 ### 2. Run the daemon
 
@@ -25,6 +36,10 @@ docker run -d --name unarr \
   -v ~/Media:/downloads \
   torrentclaw/unarr
 ```
+
+That's it — `unarr` now runs headless, watching for jobs and managing downloads.
+
+---
 
 ## Docker Compose
 
@@ -45,45 +60,54 @@ services:
     environment:
       - TZ=UTC
       # - UNARR_API_KEY=tc_your_key_here
+    network_mode: host        # recommended for full P2P performance
     deploy:
       resources:
         limits:
           memory: 512M
           cpus: "2.0"
-    network_mode: host
 
 volumes:
   unarr-data:
 ```
 
+```bash
+docker compose run --rm unarr setup   # one-time wizard
+docker compose up -d                   # start the daemon
+```
+
+---
+
 ## Volumes
 
-| Path | Purpose |
-|------|---------|
-| `/config` | Configuration file (`config.toml`) |
-| `/downloads` | Finished media downloads |
-| `/data` | Internal state: torrent metadata, cache |
+| Path         | Purpose                                          |
+|--------------|--------------------------------------------------|
+| `/config`    | Configuration file (`config.toml`)               |
+| `/downloads` | Finished media downloads                         |
+| `/data`      | Internal state: torrent metadata, cache          |
 
-## Environment Variables
+## Environment variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `TZ` | Timezone | `UTC` |
-| `UNARR_API_KEY` | TorrentClaw API key | from config |
-| `UNARR_API_URL` | API endpoint | `https://torrentclaw.com` |
-| `UNARR_DOWNLOAD_DIR` | Download directory | `/downloads` |
-| `UNARR_CONFIG_DIR` | Config directory | `/config` |
-| `UNARR_COUNTRY` | Country code (ISO 3166) | `US` |
+| Variable               | Description                          | Default                   |
+|------------------------|--------------------------------------|---------------------------|
+| `UNARR_API_KEY`        | TorrentClaw API key                  | from config               |
+| `UNARR_API_URL`        | API endpoint                         | `https://torrentclaw.com` |
+| `UNARR_DOWNLOAD_DIR`   | Download directory                   | `/downloads`              |
+| `UNARR_CONFIG_DIR`     | Config directory                     | `/config`                 |
+| `UNARR_COUNTRY`        | Country code (ISO 3166)              | `US`                      |
+| `TZ`                   | Timezone                             | `UTC`                     |
+
+Any config value can be overridden by its matching `UNARR_*` environment variable.
 
 ## Networking
 
-**Host mode** (recommended) gives full P2P performance with no port management:
+**Host mode (recommended)** — full P2P performance, no port mapping:
 
 ```yaml
 network_mode: host
 ```
 
-**Bridge mode** — more isolated, but requires explicit ports:
+**Bridge mode** — more isolated, but you must expose the BitTorrent ports:
 
 ```yaml
 ports:
@@ -91,7 +115,7 @@ ports:
   - "6881-6889:6881-6889/udp"
 ```
 
-## Running Commands
+## Running commands
 
 Use `docker exec` for one-off commands while the daemon is running:
 
@@ -99,32 +123,77 @@ Use `docker exec` for one-off commands while the daemon is running:
 docker exec unarr unarr search "inception" --quality 1080p
 docker exec unarr unarr popular --limit 10
 docker exec unarr unarr status
-docker exec unarr unarr doctor
+docker exec unarr unarr doctor      # diagnose config / connectivity
 ```
 
-## Supported Architectures
-
-| Architecture | Tag |
-|-------------|-----|
-| `linux/amd64` | `latest`, `0.3`, `0.3.5` |
-| `linux/arm64` | `latest`, `0.3`, `0.3.5` |
+---
 
 ## Tags
 
-| Tag | Description |
-|-----|-------------|
-| `latest` | Latest stable release |
-| `X.Y.Z` | Specific version (e.g. `0.3.5`) |
-| `X.Y` | Latest patch for minor version (e.g. `0.3`) |
+| Tag      | Description                                      |
+|----------|--------------------------------------------------|
+| `latest` | Latest stable release                            |
+| `X.Y.Z`  | Exact version (e.g. `0.9.0`)                      |
+| `X.Y`    | Latest patch within a minor (e.g. `0.9`)         |
 
-## Image Details
+Pin a tag in production (`torrentclaw/unarr:0.9.0`) for reproducible deploys.
 
-- **Base image:** Alpine 3.22
-- **User:** `unarr` (UID 1000, GID 1000)
+## Supported architectures
+
+Multi-arch image — Docker pulls the right one automatically:
+
+- `linux/amd64`
+- `linux/arm64` (Apple Silicon, Raspberry Pi 4/5, ARM servers)
+
+## Image details
+
+- **Base:** Alpine 3.22 (minimal, regularly patched)
+- **User:** `unarr` (UID 1000, GID 1000) — runs as **non-root**
 - **Entrypoint:** `unarr start` (daemon mode)
-- **Read-only filesystem** — only mounted volumes are writable
-- **No root required** — runs as non-root by default
+- **Read-only rootfs** — only mounted volumes are writable
+- **Bundled `ffmpeg` / `ffprobe`** for media inspection — nothing else to install
+- **Self-contained updates** — binaries are served from TorrentClaw's own
+  infrastructure, no third-party registry dependency
+
+---
+
+## Other install methods
+
+Not using Docker? Install the native binary instead:
+
+```bash
+# Linux / macOS
+curl -fsSL https://torrentclaw.com/install.sh | sh
+
+# Windows (PowerShell)
+irm https://torrentclaw.com/install.ps1 | iex
+
+# Go toolchain
+go install github.com/torrentclaw/unarr/cmd/unarr@latest
+```
+
+## Mirrors
+
+The installer and release binaries are served from every TorrentClaw mirror, so
+you can install even if one domain is blocked in your region. Each mirror is
+self-contained (it serves its own binaries — no cross-domain dependency):
+
+| Mirror | Install command |
+|--------|-----------------|
+| `torrentclaw.com` (primary) | `curl -fsSL https://torrentclaw.com/install.sh \| sh` |
+| `torrentclaw.to` | `curl -fsSL https://torrentclaw.to/install.sh \| sh` |
+| Tor (`.onion`) | `torsocks sh -c "$(curl http://torrentf3aifidcsaaanmnmuhv2s53r6hqsl3zkmfidiaxainkeqk5id.onion/install.sh)"` |
+
+The Tor address routes everything (install script + binaries) through the hidden
+service, so no clearnet exit is needed.
+
+## Links
+
+- **Website & docs:** https://torrentclaw.com/unarr
+- **CLI install guide:** https://torrentclaw.com/cli
+- **API & account:** https://torrentclaw.com
+- **Mirror status:** https://torrentclaw.com/mirrors
 
 ## License
 
-MIT License — see [LICENSE](https://github.com/torrentclaw/unarr/blob/main/LICENSE) for details.
+MIT.

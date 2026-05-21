@@ -57,7 +57,7 @@ func TestArchiveName(t *testing.T) {
 
 func TestReleaseURL(t *testing.T) {
 	url := releaseURL("0.3.0", "unarr_0.3.0_linux_amd64.tar.gz")
-	want := "https://github.com/torrentclaw/unarr/releases/download/v0.3.0/unarr_0.3.0_linux_amd64.tar.gz"
+	want := "https://torrentclaw.com/releases/download/v0.3.0/unarr_0.3.0_linux_amd64.tar.gz"
 	if url != want {
 		t.Errorf("releaseURL = %q, want %q", url, want)
 	}
@@ -289,21 +289,24 @@ func TestUpgraderSameVersionWithPrefix(t *testing.T) {
 
 func TestFetchLatestVersionMockServer(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"tag_name":"v2.5.1","published_at":"2025-01-01T00:00:00Z"}`)
+		if r.URL.Path != "/version" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprintln(w, "v2.5.1")
 	}))
 	defer srv.Close()
 
-	// We can't directly test fetchLatestVersion because it uses a hardcoded URL.
-	// But we can test the JSON parsing logic by calling the endpoint ourselves.
-	resp, err := http.Get(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	prev := updateBaseURL
+	updateBaseURL = srv.URL
+	t.Cleanup(func() { updateBaseURL = prev })
 
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
+	ver, err := fetchLatestVersion(context.Background())
+	if err != nil {
+		t.Fatalf("fetchLatestVersion() = %v", err)
+	}
+	if ver != "2.5.1" {
+		t.Errorf("fetchLatestVersion() = %q, want %q", ver, "2.5.1")
 	}
 }
 
@@ -403,19 +406,19 @@ func TestReleaseURLEdgeCases(t *testing.T) {
 			name:     "pre-release version",
 			version:  "2.0.0-beta.1",
 			filename: "unarr_2.0.0-beta.1_darwin_arm64.tar.gz",
-			wantURL:  "https://github.com/torrentclaw/unarr/releases/download/v2.0.0-beta.1/unarr_2.0.0-beta.1_darwin_arm64.tar.gz",
+			wantURL:  "https://torrentclaw.com/releases/download/v2.0.0-beta.1/unarr_2.0.0-beta.1_darwin_arm64.tar.gz",
 		},
 		{
 			name:     "checksums file",
 			version:  "3.0.0",
 			filename: "checksums.txt",
-			wantURL:  "https://github.com/torrentclaw/unarr/releases/download/v3.0.0/checksums.txt",
+			wantURL:  "https://torrentclaw.com/releases/download/v3.0.0/checksums.txt",
 		},
 		{
 			name:     "windows zip",
 			version:  "1.2.3",
 			filename: "unarr_1.2.3_windows_amd64.zip",
-			wantURL:  "https://github.com/torrentclaw/unarr/releases/download/v1.2.3/unarr_1.2.3_windows_amd64.zip",
+			wantURL:  "https://torrentclaw.com/releases/download/v1.2.3/unarr_1.2.3_windows_amd64.zip",
 		},
 	}
 	for _, tt := range tests {
@@ -530,19 +533,19 @@ func TestFetchLatestVersionWithHTTPTest(t *testing.T) {
 	}{
 		{
 			name:       "valid response",
-			body:       `{"tag_name":"v3.1.4"}`,
+			body:       "v3.1.4\n",
 			statusCode: 200,
 			wantVer:    "3.1.4",
 		},
 		{
 			name:       "valid response without v prefix",
-			body:       `{"tag_name":"2.0.0"}`,
+			body:       "2.0.0",
 			statusCode: 200,
 			wantVer:    "2.0.0",
 		},
 		{
-			name:       "empty tag_name",
-			body:       `{"tag_name":""}`,
+			name:       "empty body",
+			body:       "",
 			statusCode: 200,
 			wantErr:    true,
 		},
@@ -553,8 +556,8 @@ func TestFetchLatestVersionWithHTTPTest(t *testing.T) {
 			wantErr:    true,
 		},
 		{
-			name:       "invalid json",
-			body:       `{invalid`,
+			name:       "whitespace only",
+			body:       "   \n",
 			statusCode: 200,
 			wantErr:    true,
 		},
@@ -1083,5 +1086,42 @@ func TestDownloadSetsUserAgent(t *testing.T) {
 
 	if gotUA != "unarr-updater" {
 		t.Errorf("User-Agent = %q, want 'unarr-updater'", gotUA)
+	}
+}
+
+func TestSafeZipPath(t *testing.T) {
+	dest := t.TempDir()
+	absDest, err := filepath.Abs(dest)
+	if err != nil {
+		t.Fatalf("abs dest: %v", err)
+	}
+
+	// Names that must extract successfully.
+	good := []string{
+		"unarr.exe",
+		"bin/unarr.exe",
+		"./unarr.exe",
+		"folder/sub/unarr.exe",
+	}
+	for _, name := range good {
+		if _, ok := safeZipPath(name, "unarr.exe", absDest); !ok {
+			t.Errorf("safeZipPath(%q) = ok:false, want ok:true", name)
+		}
+	}
+
+	// Names that must be rejected for path-traversal reasons.
+	bad := []string{
+		"../unarr.exe",
+		"..",
+		"foo/../../unarr.exe",
+		"/etc/passwd",
+		"/abs/unarr.exe",
+		`..\..\windows\system32\unarr.exe`, // backslash entries that escape
+		"../../bin/unarr.exe",
+	}
+	for _, name := range bad {
+		if _, ok := safeZipPath(name, "unarr.exe", absDest); ok {
+			t.Errorf("safeZipPath(%q) = ok:true, want ok:false", name)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	tc "github.com/torrentclaw/go-client"
 	"github.com/torrentclaw/unarr/internal/config"
 	"github.com/torrentclaw/unarr/internal/sentry"
+	"github.com/torrentclaw/unarr/internal/upgrade"
 )
 
 var (
@@ -42,6 +43,10 @@ Source:         https://github.com/torrentclaw/unarr`,
 			if noColor || os.Getenv("NO_COLOR") != "" {
 				color.NoColor = true
 			}
+			// Self-updater fetches releases from the configured host (default
+			// torrentclaw.com), not GitHub — so mirrors / onion / staging /
+			// UNARR_API_URL all route updates correctly.
+			upgrade.SetBaseURL(loadConfig().Auth.APIURL)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,

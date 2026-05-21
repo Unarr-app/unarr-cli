@@ -13,6 +13,7 @@ package upgrade
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -24,7 +25,6 @@ import (
 )
 
 const (
-	githubRepo  = "torrentclaw/unarr"
 	binaryName  = "unarr"
 	smokeTestTO = 5 * time.Second
 )
@@ -43,6 +43,13 @@ type Upgrader struct {
 	CurrentVersion string
 	// OnProgress is called with status messages during the upgrade process.
 	OnProgress func(msg string)
+	// AllowUnsigned downgrades a missing checksums.txt.sig to a warning and
+	// continues with SHA256-only verification. Required to downgrade to a
+	// release published before signing was introduced, or to recover from
+	// an accidental release where the workflow's signing step was skipped.
+	// Default false — signature missing is a hard failure when a public
+	// key is embedded.
+	AllowUnsigned bool
 }
 
 func (u *Upgrader) log(msg string) {
@@ -89,10 +96,21 @@ func (u *Upgrader) Execute(ctx context.Context, targetVersion string) Result {
 	}
 	defer os.Remove(archivePath)
 
-	// 5. Verify checksum
-	u.log("Verifying checksum...")
+	// 5. Verify checksum (and signature, if configured)
+	if SignatureVerificationConfigured() {
+		u.log("Verifying checksum + ed25519 signature...")
+	} else {
+		u.log("Verifying checksum (release signature verification not configured for this build)...")
+	}
 	if err := verifyChecksum(ctx, targetVersion, archivePath); err != nil {
-		return u.fail("checksum: %v", err)
+		if errors.Is(err, ErrMissingSignature) && u.AllowUnsigned {
+			u.log("WARNING: release is unsigned and --allow-unsigned was passed; continuing with SHA256-only verification")
+			if err := verifyChecksumOnly(ctx, targetVersion, archivePath); err != nil {
+				return u.fail("checksum: %v", err)
+			}
+		} else {
+			return u.fail("checksum: %v", err)
+		}
 	}
 
 	// 6. Extract binary
@@ -224,7 +242,26 @@ func archiveName(version string) string {
 	return fmt.Sprintf("%s_%s_%s_%s.%s", binaryName, version, runtime.GOOS, runtime.GOARCH, ext)
 }
 
-// releaseURL returns the download URL for a release asset.
+// updateBaseURL is the base URL the self-updater fetches releases from —
+// TorrentClaw's own app, no GitHub dependency (the org is shadow-banned, so
+// GitHub releases/raw/API all 404 to anonymous clients). Defaults to the
+// production apex; SetBaseURL points it at the configured host (cfg.Auth.APIURL)
+// so mirrors / onion / staging work, and tests can point it at an httptest.Server.
+var updateBaseURL = "https://torrentclaw.com"
+
+// SetBaseURL overrides the release endpoint base (trailing slash trimmed).
+// No-op for empty input so a blank config can't break the default.
+func SetBaseURL(base string) {
+	if base != "" {
+		updateBaseURL = strings.TrimRight(base, "/")
+	}
+}
+
+// releaseURL returns the download URL for a release asset:
+//
+//	{base}/releases/download/v{version}/{filename}
+//
+// served by the app's src/app/releases/download/[...seg] route handler.
 func releaseURL(version, filename string) string {
-	return fmt.Sprintf("https://github.com/%s/releases/download/v%s/%s", githubRepo, version, filename)
+	return fmt.Sprintf("%s/releases/download/v%s/%s", updateBaseURL, version, filename)
 }

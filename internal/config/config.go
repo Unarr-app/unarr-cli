@@ -49,8 +49,25 @@ type DownloadConfig struct {
 	StallTimeout     string          `toml:"stall_timeout"`      // e.g. "30m", "1h", "0" = unlimited (default: "30m")
 	ListenPort       int             `toml:"listen_port"`        // fixed port for incoming peer connections (default: 42069, 0 = random)
 	StreamPort       int             `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
+	EnableUPnP       bool            `toml:"enable_upnp"`        // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in because it exposes the unauthenticated /stream + /hls endpoints to the public internet)
+	CORSExtraOrigins []string        `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
 	WebRTC           WebRTCConfig    `toml:"webrtc"`
 	Transcode        TranscodeConfig `toml:"transcode"`
+	VPN              VPNConfig       `toml:"vpn"`
+}
+
+// VPNConfig gates the managed-VPN add-on split-tunnel. When enabled, the daemon
+// fetches a WireGuard config from the web (/api/internal/agent/vpn-config) and
+// routes only the torrent client's peer/tracker traffic through an in-process
+// userspace tunnel (no root, no OS routing changes). Requires an active VPN
+// add-on on the account; otherwise the daemon logs and downloads in the clear.
+type VPNConfig struct {
+	Enabled bool `toml:"enabled"`
+	// ConfigFile, when set, makes the daemon read a local WireGuard .conf instead
+	// of fetching one from the web API. For self-hosted / personal-VPN testing:
+	// point it at a peer .conf from your own WireGuard server and the torrent
+	// client split-tunnels through it with no web/provider plumbing.
+	ConfigFile string `toml:"config_file"`
 }
 
 // TranscodeConfig controls real-time transcoding for the in-browser player

@@ -18,6 +18,7 @@ import (
 	"github.com/anacrolix/torrent/storage"
 	"github.com/pion/webrtc/v4"
 	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/torrentclaw/unarr/internal/vpn"
 	"golang.org/x/term"
 	"golang.org/x/time/rate"
 )
@@ -79,6 +80,11 @@ type TorrentConfig struct {
 	WebRTCEnabled  bool
 	WebRTCTrackers []string           // wss://… signaling trackers added to every magnet
 	ICEServers     []webrtc.ICEServer // STUN + TURN servers for NAT traversal
+
+	// VPNTunnel, when set, split-tunnels the torrent client's peer + tracker
+	// traffic through an in-process userspace WireGuard tunnel (managed-VPN
+	// add-on). nil = downloads in the clear. Brought up by the daemon.
+	VPNTunnel *vpn.Tunnel
 }
 
 // TorrentDownloader downloads torrents via BitTorrent P2P.
@@ -218,6 +224,20 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	// Re-announce active torrents to DHT periodically (keeps routing table healthy).
 	tcfg.PeriodicallyAnnounceTorrentsToDht = true
 
+	// --- Managed-VPN split-tunnel ---
+	// Route the torrent client's outbound peer + tracker traffic through the
+	// in-process WireGuard tunnel so the swarm + trackers see the VPN IP, not
+	// the user's. unarr's control plane keeps using the normal net. uTP (UDP
+	// peers) is disabled — TCP peers + HTTP/UDP tracker announces are tunnelled;
+	// inbound peers don't apply (leech-only, no port forward).
+	if cfg.VPNTunnel != nil {
+		tcfg.DisableUTP = true
+		tcfg.TrackerDialContext = cfg.VPNTunnel.Net.DialContext
+		tcfg.HTTPDialContext = cfg.VPNTunnel.Net.DialContext
+		tcfg.TrackerListenPacket = cfg.VPNTunnel.ListenPacket
+		log.Printf("[torrent] VPN split-tunnel enabled (peer + tracker traffic routed through WireGuard)")
+	}
+
 	// Try to create client; if the port is in use, try the next few ports.
 	var client *torrent.Client
 	var err error
@@ -237,6 +257,12 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	}
 	if tcfg.ListenPort != listenPort {
 		log.Printf("[torrent] listening on port %d (configured: %d was busy)", tcfg.ListenPort, listenPort)
+	}
+
+	// Route outgoing peer dials through the VPN tunnel (TCP). Added after client
+	// creation; DialForPeerConns defaults to true so this is used for peers.
+	if cfg.VPNTunnel != nil {
+		client.AddDialer(torrent.NetworkDialer{Network: "tcp", Dialer: cfg.VPNTunnel.Net})
 	}
 
 	// Restore DHT nodes with full node IDs (direct routing table insertion, no async pings).

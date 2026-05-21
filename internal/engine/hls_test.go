@@ -261,3 +261,33 @@ func TestCleanupHLSOrphanDirsMissingRoot(t *testing.T) {
 		t.Errorf("CleanupHLSOrphanDirs on missing root = %v, want nil", err)
 	}
 }
+
+func TestValidSessionID(t *testing.T) {
+	good := []string{
+		"abc",
+		"7b8c4f12-9d3e-4a1b-9c2f-aabbccddeeff",
+		"ABC_123-xyz",
+		strings.Repeat("a", 128),
+	}
+	bad := []string{
+		"",
+		"../etc/passwd",
+		"foo/bar",
+		"foo\\bar",
+		"foo.bar",
+		"with spaces",
+		"with\nnewline",
+		strings.Repeat("a", 129),
+		"héctor", // non-ascii
+	}
+	for _, id := range good {
+		if !validSessionID.MatchString(id) {
+			t.Errorf("validSessionID rejected good id %q", id)
+		}
+	}
+	for _, id := range bad {
+		if validSessionID.MatchString(id) {
+			t.Errorf("validSessionID accepted bad id %q", id)
+		}
+	}
+}

@@ -50,7 +50,18 @@ type StreamServer struct {
 	url         string     // best single URL (backward compat)
 	urls        StreamURLs // all available URLs by network type
 	upnpMapping *UPnPMapping
-	disableUPnP bool
+	// enableUPnP gates whether Listen() asks the gateway to publish the
+	// stream port to the WAN. UPnP is opt-in (false by default) because
+	// /stream and /hls have no auth — exposing them on the public internet
+	// would let any scanner enumerate active downloads. LAN and Tailscale
+	// access keep working without UPnP.
+	enableUPnP bool
+	// corsExtraOrigins are operator-configured origins added to the default
+	// allowlist defined in validate.go. Set before Listen().
+	corsExtraOrigins []string
+	// corsAllowlist is computed at Listen() time and treated as read-only
+	// thereafter so per-request reads need no locking.
+	corsAllowlist map[string]struct{}
 
 	hls *HLSSessionRegistry // HLS sessions served on /hls/<id>/...
 
@@ -65,8 +76,60 @@ type StreamServer struct {
 
 // NewStreamServer creates a stream server bound to the given port.
 // Call Listen() to start accepting connections, then SetFile() to serve content.
+//
+// UPnP is opt-in: call SetUPnPEnabled(true) before Listen() to publish the
+// stream port on the WAN. Without it, only LAN and Tailscale clients can
+// reach the server. This matches the security default — /stream and /hls
+// have no auth, so exposing them to the public internet is something the
+// operator must explicitly request.
 func NewStreamServer(port int) *StreamServer {
 	return &StreamServer{port: port, hls: NewHLSSessionRegistry()}
+}
+
+// SetUPnPEnabled toggles WAN publishing of the stream port. Call before
+// Listen(); changes after Listen() are ignored for the active server.
+func (ss *StreamServer) SetUPnPEnabled(enabled bool) {
+	ss.enableUPnP = enabled
+}
+
+// SetCORSAllowedOrigins replaces the operator-supplied extra origins. The
+// default allowlist (torrentclaw.com / app.torrentclaw.com / localhost dev
+// ports) is always merged in. Call before Listen().
+func (ss *StreamServer) SetCORSAllowedOrigins(origins []string) {
+	ss.corsExtraOrigins = origins
+}
+
+// writeCORSHeaders writes the per-origin CORS response headers when the
+// request carries an Origin header that matches the allowlist. Returns true
+// if the handler must short-circuit (preflight OPTIONS). Media-tag requests
+// (no Origin header) bypass this entirely.
+//
+// `Vary: Origin` is emitted whenever an Origin header is present (matched
+// or not) so any intermediate cache keys the response per-origin and a
+// later request with a different origin cannot be served a stale ACAO.
+func (ss *StreamServer) writeCORSHeaders(w http.ResponseWriter, r *http.Request, expose string) (preflight bool) {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	w.Header().Add("Vary", "Origin")
+	if _, ok := ss.corsAllowlist[origin]; !ok {
+		// Unknown origin — do not emit CORS headers so the browser blocks
+		// the response. Still return without short-circuiting so a non-CORS
+		// caller (e.g. curl) keeps working.
+		return false
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Range")
+	if expose != "" {
+		w.Header().Set("Access-Control-Expose-Headers", expose)
+	}
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
+	return false
 }
 
 // HLS returns the HLS session registry for this server. Daemon code uses it
@@ -75,6 +138,11 @@ func (ss *StreamServer) HLS() *HLSSessionRegistry { return ss.hls }
 
 // Listen starts the HTTP server on the configured port. Call once at daemon startup.
 func (ss *StreamServer) Listen(ctx context.Context) error {
+	// Freeze the CORS allowlist before the first request can land. After
+	// this point the map is treated as read-only so handlers can probe it
+	// without locking.
+	ss.corsAllowlist = buildCORSAllowlist(ss.corsExtraOrigins)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stream", ss.handler)
 	mux.HandleFunc("/health", ss.healthHandler)
@@ -122,11 +190,16 @@ func (ss *StreamServer) Listen(ctx context.Context) error {
 	if tsIP := TailscaleIP(); tsIP != "" {
 		ss.urls.Tailscale = fmt.Sprintf("http://%s:%d/stream", tsIP, ss.port)
 	}
-	if !ss.disableUPnP {
-		if mapping, err := SetupUPnP(ss.port); err == nil {
+	if ss.enableUPnP {
+		mapping, err := SetupUPnP(ss.port)
+		if err != nil {
+			log.Printf("[stream] UPnP setup failed: %v (only LAN/Tailscale clients will reach port %d)", err, ss.port)
+		} else {
 			ss.upnpMapping = mapping
 			ss.urls.Public = fmt.Sprintf("http://%s:%d/stream", mapping.ExternalIP, mapping.ExternalPort)
 		}
+	} else {
+		log.Printf("[stream] UPnP disabled — port %d not published to WAN (set downloads.enable_upnp = true to opt in)", ss.port)
 	}
 
 	// Best single URL for backward compat: Tailscale > LAN > Public > localhost
@@ -284,16 +357,8 @@ func (ss *StreamServer) HLSURLsJSON(sessionID string) string {
 func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 	ss.lastActivity.Store(time.Now().UnixNano())
 
-	// CORS for app.torrentclaw.com → 127.0.0.1/Tailscale daemon.
-	if origin := r.Header.Get("Origin"); origin != "" {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Range")
-		w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+	if ss.writeCORSHeaders(w, r, "Content-Length, Content-Range, Accept-Ranges") {
+		return
 	}
 
 	rest := strings.TrimPrefix(r.URL.Path, "/hls/")
@@ -303,6 +368,12 @@ func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := parts[0]
+	// Reject malformed IDs with the same 404 we return for unknown sessions —
+	// no oracle for the accepted format.
+	if !validSessionID.MatchString(sessionID) {
+		http.Error(w, "hls session not found", http.StatusNotFound)
+		return
+	}
 	session := ss.hls.Get(sessionID)
 	if session == nil {
 		http.Error(w, "hls session not found", http.StatusNotFound)
@@ -386,12 +457,26 @@ func (ss *StreamServer) serveSubtitlePlaylist(w http.ResponseWriter, r *http.Req
 //
 //	curl http://<tailscale-ip>:<port>/health
 func (ss *StreamServer) healthHandler(w http.ResponseWriter, r *http.Request) {
+	if ss.writeCORSHeaders(w, r, "") {
+		return
+	}
 	ss.mu.RLock()
 	provider := ss.provider
 	taskID := ss.taskID
 	ss.mu.RUnlock()
 
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	// Only expose filename/taskID/client to loopback callers (local diagnostics).
+	// Remote callers (LAN, Tailscale, UPnP public) get a minimal probe response
+	// so that scanners and unauthenticated peers cannot fingerprint the active
+	// download. The web stream-probe only checks HTTP 200 + Content-Type.
+	//
+	// Use net.IP.IsLoopback so we also accept ::ffff:127.0.0.1 (Linux dual-stack
+	// IPv4-mapped form) and reject the empty-string fallthrough when
+	// SplitHostPort fails on a malformed RemoteAddr — both would otherwise
+	// silently bypass the disclosure boundary.
+	parsedIP := net.ParseIP(clientIP)
+	isLocal := parsedIP != nil && parsedIP.IsLoopback()
 
 	type healthResponse struct {
 		Status    string `json:"status"`
@@ -399,19 +484,23 @@ func (ss *StreamServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 		File      string `json:"file,omitempty"`
 		Task      string `json:"task,omitempty"`
 		Port      int    `json:"port"`
-		Client    string `json:"client"`
+		Client    string `json:"client,omitempty"`
 	}
 	resp := healthResponse{
 		Status: "ok",
 		Port:   ss.port,
-		Client: clientIP,
 	}
 	if provider != nil {
 		resp.Streaming = true
-		resp.File = provider.FileName()
-		resp.Task = taskID
-		if len(resp.Task) > 8 {
-			resp.Task = resp.Task[:8]
+	}
+	if isLocal {
+		resp.Client = clientIP
+		if provider != nil {
+			resp.File = provider.FileName()
+			resp.Task = taskID
+			if len(resp.Task) > 8 {
+				resp.Task = resp.Task[:8]
+			}
 		}
 	}
 
@@ -427,15 +516,8 @@ func (ss *StreamServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 // VLC fetches this playlist and applies the EXTVLCOPT directives automatically,
 // enabling automatic audio/subtitle track selection on all VLC platforms (desktop + mobile).
 func (ss *StreamServer) playlistHandler(w http.ResponseWriter, r *http.Request) {
-	// CORS — handle preflight before doing any work (consistent with handler)
-	if origin := r.Header.Get("Origin"); origin != "" {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Range")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+	if ss.writeCORSHeaders(w, r, "") {
+		return
 	}
 
 	q := r.URL.Query()
@@ -505,17 +587,8 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CORS headers — only when browser sends Origin (HTTPS site → localhost)
-	if origin := r.Header.Get("Origin"); origin != "" {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Range")
-		w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+	if ss.writeCORSHeaders(w, r, "Content-Length, Content-Range, Accept-Ranges") {
+		return
 	}
 
 	rawReader := provider.NewFileReader(r.Context())

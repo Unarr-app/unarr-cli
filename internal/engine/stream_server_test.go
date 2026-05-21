@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -376,6 +377,149 @@ func TestStreamServer_Health_WithFile(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "task-hea") { // primeros 8 chars de "task-health-test"
 		t.Errorf("body = %q, want task short ID", bodyStr)
+	}
+}
+
+// TestStreamServer_Health_NonLoopback_NoLeak verifica que /health no revela
+// nombre de fichero, taskID ni client IP cuando el caller no es loopback.
+// Protección contra reconnaissance vía LAN / UPnP / Tailscale.
+func TestStreamServer_Health_NonLoopback_NoLeak(t *testing.T) {
+	srv := NewStreamServer(0) // UPnP off by default — keep test hermetic
+	ctx := context.Background()
+	if err := srv.Listen(ctx); err != nil {
+		t.Fatalf("Listen() error: %v", err)
+	}
+	defer srv.Shutdown(ctx)
+
+	provider := newFakeProvider("secret.mkv", []byte("data"))
+	srv.SetFile(provider, "secret-task-id")
+
+	cases := []struct {
+		name       string
+		remoteAddr string
+	}{
+		{"lan_ipv4", "192.168.1.50:54321"},
+		{"empty_host_no_bypass", ":54321"},
+		{"public_ipv4", "203.0.113.10:443"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			req.RemoteAddr = tc.remoteAddr
+			srv.healthHandler(rr, req)
+
+			body := rr.Body.String()
+			if !strings.Contains(body, `"status":"ok"`) {
+				t.Errorf("body missing status:ok: %q", body)
+			}
+			if !strings.Contains(body, `"streaming":true`) {
+				t.Errorf("body should report streaming bool: %q", body)
+			}
+			if strings.Contains(body, "secret.mkv") {
+				t.Errorf("body leaked filename: %q", body)
+			}
+			if strings.Contains(body, "secret-t") {
+				t.Errorf("body leaked task id: %q", body)
+			}
+			if strings.Contains(body, "192.168.1.50") || strings.Contains(body, "203.0.113.10") {
+				t.Errorf("body leaked client ip: %q", body)
+			}
+		})
+	}
+}
+
+// TestStreamServer_CORS_Allowlist verifica que sólo los origenes en la
+// allowlist reciben Access-Control-Allow-Origin y que ningún otro origen
+// es eco-reflejado.
+func TestStreamServer_CORS_Allowlist(t *testing.T) {
+	srv := NewStreamServer(0)
+	ctx := context.Background()
+	if err := srv.Listen(ctx); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer srv.Shutdown(ctx)
+
+	cases := []struct {
+		origin    string
+		wantAllow bool
+	}{
+		{"https://app.torrentclaw.com", true},
+		{"https://torrentclaw.com", true},
+		{"http://localhost:3030", true},
+		{"http://127.0.0.1:3030", true},
+		{"https://evil.example", false},
+		{"null", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.origin, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodOptions, "/health", nil)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			srv.healthHandler(rr, req)
+			got := rr.Header().Get("Access-Control-Allow-Origin")
+			if tc.wantAllow {
+				if got != tc.origin {
+					t.Errorf("origin %q: ACAO = %q, want %q", tc.origin, got, tc.origin)
+				}
+			} else if got != "" {
+				t.Errorf("origin %q: ACAO leaked as %q, expected empty", tc.origin, got)
+			}
+		})
+	}
+}
+
+// TestStreamServer_CORS_ExtraOrigin verifica que SetCORSAllowedOrigins añade
+// origins al baseline sin removerlos.
+func TestStreamServer_CORS_ExtraOrigin(t *testing.T) {
+	srv := NewStreamServer(0)
+	srv.SetCORSAllowedOrigins([]string{"https://custom.example"})
+	ctx := context.Background()
+	if err := srv.Listen(ctx); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer srv.Shutdown(ctx)
+
+	for _, origin := range []string{"https://custom.example", "https://torrentclaw.com"} {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.Header.Set("Origin", origin)
+		srv.healthHandler(rr, req)
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != origin {
+			t.Errorf("origin %q: ACAO = %q", origin, got)
+		}
+	}
+}
+
+// TestStreamServer_HLS_InvalidSessionID verifica que el hlsHandler rechaza
+// session IDs con caracteres ilegales devolviendo 404 (uniforme con sesión
+// inexistente) para no filtrar el formato aceptado a un attacker.
+func TestStreamServer_HLS_InvalidSessionID(t *testing.T) {
+	srv := NewStreamServer(0) // UPnP off by default — keep test hermetic
+	ctx := context.Background()
+	if err := srv.Listen(ctx); err != nil {
+		t.Fatalf("Listen() error: %v", err)
+	}
+	defer srv.Shutdown(ctx)
+
+	bad := []string{
+		"/hls/..%2Fetc%2Fpasswd/master.m3u8",
+		"/hls/foo.bar/master.m3u8",
+		"/hls/foo%20bar/master.m3u8",
+		"/hls/foo%2Fbar/master.m3u8",
+	}
+	for _, path := range bad {
+		t.Run(path, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			srv.hlsHandler(rr, req)
+			if rr.Code != http.StatusNotFound {
+				t.Errorf("path %q: status = %d, want 404", path, rr.Code)
+			}
+		})
 	}
 }
 

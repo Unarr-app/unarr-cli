@@ -2,10 +2,10 @@ package upgrade
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -88,7 +88,23 @@ func download(ctx context.Context, version string) (string, error) {
 }
 
 // verifyChecksum downloads checksums.txt and verifies the archive's SHA256.
+// When a release public key is embedded at build time (releasePubKeyBase64),
+// the function also verifies an ed25519 signature over checksums.txt before
+// trusting any hash inside it — this turns the checksum file from a passive
+// integrity check into an authenticated artifact that a maintainer or CI key
+// compromise cannot trivially forge.
 func verifyChecksum(ctx context.Context, version, archivePath string) error {
+	return verifyChecksumWithOptions(ctx, version, archivePath, true)
+}
+
+// verifyChecksumOnly skips the ed25519 signature step. Used by Upgrader
+// when --allow-unsigned is set and the release is known to predate signing
+// (or when a release accidentally shipped without a .sig file).
+func verifyChecksumOnly(ctx context.Context, version, archivePath string) error {
+	return verifyChecksumWithOptions(ctx, version, archivePath, false)
+}
+
+func verifyChecksumWithOptions(ctx context.Context, version, archivePath string, verifySignature bool) error {
 	// Download checksums.txt
 	url := releaseURL(version, "checksums.txt")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -107,11 +123,28 @@ func verifyChecksum(ctx context.Context, version, archivePath string) error {
 		return fmt.Errorf("fetch checksums: HTTP %d", resp.StatusCode)
 	}
 
+	// Read the entire checksums.txt content first so we can both parse and
+	// verify the signature over the same bytes.
+	checksumsContent, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read checksums: %w", err)
+	}
+
+	// Verify ed25519 signature over checksums.txt before trusting its
+	// contents. Skipped silently when no key is embedded (handled by the
+	// caller via SignatureVerificationConfigured) or when the caller
+	// explicitly opts out via --allow-unsigned.
+	if verifySignature {
+		if err := verifyChecksumsSignature(ctx, version, checksumsContent); err != nil {
+			return fmt.Errorf("verify signature: %w", err)
+		}
+	}
+
 	// Parse checksums.txt — format: "<sha256>  <filename>"
 	expectedName := archiveName(version)
 	var expectedHash string
 
-	scanner := bufio.NewScanner(resp.Body)
+	scanner := bufio.NewScanner(bytes.NewReader(checksumsContent))
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Fields(line)
@@ -148,36 +181,35 @@ func verifyChecksum(ctx context.Context, version, archivePath string) error {
 	return nil
 }
 
-// fetchLatestVersion queries GitHub API for the latest release tag.
+// fetchLatestVersion queries the TorrentClaw release endpoint (/version) for the
+// latest version string (e.g. "0.8.1"). No GitHub dependency.
 func fetchLatestVersion(ctx context.Context) (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
+	url := updateBaseURL + "/version"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "unarr-updater")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("fetch latest release: %w", err)
+		return "", fmt.Errorf("fetch latest version: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub API: HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("version endpoint: HTTP %d", resp.StatusCode)
 	}
 
-	var release struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		return "", fmt.Errorf("read version: %w", err)
 	}
 
-	if release.TagName == "" {
-		return "", fmt.Errorf("empty tag_name in release")
+	version := strings.TrimPrefix(strings.TrimSpace(string(body)), "v")
+	if version == "" {
+		return "", fmt.Errorf("empty version from %s", url)
 	}
 
-	return strings.TrimPrefix(release.TagName, "v"), nil
+	return version, nil
 }

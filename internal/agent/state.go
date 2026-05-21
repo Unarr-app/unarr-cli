@@ -45,9 +45,13 @@ func WriteState(state *DaemonState) {
 		return
 	}
 
-	// Write to temp file then rename for atomicity
+	// Write to temp file then rename for atomicity. 0o600 keeps the file
+	// readable only by the owning user — the state contains agentID, PID
+	// and counters which are useful to a co-tenant on a shared host for
+	// fingerprinting the daemon, and we already use 0o600 for the config
+	// file. No need for cross-user readability here.
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
 	os.Rename(tmp, path)

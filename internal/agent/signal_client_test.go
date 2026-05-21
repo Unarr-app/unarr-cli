@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -118,6 +119,48 @@ func TestSignalStreamCloseCancelsRead(t *testing.T) {
 		// drain
 	}
 	wg.Wait()
+}
+
+// TestSignalStreamRejectsOversizedEvent verifies that a hostile or buggy
+// server sending an unbounded `data:` event surfaces an error and stops
+// the reader instead of growing daemon memory forever.
+func TestSignalStreamRejectsOversizedEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			http.Error(w, "auth", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		// Send many data: continuation lines until we blow past the
+		// per-event cap. Each chunk is a short legitimate-looking line.
+		chunk := "data: " + strings.Repeat("x", 4096) + "\n"
+		fmt.Fprint(w, "event: signal\n")
+		for i := 0; i < (sseMaxEventBytes/4096)+8; i++ {
+			fmt.Fprint(w, chunk)
+		}
+		flusher.Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-key", "test-ua")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	stream, err := c.OpenSignalStream(ctx, "session-overflow")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer stream.Close()
+
+	for range stream.Events() {
+		// Should never receive a parsed event — the over-sized buffer must
+		// be rejected before dispatch.
+	}
+	if err := stream.Err(); err == nil {
+		t.Fatal("expected error from oversized event, got nil")
+	}
 }
 
 func TestPostSignalSendsCorrectBody(t *testing.T) {

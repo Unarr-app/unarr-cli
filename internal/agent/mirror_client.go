@@ -37,9 +37,28 @@ type MirrorsResponse struct {
 // Hard-coded here (not loaded from config) because the whole point is to
 // have something to consult when config-driven URLs all fail.
 //
-// Keep in sync with src/lib/mirrors-config.ts → STATIC_FALLBACKS on the web.
+// Hosted on IPFS (content-addressed, re-pinnable, no host can take it down
+// permanently — same bytes re-pinned anywhere keep the same CID). Multiple
+// public gateways are listed so a single gateway being blocked doesn't kill
+// the fallback; the /ipfs/<CID>/ path is identical across all gateways.
+//
+// GitHub Pages was removed 2026-05-17: the whole torrentclaw org is
+// shadow-banned (public repos 404 to anonymous users). Do NOT re-add any
+// github.io URL. Keep this slice in sync with `STATIC_FALLBACKS` in
+// `torrentclaw-web/src/lib/mirrors-config.ts` — when the IPFS CID changes
+// (scripts/publish-mirrors-ipfs.sh), update both.
+//
+// Future hardening: sign mirrors.json with the same ed25519 release key
+// (or a sibling) so a hijack of any single static host cannot serve a
+// malicious mirror list. Today the only signal is "agreement between
+// independent providers" via cross-checking, which we leave to the
+// operator.
+const mirrorsIPFSCID = "bafybeigwux74fek7uky7nct47z5eqwwnpylakfxppqqnzbuxdw7p3ikfdy"
+
 var DefaultStaticFallbackURLs = []string{
-	"https://torrentclaw.github.io/mirrors/mirrors.json",
+	"https://ipfs.io/ipfs/" + mirrorsIPFSCID + "/mirrors.json",
+	"https://dweb.link/ipfs/" + mirrorsIPFSCID + "/mirrors.json",
+	"https://gateway.pinata.cloud/ipfs/" + mirrorsIPFSCID + "/mirrors.json",
 }
 
 // FetchMirrorsWithFallback pulls the mirror list using FetchMirrors against
@@ -68,8 +87,8 @@ func FetchMirrorsWithFallback(ctx context.Context, candidates []string, userAgen
 }
 
 // fetchMirrorsJSON pulls a MirrorsResponse from already-fully-qualified URLs
-// (e.g. https://torrentclaw.github.io/mirrors/mirrors.json). Each candidate
-// is tried in order; the first success wins.
+// (e.g. https://ipfs.io/ipfs/<CID>/mirrors.json). Each candidate is tried
+// in order; the first success wins.
 func fetchMirrorsJSON(ctx context.Context, urls []string, userAgent string) (*MirrorsResponse, error) {
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("no static fallback URLs configured")

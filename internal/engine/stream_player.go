@@ -4,14 +4,23 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strings"
 )
 
 // OpenPlayer attempts to open a media player with the given stream URL.
 // Returns the player name and the running command.
 // If override is set, it uses that command directly.
+//
+// The URL is required to be http(s) so a hostile-looking value (e.g. starting
+// with `--`) is not interpreted as a switch by mpv/vlc/xdg-open/open. The
+// `--` separator is also appended before the URL where the helper supports
+// it.
 func OpenPlayer(url, override string) (string, *exec.Cmd, error) {
+	if !isSafePlayerURL(url) {
+		return "", nil, fmt.Errorf("refusing to open non-http(s) URL")
+	}
 	if override != "" {
-		cmd := exec.Command(override, url)
+		cmd := exec.Command(override, "--", url)
 		if err := cmd.Start(); err != nil {
 			return override, nil, fmt.Errorf("start %s: %w", override, err)
 		}
@@ -20,7 +29,7 @@ func OpenPlayer(url, override string) (string, *exec.Cmd, error) {
 
 	// Try mpv first (best streaming support)
 	if path, err := exec.LookPath("mpv"); err == nil {
-		cmd := exec.Command(path, "--no-terminal", url)
+		cmd := exec.Command(path, "--no-terminal", "--", url)
 		if err := cmd.Start(); err == nil {
 			return "mpv", cmd, nil
 		}
@@ -28,7 +37,7 @@ func OpenPlayer(url, override string) (string, *exec.Cmd, error) {
 
 	// Try VLC
 	if path, err := exec.LookPath("vlc"); err == nil {
-		cmd := exec.Command(path, url)
+		cmd := exec.Command(path, "--", url)
 		if err := cmd.Start(); err == nil {
 			return "vlc", cmd, nil
 		}
@@ -36,7 +45,7 @@ func OpenPlayer(url, override string) (string, *exec.Cmd, error) {
 
 	// Try cvlc (VLC headless)
 	if path, err := exec.LookPath("cvlc"); err == nil {
-		cmd := exec.Command(path, url)
+		cmd := exec.Command(path, "--", url)
 		if err := cmd.Start(); err == nil {
 			return "vlc (headless)", cmd, nil
 		}
@@ -51,6 +60,9 @@ func OpenPlayer(url, override string) (string, *exec.Cmd, error) {
 }
 
 func openBrowser(url string) (string, *exec.Cmd, error) {
+	if !isSafePlayerURL(url) {
+		return "", nil, fmt.Errorf("refusing to open non-http(s) URL")
+	}
 	switch runtime.GOOS {
 	case "linux":
 		if path, err := exec.LookPath("xdg-open"); err == nil {
@@ -60,7 +72,7 @@ func openBrowser(url string) (string, *exec.Cmd, error) {
 			}
 		}
 	case "darwin":
-		cmd := exec.Command("/usr/bin/open", url)
+		cmd := exec.Command("/usr/bin/open", "--", url)
 		if err := cmd.Start(); err == nil {
 			return "browser", cmd, nil
 		}
@@ -71,4 +83,10 @@ func openBrowser(url string) (string, *exec.Cmd, error) {
 		}
 	}
 	return "", nil, fmt.Errorf("no browser opener found")
+}
+
+// isSafePlayerURL guards the helpers above against URLs that could be
+// interpreted as command-line switches by the launched player.
+func isSafePlayerURL(url string) bool {
+	return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
 }

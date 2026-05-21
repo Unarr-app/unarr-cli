@@ -1,0 +1,52 @@
+# Rebuilds and re-pushes the `latest` image without a version bump so newly
+# *fixed* Alpine / ffmpeg / Go patches land between tagged releases. Versioned
+# tags are immutable and never touched here. Runs weekly and on demand.
+name: Docker rebuild
+
+on:
+  schedule:
+    # Mondays 04:17 UTC (off the hour to avoid the scheduler rush)
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Stamp the binary with the most recent release tag (not "dev").
+      - name: Resolve version
+        id: ver
+        run: echo "version=$(git describe --tags --abbrev=0 2>/dev/null || echo dev)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          # Refresh the floating tag only — never overwrite a versioned release.
+          tags: torrentclaw/unarr:latest
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+          # Force a fresh base pull so apk upgrade picks up new patches.
+          no-cache: true
+
+      - name: Scan image for fixable CVEs (gate)
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: torrentclaw/unarr:latest
+          only-severities: critical,high
+          only-fixed: true
+          exit-code: true

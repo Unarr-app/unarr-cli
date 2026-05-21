@@ -27,6 +27,28 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          # Empty when RELEASE_SIGNING_PUBKEY variable is unset — goreleaser
+          # accepts it and the resulting binary disables signature checks
+          # (back-compat: pre-signing releases continue to update). Set
+          # RELEASE_SIGNING_PUBKEY (variable) + RELEASE_SIGNING_KEY (secret)
+          # to turn verification on.
+          RELEASE_SIGNING_PUBKEY: ${{ vars.RELEASE_SIGNING_PUBKEY }}
+
+      - name: Sign checksums.txt with ed25519
+        # Reference secrets.X directly — step-level env defined in this same
+        # step is unreliable to read from this step's own if: expression.
+        if: ${{ vars.RELEASE_SIGNING_PUBKEY != '' && secrets.RELEASE_SIGNING_KEY != '' }}
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          go run ./scripts/sign-checksums \
+            -key "$RELEASE_SIGNING_KEY" \
+            -in  dist/checksums.txt \
+            -out dist/checksums.txt.sig
+          gh release upload "$RELEASE_TAG" dist/checksums.txt.sig --clobber
 
   docker:
     needs: release
@@ -61,6 +83,31 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ github.ref_name }}
+
+      # CVE gate. Fails the release on FIXABLE critical/high only — unfixed
+      # upstream ffmpeg codec CVEs are accepted (see SECURITY.md), so the
+      # codec noise does not block. Runs post-push (image already published);
+      # a failure here flags that a fixable CVE slipped through.
+      - name: Scan image for fixable CVEs (gate)
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: torrentclaw/unarr:latest
+          only-severities: critical,high
+          only-fixed: true
+          exit-code: true
+
+      # Sync the Docker Hub repo description from DOCKERHUB.md. Non-fatal: a
+      # description-API auth hiccup must not undo a successful image push.
+      - name: Update Docker Hub description
+        uses: peter-evans/dockerhub-description@v4
+        continue-on-error: true
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: torrentclaw/unarr
+          readme-filepath: ./DOCKERHUB.md
+          short-description: "unarr — the single binary that replaces your *arr stack"
 
 
   virustotal:

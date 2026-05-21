@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -85,15 +86,22 @@ func extractZip(archivePath, destDir string) (string, error) {
 
 	target := binaryName + ".exe"
 
-	for _, f := range r.File {
-		name := filepath.Base(f.Name)
+	// Resolve destDir to its absolute form once so the ZIP-slip check below
+	// can compare canonical paths instead of fragile substring matches.
+	absDest, err := filepath.Abs(destDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve dest: %w", err)
+	}
 
-		// Guard against path traversal
-		if strings.Contains(f.Name, "..") {
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() {
 			continue
 		}
-
-		if name != target {
+		if filepath.Base(f.Name) != target {
+			continue
+		}
+		absDst, ok := safeZipPath(f.Name, target, absDest)
+		if !ok {
 			continue
 		}
 
@@ -102,8 +110,7 @@ func extractZip(archivePath, destDir string) (string, error) {
 			return "", err
 		}
 
-		dst := filepath.Join(destDir, target)
-		out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		out, err := os.OpenFile(absDst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 		if err != nil {
 			rc.Close()
 			return "", err
@@ -116,8 +123,41 @@ func extractZip(archivePath, destDir string) (string, error) {
 		}
 		out.Close()
 		rc.Close()
-		return dst, nil
+		return absDst, nil
 	}
 
 	return "", fmt.Errorf("binary %q not found in archive", target)
+}
+
+// safeZipPath validates that a ZIP entry name is safe to extract under
+// absDest, then returns the absolute destination path (always
+// absDest/target, never the raw entry name — we still only extract files
+// matched by Base name).
+//
+// Rejected: absolute paths, paths that resolve to "..", paths containing
+// a "../" or "..\\" component, and any entry whose final destination
+// would land outside absDest. The check uses path.Clean on the entry's
+// native separator (ZIP uses forward slashes by spec, but some authors
+// emit backslashes — we treat both as separators here so a hostile entry
+// on Linux can't bypass the substring scan).
+func safeZipPath(entryName, target, absDest string) (string, bool) {
+	// Normalise both separators to "/" so the check works on Linux too,
+	// where filepath.Separator is "/" and a hostile "..\\foo" string is
+	// otherwise treated as a single filename component by filepath.Clean.
+	normalised := strings.ReplaceAll(entryName, `\`, "/")
+	cleaned := path.Clean(normalised)
+	if cleaned == ".." ||
+		strings.HasPrefix(cleaned, "../") ||
+		strings.Contains(cleaned, "/../") ||
+		path.IsAbs(cleaned) {
+		return "", false
+	}
+	absDst, err := filepath.Abs(filepath.Join(absDest, target))
+	if err != nil {
+		return "", false
+	}
+	if !strings.HasPrefix(absDst+string(filepath.Separator), absDest+string(filepath.Separator)) {
+		return "", false
+	}
+	return absDst, true
 }
