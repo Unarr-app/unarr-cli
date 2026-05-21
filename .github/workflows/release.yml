@@ -84,6 +84,19 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_name }}
 
+      # CVE gate. Fails the release on FIXABLE critical/high only — unfixed
+      # upstream ffmpeg codec CVEs are accepted (see SECURITY.md), so the
+      # codec noise does not block. Runs post-push (image already published);
+      # a failure here flags that a fixable CVE slipped through.
+      - name: Scan image for fixable CVEs (gate)
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: torrentclaw/unarr:latest
+          only-severities: critical,high
+          only-fixed: true
+          exit-code: true
+
       # Sync the Docker Hub repo description from DOCKERHUB.md. Non-fatal: a
       # description-API auth hiccup must not undo a successful image push.
       - name: Update Docker Hub description
