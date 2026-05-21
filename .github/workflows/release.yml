@@ -84,6 +84,18 @@ jobs:
           build-args: |
             VERSION=${{ github.ref_name }}
 
+      # Sync the Docker Hub repo description from DOCKERHUB.md. Non-fatal: a
+      # description-API auth hiccup must not undo a successful image push.
+      - name: Update Docker Hub description
+        uses: peter-evans/dockerhub-description@v4
+        continue-on-error: true
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: torrentclaw/unarr
+          readme-filepath: ./DOCKERHUB.md
+          short-description: "unarr — the single binary that replaces your *arr stack"
+
 
   virustotal:
     needs: release
