@@ -66,9 +66,9 @@ func TestSignatureVerifiesGoodSignature(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	prevHost := githubReleaseHost
-	githubReleaseHost = srv.URL
-	t.Cleanup(func() { githubReleaseHost = prevHost })
+	prevHost := updateBaseURL
+	updateBaseURL = srv.URL
+	t.Cleanup(func() { updateBaseURL = prevHost })
 
 	if err := verifyChecksumsSignature(context.Background(), "0.0.0", checksumsBody); err != nil {
 		t.Fatalf("verifyChecksumsSignature(good) = %v, want nil", err)
@@ -92,9 +92,9 @@ func TestSignatureRejectsBadSignature(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	prevHost := githubReleaseHost
-	githubReleaseHost = srv.URL
-	t.Cleanup(func() { githubReleaseHost = prevHost })
+	prevHost := updateBaseURL
+	updateBaseURL = srv.URL
+	t.Cleanup(func() { updateBaseURL = prevHost })
 
 	err = verifyChecksumsSignature(context.Background(), "0.0.0", body)
 	if err == nil || !strings.Contains(err.Error(), "verification failed") {
@@ -110,9 +110,9 @@ func TestSignatureMissingFile(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	prevHost := githubReleaseHost
-	githubReleaseHost = srv.URL
-	t.Cleanup(func() { githubReleaseHost = prevHost })
+	prevHost := updateBaseURL
+	updateBaseURL = srv.URL
+	t.Cleanup(func() { updateBaseURL = prevHost })
 
 	err := verifyChecksumsSignature(context.Background(), "0.0.0", []byte("body"))
 	if !errors.Is(err, ErrMissingSignature) {

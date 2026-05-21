@@ -25,7 +25,6 @@ import (
 )
 
 const (
-	githubRepo  = "torrentclaw/unarr"
 	binaryName  = "unarr"
 	smokeTestTO = 5 * time.Second
 )
@@ -243,12 +242,26 @@ func archiveName(version string) string {
 	return fmt.Sprintf("%s_%s_%s_%s.%s", binaryName, version, runtime.GOOS, runtime.GOARCH, ext)
 }
 
-// githubReleaseHost is the base URL used to build release asset URLs. Exposed
-// as a var (not a const) so tests can point it at an httptest.Server without
-// touching production behaviour.
-var githubReleaseHost = "https://github.com"
+// updateBaseURL is the base URL the self-updater fetches releases from —
+// TorrentClaw's own app, no GitHub dependency (the org is shadow-banned, so
+// GitHub releases/raw/API all 404 to anonymous clients). Defaults to the
+// production apex; SetBaseURL points it at the configured host (cfg.Auth.APIURL)
+// so mirrors / onion / staging work, and tests can point it at an httptest.Server.
+var updateBaseURL = "https://torrentclaw.com"
 
-// releaseURL returns the download URL for a release asset.
+// SetBaseURL overrides the release endpoint base (trailing slash trimmed).
+// No-op for empty input so a blank config can't break the default.
+func SetBaseURL(base string) {
+	if base != "" {
+		updateBaseURL = strings.TrimRight(base, "/")
+	}
+}
+
+// releaseURL returns the download URL for a release asset:
+//
+//	{base}/releases/download/v{version}/{filename}
+//
+// served by the app's src/app/releases/download/[...seg] route handler.
 func releaseURL(version, filename string) string {
-	return fmt.Sprintf("%s/%s/releases/download/v%s/%s", githubReleaseHost, githubRepo, version, filename)
+	return fmt.Sprintf("%s/releases/download/v%s/%s", updateBaseURL, version, filename)
 }
