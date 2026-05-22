@@ -26,6 +26,14 @@ type RegisterRequest struct {
 	// up to 2160p.
 	HWAccel            string `json:"hwAccel,omitempty"`
 	MaxTranscodeHeight int    `json:"maxTranscodeHeight,omitempty"`
+	// Managed-VPN split-tunnel state. The web tracks which agent holds the single
+	// WireGuard slot (1 VPNResellers account = 1 WG keypair = 1 concurrent
+	// connection); other agents are told to use OpenVPN on their host instead.
+	// VPNActive has no omitempty: false is a meaningful state (tunnel down), not
+	// "unset" — the server must see it to release the slot.
+	VPNActive bool   `json:"vpnActive"`
+	VPNMode   string `json:"vpnMode,omitempty"` // managed | self-hosted
+	VPNServer string `json:"vpnServer,omitempty"`
 }
 
 // RegisterResponse is returned by the server after registration.
@@ -344,6 +352,13 @@ type SyncRequest struct {
 	Tasks           []TaskState `json:"tasks"`
 	CanDelete       bool        `json:"canDelete"`                 // library.allow_delete is enabled
 	DeleteConfirmed []int       `json:"deleteConfirmed,omitempty"` // library item IDs successfully deleted from disk
+	// Live managed-VPN split-tunnel state, sent every sync so the web sees the
+	// WireGuard slot owner update in near-realtime (vs. register, once at startup).
+	// VPNActive has no omitempty: false (tunnel down) must reach the server so it
+	// releases the slot, not be elided as "unset".
+	VPNActive bool   `json:"vpnActive"`
+	VPNMode   string `json:"vpnMode,omitempty"`
+	VPNServer string `json:"vpnServer,omitempty"`
 }
 
 // ControlAction represents a server-side control signal for a task.

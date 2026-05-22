@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -56,9 +57,22 @@ type fetchResponse struct {
 }
 
 // FetchConfig retrieves the agent's WireGuard .conf from the web API. Auth is
-// `Authorization: Bearer <apiKey>` (the agent-auth scheme).
-func FetchConfig(ctx context.Context, apiURL, apiKey, userAgent string) (string, error) {
+// `Authorization: Bearer <apiKey>` (the agent-auth scheme). agentId lets the web
+// arbitrate the single WireGuard slot (first agent to ask claims it; others get
+// 409 → ErrSlotOnDevice and should use OpenVPN on their host instead).
+func FetchConfig(ctx context.Context, apiURL, apiKey, userAgent, agentID string, probe bool) (string, error) {
+	q := neturl.Values{}
+	if agentID != "" {
+		q.Set("agentId", agentID)
+	}
+	if probe {
+		// Validate provisioning without claiming the WireGuard slot (status --check).
+		q.Set("probe", "1")
+	}
 	url := strings.TrimSuffix(apiURL, "/") + "/api/internal/agent/vpn-config"
+	if len(q) > 0 {
+		url += "?" + q.Encode()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", &FetchError{ErrUpstream, err.Error()}
@@ -103,6 +117,10 @@ func FetchConfig(ctx context.Context, apiURL, apiKey, userAgent string) (string,
 type Tunnel struct {
 	dev *device.Device
 	Net *netstack.Net
+	// Endpoint is the resolved ip:port of the WireGuard server this tunnel
+	// exits through — surfaced in `unarr vpn status` so the user can see which
+	// VPN server their torrent traffic is routed out of.
+	Endpoint string
 }
 
 // Up parses a WireGuard .conf and brings up the tunnel in userspace.
@@ -132,7 +150,7 @@ func Up(confText string) (*Tunnel, error) {
 		return nil, fmt.Errorf("wireguard up: %w", err)
 	}
 
-	return &Tunnel{dev: dev, Net: tnet}, nil
+	return &Tunnel{dev: dev, Net: tnet, Endpoint: wc.endpoint}, nil
 }
 
 // Close tears the tunnel down.

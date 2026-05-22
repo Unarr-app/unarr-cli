@@ -48,6 +48,12 @@ type Daemon struct {
 	State               DaemonState
 	lastNotifiedVersion string
 
+	// Managed-VPN split-tunnel state, set by cmd/daemon.go before Run and folded
+	// into DaemonState on every write so external tools (`unarr vpn status`) see it.
+	vpnActive bool
+	vpnMode   string
+	vpnServer string
+
 	// Watching tracks whether a user is viewing download progress in the web UI.
 	Watching atomic.Bool
 
@@ -70,6 +76,14 @@ func NewDaemon(cfg DaemonConfig, client *Client) *Daemon {
 // SyncClient returns the sync client for external wiring.
 func (d *Daemon) SyncClient() *SyncClient { return d.sync }
 
+// SetVPNState records the managed-VPN split-tunnel state so it's reflected in the
+// daemon state file (read by `unarr vpn status`). Call before Run.
+func (d *Daemon) SetVPNState(active bool, mode, server string) {
+	d.vpnActive = active
+	d.vpnMode = mode
+	d.vpnServer = server
+}
+
 // UpdateStreamPort updates the stream port reported in sync requests.
 func (d *Daemon) UpdateStreamPort(port int) {
 	d.cfg.StreamPort = port
@@ -91,6 +105,9 @@ func (d *Daemon) Register(ctx context.Context) error {
 		TailscaleIP:        d.cfg.TailscaleIP,
 		HWAccel:            d.cfg.HWAccel,
 		MaxTranscodeHeight: d.cfg.MaxTranscodeHeight,
+		VPNActive:          d.vpnActive,
+		VPNMode:            d.vpnMode,
+		VPNServer:          d.vpnServer,
 	}
 	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {
 		req.DiskFreeBytes = free
@@ -141,6 +158,9 @@ func (d *Daemon) Register(ctx context.Context) error {
 		PID:         os.Getpid(),
 		StartedAt:   now,
 		MethodStats: make(map[string]int),
+		VPNActive:   d.vpnActive,
+		VPNMode:     d.vpnMode,
+		VPNServer:   d.vpnServer,
 	}
 	WriteState(&d.State)
 
@@ -194,6 +214,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.sync.OnWatchingChange = func(watching bool) {
 		d.Watching.Store(watching)
+	}
+	d.sync.GetVPNState = func() (bool, string, string) {
+		return d.vpnActive, d.vpnMode, d.vpnServer
 	}
 	d.sync.OnSyncSuccess = func() {
 		d.State.LastHeartbeat = time.Now()

@@ -22,6 +22,13 @@ type DaemonState struct {
 	FailedCount     int            `json:"failedCount"`
 	TotalDownloaded int64          `json:"totalDownloaded"`
 	MethodStats     map[string]int `json:"methodStats,omitempty"`
+
+	// Managed-VPN split-tunnel state, so `unarr vpn status` can report whether
+	// torrent traffic is actually being routed through the tunnel (vs. the daemon
+	// running but the tunnel having failed to come up → downloading in the clear).
+	VPNActive bool   `json:"vpnActive,omitempty"`
+	VPNMode   string `json:"vpnMode,omitempty"`   // managed | self-hosted
+	VPNServer string `json:"vpnServer,omitempty"` // WireGuard endpoint (ip:port)
 }
 
 // stateFilePathFn is overridable for testing.

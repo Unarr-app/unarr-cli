@@ -171,6 +171,9 @@ unarr start
 | `unarr status` | Show daemon status and active downloads |
 | `unarr daemon install` | Install as system service (systemd/launchd) |
 | `unarr daemon uninstall` | Remove the system service |
+| `unarr vpn status` | Show managed-VPN config and live tunnel state |
+| `unarr vpn enable` | Turn the managed VPN on |
+| `unarr vpn disable` | Turn the managed VPN off |
 
 ### System & Diagnostics
 
@@ -279,6 +282,53 @@ The daemon connects via WebSocket for instant task delivery, with automatic HTTP
 **Service locations:**
 - Linux: `~/.config/systemd/user/unarr.service` (systemd)
 - macOS: `~/Library/LaunchAgents/com.torrentclaw.unarr.plist` (launchd)
+
+## VPN
+
+unarr can route your **downloads** through a managed WireGuard VPN, so peers and
+trackers see the VPN server's IP instead of yours. It runs entirely in userspace
+(wireguard-go + a gVisor netstack) — **no root, no `wg-quick`, no changes to your
+OS routing table**.
+
+Requires a **PRO+ plan with the VPN add-on**. Set it up at
+[torrentclaw.com/vpn](https://torrentclaw.com/vpn).
+
+```bash
+# Turn it on (writes [downloads.vpn] enabled = true to your config)
+unarr vpn enable
+
+# Restart the daemon so it brings the tunnel up at startup
+unarr daemon restart        # or: unarr start (if not installed as a service)
+
+# Check it's working — shows the exit server when the tunnel is up
+unarr vpn status
+
+# Verify your account is provisioned (queries the API)
+unarr vpn status --check
+
+# Turn it off again
+unarr vpn disable
+```
+
+**Split-tunnel — read this:** only the torrent client's traffic goes through the
+VPN. Your browser, `curl`, and every other app keep using your **real IP** — that
+is by design. To check the VPN is working, look at `unarr vpn status` (or the
+peer/announce IP), **not** your browser's "what's my IP". To protect your other
+devices (phone, laptop), use the **OpenVPN credentials** from your profile — those
+support ~10 concurrent devices and do **not** share the agent's WireGuard slot.
+
+**When does it fetch the config?** Once, at daemon startup. There's no periodic
+refresh — after changing your exit server in the web panel or re-provisioning,
+restart the daemon to pick it up. If the fetch fails the daemon logs a `[vpn]`
+line and downloads in the clear (never refuses to run).
+
+**Self-hosted / personal VPN:** instead of the managed config, point unarr at a
+local WireGuard `.conf`:
+
+```toml
+[downloads.vpn]
+config_file = "/path/to/wg.conf"   # takes precedence over `enabled`
+```
 
 ## Diagnostics
 
@@ -437,6 +487,16 @@ max_concurrent = 2           # max simultaneous ffmpeg processes
 If `transcode.enabled = true` but `ffmpeg` / `ffprobe` aren't on PATH, the
 daemon logs a warning at startup and HLS sessions are rejected at runtime
 with a clear error — install ffmpeg or set `enabled = false`.
+
+#### `[downloads.vpn]`
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `false` | Managed VPN: at startup the daemon fetches a WireGuard config from your account and split-tunnels torrent traffic through it. Needs a PRO+ plan with the VPN add-on. Toggle with `unarr vpn enable` / `disable`. |
+| `config_file` | string | `""` | Self-hosted / personal VPN: path to a local WireGuard `.conf`. **Takes precedence over `enabled`** — when set, the daemon uses this file and never calls the API. |
+
+See the [VPN](#vpn) section above for how it works (split-tunnel, no root) and
+how to protect your other devices.
 
 ### Environment variables
 

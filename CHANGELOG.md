@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-05-21
+
+### Added
+
+- **vpn**: `unarr vpn` command (`status`, `enable`, `disable`) to manage the managed
+  WireGuard split-tunnel, with `vpn status --check` to verify provisioning.
+- **vpn**: report split-tunnel state (active, exit server) to the web on register
+  + every sync, so the dashboard shows which agent holds the single WireGuard slot.
+- **vpn**: send the agent id when fetching the VPN config so the web can arbitrate
+  the single WireGuard slot — the first agent claims it; the rest are told to run
+  OpenVPN on their own host (1 agent on WireGuard + up to 9 on OpenVPN).
+
 ## [0.9.1] - 2026-05-21
 
 

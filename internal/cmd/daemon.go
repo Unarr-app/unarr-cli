@@ -217,12 +217,12 @@ func runDaemonStart() error {
 			apiURL = "https://torrentclaw.com"
 		}
 		fetchCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-		conf, ferr := vpn.FetchConfig(fetchCtx, apiURL, cfg.Auth.APIKey, "unarr/"+Version)
+		conf, ferr := vpn.FetchConfig(fetchCtx, apiURL, cfg.Auth.APIKey, "unarr/"+Version, cfg.Agent.ID, false)
 		cancel()
 		var fe *vpn.FetchError
 		switch {
 		case ferr != nil && errors.As(ferr, &fe) && fe.Code == vpn.ErrSlotOnDevice:
-			log.Printf("[vpn] slot is active on one of your devices — downloads will NOT use the VPN. Switch the slot to unarr in your profile to protect downloads.")
+			log.Printf("[vpn] the single WireGuard slot is already held by another unarr agent — this one downloads in the clear. To protect this machine too, set up OpenVPN on it (1 agent uses WireGuard, the rest use OpenVPN — up to 10). See https://torrentclaw.com/vpn")
 		case ferr != nil:
 			log.Printf("[vpn] could not enable VPN (%v) — downloading in the clear", ferr)
 		default:
@@ -234,6 +234,15 @@ func runDaemonStart() error {
 				log.Printf("[vpn] managed VPN active — torrent traffic split-tunnelled through WireGuard")
 			}
 		}
+	}
+
+	// Record VPN split-tunnel state for `unarr vpn status`.
+	if vpnTunnel != nil {
+		mode := "managed"
+		if cfg.Download.VPN.ConfigFile != "" {
+			mode = "self-hosted"
+		}
+		d.SetVPNState(true, mode, vpnTunnel.Endpoint)
 	}
 
 	// Create torrent downloader

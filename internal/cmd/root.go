@@ -103,6 +103,8 @@ Source:         https://github.com/torrentclaw/unarr`,
 	statusCmd.GroupID = "daemon"
 	daemonCmd := newDaemonCmd()
 	daemonCmd.GroupID = "daemon"
+	vpnCmd := newVPNCmd()
+	vpnCmd.GroupID = "daemon"
 
 	// System & Diagnostics
 	statsCmd := newStatsCmd()
@@ -146,6 +148,7 @@ Source:         https://github.com/torrentclaw/unarr`,
 		stopCmd,
 		statusCmd,
 		daemonCmd,
+		vpnCmd,
 		// System & Diagnostics
 		statsCmd,
 		doctorCmd,
