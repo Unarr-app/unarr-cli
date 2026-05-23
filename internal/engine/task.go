@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/torrentclaw/unarr/internal/agent"
 )
@@ -229,8 +230,23 @@ func (t *Task) ToStatusUpdate() agent.StatusUpdate {
 		FileName:        t.FileName,
 		FilePath:        t.FilePath,
 		StreamURL:       t.StreamURL,
-		ErrorMessage:    t.ErrorMessage,
+		// Cap to the server's stored length. A failed extract can carry a
+		// multi-KB unrar/par2 dump; sending it raw made /agent/status 400
+		// the whole report, leaving the task stuck non-terminal.
+		ErrorMessage: truncateMsg(t.ErrorMessage, 2000),
 	}
+}
+
+// truncateMsg caps s to at most max bytes without splitting a UTF-8 rune.
+func truncateMsg(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // MagnetURI builds a magnet link from the info hash.
