@@ -28,6 +28,7 @@ type DaemonConfig struct {
 	ScanPaths          []string // configured scan paths for file deletion validation
 	HWAccel            string   // detected encoder backend ("nvenc"/"qsv"/"vaapi"/"videotoolbox"/"none")
 	MaxTranscodeHeight int      // resolution cap the agent can transcode comfortably (px)
+	AutoUpgrade        bool     // honor server-flagged upgrades by downloading + restarting (default: true)
 }
 
 // Daemon manages agent registration and the sync loop.
@@ -237,6 +238,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return
 		}
 		d.lastNotifiedVersion = version
+		if !d.cfg.AutoUpgrade {
+			log.Printf("[upgrade] new version available: %s — auto_upgrade=false, run `unarr update` to apply", version)
+			return
+		}
 		log.Printf("[upgrade] new version available: %s — applying auto-upgrade", version)
 		go d.applyAutoUpgrade(version)
 	}

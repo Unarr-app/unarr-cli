@@ -162,6 +162,7 @@ func runDaemonStart() error {
 		ScanPaths:          library.ResolveScanPaths(cfg.Download.Dir, cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir, cfg.Library.ScanPath),
 		HWAccel:            string(hwAccelPick),
 		MaxTranscodeHeight: maxTranscodeHeight,
+		AutoUpgrade:        cfg.Daemon.AutoUpgradeEnabled(),
 	}
 
 	// Create HTTP client with mirror failover so a `.com` block-out rolls
@@ -298,6 +299,32 @@ func runDaemonStart() error {
 	// restart, so without this disk usage grows unbounded across restarts.
 	if err := engine.CleanupHLSOrphanDirs(); err != nil {
 		log.Printf("[hls] orphan tmpdir cleanup: %v", err)
+	}
+
+	// Persistent HLS segment cache — survives across sessions so re-plays
+	// of the same file at the same quality skip ffmpeg entirely. Off when
+	// hls_cache.enabled = false; size cap from hls_cache.size_gb; path from
+	// hls_cache.dir (defaults to ~/.cache/unarr/hls-cache).
+	var hlsCache *engine.HLSCache
+	if cfg.Download.HLSCache.Enabled {
+		cacheDir := cfg.Download.HLSCache.Dir
+		if cacheDir == "" {
+			if base, err := os.UserCacheDir(); err == nil {
+				cacheDir = filepath.Join(base, "unarr", "hls-cache")
+			} else {
+				cacheDir = filepath.Join(os.TempDir(), "unarr-hls-cache")
+			}
+		}
+		c, err := engine.NewHLSCache(cacheDir, cfg.Download.HLSCache.SizeGB)
+		if err != nil {
+			log.Printf("[hls_cache] init failed (%v) — falling back to per-session tmpdirs", err)
+		} else {
+			hlsCache = c
+			hlsCache.StartSweeper(ctx, time.Hour)
+			log.Printf("[hls_cache] enabled: dir=%s budget=%dGB", cacheDir, cfg.Download.HLSCache.SizeGB)
+		}
+	} else {
+		log.Printf("[hls_cache] disabled by config — every play re-encodes from scratch")
 	}
 	if err := streamSrv.Listen(ctx); err != nil {
 		return fmt.Errorf("start stream server: %w", err)
@@ -543,6 +570,7 @@ func runDaemonStart() error {
 			Quality:    sess.Quality,
 			AudioIndex: sess.AudioIndex,
 			Transcode:  tcRuntime,
+			Cache:      hlsCache,
 		}
 		hsess, err := engine.StartHLSSession(hlsCtx, hlsCfg)
 		if err != nil {

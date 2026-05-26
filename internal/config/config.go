@@ -52,8 +52,20 @@ type DownloadConfig struct {
 	EnableUPnP       bool            `toml:"enable_upnp"`        // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in because it exposes the unauthenticated /stream + /hls endpoints to the public internet)
 	CORSExtraOrigins []string        `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
 	Transcode        TranscodeConfig `toml:"transcode"`
+	HLSCache         HLSCacheConfig  `toml:"hls_cache"`
 	VPN              VPNConfig       `toml:"vpn"`
 	Funnel           FunnelConfig    `toml:"funnel"`
+}
+
+// HLSCacheConfig controls the persistent HLS segment cache. A completed encode
+// is kept on disk so a second play of the same file at the same quality skips
+// ffmpeg entirely. Old entries are evicted (LRU) once the cache exceeds the
+// size budget. Enabled by default — disable to save disk space at the cost of
+// re-encoding every play.
+type HLSCacheConfig struct {
+	Enabled bool   `toml:"enabled"`  // default: true
+	SizeGB  int    `toml:"size_gb"`  // size budget in gigabytes; default: 5; minimum: 1
+	Dir     string `toml:"dir"`      // override storage path; default: ~/.cache/unarr/hls-cache
 }
 
 // FunnelConfig gates the optional CloudFlare Quick Tunnel that exposes the
@@ -101,7 +113,26 @@ type OrganizeConfig struct {
 
 type DaemonConfig struct {
 	StatusInterval string `toml:"status_interval"`
+	// AutoUpgrade gates the daemon's response to a server-flagged upgrade
+	// (set via the "Force update" button on the web). When true the daemon
+	// downloads + replaces the binary in-place and exits so the service
+	// supervisor respawns on the new version. When false the daemon only
+	// logs "new version available" and the operator must run `unarr update`
+	// manually. Default: true. Available since unarr 0.9.6.
+	AutoUpgrade *bool `toml:"auto_upgrade"`
 }
+
+// AutoUpgradeEnabled returns the resolved AutoUpgrade flag — defaults to true
+// when the user has not set it explicitly. Pointer-vs-bool because Go's
+// zero-value bool would collapse "unset" and "false" together.
+func (d DaemonConfig) AutoUpgradeEnabled() bool {
+	if d.AutoUpgrade == nil {
+		return true
+	}
+	return *d.AutoUpgrade
+}
+
+func boolPtr(v bool) *bool { return &v }
 
 type NotificationsConfig struct {
 	Enabled bool `toml:"enabled"`
@@ -156,11 +187,24 @@ func Default() Config {
 				// `unarr funnel off` (sets enabled=false in the TOML).
 				Enabled: true,
 			},
+			HLSCache: HLSCacheConfig{
+				// On by default — second play of a recently watched file at the
+				// same quality skips ffmpeg (instant start, near-zero CPU).
+				// Users can opt out (hls_cache.enabled=false) or shrink the
+				// budget (hls_cache.size_gb) when disk is tight.
+				Enabled: true,
+				SizeGB:  5,
+			},
+		},
+		Daemon: DaemonConfig{
+			// Pointer-to-true so Default() round-trips through TOML marshal
+			// as `auto_upgrade = true` instead of an omitted key — keeps the
+			// freshly-written config aligned with what README documents.
+			AutoUpgrade: boolPtr(true),
 		},
 		Organize: OrganizeConfig{
 			Enabled: true,
 		},
-		Daemon: DaemonConfig{},
 		Notifications: NotificationsConfig{
 			Enabled: true,
 		},

@@ -100,6 +100,11 @@ type HLSSessionConfig struct {
 	Quality    string // "2160p"|"1080p"|"720p"|"480p"|"original"|""
 	AudioIndex int    // 0-based ffmpeg audio stream selection (-map 0:a:N). -1 = default.
 	Transcode  TranscodeRuntime
+	// Cache is an optional persistent segment cache keyed by (source, quality,
+	// audio). When set, completed encodes are kept across sessions so re-plays
+	// of the same file at the same quality skip ffmpeg entirely. nil disables
+	// caching (per-session tmpdir, deleted on Close — original behavior).
+	Cache *HLSCache
 }
 
 // HLSSession owns a tmpdir + ffmpeg subprocess producing HLS fragments.
@@ -139,6 +144,19 @@ type HLSSession struct {
 	exitErr  error
 	exited   bool
 	readyCh  chan struct{} // closed + replaced each time readyMax advances
+
+	// Persistent cache state. cache==nil means caching disabled for this session.
+	// fromCache=true means the session is replaying a completed encode and no
+	// ffmpeg subprocess was spawned. writerLockHeld=true means this session
+	// owns the per-key TryAcquireWriter claim — Close must ReleaseWriter.
+	// subsDone closes when the subtitle extractor goroutine returns (or is
+	// nil when the source had no subtitle tracks); MarkComplete waits on it
+	// so a HIT replay never serves partial .vtt files.
+	cache          *HLSCache
+	cacheKey       string
+	fromCache      bool
+	writerLockHeld bool
+	subsDone       chan struct{}
 }
 
 // hlsSeekAhead is how many segments past the writer's current position the
@@ -263,11 +281,77 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		return nil, errors.New("hls: source has no duration")
 	}
 
-	tmpDir := filepath.Join(hlsTmpDirRoot(), cfg.SessionID)
+	// Resolve tmpDir + cache placement. Three states:
+	//   1. cache disabled              → per-session tmpdir, deleted on Close.
+	//   2. cache HIT (.complete found) → read from cache dir, no ffmpeg, Pin.
+	//   3. cache MISS, writer-lock OK  → ffmpeg writes to cache dir, Pin + writer-lock.
+	//   4. cache MISS, writer-lock NO  → another session already writing this
+	//                                    key; fall back to private per-session tmpdir
+	//                                    (no caching for this session — second-writer
+	//                                    would corrupt the first one's segments).
+	var (
+		tmpDir         string
+		cacheKey       string
+		fromCache      bool
+		writerLockHeld bool
+	)
+	if cfg.Cache != nil {
+		cacheKey = cfg.Cache.KeyFor(cfg.SourcePath, cfg.Quality, cfg.AudioIndex)
+		// Integrity gate: HasComplete just stats the marker. If init.mp4 or
+		// the last segment vanished (external rm, partial-disk failure), we
+		// can't actually serve a HIT — drop the dir and re-encode.
+		segCountForVerify := int((probe.DurationSec + float64(hlsSegmentDuration) - 1) / float64(hlsSegmentDuration))
+		if segCountForVerify < 1 {
+			segCountForVerify = 1
+		}
+		if cfg.Cache.HasComplete(cacheKey) && !cfg.Cache.VerifyComplete(cacheKey, segCountForVerify) {
+			log.Printf("[hls %s] cache %s sealed but failed integrity check — re-encoding",
+				shortHLSID(cfg.SessionID), cacheKey)
+			_ = cfg.Cache.Invalidate(cacheKey)
+		}
+		if cfg.Cache.HasComplete(cacheKey) {
+			// HIT: read-only replay — many concurrent HITs are fine.
+			tmpDir = cfg.Cache.DirFor(cacheKey)
+			cfg.Cache.Pin(cacheKey)
+			fromCache = true
+			cfg.Cache.RecordHit()
+			_ = cfg.Cache.Touch(cacheKey)
+		} else if cfg.Cache.TryAcquireWriter(cacheKey) {
+			tmpDir = cfg.Cache.DirFor(cacheKey)
+			cfg.Cache.Pin(cacheKey)
+			writerLockHeld = true
+			cfg.Cache.RecordMiss()
+		} else {
+			// Another session is writing this key — fall back to private
+			// dir so we don't trample its segments.
+			log.Printf("[hls %s] cache key %s busy, falling back to per-session tmpdir",
+				shortHLSID(cfg.SessionID), cacheKey)
+			tmpDir = filepath.Join(hlsTmpDirRoot(), cfg.SessionID)
+			cacheKey = "" // disable caching for this session
+			cfg.Cache.RecordMiss()
+		}
+	} else {
+		tmpDir = filepath.Join(hlsTmpDirRoot(), cfg.SessionID)
+	}
+
+	cleanupOnError := func() {
+		if cfg.Cache != nil && cacheKey != "" {
+			cfg.Cache.Unpin(cacheKey)
+			if writerLockHeld {
+				cfg.Cache.ReleaseWriter(cacheKey)
+				_ = cfg.Cache.Invalidate(cacheKey)
+			}
+		} else {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Join(tmpDir, "video"), 0o755); err != nil {
+		cleanupOnError()
 		return nil, fmt.Errorf("hls: mkdir video: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Join(tmpDir, "subs"), 0o755); err != nil {
+		cleanupOnError()
 		return nil, fmt.Errorf("hls: mkdir subs: %w", err)
 	}
 
@@ -285,9 +369,29 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		startedAt:    time.Now(),
 		lastTouch:    time.Now(),
 		readyCh:      make(chan struct{}),
+		cache:          cfg.Cache,
+		cacheKey:       cacheKey,
+		fromCache:      fromCache,
+		writerLockHeld: writerLockHeld,
 	}
 	s.manifestVideo = renderVideoPlaylist(probe.DurationSec, segCount)
 	s.manifestRoot = renderMasterPlaylist(probe, cfg.Quality)
+
+	// Cache HIT: every segment + init.mp4 is already on disk. Skip ffmpeg
+	// entirely and mark readyMax so handlers don't wait. Background subtitle
+	// extraction is also unnecessary — subs were extracted on the original run.
+	if fromCache {
+		s.readyMu.Lock()
+		s.readyMax = segCount - 1
+		s.exited = true
+		close(s.readyCh)
+		s.readyCh = nil
+		s.readyMu.Unlock()
+		log.Printf("[hls %s] cache HIT %s: %s, %.1fs, %d segs (quality=%s)",
+			shortHLSID(cfg.SessionID), cacheKey, filepath.Base(cfg.SourcePath),
+			probe.DurationSec, segCount, coalesce(cfg.Quality, "auto"))
+		return s, nil
+	}
 
 	// Spawn ffmpeg under a dedicated context so Close() can kill it without
 	// touching the parent ctx.
@@ -298,7 +402,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	cmd.Stderr = &hlsStderrCapture{owner: s}
 	if err := cmd.Start(); err != nil {
 		cancel()
-		_ = os.RemoveAll(tmpDir)
+		cleanupOnError()
 		return nil, fmt.Errorf("hls: start ffmpeg: %w", err)
 	}
 	s.cmd = cmd
@@ -307,12 +411,20 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	go s.pollSegments(ffCtx)
 
 	if len(probe.SubtitleTracks) > 0 {
-		go s.extractSubtitles(ffCtx)
+		s.subsDone = make(chan struct{})
+		go func() {
+			defer close(s.subsDone)
+			s.extractSubtitles(ffCtx)
+		}()
 	}
 
-	log.Printf("[hls %s] started: %s, %.1fs, %d segs (quality=%s)",
+	cachedNote := ""
+	if cfg.Cache != nil {
+		cachedNote = fmt.Sprintf(" (cache-miss %s)", cacheKey)
+	}
+	log.Printf("[hls %s] started: %s, %.1fs, %d segs (quality=%s)%s",
 		shortHLSID(cfg.SessionID), filepath.Base(cfg.SourcePath),
-		probe.DurationSec, segCount, coalesce(cfg.Quality, "auto"))
+		probe.DurationSec, segCount, coalesce(cfg.Quality, "auto"), cachedNote)
 	return s, nil
 }
 
@@ -385,8 +497,15 @@ func (s *HLSSession) Touch() {
 	s.mu.Unlock()
 }
 
-// Close stops ffmpeg, deletes the tmpdir, and prevents further requests from
-// blocking on segment readiness. Idempotent.
+// Close stops ffmpeg and prevents further requests from blocking on segment
+// readiness. Idempotent.
+//
+// Disk lifecycle:
+//   - cache disabled → delete tmpDir (original behavior).
+//   - cache enabled + this session was a HIT → keep dir, just unpin.
+//   - cache enabled + this was a write session → if ffmpeg exited cleanly and
+//     every segment is on disk, persist with .complete and keep dir. Otherwise
+//     drop the dir so a half-written cache doesn't survive into the next play.
 func (s *HLSSession) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -407,12 +526,77 @@ func (s *HLSSession) Close() error {
 		s.readyCh = nil
 	}
 	s.exited = true
+	exitErr := s.exitErr
 	s.readyMu.Unlock()
+
+	if s.cache != nil && s.cacheKey != "" {
+		defer s.cache.Unpin(s.cacheKey)
+		if s.writerLockHeld {
+			defer s.cache.ReleaseWriter(s.cacheKey)
+		}
+		if s.fromCache {
+			log.Printf("[hls %s] closed (cache reuse)", shortHLSID(s.cfg.SessionID))
+			return nil
+		}
+		// Wait briefly for the subtitle extractor to finish so a cached
+		// replay never serves half-written .vtt files. Bounded so a stuck
+		// extractor can't block Close indefinitely; on timeout we treat
+		// the cache as incomplete and drop it.
+		subsOK := true
+		if s.subsDone != nil {
+			select {
+			case <-s.subsDone:
+			case <-time.After(15 * time.Second):
+				log.Printf("[hls %s] subtitle extractor timeout — not caching", shortHLSID(s.cfg.SessionID))
+				subsOK = false
+			}
+		}
+		if subsOK && exitErr == nil && s.allSegmentsPresent() {
+			if err := s.cache.MarkComplete(s.cacheKey); err == nil {
+				log.Printf("[hls %s] cache persisted %s", shortHLSID(s.cfg.SessionID), s.cacheKey)
+				return nil
+			} else {
+				log.Printf("[hls %s] cache persist failed: %v", shortHLSID(s.cfg.SessionID), err)
+			}
+		}
+		// Partial / failed → drop so we re-encode next time.
+		if err := s.cache.Invalidate(s.cacheKey); err != nil {
+			log.Printf("[hls %s] cache invalidate failed: %v", shortHLSID(s.cfg.SessionID), err)
+		}
+		log.Printf("[hls %s] closed (cache discarded)", shortHLSID(s.cfg.SessionID))
+		return nil
+	}
+
 	if tmpDir != "" {
 		_ = os.RemoveAll(tmpDir)
 	}
 	log.Printf("[hls %s] closed", shortHLSID(s.cfg.SessionID))
 	return nil
+}
+
+// allSegmentsPresent reports whether every expected segment (and init.mp4) is
+// on disk AND validated by the segment poller. Used to decide whether a
+// finished session is cacheable. We trust readyMax (advanced by pollSegments
+// only after the next segment exists, proving the predecessor is fully closed)
+// over a naive Size>0 stat that could accept truncated mid-write files.
+func (s *HLSSession) allSegmentsPresent() bool {
+	if fi, err := os.Stat(filepath.Join(s.tmpDir, "video", "init.mp4")); err != nil || fi.Size() == 0 {
+		return false
+	}
+	s.readyMu.Lock()
+	readyMax := s.readyMax
+	s.readyMu.Unlock()
+	if readyMax < s.segmentCount-1 {
+		return false
+	}
+	for i := 0; i < s.segmentCount; i++ {
+		path := filepath.Join(s.tmpDir, "video", fmt.Sprintf("seg-%d.m4s", i))
+		fi, err := os.Stat(path)
+		if err != nil || fi.Size() == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // waitFFmpeg reaps the ffmpeg process and records its exit error for handlers.

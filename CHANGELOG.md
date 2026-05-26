@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] - 2026-05-26
+
+### Added
+
+- **hls cache**: persistent fMP4 segment cache keyed by
+  `(source, quality, audio_index)`. After a successful encode the segments
+  + `init.mp4` are kept under `~/.cache/unarr/hls-cache/{key}/` with a
+  `.complete` marker. A second play of the same file at the same quality
+  skips ffmpeg entirely (smoke-tested 23–31× faster than re-encode). LRU
+  + size-budget eviction; pinned during active play; per-key writer-lock
+  prevents two concurrent encodes from corrupting each other. Startup
+  reaps orphan dirs without `.complete` older than 10 min so a daemon
+  crash doesn't leak disk indefinitely. New `[downloads.hls_cache]` block
+  in `config.toml`: `enabled` (default true), `size_gb` (default 5,
+  min 1), `dir` (default `~/.cache/unarr/hls-cache`).
+- **hls cache integrity check**: on HIT, the daemon stats `init.mp4` +
+  last segment before reporting cache reuse — if a file was externally
+  deleted, the entry is invalidated and re-encoded transparently.
+- **hls cache stats**: hit/miss counters surface via `cache.Stats()`
+  (`Hits`, `Misses`, `EntryCount`, `TotalBytes`) and the sweeper logs a
+  daily summary line `[hls_cache] day-stats: hits=N misses=M ratio=X%
+  entries=Y size=ZMB`.
+- **subtitle integrity for cached replay**: `Close` waits up to 15 s for
+  the subtitle extractor goroutine before sealing `.complete` so a HIT
+  never serves half-written `.vtt` files. Timeout invalidates instead of
+  sealing.
+
+### Changed
+
+- `[daemon] auto_upgrade` now appears in fresh `config.toml` files as
+  `true` (it was always the implicit default; this just makes it visible
+  in default-generated configs).
+
 ## [0.9.6] - 2026-05-26
 
 ### Added
