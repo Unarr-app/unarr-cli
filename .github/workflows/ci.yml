@@ -86,14 +86,11 @@ jobs:
         run: |
           # Threshold applies only to engine and agent — cmd contains interactive UI
           # commands (config menus, daemon, auth browser) that are not unit-testable.
-          # WebRTC files are excluded: deprecated, slated for removal in 0.9.0.
           go test -race -coverprofile=coverage-core.out -covermode=atomic \
             ./internal/engine/... \
             ./internal/agent/...
-          # Strip webrtc lines from the profile before computing the threshold.
-          grep -v '/internal/engine/webrtc' coverage-core.out > coverage-core-filtered.out
-          COVERAGE=$(go tool cover -func=coverage-core-filtered.out | grep ^total | awk '{print $3}' | tr -d '%')
-          echo "Coverage on engine+agent (excluding webrtc): ${COVERAGE}%"
+          COVERAGE=$(go tool cover -func=coverage-core.out | grep ^total | awk '{print $3}' | tr -d '%')
+          echo "Coverage on engine+agent: ${COVERAGE}%"
           python3 -c "
           coverage = float('${COVERAGE}')
           threshold = 50.0

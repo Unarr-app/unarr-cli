@@ -374,29 +374,22 @@ type LibraryDeleteRequest struct {
 	FilePath string `json:"filePath"`
 }
 
-// WebRTCSession is a request to open a streaming session for a browser
-// player. Transport selects the on-the-wire protocol: empty/"webrtc" runs the
-// legacy custom WebRTC DataChannel pipeline; "hls" spawns an HLS session
-// (ffmpeg producing fragmented MP4 served over HTTP). The CLI must POST an
-// SDP answer to /api/internal/stream/signal/<sessionId> for WebRTC sessions
-// and register the HLS session in the StreamServer's HLS registry for HLS
-// sessions; either way the source bytes come from FilePath (or, when only
-// InfoHash is set, from a download_task on disk).
-type WebRTCSession struct {
-	SessionID string `json:"sessionId"`
-	// Transport selects the streaming protocol. "" or "webrtc" → legacy
-	// WebRTC + MSE pipeline (Phase 1). "hls" → HLS over HTTP (Phase 2).
-	Transport string `json:"transport,omitempty"`
-	FilePath  string `json:"filePath,omitempty"`
-	InfoHash  string `json:"infoHash,omitempty"`
-	TaskID    string `json:"taskId,omitempty"`
-	FileName  string `json:"fileName,omitempty"`
-	FileSize  int64  `json:"fileSize,omitempty"`
+// StreamSession is a request to open an HLS streaming session for an
+// in-browser player. The CLI registers the HLS session in the StreamServer's
+// HLS registry; source bytes come from FilePath (or, when only InfoHash is
+// set, from a download_task on disk).
+type StreamSession struct {
+	SessionID  string `json:"sessionId"`
+	FilePath   string `json:"filePath,omitempty"`
+	InfoHash   string `json:"infoHash,omitempty"`
+	TaskID     string `json:"taskId,omitempty"`
+	FileName   string `json:"fileName,omitempty"`
+	FileSize   int64  `json:"fileSize,omitempty"`
 	// Quality target the daemon should aim for when transcoding. One of
 	// "2160p" | "1080p" | "720p" | "480p" | "original" | "" (defer to config).
 	Quality string `json:"quality,omitempty"`
 	// AudioIndex selects the source audio track (-map 0:a:N). -1 means
-	// "use the default/first track" (HLS) or ignored (WebRTC).
+	// "use the default/first track".
 	AudioIndex int `json:"audioIndex,omitempty"`
 }
 
@@ -405,7 +398,7 @@ type SyncResponse struct {
 	NewTasks       []Task                 `json:"newTasks,omitempty"`
 	Controls       []ControlAction        `json:"controls,omitempty"`
 	StreamRequests []StreamRequest        `json:"streamRequests,omitempty"`
-	WebRTCSessions []WebRTCSession        `json:"webrtcSessions,omitempty"`
+	StreamSessions []StreamSession        `json:"streamSessions,omitempty"`
 	Watching       bool                   `json:"watching"`
 	Upgrade        *UpgradeSignal         `json:"upgrade,omitempty"`
 	Scan           bool                   `json:"scan,omitempty"`

@@ -51,7 +51,6 @@ type DownloadConfig struct {
 	StreamPort       int             `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
 	EnableUPnP       bool            `toml:"enable_upnp"`        // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in because it exposes the unauthenticated /stream + /hls endpoints to the public internet)
 	CORSExtraOrigins []string        `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
-	WebRTC           WebRTCConfig    `toml:"webrtc"`
 	Transcode        TranscodeConfig `toml:"transcode"`
 	VPN              VPNConfig       `toml:"vpn"`
 }
@@ -84,19 +83,6 @@ type TranscodeConfig struct {
 	MaxConcurrent int    `toml:"max_concurrent"` // safety cap on simultaneous transcoder processes
 }
 
-// WebRTCConfig opts the daemon into acting as a WebTorrent peer so browsers
-// can fetch pieces via WebRTC data channels — required by the in-browser
-// player on torrentclaw.com. Disabled by default; enabling implies upload
-// is allowed for active torrents (browsers can't download otherwise).
-type WebRTCConfig struct {
-	Enabled     bool     `toml:"enabled"`      // master switch
-	Trackers    []string `toml:"trackers"`     // wss:// signaling trackers
-	STUNServers []string `toml:"stun_servers"` // stun:host:port
-	TURNServers []string `toml:"turn_servers"` // turn:host:port (no auth) — see TURNCredentials for authed
-	TURNUser    string   `toml:"turn_user"`    // optional, applied to all TURNServers
-	TURNPass    string   `toml:"turn_pass"`    // optional
-}
-
 type OrganizeConfig struct {
 	Enabled    bool   `toml:"enabled"`
 	MoviesDir  string `toml:"movies_dir"`
@@ -121,7 +107,7 @@ type LibraryConfig struct {
 	ScanPath     string `toml:"scan_path"`     // remembered from last scan
 	Workers      int    `toml:"workers"`       // concurrent ffprobe (default 8)
 	FFprobePath  string `toml:"ffprobe_path"`  // optional explicit path
-	FFmpegPath   string `toml:"ffmpeg_path"`   // optional explicit path (used by WebRTC streaming transcoder)
+	FFmpegPath   string `toml:"ffmpeg_path"`   // optional explicit path (used by the HLS streaming transcoder)
 	BackupDir    string `toml:"backup_dir"`    // for replaced files
 	AutoScan     bool   `toml:"auto_scan"`     // enable daily auto-scan in daemon (default true)
 	ScanInterval string `toml:"scan_interval"` // e.g. "24h", "12h", "6h" (default "24h")
@@ -146,11 +132,6 @@ func Default() Config {
 			PreferredMethod: "auto",
 			MaxConcurrent:   3,
 			StreamPort:      11818,
-			WebRTC: WebRTCConfig{
-				Enabled:     true,
-				Trackers:    []string{"wss://tracker.torrentclaw.com"},
-				STUNServers: []string{"stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"},
-			},
 			Transcode: TranscodeConfig{
 				Enabled:       true,
 				HWAccel:       "auto",
@@ -229,19 +210,6 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	}
 	if !meta.IsDefined("general", "country") {
 		cfg.General.Country = "US"
-	}
-
-	if !meta.IsDefined("downloads", "webrtc", "enabled") {
-		cfg.Download.WebRTC.Enabled = true
-	}
-	if !meta.IsDefined("downloads", "webrtc", "trackers") {
-		cfg.Download.WebRTC.Trackers = []string{"wss://tracker.torrentclaw.com"}
-	}
-	if !meta.IsDefined("downloads", "webrtc", "stun_servers") {
-		cfg.Download.WebRTC.STUNServers = []string{
-			"stun:stun.l.google.com:19302",
-			"stun:stun1.l.google.com:19302",
-		}
 	}
 
 	if !meta.IsDefined("downloads", "transcode", "enabled") {

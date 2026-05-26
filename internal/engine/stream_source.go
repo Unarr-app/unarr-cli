@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// streamSource abstracts the byte source served over the WebRTC DataChannel.
+// streamSource abstracts the byte source consumed by the HLS transcoder.
 // Two implementations:
 //   - diskFileSource — direct passthrough of the on-disk file.
 //   - transcodeSource — ffmpeg writes a fragmented MP4 to a temp file in

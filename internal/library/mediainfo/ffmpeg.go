@@ -18,7 +18,7 @@ import (
 //  5. Previously downloaded in the unarr cache dir
 //  6. Auto-download static binary as last resort (~50MB, slow start)
 //
-// ffmpeg is required for the WebRTC streaming pipeline; ffprobe alone can't
+// ffmpeg is required for the HLS streaming pipeline; ffprobe alone can't
 // transcode HEVC/MKV to browser-friendly H.264/MP4 fragments.
 func ResolveFFmpeg(explicit string) (string, error) {
 	if explicit != "" {

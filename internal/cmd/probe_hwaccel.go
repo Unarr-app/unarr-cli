@@ -15,7 +15,7 @@ import (
 )
 
 // newProbeHWAccelCmd reports the hardware-acceleration capabilities the daemon
-// would actually use for HLS/WebRTC transcoding. The motivation: a beefy host
+// would actually use for HLS transcoding. The motivation: a beefy host
 // (e.g. RTX 3090) can still fall back to software encoding when the installed
 // ffmpeg binary was built without nvenc/qsv/vaapi support — Homebrew ffmpeg
 // is a common offender. Without this command, users see slow / failing 4K

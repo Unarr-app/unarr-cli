@@ -11,10 +11,9 @@ import (
 	"time"
 )
 
-// TranscodeOpts steers how Transcoder builds its ffmpeg command line. Defaults
-// match the project's plan/clever-weaving-dove.md (Fase 2.5):
+// TranscodeOpts steers how Transcoder builds its ffmpeg command line.
 //
-//   - Output: fragmented MP4 readable by browser <video> via MSE-less Range.
+//   - Output: fragmented MP4 chunked into HLS segments by the muxer.
 //   - Audio: AAC stereo @ 192kbps unless source already AAC (then -c:a copy).
 //   - Video: copy when h264 8-bit; otherwise transcode to h264 with HW encode
 //     when available, software fallback at "veryfast" preset.
@@ -31,11 +30,11 @@ type TranscodeOpts struct {
 }
 
 // Transcoder wraps a long-running ffmpeg child process whose stdout streams
-// fragmented MP4 bytes for the WebRTC pump to forward to the browser.
+// fragmented MP4 bytes; the HLS muxer slices them into segments served over HTTP.
 //
 // One Transcoder == one playback position. A seek beyond the buffered window
 // requires Close()ing this transcoder and starting a new one with a higher
-// StartSeconds (handled in webrtc_stream.go).
+// StartSeconds (handled by the HLS session at ffmpeg start time).
 //
 // A single internal goroutine owns cmd.Wait() — never call cmd.Wait()
 // directly from outside (os/exec forbids concurrent Wait callers). Use
@@ -269,12 +268,9 @@ func buildFFmpegArgs(filePath string, opts TranscodeOpts) []string {
 			filterChain = "format=yuv420p,setparams=colorspace=bt709:color_trc=bt709:color_primaries=bt709:range=tv"
 		}
 		args = append(args, "-vf", filterChain)
-		// Force AAC-LC stereo 48 kHz so MSE's CHUNK_DEMUXER accepts the moov.
-		// 5.1 / 7.1 source streams produce a moov shape that MSE refuses to
-		// parse (the <video src=blob:> demuxer is more forgiving), so we
-		// always downmix to stereo and resample to 48 kHz here. Source
-		// material that's already stereo passes through losslessly aside
-		// from the re-encode.
+		// Force AAC-LC stereo 48 kHz so the hls.js demuxer accepts the moov.
+		// 5.1 / 7.1 source streams produce a moov shape the demuxer refuses
+		// to parse, so always downmix to stereo + resample to 48 kHz here.
 		args = append(args,
 			"-c:a", "aac",
 			"-b:a", coalesce(opts.AudioBitrate, "192k"),
@@ -285,13 +281,12 @@ func buildFFmpegArgs(filePath string, opts TranscodeOpts) []string {
 
 	// Common output flags — fragmented MP4 to a single pipe.
 	//
-	//   * empty_moov + default_base_moof: write a header-only init segment
-	//     up front so MSE can start decoding before the file is finished.
-	//   * frag_duration=1s: cap each moof+mdat at ~1 second of media. Without
-	//     this, ffmpeg only splits at keyframes, which on a high-bitrate
-	//     1080p stream produces 8 MiB+ mdat boxes — MSE refuses to parse
-	//     the first fragment until the whole mdat lands, so playback never
-	//     starts.
+	//   * empty_moov + default_base_moof: header-only init segment up front
+	//     so the demuxer can start decoding before the file is finished.
+	//   * frag_duration=1s: cap each moof+mdat at ~1 second of media.
+	//     Without it ffmpeg only splits at keyframes; a high-bitrate 1080p
+	//     stream produces 8 MiB+ mdat boxes that delay the first fragment
+	//     until the whole mdat lands and playback never starts.
 	//   * negative_cts_offsets: lets b-frames carry the right pts/dts so
 	//     decoders don't reset the playhead to 0 every fragment.
 	args = append(args,

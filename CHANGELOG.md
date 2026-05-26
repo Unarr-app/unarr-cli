@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-05-26
+
+### Removed
+
+- **streaming**: retire the custom WebRTC DataChannel pipeline. The daemon no
+  longer ships pion/webrtc, the WSS signaling client, or the wire framing
+  package — every in-browser session now uses HLS over HTTP from the daemon
+  (Tailscale / LAN / UPnP). Browser P2P (WebTorrent) bytes never re-enabled.
+- **config**: `[downloads.webrtc]` block removed from the TOML schema; existing
+  config files with the section parse cleanly because go-toml ignores unknown
+  sections.
+- **seed_file**: `mode=seed_file` task handler + `engine.SeedFile` helper
+  dropped — the last in-browser caller was retired with the WebRTC player.
+- **wstracker-probe**: standalone probe binary removed.
+
+### Changed
+
+- **agent wire**: `SyncResponse.WebRTCSessions` (JSON: `webrtcSessions`) renamed
+  to `StreamSessions` (JSON: `streamSessions`). The Go type `agent.WebRTCSession`
+  is now `agent.StreamSession`. Wire-incompatible with web < 2026-05-26.
+- **torrent**: `buildMagnet` no longer accepts an `extraTrackers` variadic —
+  the default tracker list is the only set used.
+
+### Fixed
+
+- **hls**: clamp the ffmpeg `-b:v` to the bitrate cap derived from the EFFECTIVE
+  output height instead of the requested quality. Previously asking for "2160p"
+  on a 1080p source overshot the H.264 level we resolved from the effective
+  height (4.0, max 20 Mbps) and made libx264 abort with
+  `VBV bitrate > level limit`.
+
 ## [0.9.2] - 2026-05-21
 
 ### Added

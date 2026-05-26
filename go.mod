@@ -13,7 +13,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/huin/goupnp v1.3.0
 	github.com/olekukonko/tablewriter v1.1.4
-	github.com/pion/webrtc/v4 v4.2.11
 	github.com/spf13/cobra v1.10.2
 	github.com/torrentclaw/go-client v0.2.0
 	golang.org/x/term v0.43.0
@@ -107,6 +106,7 @@ require (
 	github.com/pion/stun/v3 v3.1.1 // indirect
 	github.com/pion/transport/v4 v4.0.1 // indirect
 	github.com/pion/turn/v4 v4.1.4 // indirect
+	github.com/pion/webrtc/v4 v4.2.11 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/protolambda/ctxlock v0.1.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

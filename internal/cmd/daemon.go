@@ -255,9 +255,6 @@ func runDaemonStart() error {
 		MaxUploadRate:   maxUl,
 		ListenPort:      cfg.Download.ListenPort,
 		SeedEnabled:     false,
-		WebRTCEnabled:   cfg.Download.WebRTC.Enabled,
-		WebRTCTrackers:  cfg.Download.WebRTC.Trackers,
-		ICEServers:      engine.BuildICEServers(cfg.Download.WebRTC),
 		VPNTunnel:       vpnTunnel,
 	})
 	if err != nil {
@@ -330,13 +327,7 @@ func runDaemonStart() error {
 	// Wire: sync receives new tasks → submit to manager or handle stream
 	d.OnTasksClaimed = func(tasks []agent.Task) {
 		for _, t := range tasks {
-			if t.Mode == "seed_file" {
-				// Browser asked us to wrap an arbitrary on-disk file as
-				// a single-file torrent + seed it via WebRTC. Runs in
-				// its own goroutine so a slow / failing seed can't
-				// stall the rest of the claim batch.
-				go handleSeedFileTask(t, torrentDl, agentClient)
-			} else if t.Mode == "stream" {
+			if t.Mode == "stream" {
 				if isStreamingTask(t.ID) {
 					continue
 				}
@@ -497,23 +488,23 @@ func runDaemonStart() error {
 		}()
 	}
 
-	// Wire: sync receives custom WebRTC streaming session requests.
-	// Each session is a one-shot browser↔daemon DataChannel. Validate the
-	// FilePath against allowed dirs to prevent path traversal abuse from a
-	// compromised server, then spawn the pion peer in its own goroutine.
-	d.OnWebRTCSession = func(sess agent.WebRTCSession) {
-		if webrtcRegistry.has(sess.SessionID) {
+	// Wire: sync receives HLS streaming session requests. Each session spawns
+	// one ffmpeg process and registers its HLS playlist with the StreamServer.
+	// Validate FilePath against allowed dirs to prevent path traversal abuse
+	// from a compromised server.
+	d.OnStreamSession = func(sess agent.StreamSession) {
+		if playerSessionRegistry.has(sess.SessionID) {
 			return // already running
 		}
 		filePath := sess.FilePath
 		if filePath == "" {
-			log.Printf("webrtc session %s rejected: empty file path", agent.ShortID(sess.SessionID))
+			log.Printf("[hls %s] rejected: empty file path", agent.ShortID(sess.SessionID))
 			return
 		}
 		filePath = filepath.Clean(filePath)
 		if !isAllowedStreamPath(filePath, cfg.Download.Dir, cfg.Library.ScanPath,
 			cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir) {
-			log.Printf("webrtc session %s rejected: path outside allowed dirs: %s",
+			log.Printf("[hls %s] rejected: path outside allowed dirs: %s",
 				agent.ShortID(sess.SessionID), filePath)
 			return
 		}
@@ -521,75 +512,36 @@ func runDaemonStart() error {
 		if info, err := os.Stat(filePath); err == nil && info.IsDir() {
 			found := engine.FindVideoFile(filePath)
 			if found == "" {
-				log.Printf("webrtc session %s rejected: no video file in dir %s",
+				log.Printf("[hls %s] rejected: no video file in dir %s",
 					agent.ShortID(sess.SessionID), filePath)
 				return
 			}
 			filePath = found
 		}
 
-		// Branch on transport: HLS sessions only need ffmpeg + StreamServer,
-		// not a WebRTC peer, so they must bypass the WebRTC.Enabled gate.
-		// Default ("" or "webrtc") runs the DataChannel pipeline and requires it.
-		if strings.EqualFold(sess.Transport, "hls") {
-			tcRuntime := buildTranscodeRuntime(ctx, cfg)
-			if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
-				log.Printf("[hls %s] rejected: ffmpeg/ffprobe unavailable", agent.ShortID(sess.SessionID))
-				return
-			}
-			hlsCtx, hlsCancel := context.WithCancel(ctx)
-			webrtcRegistry.add(sess.SessionID, hlsCancel)
-			hlsCfg := engine.HLSSessionConfig{
-				SessionID:  sess.SessionID,
-				SourcePath: filePath,
-				FileName:   sess.FileName,
-				Quality:    sess.Quality,
-				AudioIndex: sess.AudioIndex,
-				Transcode:  tcRuntime,
-			}
-			hsess, err := engine.StartHLSSession(hlsCtx, hlsCfg)
-			if err != nil {
-				webrtcRegistry.remove(sess.SessionID)
-				hlsCancel()
-				log.Printf("[hls %s] start failed: %v", agent.ShortID(sess.SessionID), err)
-				return
-			}
-			streamSrv.HLS().Register(hsess)
+		tcRuntime := buildTranscodeRuntime(ctx, cfg)
+		if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
+			log.Printf("[hls %s] rejected: ffmpeg/ffprobe unavailable", agent.ShortID(sess.SessionID))
 			return
 		}
-
-		// Non-HLS transport requires WebRTC peer support.
-		if !cfg.Download.WebRTC.Enabled {
-			log.Printf("webrtc session %s rejected: webrtc disabled in config", agent.ShortID(sess.SessionID))
+		hlsCtx, hlsCancel := context.WithCancel(ctx)
+		playerSessionRegistry.add(sess.SessionID, hlsCancel)
+		hlsCfg := engine.HLSSessionConfig{
+			SessionID:  sess.SessionID,
+			SourcePath: filePath,
+			FileName:   sess.FileName,
+			Quality:    sess.Quality,
+			AudioIndex: sess.AudioIndex,
+			Transcode:  tcRuntime,
+		}
+		hsess, err := engine.StartHLSSession(hlsCtx, hlsCfg)
+		if err != nil {
+			playerSessionRegistry.remove(sess.SessionID)
+			hlsCancel()
+			log.Printf("[hls %s] start failed: %v", agent.ShortID(sess.SessionID), err)
 			return
 		}
-
-		sessCtx, sessCancel := context.WithCancel(ctx) //nolint:gosec // G118 cancel stored in registry
-		webrtcRegistry.add(sess.SessionID, sessCancel)
-		go func() {
-			defer func() {
-				webrtcRegistry.remove(sess.SessionID)
-				sessCancel()
-			}()
-			tcRuntime := buildTranscodeRuntime(ctx, cfg)
-			runCfg := engine.WebRTCStreamConfig{
-				SessionID:  sess.SessionID,
-				FilePath:   filePath,
-				FileName:   sess.FileName,
-				FileSize:   sess.FileSize,
-				Quality:    sess.Quality,
-				ICEServers: engine.BuildICEServers(cfg.Download.WebRTC),
-				Signal:     agentClient,
-				Logger:     stdLogger{},
-				Transcode:  tcRuntime,
-			}
-			log.Printf("[wrtc %s] starting session: %s", agent.ShortID(sess.SessionID), filepath.Base(filePath))
-			if err := engine.RunWebRTCStream(sessCtx, runCfg); err != nil {
-				if sessCtx.Err() == nil {
-					log.Printf("[wrtc %s] ended: %v", agent.ShortID(sess.SessionID), err)
-				}
-			}
-		}()
+		streamSrv.HLS().Register(hsess)
 	}
 
 	// Periodic DHT node persistence (every 5 min)
@@ -658,7 +610,7 @@ func runDaemonStart() error {
 	case sig := <-sigCh:
 		fmt.Printf("\n  Received %s, shutting down...\n", sig)
 		cancelStreamContexts()
-		cancelAllWebRTCSessions()
+		cancelAllPlayerSessions()
 		streamSrv.Shutdown(context.Background())
 		cancel()
 
@@ -673,7 +625,7 @@ func runDaemonStart() error {
 
 	case err := <-errCh:
 		cancelStreamContexts()
-		cancelAllWebRTCSessions()
+		cancelAllPlayerSessions()
 		streamSrv.Shutdown(context.Background())
 		cancel()
 		return err

@@ -114,9 +114,6 @@ func runDownloadWithDeps(input, method string, deps downloadDeps) error {
 		StallTimeout:    10 * time.Minute,
 		MaxTimeout:      0, // unlimited
 		SeedEnabled:     false,
-		WebRTCEnabled:   cfg.Download.WebRTC.Enabled,
-		WebRTCTrackers:  cfg.Download.WebRTC.Trackers,
-		ICEServers:      engine.BuildICEServers(cfg.Download.WebRTC),
 	})
 	if err != nil {
 		return fmt.Errorf("create downloader: %w", err)

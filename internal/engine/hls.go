@@ -3,9 +3,7 @@
 // Browser ↔ daemon over plain HTTP (LAN / Tailscale / UPnP). The daemon runs
 // ffmpeg in `-f hls` mode, writing fragmented MP4 segments to a per-session
 // tmpdir. Master + media playlists are pre-rendered from the probed source
-// duration so the player knows the full timeline before any segment exists,
-// which fixes the seek/duration/pause/multi-track problems we hit with the
-// raw fMP4-over-WebRTC pipeline.
+// duration so the player knows the full timeline before any segment exists.
 //
 // One HLSSession == one browser playback. Sessions are registered in a
 // process-wide map keyed by session ID; the StreamServer routes

@@ -9,7 +9,7 @@ import (
 )
 
 // StreamProbe summarises the codec / container shape of a file as it relates
-// to the WebRTC streaming pipeline. It tells the transcoder whether bytes can
+// to the HLS streaming pipeline. It tells the transcoder whether bytes can
 // be streamed as-is, just remuxed to fragmented MP4, or fully transcoded.
 type StreamProbe struct {
 	// VideoCodec lowercased — e.g. "h264", "hevc", "av1", "vp9", "mpeg4".

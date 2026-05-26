@@ -72,7 +72,7 @@ Docker Hub vulnerability count:
   package pulls ~40 codec/parser libraries (`x264`, `x265`, `libvpx`, `aom`,
   `dav1d`, `libtheora`, `libvorbis`, `libwebp`, `libbluray`, `libopenmpt`, …).
   Each carries a long NVD history that Alpine does not backport. ffmpeg is a
-  **functional dependency** — the WebRTC/HLS transcode pipeline shells out to
+  **functional dependency** — the HLS transcode pipeline shells out to
   `ffmpeg`/`ffprobe` to decode untrusted media and re-encode to H.264 + AAC.
 
 ### Accepted risk and policy
@@ -100,7 +100,7 @@ Recommended additions for exposed deployments:
       - no-new-privileges:true
 ```
 
-If you do not need WebRTC/HLS transcoding, you can run with transcoding disabled to
+If you do not need HLS transcoding, you can run with transcoding disabled to
 avoid feeding untrusted media to ffmpeg at all.
 
 ## Disclosure Policy
