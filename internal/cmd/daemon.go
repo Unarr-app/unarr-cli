@@ -17,6 +17,7 @@ import (
 	"github.com/torrentclaw/unarr/internal/agent"
 	"github.com/torrentclaw/unarr/internal/config"
 	"github.com/torrentclaw/unarr/internal/engine"
+	"github.com/torrentclaw/unarr/internal/funnel"
 	"github.com/torrentclaw/unarr/internal/library"
 	"github.com/torrentclaw/unarr/internal/library/mediainfo"
 	"github.com/torrentclaw/unarr/internal/usenet/download"
@@ -302,6 +303,15 @@ func runDaemonStart() error {
 		return fmt.Errorf("start stream server: %w", err)
 	}
 	d.UpdateStreamPort(streamSrv.Port())
+
+	// CloudFlare Quick Tunnel — needs the ACTUAL listening port (the
+	// configured port may have been busy and bumped). Spawning here ensures
+	// cloudflared --url points at the right socket. Failures degrade to
+	// Tailscale/LAN only; the supervisor keeps the tunnel up across CF's
+	// periodic rotation + transient cloudflared crashes.
+	if cfg.Download.Funnel.Enabled {
+		go superviseFunnel(ctx, d, streamSrv.Port())
+	}
 
 	// Warn at startup if transcode is enabled but ffmpeg/ffprobe are missing.
 	// HLS sessions get rejected at runtime (see daemon.go ~line 455), but
@@ -771,5 +781,56 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// superviseFunnel keeps a CloudFlare Quick Tunnel up across cloudflared
+// crashes and CF's ~6h tunnel rotation. On a clean exit (cancellation) it
+// returns; on a crash it clears the reported URL and respawns with an
+// exponential backoff so we don't hammer cloudflared into a tight loop when
+// it can't reach the CF edge.
+func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
+	backoff := 2 * time.Second
+	const maxBackoff = 5 * time.Minute
+	for ctx.Err() == nil {
+		t, err := funnel.Start(ctx, funnel.Config{Port: port})
+		if err != nil {
+			log.Printf("[funnel] could not start CloudFlare tunnel (%v) — retrying in %s", err, backoff)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return
+			}
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+		log.Printf("[funnel] cloudflared started, waiting for public URL...")
+		go func() {
+			url, werr := t.WaitURL(45 * time.Second)
+			if werr != nil {
+				log.Printf("[funnel] cloudflared did not emit a URL (%v)", werr)
+				return
+			}
+			log.Printf("[funnel] public URL: %s", url)
+			d.SetFunnelURL(url)
+		}()
+		// Block until cloudflared exits (CF rotation, crash, or shutdown).
+		exitErr := <-t.Done()
+		_ = t.Close()
+		d.SetFunnelURL("")
+		if ctx.Err() != nil {
+			return
+		}
+		if exitErr != nil {
+			log.Printf("[funnel] cloudflared exited: %v — restarting in %s", exitErr, backoff)
+		} else {
+			log.Printf("[funnel] cloudflared exited cleanly — restarting in %s", backoff)
+		}
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return
+		}
+		backoff = min(backoff*2, maxBackoff)
 	}
 }

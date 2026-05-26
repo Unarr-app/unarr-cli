@@ -40,6 +40,9 @@ type SyncClient struct {
 	// WireGuard tunnel is up, the mode, and the exit server) so the web can track
 	// which agent holds the single WG slot.
 	GetVPNState func() (active bool, mode, server string)
+	// GetFunnelURL returns the CloudFlare Quick Tunnel public hostname if one
+	// is active, else "". Sent on every sync so the web picks it up live.
+	GetFunnelURL func() string
 	// OnDeleteFiles is called when the server requests file deletion from disk.
 	// It should delete the files and return the IDs of successfully deleted items.
 	OnDeleteFiles func(items []LibraryDeleteRequest) []int
@@ -161,6 +164,9 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 	}
 	if sc.GetVPNState != nil {
 		req.VPNActive, req.VPNMode, req.VPNServer = sc.GetVPNState()
+	}
+	if sc.GetFunnelURL != nil {
+		req.FunnelURL = sc.GetFunnelURL()
 	}
 	// Flush confirmed deletions from previous cycle.
 	// Once flushed, remove IDs from deleteInFlight — the server will stop sending

@@ -476,6 +476,64 @@ with a clear error — install ffmpeg or set `enabled = false`.
 See the [VPN](#vpn) section above for how it works (split-tunnel, no root) and
 how to protect your other devices.
 
+#### `[downloads.funnel]` — public HTTPS hostname for the daemon (CloudFlare Quick Tunnel)
+
+```toml
+[downloads.funnel]
+enabled = false   # off by default
+```
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `false` | Spawns `cloudflared tunnel --url http://localhost:<stream_port>` as a child process at daemon startup. Toggle with `unarr funnel on` / `off`. Requires `cloudflared` on PATH. |
+
+**What it does.** Without a tunnel, the daemon is reachable on `localhost`,
+your LAN, and (if installed) Tailscale. That covers the same-machine and
+Tailscale-connected cases, but the **browser-based player on torrentclaw.com
+fails on any other network** because HTTPS pages can't fetch HTTP resources
+("mixed content"). Enabling the funnel gives the daemon a public
+`https://<random>.trycloudflare.com` hostname so the web player picks it up
+and playback works from anywhere — phone on cellular, friend's laptop on a
+foreign Wi-Fi, anywhere. The Stremio addon already works cross-network
+(native mpv/VLC players ignore CORS), so this is strictly a web-player fix.
+
+**Privacy posture.** Bytes pass through CloudFlare's edge — TorrentClaw never
+relays content (we don't see your traffic), CloudFlare does. Quick Tunnels
+are **anonymous** (no CF account required); the registration is unauthenticated
+and the hostname is a random label, but CF logs request metadata like any CDN
+would. If you want zero third-party byte access, use Tailscale instead.
+
+**Limitations (free Quick Tunnels).**
+| Aspect | Limit |
+|--------|-------|
+| Session lifetime | ~6 hours, then the hostname rotates. cloudflared re-registers automatically; the web picks up the new URL on the next sync. In-flight HLS sessions break across the rotation (browser retries). |
+| Bandwidth | No documented hard cap, but CF reserves the right to throttle. 1080p HLS (~6 Mbps) is fine; 4K HEVC at 25 Mbps may hit throttling. |
+| Latency | +20–80 ms vs direct LAN/Tailscale (extra hop browser → CF edge → tunnel). HLS player buffer absorbs it. |
+| Concurrency | One tunnel serves N viewers. CF rate-limits ~200 req/s, plenty for HLS segments. |
+| TOS | CloudFlare flags Quick Tunnels as "not for production traffic". They can decommission an abusive tunnel without notice. |
+
+For heavy / high-throughput / persistent-URL use cases, switch to a CloudFlare
+Named Tunnel (free, needs a CF account) or run your own reverse proxy — both
+out of scope for the bundled command.
+
+**Disable.** `unarr funnel off` flips `enabled` to `false` in the TOML and
+prompts you to restart the daemon. You can also edit `config.toml` directly:
+
+```toml
+[downloads.funnel]
+enabled = false
+```
+
+**Install cloudflared.**
+- Linux: `apt install cloudflared` (after adding CF's apt repo) — see
+  <https://pkg.cloudflare.com>. Or pull the static binary from
+  <https://github.com/cloudflare/cloudflared/releases>.
+- macOS: `brew install cloudflared`.
+- Windows: `winget install --id Cloudflare.cloudflared`.
+
+If `cloudflared` is not on PATH the daemon logs a warning at startup and
+falls back to LAN/Tailscale-only reachability.
+
 ### Environment variables
 
 Environment variables override config file values:

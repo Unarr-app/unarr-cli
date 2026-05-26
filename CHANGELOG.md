@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-05-26
+
+### Added
+
+- **funnel**: optional CloudFlare Quick Tunnel subprocess. `unarr funnel on`
+  spawns `cloudflared` as a child process and registers an anonymous
+  `https://<random>.trycloudflare.com` hostname tunnelled to the daemon's
+  HLS server. The hostname is reported back to the web on every sync so the
+  in-browser player picks it up automatically — cross-network playback now
+  works on torrentclaw.com without Tailscale or port forwarding. Bytes
+  proxy through CloudFlare; TorrentClaw still doesn't relay content.
+- **funnel**: on by default for fresh installs (NAS/Docker get cross-network
+  HTTPS automatically); existing configs that pre-date the feature stay
+  off until the operator runs `unarr funnel on`.
+- **funnel**: auto-downloads cloudflared to the unarr data dir when not on
+  PATH (Linux amd64/arm64/armhf/386). ELF magic + size sanity check on the
+  download; `O_EXCL` partial-write so concurrent daemons don't clobber
+  each other.
+- **funnel**: subprocess supervisor keeps the tunnel up across cloudflared
+  crashes + CF's ~6h Quick Tunnel rotation. Exponential backoff (2 s → 5 min)
+  on persistent failures. The web's reported URL is cleared the moment
+  cloudflared exits so an outdated hostname doesn't keep handing out 502s.
+- **funnel**: `unarr funnel status` shows the live URL once registered.
+  See README §`[downloads.funnel]` for the throughput / latency caveats of
+  CF's free Quick Tunnels.
+- **docker**: the official `torrentclaw/unarr` image now bundles
+  `cloudflared` so the funnel works the moment the container starts — no
+  first-run download.
+
+### Fixed
+
+- **hls/libx264**: bump the H.264 level we hint to libx264 by one tier so
+  anamorphic (>16:9) sources stop emitting unplayable streams. 720p at
+  level 3.1 silently rejected 1728×720 cinemascope frames with
+  `frame MB size > level limit`; 720p now ships at level 4.0, 1080p at 4.1.
+  Decoder compatibility is unaffected — every device that handles 1080p
+  already handles ≥ 4.1.
+
 ## [0.9.4] - 2026-05-26
 
 ### Removed

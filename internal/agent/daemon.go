@@ -55,6 +55,10 @@ type Daemon struct {
 	vpnMode   string
 	vpnServer string
 
+	// CloudFlare Quick Tunnel public URL; folded into DaemonState + heartbeat
+	// so the web can prefer it over Tailscale/LAN for in-browser playback.
+	funnelURL string
+
 	// Watching tracks whether a user is viewing download progress in the web UI.
 	Watching atomic.Bool
 
@@ -85,6 +89,15 @@ func (d *Daemon) SetVPNState(active bool, mode, server string) {
 	d.vpnServer = server
 }
 
+// SetFunnelURL records the CloudFlare Quick Tunnel hostname so it's reflected
+// in the daemon state file (read by `unarr funnel status`) and in heartbeat
+// requests (so the web prefers it over Tailscale/LAN). Pass "" to clear.
+func (d *Daemon) SetFunnelURL(url string) {
+	d.funnelURL = url
+	d.State.FunnelURL = url
+	WriteState(&d.State)
+}
+
 // UpdateStreamPort updates the stream port reported in sync requests.
 func (d *Daemon) UpdateStreamPort(port int) {
 	d.cfg.StreamPort = port
@@ -109,6 +122,7 @@ func (d *Daemon) Register(ctx context.Context) error {
 		VPNActive:          d.vpnActive,
 		VPNMode:            d.vpnMode,
 		VPNServer:          d.vpnServer,
+		FunnelURL:          d.funnelURL,
 	}
 	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {
 		req.DiskFreeBytes = free
@@ -162,6 +176,7 @@ func (d *Daemon) Register(ctx context.Context) error {
 		VPNActive:   d.vpnActive,
 		VPNMode:     d.vpnMode,
 		VPNServer:   d.vpnServer,
+		FunnelURL:   d.funnelURL,
 	}
 	WriteState(&d.State)
 
@@ -233,6 +248,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.sync.GetVPNState = func() (bool, string, string) {
 		return d.vpnActive, d.vpnMode, d.vpnServer
+	}
+	d.sync.GetFunnelURL = func() string {
+		return d.funnelURL
 	}
 	d.sync.OnSyncSuccess = func() {
 		d.State.LastHeartbeat = time.Now()

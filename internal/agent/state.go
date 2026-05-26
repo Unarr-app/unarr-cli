@@ -29,6 +29,11 @@ type DaemonState struct {
 	VPNActive bool   `json:"vpnActive,omitempty"`
 	VPNMode   string `json:"vpnMode,omitempty"`   // managed | self-hosted
 	VPNServer string `json:"vpnServer,omitempty"` // WireGuard endpoint (ip:port)
+
+	// CloudFlare Quick Tunnel state, so `unarr funnel status` can report the
+	// HTTPS hostname the daemon is reachable at from anywhere on the internet.
+	// Empty when the funnel is off or hasn't registered yet.
+	FunnelURL string `json:"funnelUrl,omitempty"`
 }
 
 // stateFilePathFn is overridable for testing.

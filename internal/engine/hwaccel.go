@@ -129,12 +129,13 @@ func (h HWAccel) FFmpegVideoCodec(target string) string {
 	}
 }
 
-// H264LevelForHeight returns the lowest H.264 profile level capable of encoding
-// a stream at the given output pixel height (assumes ~16:9, ≤30 fps). The
-// previous code used a fixed "4.0" which silently rejects anything above 1080p
-// — libx264 logs "frame MB size > level limit" and emits a corrupt stream.
-// Returning a tighter level on smaller outputs keeps player compatibility on
-// older devices where the encoder can't auto-pick.
+// H264LevelForHeight returns the lowest H.264 profile level capable of
+// encoding a stream at the given output pixel height. Each tier carries
+// enough macroblock headroom to handle ANAMORPHIC content (up to ~2.4:1
+// cinemascope) at 30 fps — a fixed 16:9 assumption used to silently bust
+// the level on a 720p movie shot in 2.4:1 (1728×720 = 4860 MBs > 3.1's
+// 3600 limit; libx264 logs "frame MB size > level limit" and emits a
+// corrupt stream).
 func H264LevelForHeight(height int) string {
 	switch {
 	case height <= 0:
@@ -142,11 +143,14 @@ func H264LevelForHeight(height int) string {
 		// re-introduce the silent-failure mode that motivated this helper.
 		return "5.1"
 	case height <= 480:
-		return "3.0"
-	case height <= 720:
 		return "3.1"
-	case height <= 1080:
+	case height <= 720:
+		// 4.0 instead of 3.1: covers 720p anamorphic (e.g. 1728×720) +
+		// MB rate up to 245k/s (3.1 caps at 108k/s — broken at 24 fps).
 		return "4.0"
+	case height <= 1080:
+		// 4.1 instead of 4.0: covers 1080p anamorphic + 30 fps (~245k MBs/s).
+		return "4.1"
 	case height <= 1440:
 		return "5.0"
 	case height <= 2160:

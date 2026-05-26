@@ -53,6 +53,16 @@ type DownloadConfig struct {
 	CORSExtraOrigins []string        `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
 	Transcode        TranscodeConfig `toml:"transcode"`
 	VPN              VPNConfig       `toml:"vpn"`
+	Funnel           FunnelConfig    `toml:"funnel"`
+}
+
+// FunnelConfig gates the optional CloudFlare Quick Tunnel that exposes the
+// daemon's HLS server over a public HTTPS hostname (https://<random>.try
+// cloudflare.com). Enabling it lets the web player on torrentclaw.com play
+// from this daemon across any network without Tailscale or a public IP —
+// the cost is that bytes proxy through CloudFlare's network. Off by default.
+type FunnelConfig struct {
+	Enabled bool `toml:"enabled"`
 }
 
 // VPNConfig gates the managed-VPN add-on split-tunnel. When enabled, the daemon
@@ -138,6 +148,13 @@ func Default() Config {
 				Preset:        "veryfast",
 				AudioBitrate:  "192k",
 				MaxConcurrent: 2,
+			},
+			Funnel: FunnelConfig{
+				// On by default so headless installs (NAS / Docker) get cross-network
+				// HTTPS playback without anyone having to terminal in. Users who
+				// don't want bytes proxied through CloudFlare can opt out with
+				// `unarr funnel off` (sets enabled=false in the TOML).
+				Enabled: true,
 			},
 		},
 		Organize: OrganizeConfig{
@@ -227,6 +244,12 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	if !meta.IsDefined("downloads", "transcode", "max_concurrent") {
 		cfg.Download.Transcode.MaxConcurrent = 2
 	}
+	// NOTE: Funnel default-ON only applies to fresh installs (no config file →
+	// Default() returns Funnel.Enabled=true straight off). When an existing
+	// config file lacks `[downloads.funnel]` entirely we intentionally do NOT
+	// flip it on here — that would silently route an upgraded operator's
+	// traffic through CloudFlare without their consent. They opt in with
+	// `unarr funnel on` whenever they're ready.
 }
 
 // Save writes config to the default or specified path using atomic write.

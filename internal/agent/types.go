@@ -34,6 +34,9 @@ type RegisterRequest struct {
 	VPNActive bool   `json:"vpnActive"`
 	VPNMode   string `json:"vpnMode,omitempty"` // managed | self-hosted
 	VPNServer string `json:"vpnServer,omitempty"`
+	// CloudFlare Quick Tunnel hostname when enabled; the web prefers it over
+	// Tailscale/LAN for in-browser playback because it works on any network.
+	FunnelURL string `json:"funnelUrl,omitempty"`
 }
 
 // RegisterResponse is returned by the server after registration.
@@ -359,6 +362,8 @@ type SyncRequest struct {
 	VPNActive bool   `json:"vpnActive"`
 	VPNMode   string `json:"vpnMode,omitempty"`
 	VPNServer string `json:"vpnServer,omitempty"`
+	// CloudFlare Quick Tunnel hostname when enabled, else empty.
+	FunnelURL string `json:"funnelUrl,omitempty"`
 }
 
 // ControlAction represents a server-side control signal for a task.
