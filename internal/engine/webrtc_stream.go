@@ -130,6 +130,29 @@ func resolveQualityCap(label string) qualityCap {
 	}
 }
 
+// capForHeight returns the bitrate-cap pair appropriate for an effective
+// output height. Used after clamping outputHeight to the source's resolution:
+// asking ffmpeg for "2160p" bitrate (25 Mbps) on a 1080p source overshoots
+// the H.264 level we derived from the EFFECTIVE height (4.0, max 20 Mbps) and
+// makes libx264 refuse with "VBV bitrate > level limit". This helper picks
+// the bitrate that matches the level libx264 will actually accept.
+func capForHeight(height int) qualityCap {
+	switch {
+	case height <= 0:
+		return qualityCap{}
+	case height <= 480:
+		return qualityCap{MaxHeight: 480, VideoBitrate: "1500k"}
+	case height <= 720:
+		return qualityCap{MaxHeight: 720, VideoBitrate: "3500k"}
+	case height <= 1080:
+		return qualityCap{MaxHeight: 1080, VideoBitrate: "6000k"}
+	case height <= 1440:
+		return qualityCap{MaxHeight: 1440, VideoBitrate: "12000k"}
+	default:
+		return qualityCap{MaxHeight: 2160, VideoBitrate: "25000k"}
+	}
+}
+
 // buildStreamSource picks between passthrough and transcoded source. ffprobe
 // failure or missing ffmpeg falls back to passthrough — the browser surfaces
 // a clearer codec error than us refusing to start.

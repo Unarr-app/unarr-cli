@@ -863,7 +863,17 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	}
 	args = append(args, "-profile:v", "main", "-level:v", H264LevelForHeight(outputHeight))
 
-	bitrate := qcap.VideoBitrate
+	// Bitrate must match the level libx264 actually picks for outputHeight,
+	// not the qcap target for the user's requested label. If a user asks for
+	// "2160p" on a 1080p source, qcap.VideoBitrate is 25 Mbps but the level
+	// (derived from outputHeight=1080) is 4.0, which rejects bitrates >20 Mbps
+	// with "VBV bitrate (25000) > level limit (20000)". Re-derive the cap
+	// from the effective height so the (level, bitrate) pair stays coherent.
+	effectiveCap := capForHeight(outputHeight)
+	bitrate := effectiveCap.VideoBitrate
+	if bitrate == "" {
+		bitrate = qcap.VideoBitrate
+	}
 	if bitrate == "" {
 		bitrate = cfg.Transcode.VideoBitrate
 	}
