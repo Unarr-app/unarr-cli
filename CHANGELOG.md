@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] - 2026-05-26
+
+### Added
+
+- **auto-upgrade**: when the web flags the agent for upgrade
+  (`POST /api/internal/agent/upgrade` or the "Force update now" button),
+  the daemon now downloads and replaces the binary in-place, then exits so
+  the service supervisor (`systemd Restart=always` on Linux, the equivalent
+  on macOS/Windows) respawns on the new version. No `unarr update` step
+  required from the user. Still opt-in — only fires when the server sends
+  the upgrade signal.
+
+### Changed
+
+- The `OnUpgrade` daemon callback no longer just logs `run unarr self-update`;
+  it now triggers the actual upgrade in a background goroutine.
+
 ## [0.9.5] - 2026-05-26
 
 ### Added

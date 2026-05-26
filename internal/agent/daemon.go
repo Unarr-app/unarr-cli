@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/torrentclaw/unarr/internal/upgrade"
 )
 
 // DaemonConfig holds daemon runtime settings.
@@ -231,10 +233,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 	d.sync.OnUpgrade = func(version string) {
-		if version != d.lastNotifiedVersion {
-			d.lastNotifiedVersion = version
-			log.Printf("New version available: %s (run `unarr self-update` to upgrade)", version)
+		if version == d.lastNotifiedVersion {
+			return
 		}
+		d.lastNotifiedVersion = version
+		log.Printf("[upgrade] new version available: %s — applying auto-upgrade", version)
+		go d.applyAutoUpgrade(version)
 	}
 	d.sync.OnScan = func() {
 		log.Printf("Library scan requested by server")
@@ -279,6 +283,31 @@ func (d *Daemon) Deregister() {
 		log.Println("Agent deregistered")
 	}
 	RemoveState()
+}
+
+// applyAutoUpgrade downloads the target version and exits so the service
+// supervisor (systemd Restart=always on Linux) respawns on the new binary.
+// Triggered by the server's upgrade signal — opt-in flag set by the user from
+// the web UI; the daemon never auto-upgrades on a passive version bump.
+func (d *Daemon) applyAutoUpgrade(targetVersion string) {
+	currentClean := strings.TrimPrefix(d.cfg.Version, "v")
+	upgrader := &upgrade.Upgrader{
+		CurrentVersion: currentClean,
+		OnProgress: func(msg string) {
+			log.Printf("[upgrade] %s", msg)
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	result := upgrader.Execute(ctx, targetVersion)
+	if !result.Success {
+		log.Printf("[upgrade] auto-upgrade failed: %v", result.Error)
+		return
+	}
+	log.Printf("[upgrade] upgraded v%s → v%s; exiting so service supervisor restarts on new binary",
+		result.OldVersion, result.NewVersion)
+	time.Sleep(500 * time.Millisecond)
+	os.Exit(0)
 }
 
 // isTransientError returns true for errors worth retrying (429, 5xx, network).
