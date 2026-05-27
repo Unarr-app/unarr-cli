@@ -5,61 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.14] - 2026-05-27
+## [0.9.15] - 2026-05-27
+
+
+### Added
+
+- **sentry**: enhance error handling by skipping user input errors in CaptureError
 
 ### Changed
 
-- **VAAPI encode path now ships proper GPU surfaces**. Adds
-  `-vaapi_device /dev/dri/renderD128` so the encoder doesn't fall
-  back to a NULL device on multi-GPU hosts (the dev box that
-  validated this has an NVIDIA dGPU on renderD129 + an AMD iGPU on
-  renderD128 — without the explicit device the encoder picked the
-  wrong node). Filter chain switches to `format=nv12,hwupload`
-  (was `format=yuv420p`) so frames arrive at the encoder as VAAPI
-  surfaces. Color-metadata `setparams=` block is dropped on the
-  VAAPI path because VAAPI surfaces don't expose VUI fields the
-  same way libx264 does — the encoder records its own.
-  Intentionally avoids `scale_vaapi`: mesa 25 + AMD Raphael iGPU
-  emit "Cannot allocate memory" per session start, polluting logs
-  even though encode succeeds. CPU scale + hwupload is the safe
-  hybrid that works across all VAAPI-capable hosts.
-- **Unit tests** lock the argv shape: TestBuildHLSFFmpegArgsVAAPI
-  asserts the new VAAPI flags + absence of scale_vaapi /
-  format=yuv420p; TestBuildHLSFFmpegArgsLibx264NoRegression
-  ensures the libx264 path keeps its `setparams` + `yuv420p` and
-  doesn't accidentally inherit the VAAPI shape.
+- **ci**: point Forgejo URLs at torrentclaw org (post-transfer)
+- **sentry**: decouple agent import via string-match, rename predicate
 
+### Documentation
+
+- **positioning**: reframe unarr around download/stream/transcode, drop misleading search-first wording
+
+### Fixed
+
+- **ci**: unset GITHUB_TOKEN so goreleaser uses GITEA_TOKEN
+- **sentry**: skip "daemon not running" stop/reload errors
+
+### Other
+
+- **scripts**: harden release.sh against double-release and inline version bumps
+- untrack .claude/ (private local config)
+## [0.9.14] - 2026-05-27
+
+
+### Added
+
+- **vaapi**: hybrid CPU-scale + hwupload encode path (QW2, 0.9.14)
+
+### CI/CD
+
+- port workflows from .github/ to .forgejo/ (Forgejo Actions)
+
+### Fixed
+
+- **daemon**: defensive IsClosed check in watchSessionReady poll loop
+- **daemon**: use parent ctx for MarkSessionReady so cancel propagates
+- **release**: move gitea_urls to top-level (goreleaser v2 schema)
 ## [0.9.13] - 2026-05-27
 
-### Added
-
-- **Session-ready webhook** (`/api/internal/agent/session-ready`). Daemon
-  watches every new HLSSession's segment counter and, the moment seg-0 +
-  init.mp4 land on disk, POSTs the sessionId to the server. The web side
-  flips `streaming_session.ready_at = NOW()`, which its new SSE endpoint
-  pushes to subscribed players so the "Preparando…" UI flips to
-  "Stream listo" without waiting for the player's HEAD-probe retry loop
-  to discover it. Cache-HIT sessions fire the webhook immediately on
-  StartHLSSession return.
-- `engine.HLSSession.ReadyCount()` + `FromCache()` accessors so the
-  ready-watcher goroutine doesn't reach into private state.
-
-## [0.9.12] - 2026-05-27
 
 ### Added
 
-- **transcoder diagnostic in register payload**: daemon now sends the full
-  HWAccel diagnostic (ffmpeg version, resolved binary path, list of HW
-  encoders compiled in, list of device files / drivers present) up to the
-  server on register. The web "Diagnose transcoder" modal surfaces these
-  so a user stuck on software libx264 can see *why* (e.g. ffmpeg shipped
-  without `--enable-nvenc`, or `/dev/nvidia0` missing inside a container)
-  without SSHing into their machine + running `unarr probe-hwaccel`.
-- **`[transcode]` startup log line**: daemon prints a single one-line
-  summary of the picked backend + version + binary path + devices at
-  start. Same data the web shows; convenient for `journalctl --user -u
-  unarr | grep transcode`.
+- **agent**: session-ready webhook for SSE-driven player handshake (0.9.13)
+- **agent**: send full transcoder diagnostic in register payload (0.9.12)
 
+### Fixed
+
+- **daemon**: defer probeCancel so a panic mid-diagnostic still releases ctx
+
+### Other
+
+- **release**: add ship.sh end-to-end pipeline as GH Actions backup
+- **skills**: add /publish slash command + allow .claude/ in git
 ## [0.9.11] - 2026-05-27
 
 
@@ -77,6 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **cors**: allow play from .to / staging / onion mirrors
 - **library**: classify resolution by width + height, not height alone
 - **transcode**: make preset libx264-only + restore quality opt-in
+
+### Other
+
+- **release**: 0.9.11
 ## [0.9.8] - 2026-05-27
 
 
@@ -539,9 +545,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
-[0.9.11]: https://github.com/torrentclaw/unarr/compare/v0.9.8...v0.9.11
-[0.9.8]: https://github.com/torrentclaw/unarr/compare/v0.9.7...v0.9.8
-[0.9.12]: https://github.com/torrentclaw/unarr/compare/v0.9.11...v0.9.12
+[0.9.15]: https://github.com/torrentclaw/unarr/compare/v0.9.14...v0.9.15
+[0.9.14]: https://github.com/torrentclaw/unarr/compare/v0.9.13...v0.9.14
+[0.9.13]: https://github.com/torrentclaw/unarr/compare/v0.9.11...v0.9.13
 [0.9.11]: https://github.com/torrentclaw/unarr/compare/v0.9.8...v0.9.11
 [0.9.8]: https://github.com/torrentclaw/unarr/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/torrentclaw/unarr/compare/v0.9.6...v0.9.7
