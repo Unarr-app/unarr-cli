@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8] - 2026-05-27
+
+### Fixed
+
+- **auto-upgrade restart loop**: when the server signal arrived for a version
+  the daemon was already running (e.g. flag still set after a previous
+  upgrade), `applyAutoUpgrade` would call `upgrade.Execute` (which no-ops),
+  then `os.Exit(0)` anyway — systemd respawned, the flag was still set, the
+  cycle repeated. Now: no-op case is detected up front, the daemon clears
+  the server flag via `/api/internal/agent/upgrade-result` and stays alive.
+- **upgrade flag stuck after success**: the CLI never reported the upgrade
+  outcome, so `upgrade_requested` stayed `true` in the DB forever. The
+  daemon now calls `/api/internal/agent/upgrade-result` on every applyAutoUpgrade
+  branch (success, failure, no-op) — server clears the flag, restart loops
+  end.
+
+### Added
+
+- New `Client.ReportUpgradeResult(agentID, success, version, error)` HTTP
+  method wrapping `POST /api/internal/agent/upgrade-result`.
+
 ## [0.9.7] - 2026-05-26
 
 ### Added

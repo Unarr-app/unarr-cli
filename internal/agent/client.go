@@ -91,6 +91,24 @@ func (c *Client) Deregister(ctx context.Context, agentID string) error {
 	return nil
 }
 
+// ReportUpgradeResult tells the server the outcome of a previously requested
+// upgrade so the server can clear `upgrade_requested`. Without this call the
+// flag stays sticky and the daemon would re-trigger applyAutoUpgrade on every
+// sync after upgrade — even for "already on target version" no-ops.
+func (c *Client) ReportUpgradeResult(ctx context.Context, agentID string, success bool, version, errMsg string) error {
+	req := struct {
+		AgentID string `json:"agentId"`
+		Success bool   `json:"success"`
+		Version string `json:"version,omitempty"`
+		Error   string `json:"error,omitempty"`
+	}{AgentID: agentID, Success: success, Version: version, Error: errMsg}
+	var resp StatusResponse
+	if err := c.doPost(ctx, "/api/internal/agent/upgrade-result", req, &resp); err != nil {
+		return fmt.Errorf("report upgrade result: %w", err)
+	}
+	return nil
+}
+
 // ReportStatus reports download progress. Returns server-side flags the CLI must act on.
 func (c *Client) ReportStatus(ctx context.Context, update StatusUpdate) (*StatusResponse, error) {
 	var resp StatusResponse

@@ -294,8 +294,30 @@ func (d *Daemon) Deregister() {
 // supervisor (systemd Restart=always on Linux) respawns on the new binary.
 // Triggered by the server's upgrade signal — opt-in flag set by the user from
 // the web UI; the daemon never auto-upgrades on a passive version bump.
+//
+// Reports the outcome to /api/internal/agent/upgrade-result so the server
+// clears `upgrade_requested`. Without this report the flag stays sticky and
+// the daemon would loop on every sync — including the no-op case where it's
+// already on the target version.
 func (d *Daemon) applyAutoUpgrade(targetVersion string) {
 	currentClean := strings.TrimPrefix(d.cfg.Version, "v")
+	targetClean := strings.TrimPrefix(targetVersion, "v")
+
+	// No-op: server signal arrived but we're already running the target. This
+	// happens when the daemon restarts after a previous auto-upgrade before
+	// reportUpgradeResult cleared the flag, or when the operator manually
+	// installed the same version off-band. Skip Execute (which would also
+	// no-op) AND skip os.Exit, but DO clear the flag — otherwise we loop.
+	if currentClean == targetClean {
+		log.Printf("[upgrade] already on v%s — clearing server flag", currentClean)
+		ctxR, cancelR := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelR()
+		if err := d.client.ReportUpgradeResult(ctxR, d.cfg.AgentID, true, currentClean, ""); err != nil {
+			log.Printf("[upgrade] report-result failed (will retry on next signal): %v", err)
+		}
+		return
+	}
+
 	upgrader := &upgrade.Upgrader{
 		CurrentVersion: currentClean,
 		OnProgress: func(msg string) {
@@ -307,10 +329,24 @@ func (d *Daemon) applyAutoUpgrade(targetVersion string) {
 	result := upgrader.Execute(ctx, targetVersion)
 	if !result.Success {
 		log.Printf("[upgrade] auto-upgrade failed: %v", result.Error)
+		errMsg := ""
+		if result.Error != nil {
+			errMsg = result.Error.Error()
+		}
+		ctxR, cancelR := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelR()
+		if err := d.client.ReportUpgradeResult(ctxR, d.cfg.AgentID, false, targetClean, errMsg); err != nil {
+			log.Printf("[upgrade] report-result failed: %v", err)
+		}
 		return
 	}
-	log.Printf("[upgrade] upgraded v%s → v%s; exiting so service supervisor restarts on new binary",
+	log.Printf("[upgrade] upgraded v%s → v%s; reporting result + exiting so service supervisor restarts on new binary",
 		result.OldVersion, result.NewVersion)
+	ctxR, cancelR := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := d.client.ReportUpgradeResult(ctxR, d.cfg.AgentID, true, result.NewVersion, ""); err != nil {
+		log.Printf("[upgrade] report-result failed: %v", err)
+	}
+	cancelR()
 	time.Sleep(500 * time.Millisecond)
 	os.Exit(0)
 }
