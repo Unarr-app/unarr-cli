@@ -31,8 +31,11 @@ jobs:
 
       - name: Run goreleaser
         env:
-          # Forgejo runner injects GITHUB_TOKEN — but goreleaser uses it to talk to
-          # the *Forgejo* API thanks to the gitea_urls override in .goreleaser.yml.
+          # Forgejo runner auto-injects GITHUB_TOKEN (a per-job, instance-scoped
+          # token usable against the Forgejo REST API). goreleaser only accepts
+          # one token; with both GITHUB_TOKEN + GITEA_TOKEN set it errors out
+          # ("multiple tokens"). Unset GITHUB_TOKEN before invoking goreleaser so
+          # it picks the Gitea code path + the gitea_urls block in .goreleaser.yml.
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           # Empty when RELEASE_SIGNING_PUBKEY variable is unset — goreleaser
@@ -41,7 +44,9 @@ jobs:
           # RELEASE_SIGNING_PUBKEY (variable) + RELEASE_SIGNING_KEY (secret)
           # to turn verification on.
           RELEASE_SIGNING_PUBKEY: ${{ vars.RELEASE_SIGNING_PUBKEY }}
-        run: goreleaser release --clean
+        run: |
+          unset GITHUB_TOKEN
+          goreleaser release --clean
 
       - name: Sign checksums.txt with ed25519
         if: ${{ vars.RELEASE_SIGNING_PUBKEY != '' && secrets.RELEASE_SIGNING_KEY != '' }}
