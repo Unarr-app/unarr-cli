@@ -43,18 +43,5 @@ tmp/
 config/
 dist-ffbinaries/
 
-# Claude Code: global ~/.gitignore excludes .claude/ by default, which hides
-# project-shared agents/commands/hooks. Override here to commit the shared
-# pieces (agents, commands, hooks, settings.json). Keep per-user state local.
-!.claude/
-!.claude/agents/
-!.claude/agents/**
-!.claude/commands/
-!.claude/commands/**
-!.claude/hooks/
-!.claude/hooks/**
-!.claude/settings.json
-.claude/settings.local.json
-.claude/projects/
-.claude/scheduled_tasks.lock
-.claude/skills/
+# Claude Code: keep entirely local, do not track
+.claude/
