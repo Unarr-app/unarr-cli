@@ -13,6 +13,13 @@ import (
 // mtime delta.
 const probeCacheTTL = 30 * time.Minute
 
+// probeCacheJanitorInterval is how often the background sweeper wakes to
+// drop expired entries. Lookup-time eviction handles hot paths, but a
+// user who browses 5k files and then stops would leak entries until each
+// is individually re-touched. 5 min ≈ 6 sweeps per TTL window — enough
+// to keep memory bounded without burning CPU.
+const probeCacheJanitorInterval = 5 * time.Minute
+
 type probeCacheEntry struct {
 	probe   *StreamProbe
 	expires time.Time
@@ -25,9 +32,41 @@ type probeCacheKey struct {
 }
 
 var (
-	probeCacheMu sync.RWMutex
-	probeCache   = make(map[probeCacheKey]probeCacheEntry)
+	probeCacheMu      sync.RWMutex
+	probeCache        = make(map[probeCacheKey]probeCacheEntry)
+	probeCacheJanitor sync.Once
 )
+
+// startProbeCacheJanitor launches the background sweeper exactly once per
+// process. Lazy — fired on first storeProbeCache. Drops expired entries
+// every probeCacheJanitorInterval. Idempotent (sync.Once).
+func startProbeCacheJanitor() {
+	probeCacheJanitor.Do(func() {
+		go func() {
+			ticker := time.NewTicker(probeCacheJanitorInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				sweepProbeCache(time.Now())
+			}
+		}()
+	})
+}
+
+// sweepProbeCache removes every entry whose expiry is at or before `now`.
+// Exposed for tests; production code calls it indirectly via the janitor
+// goroutine.
+func sweepProbeCache(now time.Time) int {
+	probeCacheMu.Lock()
+	defer probeCacheMu.Unlock()
+	removed := 0
+	for k, e := range probeCache {
+		if !now.Before(e.expires) {
+			delete(probeCache, k)
+			removed++
+		}
+	}
+	return removed
+}
 
 // lookupProbeCache returns the cached StreamProbe for the given path if its
 // mtime + size still match the value recorded at insert time, AND the cache
@@ -50,8 +89,12 @@ func lookupProbeCache(path string) (*StreamProbe, bool) {
 		return nil, false
 	}
 	if time.Now().After(entry.expires) {
+		// Re-check under the write lock so a concurrent re-insert (same key,
+		// fresh expiry) isn't accidentally evicted.
 		probeCacheMu.Lock()
-		delete(probeCache, key)
+		if cur, stillThere := probeCache[key]; stillThere && time.Now().After(cur.expires) {
+			delete(probeCache, key)
+		}
 		probeCacheMu.Unlock()
 		return nil, false
 	}
@@ -78,6 +121,8 @@ func storeProbeCache(path string, probe *StreamProbe) {
 		expires: time.Now().Add(probeCacheTTL),
 	}
 	probeCacheMu.Unlock()
+	// Lazy janitor — fires once per process. No-op after first call.
+	startProbeCacheJanitor()
 }
 
 // ResetProbeCache clears the in-memory probe cache. Test-only.

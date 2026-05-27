@@ -42,22 +42,29 @@ func TestResolveEncoderProfileDefaults(t *testing.T) {
 		configured string
 		wantCodec  string
 		wantPreset string
+		wantHint   string
 	}{
 		// Empty configured preset → pick latency-biased default per backend.
-		{HWAccelNone, "", "libx264", "superfast"},
-		{HWAccelNVENC, "", "h264_nvenc", "p3"},
-		{HWAccelQSV, "", "h264_qsv", "veryfast"},
+		// DecodeHwAccel matches the encoder family for HW encoders; libx264 +
+		// VideoToolbox have no demuxer hint.
+		{HWAccelNone, "", "libx264", "superfast", ""},
+		{HWAccelNVENC, "", "h264_nvenc", "p3", "cuda"},
+		{HWAccelQSV, "", "h264_qsv", "veryfast", "qsv"},
+		// VAAPI: decoder hint set, no preset, no `-hwaccel_output_format vaapi`
+		// (so the CPU filter chain can consume the decoded frames).
+		{HWAccelVAAPI, "", "h264_vaapi", "", "vaapi"},
 		// VideoToolbox has no preset knob — Preset should be "" regardless of input.
-		{HWAccelVideoToolbox, "p4", "h264_videotoolbox", ""},
-		{HWAccelVideoToolbox, "", "h264_videotoolbox", ""},
-		// VAAPI codec name resolved correctly; no preset substitution (uses "").
-		{HWAccelVAAPI, "", "h264_vaapi", ""},
+		// VideoToolbox uses per-encoder flags, not a demuxer `-hwaccel` hint.
+		{HWAccelVideoToolbox, "p4", "h264_videotoolbox", "", ""},
+		{HWAccelVideoToolbox, "", "h264_videotoolbox", "", ""},
 	}
 	for _, tc := range cases {
 		got := ResolveEncoderProfile(tc.hw, tc.configured)
-		if got.Codec != tc.wantCodec || got.Preset != tc.wantPreset {
-			t.Errorf("ResolveEncoderProfile(%s, %q) = {%s, %s}, want {%s, %s}",
-				tc.hw, tc.configured, got.Codec, got.Preset, tc.wantCodec, tc.wantPreset)
+		if got.Codec != tc.wantCodec || got.Preset != tc.wantPreset || got.DecodeHwAccel != tc.wantHint {
+			t.Errorf("ResolveEncoderProfile(%s, %q) = {codec=%s preset=%s hint=%s}, want {codec=%s preset=%s hint=%s}",
+				tc.hw, tc.configured,
+				got.Codec, got.Preset, got.DecodeHwAccel,
+				tc.wantCodec, tc.wantPreset, tc.wantHint)
 		}
 	}
 }

@@ -136,11 +136,13 @@ type HLSSession struct {
 	restartCount   int // bounded auto-restart counter (resets on Close)
 	lastRestartAt  time.Time
 
-	// readyCond + readyMax track which segments ffmpeg has finished writing.
-	// Handlers waiting on a future segment block on readyCond until the
-	// poller advances readyMax past their index (or ffmpeg exits).
+	// readyCh + readyMax track how many segments ffmpeg has finished writing.
+	// readyMax is a COUNT (not an index): readyMax=N means seg-0 … seg-(N-1)
+	// are fully on disk. A handler waiting on `idx` blocks until
+	// `idx < readyMax` (segment idx is present). The pollSegments goroutine
+	// advances readyMax and re-creates readyCh on every step.
 	readyMu  sync.Mutex
-	readyMax int // highest segment index whose .m4s file is fully written
+	readyMax int
 	exitErr  error
 	exited   bool
 	readyCh  chan struct{} // closed + replaced each time readyMax advances
@@ -975,13 +977,16 @@ func buildHLSFFmpegArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string)
 	return buildHLSFFmpegArgsAt(cfg, probe, tmpDir, 0, 0)
 }
 
-// EncoderProfile names the codec + preset combination the HLS pipeline picks
-// for the given hardware backend + transcode config. Exposed so callers can
-// log the chosen encoder before ffmpeg launches (otherwise the resolution
-// lives only inside buildHLSFFmpegArgsAt).
+// EncoderProfile names the codec + preset + decoder hint combination the HLS
+// pipeline picks for the given hardware backend + transcode config. Exposed
+// so callers can log the chosen encoder before ffmpeg launches and so both
+// the demuxer-side `-hwaccel` flag and the encoder-side argv stay in sync
+// (otherwise the two switches in buildHLSFFmpegArgsAt could silently drift
+// when adding a new backend).
 type EncoderProfile struct {
-	Codec  string // ffmpeg encoder name (e.g. "h264_nvenc", "libx264")
-	Preset string // preset string, or "" when the codec has no preset knob
+	Codec     string // ffmpeg encoder name (e.g. "h264_nvenc", "libx264")
+	Preset    string // preset string, or "" when the codec has no preset knob
+	DecodeHwAccel string // ffmpeg `-hwaccel` value (e.g. "cuda", "qsv", "vaapi"), or ""
 }
 
 // ResolveEncoderProfile mirrors the codec + preset selection inside
@@ -993,6 +998,14 @@ type EncoderProfile struct {
 // the argv (NVENC uses p1-p7, QSV uses its own subset). So vendor encoders
 // always use their hardcoded vendor preset and ignore configuredPreset.
 // VideoToolbox has no preset knob at all.
+//
+// DecodeHwAccel mirrors the encoder family — `-hwaccel cuda` for NVENC,
+// `-hwaccel qsv` for QSV, `-hwaccel vaapi` for VAAPI. We intentionally
+// do NOT pass `-hwaccel_output_format vaapi`: that pins decoded frames
+// to GPU memory, but our filter chain (scale/format/setparams) runs on
+// CPU and can't consume VAAPI surfaces. Keeping output frames on CPU
+// makes the filter chain work and the VAAPI encoder still benefits from
+// HW-accelerated DECODE on the input side.
 func ResolveEncoderProfile(hw HWAccel, configuredPreset string) EncoderProfile {
 	codec := hw.FFmpegVideoCodec("h264")
 	switch codec {
@@ -1001,17 +1014,20 @@ func ResolveEncoderProfile(hw HWAccel, configuredPreset string) EncoderProfile {
 		if preset == "" {
 			preset = "superfast"
 		}
-		return EncoderProfile{Codec: codec, Preset: preset}
+		return EncoderProfile{Codec: codec, Preset: preset, DecodeHwAccel: ""}
 	case "h264_nvenc":
-		return EncoderProfile{Codec: codec, Preset: "p3"}
+		return EncoderProfile{Codec: codec, Preset: "p3", DecodeHwAccel: "cuda"}
 	case "h264_qsv":
-		return EncoderProfile{Codec: codec, Preset: "veryfast"}
+		return EncoderProfile{Codec: codec, Preset: "veryfast", DecodeHwAccel: "qsv"}
+	case "h264_vaapi":
+		return EncoderProfile{Codec: codec, Preset: "", DecodeHwAccel: "vaapi"}
 	case "h264_videotoolbox":
 		// No preset knob for VideoToolbox; the speed/quality dial is `-q:v`.
-		return EncoderProfile{Codec: codec, Preset: ""}
+		// VideoToolbox uses per-encoder flags rather than a demuxer hint.
+		return EncoderProfile{Codec: codec, Preset: "", DecodeHwAccel: ""}
 	}
-	// VAAPI + future codecs: no preset, vendor-specific knobs handled in argv.
-	return EncoderProfile{Codec: codec, Preset: ""}
+	// Unknown / future codecs: software path.
+	return EncoderProfile{Codec: codec, Preset: "", DecodeHwAccel: ""}
 }
 
 // buildHLSFFmpegArgsAt returns the argv for an HLS encode that starts at the
@@ -1019,18 +1035,19 @@ func ResolveEncoderProfile(hw HWAccel, configuredPreset string) EncoderProfile {
 // startIdx so they slot into the existing manifest at the correct position.
 // `-output_ts_offset` keeps the segment PTS aligned with manifest timeline.
 func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string, startIdx int, startSec float64) []string {
-	hwHint := cfg.Transcode.HWAccel
+	profile := ResolveEncoderProfile(cfg.Transcode.HWAccel, cfg.Transcode.Preset)
 	args := []string{"-y", "-hide_banner", "-loglevel", "warning"}
 
-	switch hwHint {
-	case HWAccelNVENC:
-		args = append(args, "-hwaccel", "cuda")
-	case HWAccelQSV:
-		args = append(args, "-hwaccel", "qsv")
-	case HWAccelVAAPI:
-		args = append(args, "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi")
-	case HWAccelNone, HWAccelVideoToolbox:
-		// No demuxer-side hint.
+	// Demuxer-side HW-decode hint. Sourced from the profile so a future
+	// codec/hint mismatch is impossible — the encoder + decode hint are
+	// computed once and stay coherent. Notably we do NOT add
+	// `-hwaccel_output_format vaapi` on the VAAPI path: that pins decoded
+	// frames to GPU memory but our CPU filter chain (scale, format,
+	// setparams) can't consume VAAPI surfaces. Letting frames flow on CPU
+	// keeps the filter chain working; the encoder still gets HW-accelerated
+	// decode on the input side.
+	if profile.DecodeHwAccel != "" {
+		args = append(args, "-hwaccel", profile.DecodeHwAccel)
 	}
 
 	// Seek before -i for fast keyframe-aligned start. The new ffmpeg writes
@@ -1060,14 +1077,14 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	}
 	args = append(args, "-map", fmt.Sprintf("0:a:%d?", audioIdx))
 
-	// Video encode. Codec + preset are resolved by ResolveEncoderProfile so
-	// the same logic feeds both the argv builder and per-session log lines.
+	// Video encode. Codec + preset come from the EncoderProfile resolved at
+	// the top of this function so the demuxer hint, the encoder, and the
+	// per-session log line all stay consistent.
 	//
 	// Defaults are biased for FIRST-START LATENCY over quality — the player
 	// blocks on seg-0 before the first frame paints, and a slow seg-0 is
 	// what users notice ("preparando sesión" stuck). Users who want better
 	// quality can override via `download.transcode.preset` in config.toml.
-	profile := ResolveEncoderProfile(hwHint, cfg.Transcode.Preset)
 	codec := profile.Codec
 	args = append(args, "-c:v", codec)
 	switch codec {
@@ -1090,9 +1107,9 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		args = append(args, "-preset", profile.Preset, "-look_ahead", "0")
 	case "h264_videotoolbox":
 		// VideoToolbox has no "preset" knob; `-realtime` flips into the
-		// low-latency path used by FaceTime. We let `-b:v / -maxrate /
-		// -bufsize` (set below at line ~1119) drive rate control —
-		// adding `-q:v` here would conflict because ffmpeg's
+		// low-latency path used by FaceTime. We let the `-b:v / -maxrate
+		// / -bufsize` block (added later in this function) drive rate
+		// control — adding `-q:v` here would conflict because ffmpeg's
 		// videotoolbox encoder treats `-b:v` as authoritative and
 		// silently ignores `-q:v`, so the constant-quality knob never
 		// took effect anyway.
