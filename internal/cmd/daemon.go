@@ -962,7 +962,10 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 	for {
 		// Cache HIT or seg-0 ready → notify + done.
 		if hsess.FromCache() || hsess.ReadyCount() >= 1 {
-			rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			// Parent ctx so a session cancel mid-POST (user closed tab,
+			// daemon shutdown) tears down the in-flight webhook instead of
+			// blocking the goroutine for up to 10 s on a now-orphan call.
+			rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			if err := client.MarkSessionReady(rctx, sessionID); err != nil {
 				log.Printf("[hls %s] mark-ready failed: %v", agent.ShortID(sessionID), err)
 			}
