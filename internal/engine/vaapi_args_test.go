@@ -67,3 +67,31 @@ func TestBuildHLSFFmpegArgsLibx264NoRegression(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildHLSFFmpegArgsVAAPIDump prints the full argv buildHLSFFmpegArgsAt
+// emits for a typical VAAPI session. Mimics the daemon spawn step so the
+// operator can verify the ffmpeg command-line shape without booting the
+// stack — equivalent to `journalctl --user -u unarr-dev | grep ffmpeg`
+// but without waiting for a real player session.
+func TestBuildHLSFFmpegArgsVAAPIDump(t *testing.T) {
+	cfg := HLSSessionConfig{
+		SessionID:  "vaapi-smoke",
+		SourcePath: "/mnt/nas/peliculas/sample.mkv",
+		Quality:    "720p",
+		AudioIndex: -1,
+		Transcode: TranscodeRuntime{
+			FFmpegPath:  "/usr/bin/ffmpeg",
+			FFprobePath: "/usr/bin/ffprobe",
+			HWAccel:     HWAccelVAAPI,
+		},
+	}
+	probe := &StreamProbe{
+		VideoCodec:  "hevc",
+		Width:       3840,
+		Height:      2160,
+		DurationSec: 5400,
+		AudioTracks: []ProbeAudioTrack{{Index: 0, Lang: "en", Codec: "ac3"}},
+	}
+	args := buildHLSFFmpegArgsAt(cfg, probe, "/tmp/smoke-tmpdir", 0, 0)
+	t.Logf("ffmpeg %s", strings.Join(args, " "))
+}
