@@ -534,6 +534,13 @@ func (s *HLSSession) ReadyCount() int {
 // circuit polling — a cache HIT is ready the moment we return.
 func (s *HLSSession) FromCache() bool { return s.fromCache }
 
+// IsClosed reports whether Close() has been invoked. Exposed (vs the
+// internal isClosed) so external watchers — the ready-webhook
+// goroutine in cmd/daemon.go — can short-circuit polling on a session
+// that was torn down through a different code path (registry replace,
+// idle sweep) without racing on the unexported helper.
+func (s *HLSSession) IsClosed() bool { return s.isClosed() }
+
 // MasterPlaylist returns the rendered master.m3u8 contents.
 func (s *HLSSession) MasterPlaylist() string { return s.manifestRoot }
 

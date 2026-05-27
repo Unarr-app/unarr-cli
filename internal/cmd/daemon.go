@@ -960,6 +960,13 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		// Session torn down through a path that didn't cancel ctx (registry
+		// replace, idle sweep, internal kill). Bail before polling further —
+		// without this check the watcher could keep alive for up to 60 s on
+		// a dead HLSSession that's never going to become ready.
+		if hsess.IsClosed() {
+			return
+		}
 		// Cache HIT or seg-0 ready → notify + done.
 		if hsess.FromCache() || hsess.ReadyCount() >= 1 {
 			// Parent ctx so a session cancel mid-POST (user closed tab,
