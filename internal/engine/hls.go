@@ -1168,6 +1168,17 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		// silently ignores `-q:v`, so the constant-quality knob never
 		// took effect anyway.
 		args = append(args, "-realtime", "1")
+	case "h264_vaapi":
+		// h264_vaapi has no preset knob. Bitrate args (set later) drive
+		// rate control. Add `-vaapi_device /dev/dri/renderD128` so the
+		// encoder doesn't fall back to a NULL device on multi-GPU hosts
+		// where the default render node is a non-VAAPI GPU (an Nvidia
+		// dGPU's render node, etc.). The filter chain below switches to
+		// `format=nv12,hwupload` so frames land on the right VAAPI
+		// surface before the encoder; we intentionally avoid scale_vaapi
+		// because mesa 25 + Raphael iGPU emits "Cannot allocate memory"
+		// per session start, polluting logs even though encode succeeds.
+		args = append(args, "-vaapi_device", "/dev/dri/renderD128")
 	}
 	// Derive H.264 level from the actual output height. A fixed "4.0" caps the
 	// encoder at 1080p — anything taller (1440p, 4K source on quality=original)
@@ -1218,14 +1229,32 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	if maxH == 0 {
 		maxH = cfg.Transcode.MaxHeight
 	}
+	// VAAPI needs frames as nv12 VAAPI surfaces before the encoder. We do
+	// scale + format conversion on CPU then `hwupload` once at the end —
+	// skips the mesa 25 + Raphael iGPU "Cannot allocate memory" log spam
+	// that scale_vaapi triggers per-session-start while still delivering
+	// the encoder a GPU surface. setparams is dropped because VAAPI
+	// surfaces don't expose VUI fields the way libx264 does; the encoder
+	// records its own color metadata via the source PTS chain.
+	pixFormat := "yuv420p"
+	hwUploadTail := ""
+	colorTail := ",setparams=colorspace=bt709:color_trc=bt709:color_primaries=bt709:range=tv"
+	if codec == "h264_vaapi" {
+		pixFormat = "nv12"
+		hwUploadTail = ",hwupload"
+		colorTail = ""
+	}
 	var filterChain string
 	if maxH > 0 && probe.Height > maxH {
 		filterChain = fmt.Sprintf(
-			"scale=-2:%d:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,setparams=colorspace=bt709:color_trc=bt709:color_primaries=bt709:range=tv",
-			maxH,
+			"scale=-2:%d:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=%s%s%s",
+			maxH, pixFormat, colorTail, hwUploadTail,
 		)
 	} else {
-		filterChain = "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,setparams=colorspace=bt709:color_trc=bt709:color_primaries=bt709:range=tv"
+		filterChain = fmt.Sprintf(
+			"scale=trunc(iw/2)*2:trunc(ih/2)*2,format=%s%s%s",
+			pixFormat, colorTail, hwUploadTail,
+		)
 	}
 	args = append(args, "-vf", filterChain)
 

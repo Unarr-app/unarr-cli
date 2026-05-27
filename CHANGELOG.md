@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.14] - 2026-05-27
+
+### Changed
+
+- **VAAPI encode path now ships proper GPU surfaces**. Adds
+  `-vaapi_device /dev/dri/renderD128` so the encoder doesn't fall
+  back to a NULL device on multi-GPU hosts (the dev box that
+  validated this has an NVIDIA dGPU on renderD129 + an AMD iGPU on
+  renderD128 — without the explicit device the encoder picked the
+  wrong node). Filter chain switches to `format=nv12,hwupload`
+  (was `format=yuv420p`) so frames arrive at the encoder as VAAPI
+  surfaces. Color-metadata `setparams=` block is dropped on the
+  VAAPI path because VAAPI surfaces don't expose VUI fields the
+  same way libx264 does — the encoder records its own.
+  Intentionally avoids `scale_vaapi`: mesa 25 + AMD Raphael iGPU
+  emit "Cannot allocate memory" per session start, polluting logs
+  even though encode succeeds. CPU scale + hwupload is the safe
+  hybrid that works across all VAAPI-capable hosts.
+- **Unit tests** lock the argv shape: TestBuildHLSFFmpegArgsVAAPI
+  asserts the new VAAPI flags + absence of scale_vaapi /
+  format=yuv420p; TestBuildHLSFFmpegArgsLibx264NoRegression
+  ensures the libx264 path keeps its `setparams` + `yuv420p` and
+  doesn't accidentally inherit the VAAPI shape.
+
 ## [0.9.13] - 2026-05-27
 
 ### Added
