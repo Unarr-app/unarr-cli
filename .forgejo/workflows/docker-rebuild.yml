@@ -1,0 +1,61 @@
+# Rebuilds and re-pushes the `latest` image without a version bump so newly
+# *fixed* Alpine / ffmpeg / Go patches land between tagged releases. Versioned
+# tags are immutable and never touched here. Runs weekly and on demand.
+name: Docker rebuild
+
+on:
+  schedule:
+    # Mondays 04:17 UTC (off the hour to avoid the scheduler rush)
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  rebuild:
+    runs-on: docker
+    container:
+      image: docker.io/library/docker:27-cli
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build deps
+        run: apk add --no-cache curl git bash
+
+      - name: Install buildx
+        run: |
+          mkdir -p ~/.docker/cli-plugins
+          curl -sSL https://github.com/docker/buildx/releases/latest/download/buildx-linux-amd64 \
+            -o ~/.docker/cli-plugins/docker-buildx
+          chmod +x ~/.docker/cli-plugins/docker-buildx
+
+      - name: Set up qemu
+        run: docker run --rm --privileged tonistiigi/binfmt --install all
+
+      # Stamp the binary with the most recent release tag (not "dev").
+      - name: Resolve version
+        id: ver
+        run: |
+          v=$(git describe --tags --abbrev=0 2>/dev/null || echo dev)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Docker Hub
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: echo "$DH_TOKEN" | docker login -u "$DH_USER" --password-stdin
+
+      - name: Build + push (refresh latest)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          docker buildx create --name builder --use --driver docker-container
+          # Refresh the floating tag only — never overwrite a versioned release.
+          # Force a fresh base pull so apk upgrade picks up new patches.
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg "VERSION=$VERSION" \
+            --tag "torrentclaw/unarr:latest" \
+            --no-cache \
+            --push \
+            .

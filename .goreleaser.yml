@@ -59,6 +59,18 @@ changelog:
       - "^test:"
       - "^chore:"
 
+# Self-hosted Forgejo at git.torrentclaw.com. goreleaser detects GITEA_TOKEN +
+# these URLs and publishes the release there instead of GitHub. Reachable via
+# `forgejo` hostname inside the dokploy-network (the runner shares it); for
+# local goreleaser runs outside the network, override via env GITEA_API_URL.
+release:
+  gitea_urls:
+    api: http://forgejo:3000/api/v1
+    download: https://git.torrentclaw.com
+    skip_tls_verify: false
+  draft: false
+  prerelease: auto
+
 # Homebrew tap — requires PAT with repo scope (not GITHUB_TOKEN)
 # Enable when torrentclaw/homebrew-tap PAT is configured as HOMEBREW_TAP_TOKEN
 # brews:

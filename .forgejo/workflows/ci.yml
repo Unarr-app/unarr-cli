@@ -12,35 +12,26 @@ permissions:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: ["1.25"]
+    runs-on: docker
+    container:
+      image: docker.io/library/golang:1.25
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: ${{ matrix.go-version }}
+      - uses: actions/checkout@v4
 
       - name: Run tests
         run: go test -v -race -count=1 ./...
 
   build:
     name: Build
-    runs-on: ubuntu-latest
+    runs-on: docker
+    container:
+      image: docker.io/library/golang:1.25
     strategy:
       matrix:
         goos: [linux, darwin, windows]
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.25"
+      - uses: actions/checkout@v4
 
       - name: Build
         env:
@@ -50,30 +41,30 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: docker
+    container:
+      image: docker.io/library/golang:1.25
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.25"
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.11.4/install.sh \
+            | sh -s -- -b /usr/local/bin v2.11.4
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.11.4
+        run: golangci-lint run ./...
 
   coverage:
     name: Coverage
-    runs-on: ubuntu-latest
+    runs-on: docker
+    container:
+      image: docker.io/library/golang:1.25
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.25"
+      - name: Install python3
+        run: apt-get update && apt-get install -y --no-install-recommends python3
 
       - name: Run tests with coverage (all packages)
         run: |
@@ -102,24 +93,13 @@ jobs:
               print('OK: Coverage meets minimum threshold')
           "
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
-        with:
-          files: ./coverage.out
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
   vet:
     name: Vet
-    runs-on: ubuntu-latest
+    runs-on: docker
+    container:
+      image: docker.io/library/golang:1.25
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.25"
+      - uses: actions/checkout@v4
 
       - name: Run go vet
         run: go vet ./...
