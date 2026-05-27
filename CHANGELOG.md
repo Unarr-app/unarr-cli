@@ -5,226 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.10] - 2026-05-27
+## [0.9.11] - 2026-05-27
 
-### Changed
-
-- **HLS segments halved from 4 s to 2 s**. seg-0 now lands in ~half the
-  cold-cache wait time, so the player paints the first frame ~1-2 s
-  sooner on software encodes (~0.5 s sooner on HW encoders). Trade-off:
-  2× more segments per source (a 2 h movie produces ~3600 segments
-  instead of ~1800), but each is half the size. Well within HLS spec
-  — Apple recommends 6 s but 2 s is also valid; LL-HLS uses 1-2 s.
-  Existing 0.9.9 cache entries fail `VerifyComplete` (the new segment
-  count expects different file names at the boundary) and are
-  invalidated + re-encoded transparently on next play. Self-healing,
-  no manual cleanup needed.
-- **`OnStreamSession` daemon callback now runs `StartHLSSession` in a
-  goroutine** instead of blocking the sync HTTP loop on ffprobe
-  (~0.3-1 s typical). Net: sync responses return immediately, and any
-  other pending actions in the same response (new tasks, deletes)
-  no longer wait for ffmpeg to warm up. Browser HEAD probes already
-  have a 30 s retry budget that absorbs the brief window between
-  `playerSessionRegistry.add` and `streamSrv.HLS().Register`.
-
-## [0.9.9] - 2026-05-27
 
 ### Added
 
-- **per-session encoder log**: every HLS session start now logs
-  `encoder=… accel=… preset=…` so a "preparando sesión" complaint can
-  be triaged from the journal alone. Cache-HIT sessions keep the
-  existing simpler log (no ffmpeg involved).
-- **probe cache**: `engine.ProbeFile` is memoised by `(path, mtime, size)`
-  for 30 minutes. A second play of the same file skips ffprobe
-  entirely — saves 1-3 s on first-segment latency for 50+ GB MKVs.
-  Cache key changes immediately on any file rewrite (mtime or size
-  delta).
-- **agents tab transcoder row**: the web profile → agents tab now shows
-  each agent's selected encoder (`NVIDIA NVENC`, `Intel Quick Sync`,
-  `VA-API`, `macOS VideoToolbox`, or `Software (libx264)` in amber) plus
-  the comfortable transcode-resolution cap. Surfaces the same diagnostic
-  the daemon log carries.
+- **hls**: pre-segmentación delantada — 2 s segments + async session start (0.9.10)
+- **hls**: faster first-start — probe cache + tighter encoder presets (0.9.9)
 
 ### Changed
 
-- **HLS encoder presets biased for first-start latency**:
-  - **libx264**: default `veryfast` → `superfast` (~15-20% faster encode;
-    marginal quality loss at 5-25 Mbps target bitrates). Users wanting
-    the previous quality can set `download.transcode.preset = "veryfast"`
-    in `config.toml`.
-  - **NVENC**: `-preset p4 -tune hq` → `-preset p3 -tune ll`. First-segment
-    encode drops from ~1.5 s to ~0.8 s on RTX-class GPUs.
-  - **QSV**: `-preset medium` → `-preset veryfast`. Keeps `-look_ahead 0`
-    for low-latency rate control.
-  - **VideoToolbox** (macOS): adds `-realtime 1 -q:v 50` (was unset). The
-    `realtime` flag steers VideoToolbox into the low-latency code path.
-- Encoder + preset selection moved into `engine.ResolveEncoderProfile` so
-  the same logic drives both argv construction and the log line.
-- **`download.transcode.preset` is now libx264-only**. The configured preset
-  is honoured on software encode (libx264 vocabulary: ultrafast →
-  veryslow); HW backends ignore it and use vendor-specific defaults
-  (NVENC p3, QSV veryfast). Passing a libx264 preset to NVENC / QSV was
-  previously rejected by ffmpeg; the documentation now reflects what was
-  always the only correct usage.
-- Default `download.transcode.preset` is empty (was `"veryfast"`). The
-  engine fills in `"superfast"` for libx264 — latency-biased. **Users who
-  want better quality at slower first-play should set it explicitly in
-  `config.toml`**: `"veryfast"` (previous default) / `"faster"` / `"fast"`
-  / `"medium"`. Range documented in the TranscodeConfig struct.
+- **hls**: critico-driven hardening of fase 3.2
 
+### Fixed
+
+- **cors**: allow play from .to / staging / onion mirrors
+- **library**: classify resolution by width + height, not height alone
+- **transcode**: make preset libx264-only + restore quality opt-in
 ## [0.9.8] - 2026-05-27
 
+
 ### Fixed
 
-- **auto-upgrade restart loop**: when the server signal arrived for a version
-  the daemon was already running (e.g. flag still set after a previous
-  upgrade), `applyAutoUpgrade` would call `upgrade.Execute` (which no-ops),
-  then `os.Exit(0)` anyway — systemd respawned, the flag was still set, the
-  cycle repeated. Now: no-op case is detected up front, the daemon clears
-  the server flag via `/api/internal/agent/upgrade-result` and stays alive.
-- **upgrade flag stuck after success**: the CLI never reported the upgrade
-  outcome, so `upgrade_requested` stayed `true` in the DB forever. The
-  daemon now calls `/api/internal/agent/upgrade-result` on every applyAutoUpgrade
-  branch (success, failure, no-op) — server clears the flag, restart loops
-  end.
-
-### Added
-
-- New `Client.ReportUpgradeResult(agentID, success, version, error)` HTTP
-  method wrapping `POST /api/internal/agent/upgrade-result`.
-
+- **upgrade**: break auto-apply restart loop (0.9.8)
 ## [0.9.7] - 2026-05-26
 
+
 ### Added
 
-- **hls cache**: persistent fMP4 segment cache keyed by
-  `(source, quality, audio_index)`. After a successful encode the segments
-  + `init.mp4` are kept under `~/.cache/unarr/hls-cache/{key}/` with a
-  `.complete` marker. A second play of the same file at the same quality
-  skips ffmpeg entirely (smoke-tested 23–31× faster than re-encode). LRU
-  + size-budget eviction; pinned during active play; per-key writer-lock
-  prevents two concurrent encodes from corrupting each other. Startup
-  reaps orphan dirs without `.complete` older than 10 min so a daemon
-  crash doesn't leak disk indefinitely. New `[downloads.hls_cache]` block
-  in `config.toml`: `enabled` (default true), `size_gb` (default 5,
-  min 1), `dir` (default `~/.cache/unarr/hls-cache`).
-- **hls cache integrity check**: on HIT, the daemon stats `init.mp4` +
-  last segment before reporting cache reuse — if a file was externally
-  deleted, the entry is invalidated and re-encoded transparently.
-- **hls cache stats**: hit/miss counters surface via `cache.Stats()`
-  (`Hits`, `Misses`, `EntryCount`, `TotalBytes`) and the sweeper logs a
-  daily summary line `[hls_cache] day-stats: hits=N misses=M ratio=X%
-  entries=Y size=ZMB`.
-- **subtitle integrity for cached replay**: `Close` waits up to 15 s for
-  the subtitle extractor goroutine before sealing `.complete` so a HIT
-  never serves half-written `.vtt` files. Timeout invalidates instead of
-  sealing.
-
-### Changed
-
-- `[daemon] auto_upgrade` now appears in fresh `config.toml` files as
-  `true` (it was always the implicit default; this just makes it visible
-  in default-generated configs).
-
+- **hls**: persistent fMP4 segment cache + integrity + stats (0.9.7)
 ## [0.9.6] - 2026-05-26
 
+
 ### Added
 
-- **auto-upgrade**: when the web flags the agent for upgrade
-  (`POST /api/internal/agent/upgrade` or the "Force update now" button),
-  the daemon now downloads and replaces the binary in-place, then exits so
-  the service supervisor (`systemd Restart=always` on Linux, the equivalent
-  on macOS/Windows) respawns on the new version. No `unarr update` step
-  required from the user. Still opt-in — only fires when the server sends
-  the upgrade signal.
-
-### Changed
-
-- The `OnUpgrade` daemon callback no longer just logs `run unarr self-update`;
-  it now triggers the actual upgrade in a background goroutine.
-
+- **daemon**: auto-apply upgrades when server signals (0.9.6)
 ## [0.9.5] - 2026-05-26
 
+
 ### Added
 
-- **funnel**: optional CloudFlare Quick Tunnel subprocess. `unarr funnel on`
-  spawns `cloudflared` as a child process and registers an anonymous
-  `https://<random>.trycloudflare.com` hostname tunnelled to the daemon's
-  HLS server. The hostname is reported back to the web on every sync so the
-  in-browser player picks it up automatically — cross-network playback now
-  works on torrentclaw.com without Tailscale or port forwarding. Bytes
-  proxy through CloudFlare; TorrentClaw still doesn't relay content.
-- **funnel**: on by default for fresh installs (NAS/Docker get cross-network
-  HTTPS automatically); existing configs that pre-date the feature stay
-  off until the operator runs `unarr funnel on`.
-- **funnel**: auto-downloads cloudflared to the unarr data dir when not on
-  PATH (Linux amd64/arm64/armhf/386). ELF magic + size sanity check on the
-  download; `O_EXCL` partial-write so concurrent daemons don't clobber
-  each other.
-- **funnel**: subprocess supervisor keeps the tunnel up across cloudflared
-  crashes + CF's ~6h Quick Tunnel rotation. Exponential backoff (2 s → 5 min)
-  on persistent failures. The web's reported URL is cleared the moment
-  cloudflared exits so an outdated hostname doesn't keep handing out 502s.
-- **funnel**: `unarr funnel status` shows the live URL once registered.
-  See README §`[downloads.funnel]` for the throughput / latency caveats of
-  CF's free Quick Tunnels.
-- **docker**: the official `torrentclaw/unarr` image now bundles
-  `cloudflared` so the funnel works the moment the container starts — no
-  first-run download.
-
-### Fixed
-
-- **hls/libx264**: bump the H.264 level we hint to libx264 by one tier so
-  anamorphic (>16:9) sources stop emitting unplayable streams. 720p at
-  level 3.1 silently rejected 1728×720 cinemascope frames with
-  `frame MB size > level limit`; 720p now ships at level 4.0, 1080p at 4.1.
-  Decoder compatibility is unaffected — every device that handles 1080p
-  already handles ≥ 4.1.
-
+- **funnel**: cloudflare quick tunnel embedded subprocess (0.9.5)
 ## [0.9.4] - 2026-05-26
 
-### Removed
-
-- **streaming**: retire the custom WebRTC DataChannel pipeline. The daemon no
-  longer ships pion/webrtc, the WSS signaling client, or the wire framing
-  package — every in-browser session now uses HLS over HTTP from the daemon
-  (Tailscale / LAN / UPnP). Browser P2P (WebTorrent) bytes never re-enabled.
-- **config**: `[downloads.webrtc]` block removed from the TOML schema; existing
-  config files with the section parse cleanly because go-toml ignores unknown
-  sections.
-- **seed_file**: `mode=seed_file` task handler + `engine.SeedFile` helper
-  dropped — the last in-browser caller was retired with the WebRTC player.
-- **wstracker-probe**: standalone probe binary removed.
-
-### Changed
-
-- **agent wire**: `SyncResponse.WebRTCSessions` (JSON: `webrtcSessions`) renamed
-  to `StreamSessions` (JSON: `streamSessions`). The Go type `agent.WebRTCSession`
-  is now `agent.StreamSession`. Wire-incompatible with web < 2026-05-26.
-- **torrent**: `buildMagnet` no longer accepts an `extraTrackers` variadic —
-  the default tracker list is the only set used.
-
-### Fixed
-
-- **hls**: clamp the ffmpeg `-b:v` to the bitrate cap derived from the EFFECTIVE
-  output height instead of the requested quality. Previously asking for "2160p"
-  on a 1080p source overshot the H.264 level we resolved from the effective
-  height (4.0, max 20 Mbps) and made libx264 abort with
-  `VBV bitrate > level limit`.
-
-## [0.9.2] - 2026-05-21
 
 ### Added
 
-- **vpn**: `unarr vpn` command (`status`, `enable`, `disable`) to manage the managed
-  WireGuard split-tunnel, with `vpn status --check` to verify provisioning.
-- **vpn**: report split-tunnel state (active, exit server) to the web on register
-  + every sync, so the dashboard shows which agent holds the single WireGuard slot.
-- **vpn**: send the agent id when fetching the VPN config so the web can arbitrate
-  the single WireGuard slot — the first agent claims it; the rest are told to run
-  OpenVPN on their own host (1 agent on WireGuard + up to 9 on OpenVPN).
+- **stream**: retire WebRTC, HLS-only, bump 0.9.4 (**BREAKING**)
+## [0.9.3] - 2026-05-26
 
+
+### Added
+
+- **usenet**: warn at startup when par2 or extractor is missing
+
+### Fixed
+
+- **engine**: truncate errorMessage before reporting status
+- **hls**: clamp ffmpeg bitrate to the level we derive from outputHeight
+## [0.9.2] - 2026-05-22
+
+
+### Added
+
+- **vpn**: unarr vpn command + report/arbitrate the WireGuard slot
 ## [0.9.1] - 2026-05-21
 
 
@@ -235,6 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **security**: bump golang.org/x deps and add container CVE scan gate
+
+### Other
+
+- **release**: 0.9.1
 ## [0.9.0] - 2026-05-21
 
 
@@ -243,6 +91,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **agent**: add mirror failover, agent client refactor, status 401 detection
 - **vpn**: local config_file for self-hosted/personal VPN testing
 - **vpn**: split-tunnel torrent traffic through managed WireGuard
+
+### CI/CD
+
+- deploy install scripts to GitHub Pages
 
 ### Documentation
 
@@ -257,6 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- **pages**: add .nojekyll to disable Jekyll processing
+- **pages**: set custom domain unarr.torrentclaw.com
 - **release**: 0.9.0
 ## [0.8.1] - 2026-05-08
 
@@ -630,23 +484,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
-[0.9.1]: https://github.com/torrentclaw/unarr/compare/v0.9.0...v0.9.1
-[0.9.0]: https://github.com/torrentclaw/unarr/compare/v0.8.1...v0.9.0
-[0.8.1]: https://github.com/torrentclaw/unarr/compare/v0.8.0...v0.8.1
-[0.8.0]: https://github.com/torrentclaw/unarr/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/torrentclaw/unarr/compare/v0.6.8...v0.7.0
-[0.6.8]: https://github.com/torrentclaw/unarr/compare/v0.6.7...v0.6.8
-[0.6.7]: https://github.com/torrentclaw/unarr/compare/v0.6.6...v0.6.7
-[0.6.6]: https://github.com/torrentclaw/unarr/compare/v0.6.5...v0.6.6
-[0.6.5]: https://github.com/torrentclaw/unarr/compare/v0.6.4...v0.6.5
-[0.6.4]: https://github.com/torrentclaw/unarr/compare/v0.6.3...v0.6.4
-[0.9.10]: https://github.com/torrentclaw/unarr/compare/v0.9.9...v0.9.10
-[0.9.9]: https://github.com/torrentclaw/unarr/compare/v0.9.8...v0.9.9
+[0.9.11]: https://github.com/torrentclaw/unarr/compare/v0.9.8...v0.9.11
 [0.9.8]: https://github.com/torrentclaw/unarr/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/torrentclaw/unarr/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/torrentclaw/unarr/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/torrentclaw/unarr/compare/v0.9.4...v0.9.5
-[0.9.4]: https://github.com/torrentclaw/unarr/compare/v0.9.2...v0.9.4
+[0.9.4]: https://github.com/torrentclaw/unarr/compare/v0.9.3...v0.9.4
+[0.9.3]: https://github.com/torrentclaw/unarr/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/torrentclaw/unarr/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/torrentclaw/unarr/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/torrentclaw/unarr/compare/v0.8.1...v0.9.0
