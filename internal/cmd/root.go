@@ -25,8 +25,9 @@ var (
 
 func init() {
 	rootCmd = &cobra.Command{
-		Use:   "unarr",
-		Short: "unarr — torrent search and management",
+		Use:     "unarr",
+		Version: Version,
+		Short:   "unarr — torrent search and management",
 		Long: `unarr is a powerful terminal tool for torrent search and management.
 
 Search 30+ torrent sources, inspect torrent quality, discover popular content,

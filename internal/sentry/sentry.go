@@ -1,12 +1,14 @@
 package sentry
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"strings"
 	"time"
 
 	gosentry "github.com/getsentry/sentry-go"
+	"github.com/spf13/pflag"
 )
 
 // dsn is injected at build time via ldflags. If empty, Sentry is disabled.
@@ -45,8 +47,10 @@ func Close() {
 }
 
 // CaptureError sends a non-fatal error to Sentry with optional command context.
+// User-input errors (unknown flag/command, bad value) are skipped — they are
+// not bugs, just noise.
 func CaptureError(err error, command string) {
-	if err == nil {
+	if err == nil || isUserInputError(err) {
 		return
 	}
 
@@ -56,6 +60,20 @@ func CaptureError(err error, command string) {
 		}
 		gosentry.CaptureException(err)
 	})
+}
+
+func isUserInputError(err error) bool {
+	var notExist *pflag.NotExistError
+	var valueReq *pflag.ValueRequiredError
+	var invalidVal *pflag.InvalidValueError
+	var invalidSyn *pflag.InvalidSyntaxError
+	if errors.As(err, &notExist) || errors.As(err, &valueReq) ||
+		errors.As(err, &invalidVal) || errors.As(err, &invalidSyn) {
+		return true
+	}
+	msg := err.Error()
+	return strings.HasPrefix(msg, "unknown command ") ||
+		strings.HasPrefix(msg, "required flag(s)")
 }
 
 // RecoverPanic captures a panic and re-panics after reporting.
