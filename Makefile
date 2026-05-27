@@ -1,4 +1,4 @@
-.PHONY: all build test lint coverage clean fmt vet check install-hooks changelog release release-patch release-minor release-major release-dry
+.PHONY: all build test lint coverage clean fmt vet check install-hooks changelog release release-patch release-minor release-major release-dry ship ship-dry ship-push
 
 BINARY = unarr
 SENTRY_DSN ?=
@@ -70,6 +70,19 @@ release-major:
 release-dry:
 	@test -n "$(V)" || { echo "Usage: make release-dry V=patch|minor|major|0.5.0"; exit 1; }
 	@./scripts/release.sh --dry-run $(V)
+
+## Ship a release end-to-end (goreleaser + Hetzner + Docker Hub). Standalone backup for GH Actions.
+## Reads version from internal/cmd/version.go unless V= is provided.
+ship:
+	@./scripts/ship.sh $(V)
+
+## Ship + git push tag to GH afterwards
+ship-push:
+	@./scripts/ship.sh --push $(V)
+
+## Preview ship steps without executing
+ship-dry:
+	@./scripts/ship.sh --dry-run $(V)
 
 ## Remove generated files
 clean:
