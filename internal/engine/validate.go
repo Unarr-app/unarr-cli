@@ -21,12 +21,27 @@ var validSessionID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 // 127.0.0.1 is listed in addition to localhost because some browsers treat
 // them as distinct origins for CORS.
 //
+// Mirrors (`.to`, `staging.torrentclaw.com`, `www.`) are listed so a user
+// playing from any official mirror succeeds the HEAD probe; without these
+// the browser drops the response for "missing ACAO" and the player reports
+// "404 todos los canales" even though the daemon returned 200.
+//
 // Note: media tags (<video src>, <audio src>) do not send the Origin
 // header so they are not gated by CORS at all; this allowlist only
 // affects fetch()/XHR.
 var defaultCORSAllowedOrigins = []string{
 	"https://torrentclaw.com",
+	"https://www.torrentclaw.com",
 	"https://app.torrentclaw.com",
+	"https://staging.torrentclaw.com",
+	"https://torrentclaw.to",
+	"https://www.torrentclaw.to",
+	// Tor mirror — Tor Browser sends `Origin: http://<addr>.onion` (plain
+	// http, no port). Mirror address is the BUILT_IN_ONION constant from
+	// torrentclaw-web/src/lib/mirrors-config.ts; rotates rarely, kept in
+	// sync by hand. Daemon also dynamically merges /api/mirrors at startup
+	// (see daemon.go) so a new key doesn't need a CLI rebuild.
+	"http://torrentf3aifidcsaaanmnmuhv2s53r6hqsl3zkmfidiaxainkeqk5id.onion",
 	"http://localhost:3030",
 	"http://127.0.0.1:3030",
 }

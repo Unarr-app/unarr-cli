@@ -293,7 +293,15 @@ func runDaemonStart() error {
 	// Create persistent stream server
 	streamSrv := engine.NewStreamServer(cfg.Download.StreamPort)
 	streamSrv.SetUPnPEnabled(cfg.Download.EnableUPnP)
-	streamSrv.SetCORSAllowedOrigins(cfg.Download.CORSExtraOrigins)
+	// CORS extras = operator config + dynamic mirror list from /api/mirrors.
+	// Without the mirror merge, a user playing from `torrentclaw.to` (or any
+	// future mirror) hits the daemon, gets 200 + body, but no
+	// `Access-Control-Allow-Origin` → browser drops the response → player
+	// reports "404 todos los canales". Fetching /api/mirrors at startup
+	// future-proofs against mirror additions without a CLI rebuild.
+	corsExtras := append([]string(nil), cfg.Download.CORSExtraOrigins...)
+	corsExtras = append(corsExtras, mirrorCORSOrigins(ctx, cfg, userAgent)...)
+	streamSrv.SetCORSAllowedOrigins(corsExtras)
 	// Reap HLS tmpdirs left over from a previous daemon run before we start
 	// accepting new sessions. The in-memory registry doesn't survive a
 	// restart, so without this disk usage grows unbounded across restarts.
@@ -861,4 +869,49 @@ func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
 		}
 		backoff = min(backoff*2, maxBackoff)
 	}
+}
+
+// mirrorCORSOrigins fetches /api/mirrors from the configured primary (+ extra
+// mirror candidates + static IPFS fallback) and returns the discovered URLs as
+// Origin strings. Best-effort: any failure logs a warning and returns an empty
+// slice; the static defaultCORSAllowedOrigins in validate.go covers the known
+// mirrors (.com / .to / built-in onion) so the daemon still accepts the
+// official surfaces when this call fails.
+//
+// Bounded to a short timeout so a slow /api/mirrors response can't delay
+// daemon startup — every second here is a second the user can't play.
+func mirrorCORSOrigins(parent context.Context, cfg config.Config, userAgent string) []string {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+
+	candidates := append([]string{cfg.Auth.APIURL}, cfg.Auth.Mirrors...)
+	resp, err := agent.FetchMirrorsWithFallback(ctx, candidates, userAgent)
+	if err != nil {
+		log.Printf("[cors] mirror discovery failed (%v) — using static allowlist only", err)
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(resp.Mirrors))
+	add := func(rawURL string) {
+		if rawURL == "" {
+			return
+		}
+		origin := strings.TrimRight(rawURL, "/")
+		if _, dup := seen[origin]; dup {
+			return
+		}
+		seen[origin] = struct{}{}
+		out = append(out, origin)
+	}
+	for _, m := range resp.Mirrors {
+		add(m.URL)
+	}
+	if resp.Tor != nil {
+		add(resp.Tor.URL)
+	}
+	if len(out) > 0 {
+		log.Printf("[cors] merged %d mirror origins from /api/mirrors", len(out))
+	}
+	return out
 }
