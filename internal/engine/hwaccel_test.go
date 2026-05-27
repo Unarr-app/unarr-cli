@@ -63,15 +63,23 @@ func TestResolveEncoderProfileDefaults(t *testing.T) {
 }
 
 func TestResolveEncoderProfileHonoursConfiguredPreset(t *testing.T) {
-	// libx264 / NVENC / QSV all defer to the configured preset when set.
+	// Only libx264 honours the configured preset — the libx264 vocabulary
+	// (ultrafast…veryslow) doesn't apply to vendor encoders. NVENC has its
+	// own p1-p7 scale; QSV uses a different subset; VideoToolbox has no
+	// preset knob. Passing a libx264 preset to them would have ffmpeg reject
+	// the argv, so ResolveEncoderProfile always falls back to the hardcoded
+	// vendor preset for non-libx264 codecs.
 	cases := []struct {
 		hw         HWAccel
 		configured string
 		wantPreset string
 	}{
-		{HWAccelNone, "ultrafast", "ultrafast"},
-		{HWAccelNVENC, "p1", "p1"},
-		{HWAccelQSV, "veryslow", "veryslow"},
+		{HWAccelNone, "ultrafast", "ultrafast"},  // libx264 honours
+		{HWAccelNone, "medium", "medium"},        // libx264 honours
+		{HWAccelNVENC, "p1", "p3"},               // NVENC ignores, sticks to p3
+		{HWAccelNVENC, "veryfast", "p3"},         // NVENC ignores libx264 vocab
+		{HWAccelQSV, "veryslow", "veryfast"},     // QSV ignores, sticks to veryfast
+		{HWAccelVideoToolbox, "veryfast", ""},    // VideoToolbox has no preset
 	}
 	for _, tc := range cases {
 		got := ResolveEncoderProfile(tc.hw, tc.configured)

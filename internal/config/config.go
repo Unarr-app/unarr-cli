@@ -96,9 +96,27 @@ type VPNConfig struct {
 // Disabled by default; enabling requires ffmpeg + ffprobe on PATH (or
 // explicit paths via the library config).
 type TranscodeConfig struct {
-	Enabled       bool   `toml:"enabled"`        // master switch
-	HWAccel       string `toml:"hw_accel"`       // "auto" | "none" | "nvenc" | "qsv" | "vaapi" | "videotoolbox"
-	Preset        string `toml:"preset"`         // libx264 preset; "veryfast" by default
+	Enabled bool   `toml:"enabled"`  // master switch
+	HWAccel string `toml:"hw_accel"` // "auto" | "none" | "nvenc" | "qsv" | "vaapi" | "videotoolbox"
+	// Preset is the encoder speed/quality dial. Only used on software encode
+	// (libx264) — HW backends (NVENC/QSV/VAAPI/VideoToolbox) use vendor
+	// presets that don't share libx264's vocabulary and would be rejected
+	// by ffmpeg if passed here.
+	//
+	// Empty (default) → engine picks "superfast" — latency-biased, ~3 s
+	// first-play on 1080p source on a modern x86 CPU. Marginal quality loss
+	// at 5-25 Mbps target bitrates.
+	//
+	// For better quality at slower first-play (1-2 s slower per seg):
+	//   "veryfast"  — previous default; balanced
+	//   "faster"    — slight quality bump
+	//   "fast"      — meaningful quality bump
+	//   "medium"    — libx264 stock default; CPU-bound on 4K
+	//   "slow" / "slower" / "veryslow" — only for batch encodes, not real-time HLS
+	//
+	// Or faster:
+	//   "ultrafast" — lowest quality, fastest encode
+	Preset        string `toml:"preset"`
 	VideoBitrate  string `toml:"video_bitrate"`  // e.g. "5M"
 	AudioBitrate  string `toml:"audio_bitrate"`  // e.g. "192k"
 	MaxHeight     int    `toml:"max_height"`     // optional downscale cap (e.g. 720)
@@ -176,7 +194,10 @@ func Default() Config {
 			Transcode: TranscodeConfig{
 				Enabled:       true,
 				HWAccel:       "auto",
-				Preset:        "veryfast",
+				// Empty preset → engine.ResolveEncoderProfile picks the
+				// latency-biased default ("superfast" on libx264). Override
+				// in config.toml when quality > first-start latency matters.
+				Preset:        "",
 				AudioBitrate:  "192k",
 				MaxConcurrent: 2,
 			},
@@ -280,7 +301,12 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 		cfg.Download.Transcode.HWAccel = "auto"
 	}
 	if !meta.IsDefined("downloads", "transcode", "preset") {
-		cfg.Download.Transcode.Preset = "veryfast"
+		// Empty = let engine.ResolveEncoderProfile pick the latency-biased
+		// default ("superfast" on libx264). Users wanting better quality at
+		// slower first-play can override to "veryfast" / "fast" / "medium" in
+		// config.toml. Ignored when hw_accel picks NVENC/QSV/VAAPI/VideoToolbox
+		// (those have built-in vendor presets).
+		cfg.Download.Transcode.Preset = ""
 	}
 	if !meta.IsDefined("downloads", "transcode", "audio_bitrate") {
 		cfg.Download.Transcode.AudioBitrate = "192k"

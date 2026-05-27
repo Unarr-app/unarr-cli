@@ -987,27 +987,31 @@ type EncoderProfile struct {
 // ResolveEncoderProfile mirrors the codec + preset selection inside
 // buildHLSFFmpegArgsAt so callers (registry, log lines, diagnostic
 // endpoints) can know what ffmpeg will be told to do without parsing argv.
+//
+// The configured preset is libx264-specific by vocabulary (ultrafast…
+// veryslow). Passing it through to NVENC / QSV would have ffmpeg reject
+// the argv (NVENC uses p1-p7, QSV uses its own subset). So vendor encoders
+// always use their hardcoded vendor preset and ignore configuredPreset.
+// VideoToolbox has no preset knob at all.
 func ResolveEncoderProfile(hw HWAccel, configuredPreset string) EncoderProfile {
 	codec := hw.FFmpegVideoCodec("h264")
-	preset := configuredPreset
 	switch codec {
 	case "libx264":
+		preset := configuredPreset
 		if preset == "" {
 			preset = "superfast"
 		}
+		return EncoderProfile{Codec: codec, Preset: preset}
 	case "h264_nvenc":
-		if preset == "" {
-			preset = "p3"
-		}
+		return EncoderProfile{Codec: codec, Preset: "p3"}
 	case "h264_qsv":
-		if preset == "" {
-			preset = "veryfast"
-		}
+		return EncoderProfile{Codec: codec, Preset: "veryfast"}
 	case "h264_videotoolbox":
 		// No preset knob for VideoToolbox; the speed/quality dial is `-q:v`.
-		preset = ""
+		return EncoderProfile{Codec: codec, Preset: ""}
 	}
-	return EncoderProfile{Codec: codec, Preset: preset}
+	// VAAPI + future codecs: no preset, vendor-specific knobs handled in argv.
+	return EncoderProfile{Codec: codec, Preset: ""}
 }
 
 // buildHLSFFmpegArgsAt returns the argv for an HLS encode that starts at the

@@ -215,8 +215,11 @@ name = "Test"
 	if cfg.Download.Transcode.HWAccel != "auto" {
 		t.Errorf("Transcode.HWAccel = %q, want auto", cfg.Download.Transcode.HWAccel)
 	}
-	if cfg.Download.Transcode.Preset != "veryfast" {
-		t.Errorf("Transcode.Preset = %q, want veryfast", cfg.Download.Transcode.Preset)
+	if cfg.Download.Transcode.Preset != "" {
+		// Default is now empty — engine.ResolveEncoderProfile picks
+		// "superfast" on libx264 for first-start latency. Users
+		// wanting better quality override in config.toml.
+		t.Errorf("Transcode.Preset = %q, want empty", cfg.Download.Transcode.Preset)
 	}
 	if cfg.Download.Transcode.MaxConcurrent != 2 {
 		t.Errorf("Transcode.MaxConcurrent = %d, want 2", cfg.Download.Transcode.MaxConcurrent)

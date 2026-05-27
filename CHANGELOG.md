@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `realtime` flag steers VideoToolbox into the low-latency code path.
 - Encoder + preset selection moved into `engine.ResolveEncoderProfile` so
   the same logic drives both argv construction and the log line.
+- **`download.transcode.preset` is now libx264-only**. The configured preset
+  is honoured on software encode (libx264 vocabulary: ultrafast →
+  veryslow); HW backends ignore it and use vendor-specific defaults
+  (NVENC p3, QSV veryfast). Passing a libx264 preset to NVENC / QSV was
+  previously rejected by ffmpeg; the documentation now reflects what was
+  always the only correct usage.
+- Default `download.transcode.preset` is empty (was `"veryfast"`). The
+  engine fills in `"superfast"` for libx264 — latency-biased. **Users who
+  want better quality at slower first-play should set it explicitly in
+  `config.toml`**: `"veryfast"` (previous default) / `"faster"` / `"fast"`
+  / `"medium"`. Range documented in the TranscodeConfig struct.
 
 ## [0.9.8] - 2026-05-27
 
