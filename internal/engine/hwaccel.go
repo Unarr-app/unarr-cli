@@ -86,6 +86,117 @@ func listFFmpegEncoders(ctx context.Context, ffmpegPath string) string {
 	return string(out)
 }
 
+// HWAccelDiagnostic bundles what we know about the host's ffmpeg + HW encode
+// capabilities so the daemon can log a single coherent line at startup and the
+// web side can surface "this agent is software-only" without re-running probes.
+type HWAccelDiagnostic struct {
+	Pick          HWAccel  // backend selected by DetectHWAccel
+	FFmpegPath    string   // resolved ffmpeg binary
+	FFmpegVersion string   // first line of `ffmpeg -version` (e.g. "ffmpeg version 6.1.1")
+	Encoders      []string // HW + libsvtav1/libvpx9-class encoders found in -encoders output
+	Devices       []string // device files / drivers detected at probe time
+}
+
+// DetectHWAccelDiagnostic returns the full diagnostic picture for the host's
+// transcode pipeline. Unlike DetectHWAccel, this is NOT cached — callers pay
+// for an ffmpeg subprocess on each call (one `-encoders`, one `-version`).
+// Daemon startup is the natural caller; per-session lookups should keep using
+// DetectHWAccel (cached) and only re-probe diagnostics if the user runs an
+// explicit doctor command.
+func DetectHWAccelDiagnostic(ctx context.Context, ffmpegPath string) HWAccelDiagnostic {
+	d := HWAccelDiagnostic{Pick: HWAccelNone, FFmpegPath: ffmpegPath}
+	if ffmpegPath == "" {
+		return d
+	}
+	d.FFmpegVersion = ffmpegVersionLine(ctx, ffmpegPath)
+	encoders := listFFmpegEncoders(ctx, ffmpegPath)
+	for _, name := range hwEncoderNames {
+		if strings.Contains(encoders, name) {
+			d.Encoders = append(d.Encoders, name)
+		}
+	}
+	// Device-file checks mirror the picks below so the log line tells the
+	// reader why a present encoder might still have been rejected (e.g. NVENC
+	// compiled in but /dev/nvidia0 missing inside a container).
+	if fileExists("/dev/nvidia0") {
+		d.Devices = append(d.Devices, "/dev/nvidia0")
+	}
+	if fileExists("/dev/dri/renderD128") {
+		d.Devices = append(d.Devices, "/dev/dri/renderD128")
+	}
+	if hasNvidiaDriver() {
+		d.Devices = append(d.Devices, "nvidia-smi")
+	}
+	d.Pick = DetectHWAccel(ctx, ffmpegPath)
+	return d
+}
+
+// LogLine returns a one-line human-readable summary of the diagnostic,
+// suitable for daemon startup output. Format:
+//
+//	"[transcode] ffmpeg 6.1.1 at /usr/bin/ffmpeg, HW=nvenc (h264_nvenc), devices=/dev/nvidia0,nvidia-smi"
+//	"[transcode] ffmpeg 6.1.1 at /home/linuxbrew/.../ffmpeg, HW=none (software libx264) — no HW encoders compiled in"
+func (d HWAccelDiagnostic) LogLine() string {
+	var b strings.Builder
+	b.WriteString("[transcode] ")
+	if d.FFmpegVersion != "" {
+		b.WriteString(d.FFmpegVersion)
+	} else {
+		b.WriteString("ffmpeg")
+	}
+	if d.FFmpegPath != "" {
+		b.WriteString(" at ")
+		b.WriteString(d.FFmpegPath)
+	}
+	b.WriteString(", HW=")
+	b.WriteString(string(d.Pick))
+	if d.Pick == HWAccelNone {
+		if len(d.Encoders) == 0 {
+			b.WriteString(" (software libx264) — no HW encoders compiled in")
+		} else {
+			b.WriteString(" (software libx264) — encoders found but no matching device: ")
+			b.WriteString(strings.Join(d.Encoders, ","))
+		}
+	} else {
+		b.WriteString(" (")
+		b.WriteString(d.Pick.FFmpegVideoCodec("h264"))
+		b.WriteString(")")
+		if len(d.Devices) > 0 {
+			b.WriteString(", devices=")
+			b.WriteString(strings.Join(d.Devices, ","))
+		}
+	}
+	return b.String()
+}
+
+// hwEncoderNames lists the HW-accelerated encoders we care about for the
+// startup log. Kept in lookup order so the output reads predictably across
+// hosts.
+var hwEncoderNames = []string{
+	"h264_nvenc", "hevc_nvenc",
+	"h264_qsv", "hevc_qsv",
+	"h264_vaapi", "hevc_vaapi",
+	"h264_videotoolbox", "hevc_videotoolbox",
+}
+
+// ffmpegVersionLine extracts the "ffmpeg version X.Y.Z" prefix from
+// `ffmpeg -version`. Bounded to avoid hanging the daemon on a misbehaving
+// binary.
+func ffmpegVersionLine(ctx context.Context, ffmpegPath string) string {
+	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-version")
+	out, err := cmd.CombinedOutput()
+	if err != nil || len(out) == 0 {
+		return ""
+	}
+	line, _, _ := strings.Cut(string(out), "\n")
+	// "ffmpeg version 6.1.1-some-build-suffix Copyright..." → keep up to first
+	// space after "version 6.x" to avoid spamming build flags into the log.
+	if idx := strings.Index(line, "Copyright"); idx > 0 {
+		line = strings.TrimSpace(line[:idx])
+	}
+	return strings.TrimSpace(line)
+}
+
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil

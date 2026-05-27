@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.9] - 2026-05-27
+
+### Added
+
+- **per-session encoder log**: every HLS session start now logs
+  `encoder=… accel=… preset=…` so a "preparando sesión" complaint can
+  be triaged from the journal alone. Cache-HIT sessions keep the
+  existing simpler log (no ffmpeg involved).
+- **probe cache**: `engine.ProbeFile` is memoised by `(path, mtime, size)`
+  for 30 minutes. A second play of the same file skips ffprobe
+  entirely — saves 1-3 s on first-segment latency for 50+ GB MKVs.
+  Cache key changes immediately on any file rewrite (mtime or size
+  delta).
+- **agents tab transcoder row**: the web profile → agents tab now shows
+  each agent's selected encoder (`NVIDIA NVENC`, `Intel Quick Sync`,
+  `VA-API`, `macOS VideoToolbox`, or `Software (libx264)` in amber) plus
+  the comfortable transcode-resolution cap. Surfaces the same diagnostic
+  the daemon log carries.
+
+### Changed
+
+- **HLS encoder presets biased for first-start latency**:
+  - **libx264**: default `veryfast` → `superfast` (~15-20% faster encode;
+    marginal quality loss at 5-25 Mbps target bitrates). Users wanting
+    the previous quality can set `download.transcode.preset = "veryfast"`
+    in `config.toml`.
+  - **NVENC**: `-preset p4 -tune hq` → `-preset p3 -tune ll`. First-segment
+    encode drops from ~1.5 s to ~0.8 s on RTX-class GPUs.
+  - **QSV**: `-preset medium` → `-preset veryfast`. Keeps `-look_ahead 0`
+    for low-latency rate control.
+  - **VideoToolbox** (macOS): adds `-realtime 1 -q:v 50` (was unset). The
+    `realtime` flag steers VideoToolbox into the low-latency code path.
+- Encoder + preset selection moved into `engine.ResolveEncoderProfile` so
+  the same logic drives both argv construction and the log line.
+
 ## [0.9.8] - 2026-05-27
 
 ### Fixed

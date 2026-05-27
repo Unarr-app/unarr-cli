@@ -88,7 +88,15 @@ const (
 )
 
 // ProbeFile runs ffprobe and returns a StreamProbe view of the file.
+//
+// Result is memoised by (path, mtime, size) for probeCacheTTL — repeat plays
+// of the same file at the same quality (the HLS cache HIT path) skip ffprobe
+// entirely. ffprobe on a 50 GB MKV can cost 1-3 s; first-segment latency
+// shrinks by the same amount on the second play.
 func ProbeFile(ctx context.Context, ffprobePath, filePath string) (*StreamProbe, error) {
+	if cached, ok := lookupProbeCache(filePath); ok {
+		return cached, nil
+	}
 	mi, err := mediainfo.ExtractMediaInfo(ctx, ffprobePath, filePath)
 	if err != nil {
 		return nil, fmt.Errorf("probe: %w", err)
@@ -136,6 +144,7 @@ func ProbeFile(ctx context.Context, ffprobePath, filePath string) (*StreamProbe,
 			})
 		}
 	}
+	storeProbeCache(filePath, probe)
 	return probe, nil
 }
 
