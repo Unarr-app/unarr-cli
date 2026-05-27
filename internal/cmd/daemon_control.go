@@ -262,9 +262,9 @@ func runDaemonReload() error {
 // stopDaemonByPID reads the state file and sends a graceful stop to the daemon PID.
 // Used as fallback on platforms without a service manager (and as Windows implementation).
 func stopDaemonByPID() error {
-	state := agent.ReadState()
-	if state == nil {
-		return fmt.Errorf("daemon does not appear to be running (state file not found)")
+	state, err := agent.LoadState()
+	if err != nil {
+		return err
 	}
 	return killPID(state.PID)
 }

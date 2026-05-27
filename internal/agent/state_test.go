@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -102,5 +103,41 @@ func TestReadStateCorruptedJSON(t *testing.T) {
 	state := ReadState()
 	if state != nil {
 		t.Errorf("ReadState() should return nil for corrupted JSON, got %+v", state)
+	}
+}
+
+func TestLoadStateNotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+	origFn := stateFilePathFn
+	stateFilePathFn = func() string { return filepath.Join(tmpDir, "nonexistent.json") }
+	defer func() { stateFilePathFn = origFn }()
+
+	state, err := LoadState()
+	if state != nil {
+		t.Errorf("LoadState() state = %+v, want nil", state)
+	}
+	if !errors.Is(err, ErrDaemonNotRunning) {
+		t.Errorf("LoadState() err = %v, want ErrDaemonNotRunning", err)
+	}
+}
+
+func TestLoadStateCorruptedJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	origFn := stateFilePathFn
+	path := filepath.Join(tmpDir, "daemon.state.json")
+	stateFilePathFn = func() string { return path }
+	defer func() { stateFilePathFn = origFn }()
+
+	os.WriteFile(path, []byte("not valid json{{{"), 0o644)
+
+	state, err := LoadState()
+	if state != nil {
+		t.Errorf("LoadState() state = %+v, want nil", state)
+	}
+	if err == nil {
+		t.Fatal("LoadState() err = nil, want decode error")
+	}
+	if errors.Is(err, ErrDaemonNotRunning) {
+		t.Error("corrupt state must not be reported as ErrDaemonNotRunning — it would be filtered from Sentry")
 	}
 }

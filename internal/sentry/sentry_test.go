@@ -1,6 +1,11 @@
 package sentry
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+
+	"github.com/torrentclaw/unarr/internal/agent"
+)
 
 func TestEnvironment(t *testing.T) {
 	tests := []struct {
@@ -44,4 +49,14 @@ func TestCaptureErrorNil(t *testing.T) {
 func TestSetUser(t *testing.T) {
 	// Should not panic without initialization
 	SetUser("agent-123")
+}
+
+func TestIsUserInputErrorDaemonNotRunning(t *testing.T) {
+	if !isUserInputError(agent.ErrDaemonNotRunning) {
+		t.Error("ErrDaemonNotRunning should be treated as user-input error")
+	}
+	wrapped := fmt.Errorf("stop daemon: %w", agent.ErrDaemonNotRunning)
+	if !isUserInputError(wrapped) {
+		t.Error("wrapped ErrDaemonNotRunning should be treated as user-input error")
+	}
 }

@@ -9,6 +9,8 @@ import (
 
 	gosentry "github.com/getsentry/sentry-go"
 	"github.com/spf13/pflag"
+
+	"github.com/torrentclaw/unarr/internal/agent"
 )
 
 // dsn is injected at build time via ldflags. If empty, Sentry is disabled.
@@ -63,6 +65,9 @@ func CaptureError(err error, command string) {
 }
 
 func isUserInputError(err error) bool {
+	if errors.Is(err, agent.ErrDaemonNotRunning) {
+		return true
+	}
 	var notExist *pflag.NotExistError
 	var valueReq *pflag.ValueRequiredError
 	var invalidVal *pflag.InvalidValueError

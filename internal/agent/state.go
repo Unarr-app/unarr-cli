@@ -2,12 +2,19 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/torrentclaw/unarr/internal/config"
 )
+
+// ErrDaemonNotRunning is returned by callers that need a running daemon but
+// find no state file on disk. Sentinel so user-facing commands (stop/reload)
+// can wrap it and Sentry can filter it out as a non-bug.
+var ErrDaemonNotRunning = errors.New("daemon does not appear to be running (state file not found)")
 
 // DaemonState is written to disk every heartbeat for external tools to read.
 type DaemonState struct {
@@ -69,17 +76,31 @@ func WriteState(state *DaemonState) {
 	os.Rename(tmp, path)
 }
 
-// ReadState reads the daemon state from disk. Returns nil if not found.
+// ReadState reads the daemon state from disk. Returns nil if not found or
+// unreadable. Use LoadState when callers need to distinguish "not running"
+// from "state file corrupted".
 func ReadState() *DaemonState {
+	state, _ := LoadState()
+	return state
+}
+
+// LoadState reads the daemon state and returns explicit errors:
+//   - ErrDaemonNotRunning when the state file does not exist
+//   - a wrapped json error when the file exists but cannot be decoded
+//     (a real bug worth reporting to Sentry)
+func LoadState() (*DaemonState, error) {
 	data, err := os.ReadFile(StateFilePath())
 	if err != nil {
-		return nil
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrDaemonNotRunning
+		}
+		return nil, err
 	}
 	var state DaemonState
-	if json.Unmarshal(data, &state) != nil {
-		return nil
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("decode daemon state %s: %w", StateFilePath(), err)
 	}
-	return &state
+	return &state, nil
 }
 
 // RemoveState deletes the state file (called on clean shutdown).

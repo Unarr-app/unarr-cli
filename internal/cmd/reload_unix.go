@@ -43,9 +43,9 @@ func startReloadWatcher(rc *ReloadableConfig) {
 
 // sendReloadSignal sends SIGUSR1 to the running daemon process.
 func sendReloadSignal() error {
-	state := agent.ReadState()
-	if state == nil {
-		return fmt.Errorf("daemon does not appear to be running (state file not found)")
+	state, err := agent.LoadState()
+	if err != nil {
+		return err
 	}
 	p, err := os.FindProcess(state.PID)
 	if err != nil {
