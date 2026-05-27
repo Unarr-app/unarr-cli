@@ -580,14 +580,23 @@ func runDaemonStart() error {
 			Transcode:  tcRuntime,
 			Cache:      hlsCache,
 		}
-		hsess, err := engine.StartHLSSession(hlsCtx, hlsCfg)
-		if err != nil {
-			playerSessionRegistry.remove(sess.SessionID)
-			hlsCancel()
-			log.Printf("[hls %s] start failed: %v", agent.ShortID(sess.SessionID), err)
-			return
-		}
-		streamSrv.HLS().Register(hsess)
+		// StartHLSSession runs ffprobe (15 s cap, typical 0.3–1 s) before
+		// returning. Doing this synchronously inside the sync handler holds
+		// the next sync HTTP cycle until ffprobe is done, so any other
+		// pending actions (new tasks, deletes) wait too. Hand it off so
+		// the sync loop returns immediately — browser HEAD probes already
+		// have a 30 s retry budget that absorbs the gap until
+		// `streamSrv.HLS().Register` lands.
+		go func() {
+			hsess, err := engine.StartHLSSession(hlsCtx, hlsCfg)
+			if err != nil {
+				playerSessionRegistry.remove(sess.SessionID)
+				hlsCancel()
+				log.Printf("[hls %s] start failed: %v", agent.ShortID(sess.SessionID), err)
+				return
+			}
+			streamSrv.HLS().Register(hsess)
+		}()
 	}
 
 	// Periodic DHT node persistence (every 5 min)

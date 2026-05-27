@@ -115,10 +115,11 @@ func TestRenderVideoPlaylist(t *testing.T) {
 }
 
 func TestRenderVideoPlaylistShortFinalSegment(t *testing.T) {
-	// 9.5s total, 4s segments → 3 segs of 4/4/1.5
-	out := renderVideoPlaylist(9.5, 3)
+	// 9.5s total, 2s segments → 5 segs of 2/2/2/2/1.5
+	segCount := segmentCountForDuration(9.5)
+	out := renderVideoPlaylist(9.5, segCount)
 	if !strings.Contains(out, "#EXTINF:1.500,") {
-		t.Errorf("expected final segment 1.5s in playlist, got:\n%s", out)
+		t.Errorf("expected final segment 1.5s in playlist (segCount=%d), got:\n%s", segCount, out)
 	}
 }
 

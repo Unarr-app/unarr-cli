@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.10] - 2026-05-27
+
+### Changed
+
+- **HLS segments halved from 4 s to 2 s**. seg-0 now lands in ~half the
+  cold-cache wait time, so the player paints the first frame ~1-2 s
+  sooner on software encodes (~0.5 s sooner on HW encoders). Trade-off:
+  2× more segments per source (a 2 h movie produces ~3600 segments
+  instead of ~1800), but each is half the size. Well within HLS spec
+  — Apple recommends 6 s but 2 s is also valid; LL-HLS uses 1-2 s.
+  Existing 0.9.9 cache entries fail `VerifyComplete` (the new segment
+  count expects different file names at the boundary) and are
+  invalidated + re-encoded transparently on next play. Self-healing,
+  no manual cleanup needed.
+- **`OnStreamSession` daemon callback now runs `StartHLSSession` in a
+  goroutine** instead of blocking the sync HTTP loop on ffprobe
+  (~0.3-1 s typical). Net: sync responses return immediately, and any
+  other pending actions in the same response (new tasks, deletes)
+  no longer wait for ffmpeg to warm up. Browser HEAD probes already
+  have a 30 s retry budget that absorbs the brief window between
+  `playerSessionRegistry.add` and `streamSrv.HLS().Register`.
+
 ## [0.9.9] - 2026-05-27
 
 ### Added
@@ -618,6 +640,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.6.6]: https://github.com/torrentclaw/unarr/compare/v0.6.5...v0.6.6
 [0.6.5]: https://github.com/torrentclaw/unarr/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/torrentclaw/unarr/compare/v0.6.3...v0.6.4
+[0.9.10]: https://github.com/torrentclaw/unarr/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/torrentclaw/unarr/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/torrentclaw/unarr/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/torrentclaw/unarr/compare/v0.9.6...v0.9.7

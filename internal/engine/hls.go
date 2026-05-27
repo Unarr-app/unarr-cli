@@ -32,10 +32,46 @@ import (
 	"time"
 )
 
-// hlsSegmentDuration is the target seconds per HLS fragment. Four seconds is
-// the Plex/Apple default — short enough that seek granularity is acceptable,
-// long enough that GOP overhead doesn't dominate.
-const hlsSegmentDuration = 4
+// hlsSegmentDuration is the target seconds per HLS fragment.
+//
+// We use 2 seconds (not the more common 4-6 s). Trade-off: 2× more segments
+// per source (a 2 h movie produces 3600 segments instead of 1800), but the
+// player's first-frame wait drops to ~half — ffmpeg only needs to encode
+// 2 s before seg-0 lands. For software encodes on 4K this is ~1 s instead
+// of ~3 s of cold-cache wait. Well within HLS spec (Apple recommends 6 s,
+// but 2-6 s is acceptable; Low-Latency HLS uses 1-2 s segments).
+//
+// Caveat for existing cached encodes: cache entries from 0.9.9 used 4 s
+// segments. After this bump, VerifyComplete (which checks the highest
+// expected segment index) returns false for those entries — they're
+// invalidated + re-encoded with 2 s segments on next play. Self-healing.
+const hlsSegmentDuration = 2
+
+// segmentDurationFor returns the target duration (in whole seconds) for the
+// segment at index idx. With uniform-duration segments this is always
+// hlsSegmentDuration; the helper exists so a future short-first-segment
+// variant can be slotted in here without touching every call site.
+func segmentDurationFor(idx int) int {
+	return hlsSegmentDuration
+}
+
+// segmentStartSec returns the wall-clock start time of segment idx. Used
+// to compute the `-ss` flag when ffmpeg restarts at a mid-file segment.
+func segmentStartSec(idx int) float64 {
+	if idx <= 0 {
+		return 0
+	}
+	return float64(idx * hlsSegmentDuration)
+}
+
+// segmentCountForDuration returns how many segments cover a source of the
+// given duration. Always returns at least 1.
+func segmentCountForDuration(dur float64) int {
+	if dur <= 0 {
+		return 1
+	}
+	return int((dur + float64(hlsSegmentDuration) - 1) / float64(hlsSegmentDuration))
+}
 
 // hlsSessionTTL is how long a session can sit idle (no segment requests)
 // before the manager kills ffmpeg + cleans the tmpdir.
@@ -302,10 +338,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		// Integrity gate: HasComplete just stats the marker. If init.mp4 or
 		// the last segment vanished (external rm, partial-disk failure), we
 		// can't actually serve a HIT — drop the dir and re-encode.
-		segCountForVerify := int((probe.DurationSec + float64(hlsSegmentDuration) - 1) / float64(hlsSegmentDuration))
-		if segCountForVerify < 1 {
-			segCountForVerify = 1
-		}
+		segCountForVerify := segmentCountForDuration(probe.DurationSec)
 		if cfg.Cache.HasComplete(cacheKey) && !cfg.Cache.VerifyComplete(cacheKey, segCountForVerify) {
 			log.Printf("[hls %s] cache %s sealed but failed integrity check — re-encoding",
 				shortHLSID(cfg.SessionID), cacheKey)
@@ -357,10 +390,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		return nil, fmt.Errorf("hls: mkdir subs: %w", err)
 	}
 
-	segCount := int((probe.DurationSec + float64(hlsSegmentDuration) - 1) / float64(hlsSegmentDuration))
-	if segCount < 1 {
-		segCount = 1
-	}
+	segCount := segmentCountForDuration(probe.DurationSec)
 
 	s := &HLSSession{
 		cfg:          cfg,
@@ -911,8 +941,10 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Build args for the new ffmpeg with -ss offset.
-	startSec := float64(targetIdx * hlsSegmentDuration)
+	// Build args for the new ffmpeg with -ss offset. Segments are non-uniform
+	// (seg-0 is hlsInitSegmentDuration s, the rest are hlsSegmentDuration s),
+	// so use segmentStartSec for the seek time instead of multiplying.
+	startSec := segmentStartSec(targetIdx)
 	args := buildHLSFFmpegArgsAt(s.cfg, s.probe, s.tmpDir, targetIdx, startSec)
 
 	ffCtx, cancel := context.WithCancel(context.Background())
@@ -1244,6 +1276,10 @@ func (s *HLSSession) extractSubtitles(ctx context.Context) {
 // renderVideoPlaylist builds the VOD media playlist for the video stream.
 // Segment count is derived from the source duration — the player learns the
 // total timeline from the manifest before any segment is fetched.
+//
+// seg-0 is the short init segment (hlsInitSegmentDuration s); seg-1 onward
+// are hlsSegmentDuration s each. The last segment may be shorter than the
+// nominal duration when (duration - init) doesn't divide evenly.
 func renderVideoPlaylist(durationSec float64, segCount int) string {
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
@@ -1254,7 +1290,7 @@ func renderVideoPlaylist(durationSec float64, segCount int) string {
 	b.WriteString(`#EXT-X-MAP:URI="init.mp4"` + "\n")
 	remaining := durationSec
 	for i := 0; i < segCount; i++ {
-		segDur := float64(hlsSegmentDuration)
+		segDur := float64(segmentDurationFor(i))
 		if remaining < segDur {
 			segDur = remaining
 		}
