@@ -11,9 +11,11 @@ import (
 	"github.com/torrentclaw/unarr/internal/config"
 )
 
-// ErrDaemonNotRunning is returned by callers that need a running daemon but
-// find no state file on disk. Sentinel so user-facing commands (stop/reload)
-// can wrap it and Sentry can filter it out as a non-bug.
+// ErrDaemonNotRunning is returned when no daemon state file exists on disk.
+// Callers may wrap it with %w; downstream code uses errors.Is to detect it.
+// NOTE: the message text is matched by the sentry package (string-match, to
+// avoid an import cycle). Keep the prefix "daemon does not appear to be
+// running" stable, or update sentry.daemonNotRunningMarker accordingly.
 var ErrDaemonNotRunning = errors.New("daemon does not appear to be running (state file not found)")
 
 // DaemonState is written to disk every heartbeat for external tools to read.

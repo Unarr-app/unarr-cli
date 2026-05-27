@@ -9,8 +9,6 @@ import (
 
 	gosentry "github.com/getsentry/sentry-go"
 	"github.com/spf13/pflag"
-
-	"github.com/torrentclaw/unarr/internal/agent"
 )
 
 // dsn is injected at build time via ldflags. If empty, Sentry is disabled.
@@ -48,11 +46,16 @@ func Close() {
 	gosentry.Flush(flushTimeout)
 }
 
+// daemonNotRunningMarker matches the message of agent.ErrDaemonNotRunning
+// without importing the agent package — avoids a sentry → agent dependency
+// that would risk a cycle if agent ever needed to report errors itself.
+const daemonNotRunningMarker = "daemon does not appear to be running"
+
 // CaptureError sends a non-fatal error to Sentry with optional command context.
-// User-input errors (unknown flag/command, bad value) are skipped — they are
-// not bugs, just noise.
+// Expected non-bug errors (bad CLI input, daemon not running) are skipped to
+// keep the issue feed signal-heavy.
 func CaptureError(err error, command string) {
-	if err == nil || isUserInputError(err) {
+	if err == nil || shouldSkipSentry(err) {
 		return
 	}
 
@@ -64,10 +67,7 @@ func CaptureError(err error, command string) {
 	})
 }
 
-func isUserInputError(err error) bool {
-	if errors.Is(err, agent.ErrDaemonNotRunning) {
-		return true
-	}
+func shouldSkipSentry(err error) bool {
 	var notExist *pflag.NotExistError
 	var valueReq *pflag.ValueRequiredError
 	var invalidVal *pflag.InvalidValueError
@@ -78,7 +78,8 @@ func isUserInputError(err error) bool {
 	}
 	msg := err.Error()
 	return strings.HasPrefix(msg, "unknown command ") ||
-		strings.HasPrefix(msg, "required flag(s)")
+		strings.HasPrefix(msg, "required flag(s)") ||
+		strings.Contains(msg, daemonNotRunningMarker)
 }
 
 // RecoverPanic captures a panic and re-panics after reporting.

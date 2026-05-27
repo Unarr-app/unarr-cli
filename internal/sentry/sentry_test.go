@@ -1,10 +1,9 @@
 package sentry
 
 import (
+	"errors"
 	"fmt"
 	"testing"
-
-	"github.com/torrentclaw/unarr/internal/agent"
 )
 
 func TestEnvironment(t *testing.T) {
@@ -51,12 +50,15 @@ func TestSetUser(t *testing.T) {
 	SetUser("agent-123")
 }
 
-func TestIsUserInputErrorDaemonNotRunning(t *testing.T) {
-	if !isUserInputError(agent.ErrDaemonNotRunning) {
-		t.Error("ErrDaemonNotRunning should be treated as user-input error")
+func TestShouldSkipSentryDaemonNotRunning(t *testing.T) {
+	// String must stay in sync with agent.ErrDaemonNotRunning. If that sentinel
+	// is reworded, this test fails loudly so the marker can be updated.
+	err := errors.New("daemon does not appear to be running (state file not found)")
+	if !shouldSkipSentry(err) {
+		t.Error("ErrDaemonNotRunning message should be skipped")
 	}
-	wrapped := fmt.Errorf("stop daemon: %w", agent.ErrDaemonNotRunning)
-	if !isUserInputError(wrapped) {
-		t.Error("wrapped ErrDaemonNotRunning should be treated as user-input error")
+	wrapped := fmt.Errorf("read daemon state: %w", err)
+	if !shouldSkipSentry(wrapped) {
+		t.Error("wrapped ErrDaemonNotRunning message should be skipped")
 	}
 }

@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -45,7 +46,10 @@ func startReloadWatcher(rc *ReloadableConfig) {
 func sendReloadSignal() error {
 	state, err := agent.LoadState()
 	if err != nil {
-		return err
+		if errors.Is(err, agent.ErrDaemonNotRunning) {
+			return err
+		}
+		return fmt.Errorf("read daemon state: %w", err)
 	}
 	p, err := os.FindProcess(state.PID)
 	if err != nil {

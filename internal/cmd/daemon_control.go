@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -264,7 +265,10 @@ func runDaemonReload() error {
 func stopDaemonByPID() error {
 	state, err := agent.LoadState()
 	if err != nil {
-		return err
+		if errors.Is(err, agent.ErrDaemonNotRunning) {
+			return err
+		}
+		return fmt.Errorf("read daemon state: %w", err)
 	}
 	return killPID(state.PID)
 }
