@@ -612,6 +612,11 @@ func runDaemonStart() error {
 				return
 			}
 			streamSrv.HLS().Register(hsess)
+			// Tell the server seg-0 is on disk as soon as it lands so the
+			// player's SSE subscription flips its "Preparando…" UI without
+			// waiting for the browser HEAD-probe loop to discover it
+			// independently. Cache-HIT sessions are ready immediately.
+			go watchSessionReady(hlsCtx, agentClient, hsess, sess.SessionID)
 		}()
 	}
 
@@ -939,4 +944,39 @@ func mirrorCORSOrigins(parent context.Context, cfg config.Config, userAgent stri
 		log.Printf("[cors] merged %d mirror origins from /api/mirrors", len(out))
 	}
 	return out
+}
+
+// watchSessionReady polls HLSSession.ReadyCount until the first segment +
+// init.mp4 are on disk, then POSTs /api/internal/agent/session-ready so
+// the web side flips streaming_session.ready_at — which its SSE endpoint
+// pushes to subscribed players. Cache-HIT sessions are ready the moment
+// StartHLSSession returns and POST immediately.
+//
+// Bounded by a 60 s deadline so a permanently stuck encoder doesn't keep
+// a goroutine alive forever; if seg-0 never lands the player falls back
+// to its existing HEAD-probe retry path anyway.
+func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.HLSSession, sessionID string) {
+	deadline := time.Now().Add(60 * time.Second)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		// Cache HIT or seg-0 ready → notify + done.
+		if hsess.FromCache() || hsess.ReadyCount() >= 1 {
+			rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := client.MarkSessionReady(rctx, sessionID); err != nil {
+				log.Printf("[hls %s] mark-ready failed: %v", agent.ShortID(sessionID), err)
+			}
+			cancel()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if time.Now().After(deadline) {
+			log.Printf("[hls %s] mark-ready: timeout waiting for seg-0", agent.ShortID(sessionID))
+			return
+		}
+	}
 }

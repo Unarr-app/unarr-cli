@@ -519,6 +519,21 @@ func (s *HLSSession) ProbeInfo() map[string]any {
 	}
 }
 
+// ReadyCount returns how many segments are currently fully on disk.
+// Caller can `>= 1` it to check whether seg-0 has landed (and so the
+// player can be told to attach). For cache-HIT sessions this is always
+// `segmentCount` from the moment StartHLSSession returns.
+func (s *HLSSession) ReadyCount() int {
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
+	return s.readyMax
+}
+
+// FromCache reports whether this session was served from the HLS cache
+// (no ffmpeg subprocess spawned). Used by ready-watcher logic to short-
+// circuit polling — a cache HIT is ready the moment we return.
+func (s *HLSSession) FromCache() bool { return s.fromCache }
+
 // MasterPlaylist returns the rendered master.m3u8 contents.
 func (s *HLSSession) MasterPlaylist() string { return s.manifestRoot }
 

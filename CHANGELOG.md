@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.13] - 2026-05-27
+
+### Added
+
+- **Session-ready webhook** (`/api/internal/agent/session-ready`). Daemon
+  watches every new HLSSession's segment counter and, the moment seg-0 +
+  init.mp4 land on disk, POSTs the sessionId to the server. The web side
+  flips `streaming_session.ready_at = NOW()`, which its new SSE endpoint
+  pushes to subscribed players so the "Preparando…" UI flips to
+  "Stream listo" without waiting for the player's HEAD-probe retry loop
+  to discover it. Cache-HIT sessions fire the webhook immediately on
+  StartHLSSession return.
+- `engine.HLSSession.ReadyCount()` + `FromCache()` accessors so the
+  ready-watcher goroutine doesn't reach into private state.
+
 ## [0.9.12] - 2026-05-27
 
 ### Added

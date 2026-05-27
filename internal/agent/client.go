@@ -109,6 +109,27 @@ func (c *Client) ReportUpgradeResult(ctx context.Context, agentID string, succes
 	return nil
 }
 
+// MarkSessionReady signals the server that the first HLS segment + init.mp4
+// landed on disk for the given session. The web side flips
+// streaming_session.ready_at = NOW(), which its SSE endpoint emits to
+// subscribed players so the "Preparando…" UI ends without polling HEAD
+// on /hls/<id>/master.m3u8.
+//
+// Best-effort: the server is the source of truth for session state and
+// will reach the same conclusion via HEAD probes anyway if this call
+// fails. We log the error in the caller but don't retry — by the time
+// a retry would land the user is likely already playing.
+func (c *Client) MarkSessionReady(ctx context.Context, sessionID string) error {
+	req := struct {
+		SessionID string `json:"sessionId"`
+	}{SessionID: sessionID}
+	var resp StatusResponse
+	if err := c.doPost(ctx, "/api/internal/agent/session-ready", req, &resp); err != nil {
+		return fmt.Errorf("mark session ready: %w", err)
+	}
+	return nil
+}
+
 // ReportStatus reports download progress. Returns server-side flags the CLI must act on.
 func (c *Client) ReportStatus(ctx context.Context, update StatusUpdate) (*StatusResponse, error) {
 	var resp StatusResponse
