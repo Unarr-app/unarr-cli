@@ -28,7 +28,15 @@ type DaemonConfig struct {
 	ScanPaths          []string // configured scan paths for file deletion validation
 	HWAccel            string   // detected encoder backend ("nvenc"/"qsv"/"vaapi"/"videotoolbox"/"none")
 	MaxTranscodeHeight int      // resolution cap the agent can transcode comfortably (px)
-	AutoUpgrade        bool     // honor server-flagged upgrades by downloading + restarting (default: true)
+	// Diagnostic data populated by engine.DetectHWAccelDiagnostic at daemon
+	// start. Surfaced in the web "Diagnose transcoder" modal — lets a user
+	// see which encoders the ffmpeg binary supports and which devices the
+	// host exposes without running `unarr probe-hwaccel`.
+	FFmpegVersion string   // first line of `ffmpeg -version`
+	FFmpegPath    string   // resolved binary path
+	HWEncoders    []string // HW-class encoder names found in `ffmpeg -encoders`
+	HWDevices     []string // device files + driver bins detected at probe time
+	AutoUpgrade   bool     // honor server-flagged upgrades by downloading + restarting (default: true)
 }
 
 // Daemon manages agent registration and the sync loop.
@@ -122,6 +130,10 @@ func (d *Daemon) Register(ctx context.Context) error {
 		TailscaleIP:        d.cfg.TailscaleIP,
 		HWAccel:            d.cfg.HWAccel,
 		MaxTranscodeHeight: d.cfg.MaxTranscodeHeight,
+		FFmpegVersion:      d.cfg.FFmpegVersion,
+		FFmpegPath:         d.cfg.FFmpegPath,
+		HWEncoders:         d.cfg.HWEncoders,
+		HWDevices:          d.cfg.HWDevices,
 		VPNActive:          d.vpnActive,
 		VPNMode:            d.vpnMode,
 		VPNServer:          d.vpnServer,

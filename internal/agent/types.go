@@ -26,6 +26,15 @@ type RegisterRequest struct {
 	// up to 2160p.
 	HWAccel            string `json:"hwAccel,omitempty"`
 	MaxTranscodeHeight int    `json:"maxTranscodeHeight,omitempty"`
+	// Diagnostic surface filled by engine.DetectHWAccelDiagnostic at daemon
+	// start. Surfaced in the web "Diagnose transcoder" modal so users can
+	// see *why* their HWAccel landed on "none" without running
+	// `unarr probe-hwaccel` locally — most commonly the ffmpeg binary
+	// shipped without HW encoders (linuxbrew, brew's default formula).
+	FFmpegVersion string   `json:"ffmpegVersion,omitempty"`
+	FFmpegPath    string   `json:"ffmpegPath,omitempty"`
+	HWEncoders    []string `json:"hwEncoders,omitempty"`
+	HWDevices     []string `json:"hwDevices,omitempty"`
 	// Managed-VPN split-tunnel state. The web tracks which agent holds the single
 	// WireGuard slot (1 VPNResellers account = 1 WG keypair = 1 concurrent
 	// connection); other agents are told to use OpenVPN on their host instead.

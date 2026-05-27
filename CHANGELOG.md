@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.12] - 2026-05-27
+
+### Added
+
+- **transcoder diagnostic in register payload**: daemon now sends the full
+  HWAccel diagnostic (ffmpeg version, resolved binary path, list of HW
+  encoders compiled in, list of device files / drivers present) up to the
+  server on register. The web "Diagnose transcoder" modal surfaces these
+  so a user stuck on software libx264 can see *why* (e.g. ffmpeg shipped
+  without `--enable-nvenc`, or `/dev/nvidia0` missing inside a container)
+  without SSHing into their machine + running `unarr probe-hwaccel`.
+- **`[transcode]` startup log line**: daemon prints a single one-line
+  summary of the picked backend + version + binary path + devices at
+  start. Same data the web shows; convenient for `journalctl --user -u
+  unarr | grep transcode`.
+
 ## [0.9.11] - 2026-05-27
 
 
@@ -484,6 +500,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[0.9.11]: https://github.com/torrentclaw/unarr/compare/v0.9.8...v0.9.11
+[0.9.8]: https://github.com/torrentclaw/unarr/compare/v0.9.7...v0.9.8
+[0.9.12]: https://github.com/torrentclaw/unarr/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/torrentclaw/unarr/compare/v0.9.8...v0.9.11
 [0.9.8]: https://github.com/torrentclaw/unarr/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/torrentclaw/unarr/compare/v0.9.6...v0.9.7

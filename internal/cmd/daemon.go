@@ -143,7 +143,19 @@ func runDaemonStart() error {
 	// is what the web side uses to decide whether the user should pre-empt
 	// transcoding by downloading a smaller version (4K source on a software
 	// libx264-only host is the canonical case where pre-download wins).
-	hwAccelPick := engine.DetectHWAccel(context.Background(), cfg.Library.FFmpegPath)
+	//
+	// Use the full diagnostic (encoders + devices + ffmpeg version) instead
+	// of just the picked backend — the extra fields ride along in the
+	// register payload so the web "Diagnose transcoder" modal can show *why*
+	// libx264 was selected on a host with a GPU (e.g. brew's ffmpeg without
+	// --enable-nvenc). 10 s ceiling so a hung ffmpeg binary can't stall
+	// startup forever.
+	ffmpegResolved, _ := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath)
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	hwDiag := engine.DetectHWAccelDiagnostic(probeCtx, ffmpegResolved)
+	probeCancel()
+	log.Println(hwDiag.LogLine())
+	hwAccelPick := hwDiag.Pick
 	maxTranscodeHeight := 1080
 	if hwAccelPick != engine.HWAccelNone {
 		maxTranscodeHeight = 2160
@@ -162,6 +174,10 @@ func runDaemonStart() error {
 		ScanPaths:          library.ResolveScanPaths(cfg.Download.Dir, cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir, cfg.Library.ScanPath),
 		HWAccel:            string(hwAccelPick),
 		MaxTranscodeHeight: maxTranscodeHeight,
+		FFmpegVersion:      hwDiag.FFmpegVersion,
+		FFmpegPath:         hwDiag.FFmpegPath,
+		HWEncoders:         hwDiag.Encoders,
+		HWDevices:          hwDiag.Devices,
 		AutoUpgrade:        cfg.Daemon.AutoUpgradeEnabled(),
 	}
 
