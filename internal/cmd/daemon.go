@@ -152,8 +152,8 @@ func runDaemonStart() error {
 	// startup forever.
 	ffmpegResolved, _ := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath)
 	probeCtx, probeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer probeCancel() // guard against a panic inside DetectHWAccelDiagnostic
 	hwDiag := engine.DetectHWAccelDiagnostic(probeCtx, ffmpegResolved)
-	probeCancel()
 	log.Println(hwDiag.LogLine())
 	hwAccelPick := hwDiag.Pick
 	maxTranscodeHeight := 1080
