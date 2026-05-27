@@ -63,11 +63,15 @@ changelog:
 # these URLs and publishes the release there instead of GitHub. Reachable via
 # `forgejo` hostname inside the dokploy-network (the runner shares it); for
 # local goreleaser runs outside the network, override via env GITEA_API_URL.
+#
+# In goreleaser v2 `gitea_urls` is a top-level key (was nested under `release`
+# in v1).
+gitea_urls:
+  api: http://forgejo:3000/api/v1
+  download: https://git.torrentclaw.com
+  skip_tls_verify: false
+
 release:
-  gitea_urls:
-    api: http://forgejo:3000/api/v1
-    download: https://git.torrentclaw.com
-    skip_tls_verify: false
   draft: false
   prerelease: auto
 
