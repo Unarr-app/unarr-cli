@@ -53,7 +53,7 @@ jobs:
           # forgejo (hostname `forgejo`), so the in-cluster hostname is fastest, but the
           # Tailscale IP is the documented fallback.
           FORGEJO_API: http://forgejo:3000/api/v1
-          REPO: deivid/unarr
+          REPO: torrentclaw/unarr
         run: |
           set -euo pipefail
           go run ./scripts/sign-checksums \
