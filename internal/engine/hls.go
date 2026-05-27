@@ -1150,10 +1150,14 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		// helps when the user has set GOMAXPROCS.
 		args = append(args, "-preset", profile.Preset, "-threads", "0")
 	case "h264_nvenc":
-		// p3 + tune=ll trades ~0.3 dB PSNR for 1.5-2× faster encode vs the
-		// previous p4 + tune=hq pair — first-segment encode drops from
-		// ~1.5 s to ~0.8 s on RTX-class hardware.
-		args = append(args, "-preset", profile.Preset, "-rc", "vbr", "-tune", "ll")
+		// p3 + vbr keeps NVENC fast (~1.5 s seg-0) without the segmentation
+		// breakage `-tune ll` introduced in 0.9.9: with -tune=ll the NVENC
+		// rate control emits long IDR-less GOPs that ignore -force_key_frames,
+		// so ffmpeg's HLS muxer never closes seg-0 and the player stalls at
+		// "preparando sesión" until the 60 s mark-ready timeout. Verified on
+		// ffmpeg 6.1.1 + driver 580 / RTX-class GPUs: dropping -tune ll
+		// restores per-segment cuts at 27x real-time vs 28x with -tune ll.
+		args = append(args, "-preset", profile.Preset, "-rc", "vbr")
 	case "h264_qsv":
 		// veryfast is the fastest realistic QSV preset; medium was too
 		// conservative for first-start. look_ahead=0 keeps the encoder
