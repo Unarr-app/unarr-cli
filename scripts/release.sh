@@ -55,6 +55,17 @@ fi
 CURRENT_BRANCH=$(git branch --show-current)
 [ "$CURRENT_BRANCH" = "main" ] || warn "Not on main branch (current: $CURRENT_BRANCH)"
 
+HEAD_SUBJECT=$(git log -1 --pretty=%s)
+if [[ "$HEAD_SUBJECT" =~ \(([0-9]+\.[0-9]+\.[0-9]+)\) ]]; then
+  die "HEAD commit subject contains inline version bump: \"$HEAD_SUBJECT\"
+Release contract: version bumps MUST live in a dedicated 'chore(release): X.Y.Z' commit.
+Revert the inline bump and re-run this script — it will create the proper commit."
+fi
+if [[ "$HEAD_SUBJECT" =~ ^chore\(release\): ]]; then
+  die "HEAD is already a chore(release) commit: \"$HEAD_SUBJECT\"
+Nothing new to release. Add commits since the last release or amend intentionally outside this script."
+fi
+
 # ── Resolve version ────────────────────────────────────────────────
 LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
 LATEST_VERSION="${LATEST_TAG#v}"
