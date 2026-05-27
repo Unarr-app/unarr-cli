@@ -1,8 +1,9 @@
 # unarr
 
-**The single binary that replaces your whole *arr stack.** Search 30+ torrent
-sources, inspect real quality before you download, grab subtitles, and manage
-your media library — all from one terminal tool or a headless daemon.
+**The single binary that replaces your whole *arr stack.** Built-in torrent,
+debrid, and usenet engines. Stream, transcode, and organize your library from
+one terminal — or run it as a headless daemon with a web dashboard, WireGuard
+split-tunnel, and Cloudflare Funnel remote access.
 
 **[Website & docs](https://torrentclaw.com/unarr)** · **[Install guide](https://torrentclaw.com/cli)** · **[Get an API key](https://torrentclaw.com)**
 

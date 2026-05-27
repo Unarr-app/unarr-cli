@@ -11,9 +11,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/torrentclaw/unarr)](go.mod)
 
-Powerful terminal tool for torrent search and management. **Free and open source.**
+The single-binary terminal client for torrent, debrid, and usenet downloads. **Free and open source.**
 
-Search 30+ torrent sources, inspect torrent quality, discover popular content, find streaming providers, and manage your media collection — all from your terminal.
+Built-in torrent engine, debrid (Real-Debrid / AllDebrid), and NZB support. Stream to mpv/vlc, transcode on the fly with hardware acceleration, and manage your library — one binary or a headless daemon with WireGuard split-tunnel and Cloudflare Funnel remote access.
 
 <!-- GIF demo placeholder -->
 <!-- ![unarr Demo](docs/demo.gif) -->

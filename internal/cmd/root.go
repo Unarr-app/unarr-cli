@@ -27,15 +27,18 @@ func init() {
 	rootCmd = &cobra.Command{
 		Use:     "unarr",
 		Version: Version,
-		Short:   "unarr — torrent search and management",
-		Long: `unarr is a powerful terminal tool for torrent search and management.
-
-Search 30+ torrent sources, inspect torrent quality, discover popular content,
-find streaming providers, and manage your media collection — all from your terminal.
+		Short:   "Terminal torrent + debrid + usenet client — download, stream, transcode",
+		Long: `unarr is a terminal-native client that downloads torrents, debrid links,
+and usenet (NZB) — all from the same binary. It streams content straight
+to mpv/vlc with sequential piece prioritization, transcodes on the fly via
+ffmpeg with hardware acceleration (NVENC, QSV, VA-API, VideoToolbox), and
+organizes your library into Movies/TV folders. Run it one-shot or as a
+long-running daemon with a built-in WireGuard split-tunnel and remote
+playback over Cloudflare Funnel.
 
 Get started:
   unarr init                           First-time configuration wizard
-  unarr search "breaking bad"          Search for content
+  unarr download <magnet|hash>         Grab a torrent one-shot
   unarr start                          Start the download daemon
 
 Documentation:  https://torrentclaw.com/cli
@@ -56,7 +59,7 @@ Source:         https://github.com/torrentclaw/unarr`,
 	// Command groups for organized help output
 	rootCmd.AddGroup(
 		&cobra.Group{ID: "start", Title: "Getting Started:"},
-		&cobra.Group{ID: "search", Title: "Search & Discovery:"},
+		&cobra.Group{ID: "search", Title: "Catalog & Discovery:"},
 		&cobra.Group{ID: "download", Title: "Downloads & Streaming:"},
 		&cobra.Group{ID: "daemon", Title: "Daemon Management:"},
 		&cobra.Group{ID: "system", Title: "System & Diagnostics:"},
