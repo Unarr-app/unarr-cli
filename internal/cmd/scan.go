@@ -241,7 +241,7 @@ func printScanSummary(cache *library.LibraryCache) {
 			continue
 		}
 
-		res := library.ResolveResolution(item.MediaInfo.Video.Height)
+		res := library.ResolveResolution(item.MediaInfo.Video.Width, item.MediaInfo.Video.Height)
 		if res == "" {
 			res = "other"
 		}

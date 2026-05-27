@@ -8,28 +8,31 @@ import (
 
 func TestResolveResolution(t *testing.T) {
 	tests := []struct {
+		name   string
+		width  int
 		height int
 		want   string
 	}{
-		{2160, "2160p"},
-		{2000, "2160p"},
-		{1080, "1080p"},
-		{1920, "1080p"}, // 1920 is width, not height — height for 1080p is ~1080
-		{900, "1080p"},
-		{720, "720p"},
-		{600, "720p"},
-		{576, "480p"},
-		{480, "480p"},
-		{400, "480p"},
-		{360, ""},
-		{0, ""},
+		{"4K square", 3840, 2160, "2160p"},
+		{"4K low height", 3840, 1600, "2160p"},
+		{"1080p square", 1920, 1080, "1080p"},
+		{"1080p cinematic 2.39:1", 1920, 804, "1080p"}, // anamorphic widescreen — must not fall to 720p
+		{"1080p cinematic 2.35:1", 1920, 818, "1080p"},
+		{"1080p 21:9", 2560, 1080, "1080p"},
+		{"720p square", 1280, 720, "720p"},
+		{"720p widescreen", 1280, 540, "720p"},
+		{"480p", 854, 480, "480p"},
+		{"sub-480", 640, 360, ""},
+		{"zero", 0, 0, ""},
 	}
 
 	for _, tt := range tests {
-		got := ResolveResolution(tt.height)
-		if got != tt.want {
-			t.Errorf("ResolveResolution(%d) = %q, want %q", tt.height, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveResolution(tt.width, tt.height)
+			if got != tt.want {
+				t.Errorf("ResolveResolution(%d, %d) = %q, want %q", tt.width, tt.height, got, tt.want)
+			}
+		})
 	}
 }
 

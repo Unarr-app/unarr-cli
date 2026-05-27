@@ -23,7 +23,7 @@ func BuildSyncItems(cache *LibraryCache) []agent.LibrarySyncItem {
 
 		if item.MediaInfo != nil {
 			if item.MediaInfo.Video != nil {
-				si.Resolution = ResolveResolution(item.MediaInfo.Video.Height)
+				si.Resolution = ResolveResolution(item.MediaInfo.Video.Width, item.MediaInfo.Video.Height)
 				si.VideoCodec = item.MediaInfo.Video.Codec
 				si.HDR = item.MediaInfo.Video.HDR
 				si.BitDepth = item.MediaInfo.Video.BitDepth

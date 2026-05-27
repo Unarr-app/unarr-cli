@@ -13,8 +13,17 @@ var (
 	altEpRegex  = regexp.MustCompile(`(?i)(\d{1,2})x(\d{2})`)
 )
 
-// ResolveResolution maps a pixel height to a standard resolution label.
-func ResolveResolution(height int) string {
+// ResolveResolution maps video dimensions to a standard resolution label.
+// Uses both width and height so cinematic aspect ratios (2.35:1, 2.39:1, 21:9)
+// are not misclassified — e.g. a 1080p source presented as 1920×804 letterboxed
+// would fall to 720p if classified by height alone.
+func ResolveResolution(width, height int) string {
+	byHeight := resolutionByHeight(height)
+	byWidth := resolutionByWidth(width)
+	return maxResolution(byHeight, byWidth)
+}
+
+func resolutionByHeight(height int) string {
 	switch {
 	case height >= 2000:
 		return "2160p"
@@ -27,6 +36,36 @@ func ResolveResolution(height int) string {
 	default:
 		return ""
 	}
+}
+
+func resolutionByWidth(width int) string {
+	switch {
+	case width >= 3400:
+		return "2160p"
+	case width >= 1800:
+		return "1080p"
+	case width >= 1200:
+		return "720p"
+	case width >= 800:
+		return "480p"
+	default:
+		return ""
+	}
+}
+
+var resolutionRank = map[string]int{
+	"":      0,
+	"480p":  1,
+	"720p":  2,
+	"1080p": 3,
+	"2160p": 4,
+}
+
+func maxResolution(a, b string) string {
+	if resolutionRank[a] >= resolutionRank[b] {
+		return a
+	}
+	return b
 }
 
 // DeriveContentType guesses "movie" or "show" from parsed metadata.
