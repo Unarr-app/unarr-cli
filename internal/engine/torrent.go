@@ -352,6 +352,13 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 	result.Method = MethodTorrent
 	result.Size = totalBytes
 
+	// anacrolix mmap storage (storage.NewMMap) creates completed files with mode
+	// 0000 — the running process keeps its own mmap handle so the download works,
+	// but any fresh open (streaming, ffprobe/HLS, organize-then-reopen) hits
+	// "permission denied". Relax perms now, before organize moves the file, so the
+	// readable mode is preserved through the rename.
+	makeReadable(filePath)
+
 	// If seeding enabled, keep alive (don't cleanup).
 	// The manager handles seeding lifecycle.
 	if !d.cfg.SeedEnabled {
@@ -456,6 +463,41 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 				return &Result{}, nil
 			}
 		}
+	}
+}
+
+// makeReadable relaxes permissions on a completed download so it can be
+// re-opened by streaming/ffprobe/organize. anacrolix mmap storage creates
+// files with mode 0000; we set files to 0644 and directories to 0755. Errors
+// are logged but non-fatal (e.g. NFS root_squash) — the file may still be
+// readable depending on the export.
+func makeReadable(path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		log.Printf("[organize] makeReadable stat %q: %v", path, err)
+		return
+	}
+	if !info.IsDir() {
+		if err := os.Chmod(path, 0o644); err != nil {
+			log.Printf("[organize] makeReadable chmod %q: %v", path, err)
+		}
+		return
+	}
+	err = filepath.WalkDir(path, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil // skip unreadable entries, keep going
+		}
+		mode := os.FileMode(0o644)
+		if d.IsDir() {
+			mode = 0o755
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			log.Printf("[organize] makeReadable chmod %q: %v", p, err)
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("[organize] makeReadable walk %q: %v", path, err)
 	}
 }
 
