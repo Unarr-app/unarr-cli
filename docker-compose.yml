@@ -1,48 +1,65 @@
+# unarr — TorrentClaw agent
+#
+# Quick start:
+#   1. Copy this file to any directory.
+#   2. Set UNARR_API_KEY to your key (Settings → API Keys on torrentclaw.com).
+#   3. Set DOWNLOAD_DIR to your media folder (absolute path).
+#   4. Run:  docker compose up -d
+#
+# Get your API key: https://torrentclaw.com/settings/api-keys
+# Full docs:        https://torrentclaw.com/unarr
+
 services:
   unarr:
-    build:
-      context: ..
-      dockerfile: unarr/Dockerfile
     image: torrentclaw/unarr:latest
+    pull_policy: always          # always pull on `up` so you stay on the latest release
     container_name: unarr
     restart: unless-stopped
-    user: "1000:1000"
 
-    # Read-only root filesystem — only volumes are writable
-    read_only: true
-    tmpfs:
-      - /tmp:size=64m,mode=1777
-
-    volumes:
-      # Config: your config.toml lives here
-      - ./config:/config
-      # Downloads: finished media goes here
-      - ~/Media:/downloads
-      # Data: torrent metadata, piece DB, cache
-      - unarr-data:/data
-
-    environment:
-      - TZ=${TZ:-UTC}
-      # Optional overrides (uncomment to use):
-      # - UNARR_API_KEY=tc_your_key_here
-      # - UNARR_API_URL=https://torrentclaw.com
-
-    # Resource limits — adjust to your needs
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "2.0"
-
-    # Torrent P2P needs host network or explicit port range
-    # Option A: host network (simplest, full P2P performance)
+    # host network is required for:
+    #   - streaming to reach your TV / mobile / other LAN devices (port 11818)
+    #   - HLS transcode server (port 11819)
+    #   - Tailscale connectivity (if you use it)
+    # On macOS / Windows Docker Desktop, replace with `ports` mapping (see below).
     network_mode: host
 
-    # Option B: bridge network with port mapping (more isolated)
-    # Uncomment below and comment out network_mode above:
+    environment:
+      # --- Required ---
+      - UNARR_API_KEY=${UNARR_API_KEY:?Set UNARR_API_KEY in .env or export it}
+
+      # --- Optional ---
+      # Server URL — change only if you run a self-hosted TorrentClaw instance
+      - UNARR_API_URL=${UNARR_API_URL:-https://torrentclaw.com}
+      - TZ=${TZ:-UTC}
+
+    volumes:
+      # Config: config.toml is auto-created here on first run.
+      # After first start, edit this file to set organize paths, quality, etc.
+      - ${CONFIG_DIR:-./config}:/config
+
+      # Downloads: where finished media is saved.
+      # Set DOWNLOAD_DIR in .env or export it before running.
+      - ${DOWNLOAD_DIR:?Set DOWNLOAD_DIR to your media folder}:/downloads
+
+      # Data: piece-completion DB, HLS cache, DHT nodes.
+      # Named volume keeps this off your media drive (avoids NFS locking issues).
+      - unarr-data:/data
+
+    # Optional: limit CPU/RAM for transcoding on shared hosts
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 2G
+    #       cpus: "4.0"
+
+    # --- macOS / Windows alternative (replace network_mode: host above) ---
+    # network_mode: bridge
     # ports:
-    #   - "6881-6889:6881-6889/tcp"
-    #   - "6881-6889:6881-6889/udp"
+    #   - "11818:11818"   # direct stream (VLC, download)
+    #   - "11819:11819"   # HLS transcode (web player)
+    #   - "42069:42069"   # BitTorrent incoming peers
+    # Note: streaming will only reach devices on the same machine.
+    # For LAN / Tailscale playback use a Linux host with network_mode: host.
 
 volumes:
   unarr-data:
