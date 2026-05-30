@@ -43,10 +43,11 @@ Sólido salvo nota:
 funnel/UPnP el stream queda público en internet. Plan previo
 `Docs/plans/security-stream-token.md` (deferido, sin código).
 
-### Hueco #2 — Debrid en el path de streaming  ⬜
+### Hueco #2 — Debrid en el path de streaming  🔵 DISEÑADO (ver estado abajo)
 Hoy debrid es **solo descarga**, resuelto server-side; el streaming es 100%
 torrent. La promesa "play instantáneo cache-fast" no ocurre. Falta: source debrid
 en el path de streaming + cache-availability + **fallback torrent↔debrid mid-stream**.
+Diseño por fases (2a direct-play / 2b HLS-desde-URL / 2c fallback) en el estado abajo.
 
 ### Hueco #3 — Device-profile + direct-play + ABR  ⬜
 El path HLS **siempre re-encoda** (incluso mp4 h264/aac ya compatible). `DecideAction`
@@ -132,3 +133,64 @@ WEB (`torrentclaw-web`):
 **Verificación:** CLI `go build/vet/test ./...` ✓; WEB typecheck+lint+2325 unit ✓; paridad cross-lenguaje verificada en ambos sentidos.
 
 > ⚠️ **ORDEN DE DEPLOY (obligatorio):** desplegar **primero el WEB** (columna `stream_secret` + minteo HLS), **luego** publicar el binario del agente. Un agente nuevo (enforce por defecto) contra un web viejo (sin minteo HLS) rompería el HLS remoto. El web es retrocompatible (agente viejo sin secreto → URLs sin token). Smoke real de extremo a extremo (daemon + funnel + navegador) **pendiente de hacer con un agente desplegado** — los tests cubren mint/verify/handlers y la paridad, no el round-trip cloudflared en vivo.
+
+---
+
+### Hueco #2 — Debrid en el path de streaming
+**Estado:** 🔵 DISEÑADO (2026-05-31), listo para implementar en sesión fresca.
+
+**Problema (confirmado en el análisis):** hoy `debrid` es **solo descarga**
+(`engine/debrid.go` baja la `DirectURL` HTTPS resuelta server-side). El
+streaming es **100% torrent**: `daemon.OnStreamSession` arma el provider desde
+`sess.FilePath`/`sess.InfoHash`/`sess.TaskID` y `StreamSession` **no lleva
+DirectURL**. La promesa "play instantáneo cache-fast por debrid" no ocurre.
+
+**Arquitectura de providers (lo que ya hay):** `FileProvider{ NewFileReader(ctx)
+io.ReadSeekCloser; FileName(); FileSize() }`. Implementaciones: `torrentFileProvider`,
+`diskFileProvider`, `StreamEngine`. El /stream sirve un `FileProvider` via
+`http.ServeContent` (range/seek). El HLS arranca una `HLSSession` desde una ruta
+de fichero (ffmpeg `-i <path>`).
+
+**Diseño por fases (de menos a más riesgo):**
+
+- **Fase 2a — debrid como fuente de /stream (direct-play).** *Slice completo y
+  acotado.*
+  1. Añadir `DirectURL string` a `StreamSession` (web→agente) y a su validación.
+  2. Nuevo `debridFileProvider` (`FileProvider`): `NewFileReader` devuelve un
+     `io.ReadSeekCloser` que hace **GET con Range** contra la `DirectURL` (debrid
+     ya soporta Range, ver `debrid.go`); `FileSize` via HEAD o `sess.FileSize`;
+     `Seek` traducido a `Range:`. Reutilizar la lógica de `debrid.go` (416,
+     Content-Range, reintentos).
+  3. En `OnStreamSession`: si `sess.DirectURL` presente → `debridFileProvider`
+     → `SetFile`. (Direct-play; el navegador hace range sobre el provider.)
+  4. Web: al crear la sesión de stream, si el contenido está **cacheado en
+     debrid**, resolver la `DirectURL` server-side (como en descargas) e incluirla
+     en el `StreamSession`. Señal de cache: `debridCacheStatus` fresh (ya existe).
+  5. Tests: `debridFileProvider` con un httptest server que sirve Range; round-trip
+     /stream con provider debrid.
+
+- **Fase 2b — HLS desde URL (transcode de fuentes debrid no-compatibles).**
+  ffmpeg lee HTTP directo (`-i https://…`), así que `HLSSession` puede aceptar
+  una URL como source en vez de una ruta. Mayor cambio en el pipeline HLS
+  (timeouts, reintentos de red, headers). Permite transcodear contenido debrid.
+
+- **Fase 2c — selección cache-fast + fallback mid-stream ("sin callejones").**
+  - Conciencia de cache en el agente o señal del web para **preferir debrid
+    cacheado sobre torrent** cuando aplique (hoy `resolve.go:22` pone torrent
+    primero).
+  - **Fallback mid-stream**: si la fuente activa muere (peers a 0 / 5xx debrid),
+    cambiar a la otra sin cortar la reproducción. Complejo (estado de sesión,
+    re-seek). Es lo que de verdad cierra "play-anything sin callejones".
+
+**Ficheros a tocar:** CLI `internal/engine/{stream_server.go (provider), debrid.go,
+hls.go (2b)}`, `internal/agent/types.go` (+DirectURL), `internal/cmd/daemon.go`
+(wiring). WEB `src/app/api/internal/stream/session/route.ts` (resolver DirectURL +
+cache), `src/lib/services/agent.ts`.
+
+**Partes difíciles / riesgos:** ranged reader robusto sobre HTTP (reconexión,
+timeouts), HLS-desde-URL (red dentro de ffmpeg), y el fallback mid-stream (estado).
+Empezar por 2a (valor inmediato, riesgo bajo), 2b y 2c como iteraciones.
+
+**Mejora detectada:** `resolve.go:22` ordena `torrent > debrid > usenet`; para el
+diferenciador cache-fast convendría que, **cuando hay cache debrid confirmada**,
+el orden de STREAMING (no el de descarga) prefiera debrid.
