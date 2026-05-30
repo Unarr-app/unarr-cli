@@ -5,12 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.19] - 2026-05-30
+
+
+### Fixed
+
+- **docker**: three streaming/reliability bugs found in live docker test
 ## [0.9.18] - 2026-05-29
 
 
 ### Fixed
 
 - **stream**: make completed torrent files readable (mmap creates 0000)
+
+### Other
+
+- **release**: 0.9.18
 ## [0.9.17] - 2026-05-27
 
 
@@ -566,6 +576,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[0.9.19]: https://github.com/torrentclaw/unarr/compare/v0.9.18...v0.9.19
 [0.9.18]: https://github.com/torrentclaw/unarr/compare/v0.9.17...v0.9.18
 [0.9.17]: https://github.com/torrentclaw/unarr/compare/v0.9.15...v0.9.17
 [0.9.15]: https://github.com/torrentclaw/unarr/compare/v0.9.14...v0.9.15
