@@ -18,6 +18,11 @@ type RegisterRequest struct {
 	StreamPort     int    `json:"streamPort,omitempty"`
 	LanIP          string `json:"lanIp,omitempty"`
 	TailscaleIP    string `json:"tailscaleIp,omitempty"`
+	// StreamSecret is the daemon's per-run HMAC key (hex) for stream tokens. The
+	// web mints the HLS path token with it (the agent mints /stream tokens on its
+	// own URLs); the agent verifies both. In memory, regenerated each start, so a
+	// fresh register after restart re-syncs it.
+	StreamSecret string `json:"streamSecret,omitempty"`
 	// Transcode capabilities — let the web side suggest a smarter quality
 	// before the player even starts. HWAccel is the picked backend
 	// ("nvenc"/"qsv"/"vaapi"/"videotoolbox"/"none"). MaxTranscodeHeight is

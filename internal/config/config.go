@@ -39,22 +39,27 @@ type AgentConfig struct {
 }
 
 type DownloadConfig struct {
-	Dir              string          `toml:"dir"`
-	PreferredMethod  string          `toml:"preferred_method"`
-	PreferredQuality string          `toml:"preferred_quality"` // "2160p", "1080p", "720p" — hint for auto-selection
-	MaxConcurrent    int             `toml:"max_concurrent"`
-	MaxDownloadSpeed string          `toml:"max_download_speed"` // e.g. "10MB", "500KB", "0" = unlimited
-	MaxUploadSpeed   string          `toml:"max_upload_speed"`   // e.g. "1MB", "0" = unlimited
-	MetadataTimeout  string          `toml:"metadata_timeout"`   // e.g. "1h", "30m", "0" = unlimited (default: "0")
-	StallTimeout     string          `toml:"stall_timeout"`      // e.g. "30m", "1h", "0" = unlimited (default: "30m")
-	ListenPort       int             `toml:"listen_port"`        // fixed port for incoming peer connections (default: 42069, 0 = random)
-	StreamPort       int             `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
-	EnableUPnP       bool            `toml:"enable_upnp"`        // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in because it exposes the unauthenticated /stream + /hls endpoints to the public internet)
-	CORSExtraOrigins []string        `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
-	Transcode        TranscodeConfig `toml:"transcode"`
-	HLSCache         HLSCacheConfig  `toml:"hls_cache"`
-	VPN              VPNConfig       `toml:"vpn"`
-	Funnel           FunnelConfig    `toml:"funnel"`
+	Dir              string `toml:"dir"`
+	PreferredMethod  string `toml:"preferred_method"`
+	PreferredQuality string `toml:"preferred_quality"` // "2160p", "1080p", "720p" — hint for auto-selection
+	MaxConcurrent    int    `toml:"max_concurrent"`
+	MaxDownloadSpeed string `toml:"max_download_speed"` // e.g. "10MB", "500KB", "0" = unlimited
+	MaxUploadSpeed   string `toml:"max_upload_speed"`   // e.g. "1MB", "0" = unlimited
+	MetadataTimeout  string `toml:"metadata_timeout"`   // e.g. "1h", "30m", "0" = unlimited (default: "0")
+	StallTimeout     string `toml:"stall_timeout"`      // e.g. "30m", "1h", "0" = unlimited (default: "30m")
+	ListenPort       int    `toml:"listen_port"`        // fixed port for incoming peer connections (default: 42069, 0 = random)
+	StreamPort       int    `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
+	EnableUPnP       bool   `toml:"enable_upnp"`        // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in)
+	// RequireStreamToken gates remote (non-loopback) /stream + /hls requests on a
+	// signed, short-lived token embedded in the URLs the agent reports. Default
+	// true (secure by default); loopback callers (local mpv/vlc) are always exempt.
+	// Set false only to debug a player that can't carry the token.
+	RequireStreamToken bool            `toml:"require_stream_token"`
+	CORSExtraOrigins   []string        `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
+	Transcode          TranscodeConfig `toml:"transcode"`
+	HLSCache           HLSCacheConfig  `toml:"hls_cache"`
+	VPN                VPNConfig       `toml:"vpn"`
+	Funnel             FunnelConfig    `toml:"funnel"`
 }
 
 // HLSCacheConfig controls the persistent HLS segment cache. A completed encode
@@ -63,9 +68,9 @@ type DownloadConfig struct {
 // size budget. Enabled by default — disable to save disk space at the cost of
 // re-encoding every play.
 type HLSCacheConfig struct {
-	Enabled bool   `toml:"enabled"`  // default: true
-	SizeGB  int    `toml:"size_gb"`  // size budget in gigabytes; default: 5; minimum: 1
-	Dir     string `toml:"dir"`      // override storage path; default: ~/.cache/unarr/hls-cache
+	Enabled bool   `toml:"enabled"` // default: true
+	SizeGB  int    `toml:"size_gb"` // size budget in gigabytes; default: 5; minimum: 1
+	Dir     string `toml:"dir"`     // override storage path; default: ~/.cache/unarr/hls-cache
 }
 
 // FunnelConfig gates the optional CloudFlare Quick Tunnel that exposes the
@@ -188,12 +193,13 @@ func Default() Config {
 			},
 		},
 		Download: DownloadConfig{
-			PreferredMethod: "auto",
-			MaxConcurrent:   3,
-			StreamPort:      11818,
+			PreferredMethod:    "auto",
+			MaxConcurrent:      3,
+			StreamPort:         11818,
+			RequireStreamToken: true, // secure by default; loopback exempt
 			Transcode: TranscodeConfig{
-				Enabled:       true,
-				HWAccel:       "auto",
+				Enabled: true,
+				HWAccel: "auto",
 				// Empty preset → engine.ResolveEncoderProfile picks the
 				// latency-biased default ("superfast" on libx264). Override
 				// in config.toml when quality > first-start latency matters.

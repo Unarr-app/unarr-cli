@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,6 +66,12 @@ type StreamServer struct {
 
 	hls *HLSSessionRegistry // HLS sessions served on /hls/<id>/...
 
+	// streamSecret signs the per-URL stream tokens (see stream_token.go). In
+	// memory only; regenerated each daemon start. requireToken gates whether
+	// remote (non-loopback) /stream and /hls requests must carry a valid token.
+	streamSecret []byte
+	requireToken bool
+
 	lastActivity  atomic.Int64
 	maxByteOffset atomic.Int64 // highest sequential read position (main playback connection)
 	totalFileSize atomic.Int64
@@ -83,7 +90,37 @@ type StreamServer struct {
 // have no auth, so exposing them to the public internet is something the
 // operator must explicitly request.
 func NewStreamServer(port int) *StreamServer {
-	return &StreamServer{port: port, hls: NewHLSSessionRegistry()}
+	return &StreamServer{
+		port:         port,
+		hls:          NewHLSSessionRegistry(),
+		streamSecret: newStreamSecret(),
+		requireToken: true, // secure by default; the agent self-mints tokens
+	}
+}
+
+// StreamSecretHex returns the daemon's stream-token signing key as hex, so it
+// can be reported to the web (which mints the HLS path token the agent then
+// verifies). Treat as a secret — it lets the holder mint valid stream tokens.
+func (ss *StreamServer) StreamSecretHex() string {
+	return hex.EncodeToString(ss.streamSecret)
+}
+
+// SetRequireStreamToken toggles remote stream-token enforcement. Loopback
+// callers are always exempt. Call before Listen() / before reporting URLs.
+// Default is true; an operator can disable it via config for debugging.
+func (ss *StreamServer) SetRequireStreamToken(require bool) {
+	ss.requireToken = require
+}
+
+// checkStreamToken reports whether a request may proceed: always true when
+// enforcement is off; otherwise the token must be a valid signature for scope.
+// No loopback exemption — cloudflared relays public funnel traffic over
+// localhost, so loopback is not a trust signal.
+func (ss *StreamServer) checkStreamToken(scope, token string) bool {
+	if !ss.requireToken {
+		return true
+	}
+	return verifyStreamToken(ss.streamSecret, scope, token, time.Now())
 }
 
 // SetUPnPEnabled toggles WAN publishing of the stream port. Call before
@@ -286,12 +323,45 @@ func (ss *StreamServer) HasFile() bool {
 }
 
 // URL returns the best single stream URL (backward compat).
-func (ss *StreamServer) URL() string { return ss.url }
+// URL returns the best single /stream URL, carrying a `?t=` token when
+// enforcement is on. This is what the one-shot `unarr stream` hands to the
+// player — and since the best URL is the Tailscale/LAN address (not loopback),
+// it must be tokenised or a remote-addressed player would be rejected.
+func (ss *StreamServer) URL() string { return ss.tokenizeStreamURL(ss.url) }
 
-// URLsJSON returns all available stream URLs as a JSON string.
+// tokenizeStreamURL appends a freshly-minted `?t=<token>` (scope "stream") to a
+// /stream URL. No-op when the URL is empty or enforcement is off.
+func (ss *StreamServer) tokenizeStreamURL(u string) string {
+	if u == "" || !ss.requireToken {
+		return u
+	}
+	sep := "?"
+	if strings.Contains(u, "?") {
+		sep = "&"
+	}
+	return u + sep + "t=" + mintStreamToken(ss.streamSecret, streamScopeStream, time.Now())
+}
+
+// URLsJSON returns all available stream URLs as a JSON string, each carrying a
+// freshly-minted `?t=` stream token when enforcement is on. The web reports
+// these verbatim to the browser (pass-through), so the token reaches the
+// player without any web-side minting.
 func (ss *StreamServer) URLsJSON() string {
-	b, _ := json.Marshal(ss.urls)
+	b, _ := json.Marshal(ss.tokenizedStreamURLs())
 	return string(b)
+}
+
+// tokenizedStreamURLs appends a `?t=<token>` (scope "stream") to each non-empty
+// /stream URL. No-op when enforcement is off.
+func (ss *StreamServer) tokenizedStreamURLs() StreamURLs {
+	if !ss.requireToken {
+		return ss.urls
+	}
+	return StreamURLs{
+		LAN:       ss.tokenizeStreamURL(ss.urls.LAN),
+		Tailscale: ss.tokenizeStreamURL(ss.urls.Tailscale),
+		Public:    ss.tokenizeStreamURL(ss.urls.Public),
+	}
 }
 
 // Port returns the bound port.
@@ -323,15 +393,21 @@ func (ss *StreamServer) Shutdown(ctx context.Context) error {
 // The web client picks the first reachable one — same fallback strategy as
 // the legacy /stream URLs.
 func (ss *StreamServer) hlsBaseURLs(sessionID string) StreamURLs {
+	// Token rides as a path segment so the playlists' relative child URIs
+	// (video/index.m3u8, seg-N.m4s, subs/…) inherit it via relative resolution.
+	base := "/hls/" + sessionID
+	if ss.requireToken {
+		base += "/" + mintStreamToken(ss.streamSecret, streamScopeHLS(sessionID), time.Now())
+	}
 	var out StreamURLs
 	if ss.urls.LAN != "" {
-		out.LAN = strings.Replace(ss.urls.LAN, "/stream", "/hls/"+sessionID, 1)
+		out.LAN = strings.Replace(ss.urls.LAN, "/stream", base, 1)
 	}
 	if ss.urls.Tailscale != "" {
-		out.Tailscale = strings.Replace(ss.urls.Tailscale, "/stream", "/hls/"+sessionID, 1)
+		out.Tailscale = strings.Replace(ss.urls.Tailscale, "/stream", base, 1)
 	}
 	if ss.urls.Public != "" {
-		out.Public = strings.Replace(ss.urls.Public, "/stream", "/hls/"+sessionID, 1)
+		out.Public = strings.Replace(ss.urls.Public, "/stream", base, 1)
 	}
 	return out
 }
@@ -374,16 +450,36 @@ func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "hls session not found", http.StatusNotFound)
 		return
 	}
+	remainder := ""
+	if len(parts) > 1 {
+		remainder = parts[1]
+	}
+	// Auth: when enforcement is on, the URL is /hls/<sessionID>/<token>/<resource>.
+	// Peel the token segment and verify it (no loopback exemption — funnel
+	// traffic arrives over localhost). 404 on mismatch — same response as an
+	// unknown session, no oracle.
+	if ss.requireToken {
+		sub := strings.SplitN(remainder, "/", 2)
+		if !verifyStreamToken(ss.streamSecret, streamScopeHLS(sessionID), sub[0], time.Now()) {
+			http.Error(w, "hls session not found", http.StatusNotFound)
+			return
+		}
+		if len(sub) < 2 {
+			http.Error(w, "missing resource", http.StatusNotFound)
+			return
+		}
+		remainder = sub[1]
+	}
 	session := ss.hls.Get(sessionID)
 	if session == nil {
 		http.Error(w, "hls session not found", http.StatusNotFound)
 		return
 	}
-	if len(parts) == 1 {
+	if remainder == "" {
 		http.Error(w, "missing resource", http.StatusNotFound)
 		return
 	}
-	resource := parts[1]
+	resource := remainder
 
 	switch {
 	case resource == "master.m3u8":
@@ -539,9 +635,11 @@ func (ss *StreamServer) playlistHandler(w http.ResponseWriter, r *http.Request) 
 		streamURL = ""
 	}
 	if streamURL == "" {
-		streamURL = ss.url
-	}
-	if streamURL == "" {
+		// No self-minting fallback: returning a freshly-tokenised URL for a
+		// param-less request would make /playlist.m3u an open token oracle
+		// (any caller could fetch a valid /stream?t=… here). The web always
+		// passes an already-tokenised streamUrl param; the playlist just echoes
+		// it — the real auth gate is /stream itself.
 		http.Error(w, "no active stream", http.StatusNotFound)
 		return
 	}
@@ -588,6 +686,14 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if ss.writeCORSHeaders(w, r, "Content-Length, Content-Range, Accept-Ranges") {
+		return
+	}
+
+	// Auth: every caller must carry a valid stream token. 404 (not 401/403) so
+	// an unauthorised caller gets no oracle that a stream is active here.
+	if !ss.checkStreamToken(streamScopeStream, r.URL.Query().Get("t")) {
+		log.Printf("[stream] rejected %s — bad/absent token", clientIP)
+		http.Error(w, "no active stream", http.StatusNotFound)
 		return
 	}
 

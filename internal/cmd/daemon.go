@@ -310,6 +310,14 @@ func runDaemonStart() error {
 	// Create persistent stream server
 	streamSrv := engine.NewStreamServer(cfg.Download.StreamPort)
 	streamSrv.SetUPnPEnabled(cfg.Download.EnableUPnP)
+	streamSrv.SetRequireStreamToken(cfg.Download.RequireStreamToken)
+	// Report the stream-token signing key ONLY when enforcing, so the web's
+	// "secret present → mint HLS token" signal accurately means "this agent
+	// verifies tokens". Reporting it with enforcement off would make the web
+	// mint HLS path tokens the agent never peels → 404. Set before Register().
+	if cfg.Download.RequireStreamToken {
+		d.UpdateStreamSecret(streamSrv.StreamSecretHex())
+	}
 	// CORS extras = operator config + dynamic mirror list from /api/mirrors.
 	// Without the mirror merge, a user playing from `torrentclaw.to` (or any
 	// future mirror) hits the daemon, gets 200 + body, but no

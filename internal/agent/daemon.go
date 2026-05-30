@@ -22,6 +22,7 @@ type DaemonConfig struct {
 	Version            string
 	DownloadDir        string
 	StreamPort         int      // port for the HTTP stream server
+	StreamSecret       string   // hex HMAC key for stream tokens (reported so the web can mint HLS tokens)
 	LanIP              string   // LAN IP (reported in sync for stream URL resolution)
 	TailscaleIP        string   // Tailscale IP (reported in sync for stream URL resolution)
 	CanDelete          bool     // library.allow_delete is enabled
@@ -109,6 +110,13 @@ func (d *Daemon) SetFunnelURL(url string) {
 	WriteState(&d.State)
 }
 
+// UpdateStreamSecret sets the hex HMAC key reported on register so the web can
+// mint HLS stream tokens the agent will accept.
+func (d *Daemon) UpdateStreamSecret(secretHex string) {
+	d.cfg.StreamSecret = secretHex
+	d.sync.cfg.StreamSecret = secretHex
+}
+
 // UpdateStreamPort updates the stream port reported in sync requests.
 func (d *Daemon) UpdateStreamPort(port int) {
 	d.cfg.StreamPort = port
@@ -126,6 +134,7 @@ func (d *Daemon) Register(ctx context.Context) error {
 		Version:            d.cfg.Version,
 		DownloadDir:        d.cfg.DownloadDir,
 		StreamPort:         d.cfg.StreamPort,
+		StreamSecret:       d.cfg.StreamSecret,
 		LanIP:              d.cfg.LanIP,
 		TailscaleIP:        d.cfg.TailscaleIP,
 		HWAccel:            d.cfg.HWAccel,
