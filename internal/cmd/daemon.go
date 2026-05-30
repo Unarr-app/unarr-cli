@@ -265,15 +265,16 @@ func runDaemonStart() error {
 
 	// Create torrent downloader
 	torrentDl, err := engine.NewTorrentDownloader(engine.TorrentConfig{
-		DataDir:         cfg.Download.Dir,
-		MetadataTimeout: metaTimeout,
-		StallTimeout:    stallTimeout,
-		MaxTimeout:      0,
-		MaxDownloadRate: maxDl,
-		MaxUploadRate:   maxUl,
-		ListenPort:      cfg.Download.ListenPort,
-		SeedEnabled:     false,
-		VPNTunnel:       vpnTunnel,
+		DataDir:            cfg.Download.Dir,
+		PieceCompletionDir: config.DataDir(), // keep piece-completion DB off NFS/SMB mounts
+		MetadataTimeout:    metaTimeout,
+		StallTimeout:       stallTimeout,
+		MaxTimeout:         0,
+		MaxDownloadRate:    maxDl,
+		MaxUploadRate:      maxUl,
+		ListenPort:         cfg.Download.ListenPort,
+		SeedEnabled:        false,
+		VPNTunnel:          vpnTunnel,
 	})
 	if err != nil {
 		return fmt.Errorf("create torrent downloader: %w", err)

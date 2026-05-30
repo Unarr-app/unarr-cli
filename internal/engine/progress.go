@@ -45,10 +45,19 @@ type ProgressReporter struct {
 	lastCheckAt  time.Time             // last time we reported for control-signal polling
 }
 
-// NewProgressReporter creates a reporter that flushes every interval.
+// NewProgressReporter creates a reporter that flushes every interval. A nil
+// client yields a local-only reporter that tracks progress for terminal output
+// but never calls the API — used by one-shot `unarr download`, which has no
+// server-side task to report against (its synthetic "oneshot-" id is not a UUID
+// and the /api/internal/agent/status endpoint 400s it). Passing the typed nil
+// straight into the interface field would make it non-nil, so guard explicitly.
 func NewProgressReporter(ac *agent.Client, interval time.Duration) *ProgressReporter {
+	var rep StatusReporter
+	if ac != nil {
+		rep = ac
+	}
 	return &ProgressReporter{
-		reporter:     ac,
+		reporter:     rep,
 		interval:     interval,
 		latest:       make(map[string]*Task),
 		lastReported: make(map[string]TaskStatus),
@@ -108,6 +117,9 @@ func (r *ProgressReporter) Run(ctx context.Context) error {
 }
 
 func (r *ProgressReporter) flush(ctx context.Context) {
+	if r.reporter == nil {
+		return // local-only reporter (one-shot): nothing to send
+	}
 	r.mu.Lock()
 	tasks := make([]*Task, 0, len(r.latest))
 	for _, t := range r.latest {
@@ -239,6 +251,10 @@ func (r *ProgressReporter) handleResponse(task *Task, resp *agent.StatusResponse
 
 // ReportFinal sends a final status update for a completed/failed task.
 func (r *ProgressReporter) ReportFinal(ctx context.Context, task *Task) {
+	if r.reporter == nil {
+		r.Untrack(task.ID)
+		return // local-only reporter (one-shot)
+	}
 	update := task.ToStatusUpdate()
 	if _, err := r.reporter.ReportStatus(ctx, update); err != nil {
 		log.Printf("[%s] final report failed: %v", task.ID[:8], err)

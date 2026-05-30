@@ -61,7 +61,12 @@ var defaultTrackers = []string{
 
 // TorrentConfig holds settings for the BitTorrent downloader.
 type TorrentConfig struct {
-	DataDir         string
+	DataDir             string
+	// PieceCompletionDir, when non-empty, stores the piece-completion SQLite DB
+	// in this directory instead of DataDir. Use the agent's local state dir
+	// (not the download dir) so the DB never lands on NFS/SMB volumes where
+	// SQLite locking times out.
+	PieceCompletionDir  string
 	MetadataTimeout time.Duration // how long to wait for torrent metadata (default 15m, 0 = unlimited)
 	StallTimeout    time.Duration // no progress during download for this long = stall (default 10m)
 	MaxTimeout      time.Duration // absolute maximum per torrent (default 0 = unlimited)
@@ -113,7 +118,23 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	// Storage: mmap instead of default file backend.
 	// The library author notes file storage has "very high system overhead".
 	// mmap improves I/O throughput and piece verification speed significantly.
-	tcfg.DefaultStorage = storage.NewMMap(cfg.DataDir)
+	//
+	// When PieceCompletionDir is set (daemon always passes the agent state dir),
+	// keep the piece-completion SQLite DB off the download dir so it never lands
+	// on NFS/SMB where SQLite's file locking times out and emits a warning.
+	if cfg.PieceCompletionDir != "" {
+		if mkErr := os.MkdirAll(cfg.PieceCompletionDir, 0o755); mkErr != nil {
+			log.Printf("[torrent] piece-completion dir create failed (%v), DB stays in download dir", mkErr)
+			tcfg.DefaultStorage = storage.NewMMap(cfg.DataDir)
+		} else if pc, pcErr := storage.NewDefaultPieceCompletionForDir(cfg.PieceCompletionDir); pcErr != nil {
+			log.Printf("[torrent] piece-completion db in %q failed (%v), falling back to download dir", cfg.PieceCompletionDir, pcErr)
+			tcfg.DefaultStorage = storage.NewMMap(cfg.DataDir)
+		} else {
+			tcfg.DefaultStorage = storage.NewMMapWithCompletion(cfg.DataDir, pc)
+		}
+	} else {
+		tcfg.DefaultStorage = storage.NewMMap(cfg.DataDir)
+	}
 
 	// Fixed port for incoming peer connections (enables UPnP port mapping).
 	// With ListenPort=0, only ~30% of peers can connect to us.

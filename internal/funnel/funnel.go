@@ -32,9 +32,13 @@ import (
 )
 
 // urlPattern matches the `https://<random>.trycloudflare.com` URL cloudflared
-// prints when a Quick Tunnel is registered. The hostname has a random
-// hyphen-separated label followed by .trycloudflare.com.
-var urlPattern = regexp.MustCompile(`https://[a-z0-9-]+\.trycloudflare\.com`)
+// prints when a Quick Tunnel is registered. Quick Tunnel hostnames are always
+// several hyphen-joined dictionary words (e.g.
+// `make-appointments-negotiation-blacks`), so we require at least one hyphen.
+// This deliberately excludes cloudflared's control-plane endpoint
+// `https://api.trycloudflare.com`, which appears earlier in the log stream — a
+// permissive `[a-z0-9-]+` matched `api` first and we advertised a dead URL.
+var urlPattern = regexp.MustCompile(`https://[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com`)
 
 // Config controls how the tunnel is launched.
 type Config struct {

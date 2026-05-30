@@ -119,11 +119,10 @@ func runDownloadWithDeps(input, method string, deps downloadDeps) error {
 		return fmt.Errorf("create downloader: %w", err)
 	}
 
-	// Create a dummy reporter (no API reporting for one-shot)
-	reporter := engine.NewProgressReporter(
-		deps.newAgentClient(cfg.Auth.APIURL, cfg.Auth.APIKey, "unarr/"+Version),
-		5*time.Second,
-	)
+	// Local-only reporter: one-shot downloads have no server-side task, so a nil
+	// client keeps terminal progress working without spamming the status API
+	// (which 400s the synthetic "oneshot-" id).
+	reporter := engine.NewProgressReporter(nil, 5*time.Second)
 
 	debridDl := deps.newDebridDl()
 
