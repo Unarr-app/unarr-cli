@@ -36,6 +36,11 @@ var defaultCORSAllowedOrigins = []string{
 	"https://staging.torrentclaw.com",
 	"https://torrentclaw.to",
 	"https://www.torrentclaw.to",
+	// unarr brand (separate deployment). The web player + agent endpoints run
+	// under unarr.app; without these the browser drops every /hls + /stream
+	// response (no Access-Control-Allow-Origin) and playback fails on unarr.
+	"https://unarr.app",
+	"https://www.unarr.app",
 	// Tor mirror — Tor Browser sends `Origin: http://<addr>.onion` (plain
 	// http, no port). Mirror address is the BUILT_IN_ONION constant from
 	// torrentclaw-web/src/lib/mirrors-config.ts; rotates rarely, kept in
