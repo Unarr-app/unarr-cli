@@ -53,8 +53,8 @@ Diseño por fases (2a direct-play / 2b HLS-desde-URL / 2c fallback) en el estado
 El path HLS **siempre re-encoda** (incluso mp4 h264/aac ya compatible). `DecideAction`
 (passthrough/remux) existe pero muerto en el path browser. Sin negociación por
 capacidades del dispositivo. Sin ABR multi-bitrate.
-Diseño por fases (3a direct-play / 3b remux-HLS / 3c capability-negotiation / 3d ABR)
-en el estado abajo. **Fase 3a CERRADA** (CLI c8d7c4b + web 636fbe59); 3b/3c/3d pendientes.
+Diseño por fases (3a direct-play / 3b remux fMP4 / 3c capability-negotiation / 3d ABR)
+en el estado abajo. **Fases 3a + 3b CERRADAS** (smoke e2e en browser); 3c/3d pendientes.
 
 ### Hueco #4 — Pre-transcode (transcode-on-download)  🔵 DISEÑADO (ver estado abajo)
 Al completar una descarga/import, transcodificar/remuxar en background para que el
@@ -293,6 +293,29 @@ el orden de STREAMING (no el de descarga) prefiera debrid.
   (range responder + provider creciente), `cmd/daemon.go` (branch `remux`),
   `engine/transcoder.go` (args `-c copy` fMP4). WEB `lib/stream/play-method.ts`
   (+"remux"), `stream/session/route.ts`, `HlsStreamPlayer.tsx` (`!= "hls"`).
+
+  **CERRADO 2026-05-31:**
+  - CLI 3b-i (`feat/unarr-agent` 4a12f13): `GrowingSource` + `NewRemuxSource`
+    (reusa `transcodeSource`+`ActionRemux`, estimate = tamaño origen para copy);
+    `StreamServer.SetGrowingFile` + `serveGrowing` (responder Range manual: 206
+    con total estimado en `Content-Range`, body chunked mientras no-final, exact
+    `Content-Length` al finalizar, bloqueo vía `ReadAt`); branch `remux` en
+    `OnStreamSession`. Tests `parseByteRange`+`serveGrowing` (full/offset/bounded/
+    estimate/HEAD/416). build+vet+test verdes.
+  - WEB 3b-ii (`feat/unarr-brand` 10b7d602): `decidePlayMethod`→`"remux"` para
+    codecs compatibles en contenedor no-nativo; ruta gatea remux como direct
+    (versión, metadata, sin downscale, audioIndex -1); player trata `!= "hls"`
+    como attach nativo. lint+typecheck+2334 unit OK.
+  - **Smoke e2e (browser, mkv h264/aac 1080p):** `playMethod: remux`, `hlsUrls:
+    null`; agente `[stream …] remux (copy) → fMP4`; `/stream` HEAD 200 + GET Range
+    206 con fMP4 válido (`ftyp iso6 mp41`+`moov`); browser reproduce 1080p nativo,
+    duration leída del fMP4, **seek a 2min OK**, **0 reqs `/hls`**. ✓
+  - **Bug cazado por el smoke:** la respuesta `created` de la ruta quedó en
+    `playMethod === "direct" ? null` (en vez de `!== "hls"`) → devolvía `hlsUrls`
+    para remux. Corregido (el player usaba streamUrls igual, pero inconsistente).
+  - **Limitación:** seek-adelante a zona aún-no-remuxada bloquea hasta que el copy
+    (rápido) la alcanza; seek-atrás inmediato. Audio no-default / subs-bitmap →
+    siguen yendo por HLS (gate `audioIndex == -1`).
 
 - **Fase 3c — capability negotiation (device-profile).** El web envía
   `{maxHeight, codecs:[h264,hevc,av1], containers}` (de UA + `canPlayType`).
