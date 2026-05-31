@@ -43,6 +43,7 @@ type DownloadConfig struct {
 	PreferredMethod  string `toml:"preferred_method"`
 	PreferredQuality string `toml:"preferred_quality"` // "2160p", "1080p", "720p" — hint for auto-selection
 	MaxConcurrent    int    `toml:"max_concurrent"`
+	MinFreeDiskMB    int    `toml:"min_free_disk_mb"` // refuse a download if it would leave less than this free (reserve to keep the FS healthy); default 2048, 0 = disable
 	MaxDownloadSpeed string `toml:"max_download_speed"` // e.g. "10MB", "500KB", "0" = unlimited
 	MaxUploadSpeed   string `toml:"max_upload_speed"`   // e.g. "1MB", "0" = unlimited
 	MetadataTimeout  string `toml:"metadata_timeout"`   // e.g. "1h", "30m", "0" = unlimited (default: "0")
@@ -195,6 +196,7 @@ func Default() Config {
 		Download: DownloadConfig{
 			PreferredMethod:    "auto",
 			MaxConcurrent:      3,
+			MinFreeDiskMB:      2048, // 2 GiB reserve
 			StreamPort:         11818,
 			RequireStreamToken: true, // secure by default; loopback exempt
 			Transcode: TranscodeConfig{
@@ -292,6 +294,9 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	}
 	if !meta.IsDefined("downloads", "max_concurrent") {
 		cfg.Download.MaxConcurrent = 3
+	}
+	if !meta.IsDefined("downloads", "min_free_disk_mb") {
+		cfg.Download.MinFreeDiskMB = 2048 // 2 GiB reserve so a download never fills the FS to 0
 	}
 	if !meta.IsDefined("downloads", "stream_port") {
 		cfg.Download.StreamPort = 11818

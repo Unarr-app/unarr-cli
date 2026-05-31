@@ -293,6 +293,15 @@ func runDaemonStart() error {
 
 	// Create debrid downloader
 	debridDl := engine.NewDebridDownloader()
+	usenetDl := engine.NewUsenetDownloader(agentClient)
+
+	// Pre-flight disk reserve: refuse a download that would leave less than this
+	// many bytes free, so a download never fills the filesystem to 0 mid-write.
+	minFreeBytes := int64(cfg.Download.MinFreeDiskMB) << 20
+	torrentDl.SetMinFreeBytes(minFreeBytes)
+	debridDl.SetMinFreeBytes(minFreeBytes)
+	usenetDl.SetMinFreeBytes(minFreeBytes)
+	log.Printf("[disk] download free-space reserve: %d MiB", cfg.Download.MinFreeDiskMB)
 
 	// Create download manager
 	manager := engine.NewManager(engine.ManagerConfig{
@@ -305,7 +314,7 @@ func runDaemonStart() error {
 			TVShowsDir: cfg.Organize.TVShowsDir,
 			OutputDir:  cfg.Download.Dir,
 		},
-	}, reporter, torrentDl, debridDl, engine.NewUsenetDownloader(agentClient))
+	}, reporter, torrentDl, debridDl, usenetDl)
 
 	// Create persistent stream server
 	streamSrv := engine.NewStreamServer(cfg.Download.StreamPort)

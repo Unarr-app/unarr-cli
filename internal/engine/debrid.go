@@ -27,6 +27,8 @@ var httpClient = &http.Client{
 type DebridDownloader struct {
 	activeMu sync.Mutex
 	active   map[string]context.CancelFunc
+
+	minFreeBytes int64 // disk reserve for the pre-flight space check (0 = reserve disabled)
 }
 
 // NewDebridDownloader creates a debrid downloader.
@@ -35,6 +37,11 @@ func NewDebridDownloader() *DebridDownloader {
 		active: make(map[string]context.CancelFunc),
 	}
 }
+
+// SetMinFreeBytes sets the free-space reserve enforced before a download starts.
+// Call once at construction; 0 disables the reserve (the size-vs-free check still
+// runs). See CheckDiskSpace.
+func (d *DebridDownloader) SetMinFreeBytes(n int64) { d.minFreeBytes = n }
 
 func (d *DebridDownloader) Method() DownloadMethod { return MethodDebrid }
 
@@ -165,6 +172,12 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 	} else {
 		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 		log.Printf("[%s] starting debrid download: %s", agent.ShortID(task.ID), fileName)
+	}
+
+	// Pre-flight disk-space guard on the bytes still to write (resume subtracts
+	// what's already on disk). Best-effort; ENOSPC stays the backstop.
+	if err := CheckDiskSpace(outputDir, totalBytes-startOffset, d.minFreeBytes); err != nil {
+		return nil, err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {

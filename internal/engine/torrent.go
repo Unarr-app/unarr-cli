@@ -90,7 +90,14 @@ type TorrentDownloader struct {
 
 	activeMu sync.Mutex
 	active   map[string]*torrent.Torrent // taskID -> torrent handle
+
+	minFreeBytes int64 // disk reserve for the pre-flight space check (0 = reserve disabled)
 }
+
+// SetMinFreeBytes sets the free-space reserve enforced before a download starts.
+// Call once at construction; 0 disables the reserve (the size-vs-free check still
+// runs). See CheckDiskSpace.
+func (d *TorrentDownloader) SetMinFreeBytes(n int64) { d.minFreeBytes = n }
 
 // NewTorrentDownloader creates a BitTorrent downloader with a long-lived client.
 func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
@@ -339,6 +346,15 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 	totalBytes, fileName := d.selectFiles(t, task.ID)
 
 	log.Printf("[%s] downloading %s (%s)", task.ID[:8], fileName, formatBytes(totalBytes))
+
+	// 2.5 Pre-flight disk-space guard — refuse before writing rather than fill
+	// the disk to 0 mid-download (corrupts the partial file). Torrents land in
+	// DataDir (not the manager's outputDir), so stat DataDir. Conservative: uses
+	// the full selected size without subtracting pieces a resume may already hold.
+	if err := CheckDiskSpace(d.cfg.DataDir, totalBytes, d.minFreeBytes); err != nil {
+		cleanup()
+		return nil, err
+	}
 
 	// 3. Poll progress with stall detection
 	result, err := d.pollDownload(ctx, t, task, totalBytes, fileName, progressCh)
@@ -715,12 +731,15 @@ func formatBytes(b int64) string {
 	if b < unit {
 		return fmt.Sprintf("%d B", b)
 	}
+	// Cap exp at the last unit so an exabyte-scale value (or a corrupt/huge
+	// size) can never index past the slice and panic.
+	units := []string{"KB", "MB", "GB", "TB", "PB", "EB"}
 	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
+	for n := b / unit; n >= unit && exp < len(units)-1; n /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %s", float64(b)/float64(div), []string{"KB", "MB", "GB", "TB"}[exp])
+	return fmt.Sprintf("%.1f %s", float64(b)/float64(div), units[exp])
 }
 
 // ---------------------------------------------------------------------------

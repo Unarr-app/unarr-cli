@@ -42,7 +42,14 @@ type UsenetDownloader struct {
 	// Cached NZB search results (from Available → Download)
 	nzbCache   map[string]*agent.NzbSearchResult // taskID → best result
 	nzbCacheMu sync.RWMutex
+
+	minFreeBytes int64 // disk reserve for the pre-flight space check (0 = reserve disabled)
 }
+
+// SetMinFreeBytes sets the free-space reserve enforced before a download starts.
+// Call once at construction; 0 disables the reserve (the size-vs-free check still
+// runs). See CheckDiskSpace.
+func (u *UsenetDownloader) SetMinFreeBytes(n int64) { u.minFreeBytes = n }
 
 // NewUsenetDownloader creates a usenet downloader.
 // apiClient is used to call the web API for NZB search, download, and credentials.
@@ -171,6 +178,12 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	if resumed {
 		log.Printf("[%s] resuming usenet download (%d/%d segments completed)",
 			shortID, tracker.TotalCompleted(), totalSegs)
+	} else {
+		// Pre-flight disk-space guard on a fresh download (a resume already has
+		// its partial bytes on disk; ENOSPC stays the backstop there).
+		if err := CheckDiskSpace(outputDir, totalBytes, u.minFreeBytes); err != nil {
+			return nil, err
+		}
 	}
 
 	// Always flush progress on exit — covers graceful shutdown, SIGTERM,

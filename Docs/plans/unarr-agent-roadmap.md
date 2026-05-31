@@ -67,7 +67,7 @@ el pipeline de `prewarm` (ya hace encode de la siguiente ep) — generaliza prew
 desde la web. Diseño + set de opciones en el estado abajo.
 
 ### Huecos medios  ⬜
-- Sin gestión de espacio en disco (`Statfs`) → disco lleno revienta a mitad.
+- ~~Sin gestión de espacio en disco (`Statfs`)~~ ✅ **Pre-flight de espacio (2026-05-31)** — `CheckDiskSpace` antes de cada descarga (torrent/usenet/debrid) con reserva configurable `downloads.min_free_disk_mb` (default 2048); manager NO hace fallback en disco lleno; aviso web 507 `INSUFFICIENT_DISK` al despachar (torrentclaw). Monitoreo mid-download diferido. Ver estado abajo.
 - Resume de torrent NO persiste reinicio del daemon (usenet sí).
 - Sin seeding/ratio lifecycle (flags existen, nadie los aplica).
 - Reproducir-mientras-baja: readahead estático 5MB, sin playhead→prioridad dinámica.
@@ -98,6 +98,12 @@ WireGuard endpoint sin pin · sesión única (1 viewer).
 - **Funnel = SPOF CloudFlare** (ya en huecos medios): el funnel sigue siendo trycloudflare; relay propio pendiente.
 - **Rutas localizadas unarr 404 (media)**: bajo `NEXT_PUBLIC_BRAND=unarr` el allowlist `UNARR_PAGE_PREFIXES` solo lista los paths EN (`/library`, `/title`, …), pero next-intl sirve los localizados (`/es/biblioteca`, `/es/descargas`, `/es/perfil`) → 404 al navegar la biblioteca en español. Las páginas EN (`/title/<id>`) funcionan. Hallado durante el smoke de "características del fichero" (2026-05-31). Fix: añadir los pathnames localizados al allowlist o derivarlos del mapeo de next-intl. Ajeno a este hueco.
 - **Thumbnails — sprites/trickplay (media)**: cerrado solo el camino bajo demanda (N frames en vivo). El scrubber pregenerado (sprite/BIF de toda la timeline, preview al pasar el ratón por la barra) queda como hueco propio: reaprovecharía `/thumbnail` + cacheo en disco del agente. Decidido alcance "solo bajo demanda" con el usuario (2026-05-31).
+
+### Hueco medio — Gestión de espacio en disco (pre-flight)  ✅ CERRADO (2026-05-31)
+Una descarga ya no llena el disco a 0 a mitad (corrompía el fichero parcial).
+- **CLI**: `internal/engine/diskspace.go` — `CheckDiskSpace(dir, need, reserve)` usa `agent.DiskInfo` (Statfs/GetDiskFreeSpaceEx, ya abstraído) y devuelve `*InsufficientDiskError` si `free-need < reserve`; best-effort (need≤0 o stat falla → nil, ENOSPC sigue de backstop). Cableado antes de escribir en los 3 downloaders (torrent: DataDir+totalBytes; debrid: outputDir+restantes; usenet: outputDir+totalBytes solo en fresh). Reserva por `SetMinFreeBytes` desde `downloads.min_free_disk_mb` (default 2048 MiB). `manager` falla sin fallback en disco lleno (otra fuente llena el mismo disco). Fix latente: `formatBytes` paniqueaba ≥1PB (array hasta TB) → +PB/EB+clamp.
+- **WEB**: `/api/internal/download` rechaza 507 `INSUFFICIENT_DISK` antes de crear la tarea si `diskFreeBytes - sizeBytes < 2 GiB` (reserva = default agente). Solo single-file torrent + agente online (telemetría de disco ya fluía). Saltado: stream, usenet, episodios (sizeBytes=pack completo → falso reject), agente offline. `DownloadButton` muestra estado `diskfull` (i18n 7 locales, namespace torrent). Bajo unarr el endpoint está fuera del allowlist → unarr solo streamea; el pre-flight del agente cubre sus descargas.
+- **Tests/smoke**: Go `diskspace_test` (Statfs real vía TempDir: enough/insufficient/reserve/unknown/bad-dir). Web reject no e2e-smokeable en el dev box (es unarr → endpoint 404); verificado por build+typecheck+lógica. /critico 2 revisores → 2 bugs reales (guard sin `health.online`; falso reject en season packs) + 4 clarity.
 
 ### Hueco medio — Características del fichero + thumbnails bajo demanda  ✅ CERRADO (2026-05-31)
 Panel "ver características del fichero" (ruta + mediainfo completa: codec/HDR/bit-depth/tracks audio+subs/tamaño/duración — ya en DB vía ffprobe, solo faltaba surface) + tira de fotogramas extraídos en vivo por el agente.

@@ -344,6 +344,12 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 	close(progressCh)
 
 	if err != nil {
+		// A full disk is terminal — another source would fill the same disk, so
+		// skip the fallback and surface the clear message immediately.
+		if IsInsufficientDisk(err) {
+			m.fail(ctx, task, err.Error())
+			return
+		}
 		// Try fallback
 		if tryFallback(task, m.downloaders) {
 			log.Printf("[%s] %s failed, trying fallback: %v", agent.ShortID(task.ID), method, err)
@@ -386,6 +392,8 @@ func (m *Manager) processTaskRetry(ctx context.Context, task *Task) {
 	close(progressCh)
 
 	if err != nil {
+		// No further fallback here — same disk, same outcome — so an
+		// InsufficientDiskError on the fallback surfaces its message directly.
 		m.fail(ctx, task, err.Error())
 		return
 	}
