@@ -302,7 +302,7 @@ local escaneada; mp4-h264-aac es común en web-dl/YIFY). 3b/3c/3d como iteracion
   + `vet` + tests verdes.
 - WEB (`feat/unarr-brand` 636fbe59): `decidePlayMethod()` (espeja la rama
   passthrough de Go, conservador) + test unitario; gate `supportsDirectPlay`
-  (`DIRECT_PLAY_MIN_VERSION = 0.9.20`); decisión en la ruta de sesión (solo
+  (`DIRECT_PLAY_MIN_VERSION = 0.10.0`); decisión en la ruta de sesión (solo
   library item + sin downscale + `audioIndex == -1`); `buildStreamUrls` mintea
   token scope `stream` (paridad Go); `streaming_session.play_method` (migración
   0135) emitido al agente vía `getPendingStreamSessions`; player ramifica a
@@ -315,9 +315,9 @@ local escaneada; mp4-h264-aac es común en web-dl/YIFY). 3b/3c/3d como iteracion
 usuario → esos casos van a HLS con `-map 0:a:N`).
 
 **Pendiente de validación (3a):** **smoke e2e real no hecho** (requiere un agente
-desplegado >= 0.9.20 + un item de biblioteca mp4-h264-aac + browser). Los tests
+desplegado >= 0.10.0 + un item de biblioteca mp4-h264-aac + browser). Los tests
 cubren la decisión + paridad de token, no el round-trip /stream en vivo. El agente
-dev (`unarr-dev`) debe reportar versión >= 0.9.20 o el gate bloquea direct-play.
+dev (`unarr-dev`) debe reportar versión >= 0.10.0 o el gate bloquea direct-play.
 
 **Backlog detectado en 3a (baja prioridad):**
 - `streaming_session.transport` queda `"hls"` también para sesiones direct
