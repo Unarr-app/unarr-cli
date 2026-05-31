@@ -49,10 +49,12 @@ torrent. La promesa "play instantáneo cache-fast" no ocurre. Falta: source debr
 en el path de streaming + cache-availability + **fallback torrent↔debrid mid-stream**.
 Diseño por fases (2a direct-play / 2b HLS-desde-URL / 2c fallback) en el estado abajo.
 
-### Hueco #3 — Device-profile + direct-play + ABR  ⬜
+### Hueco #3 — Device-profile + direct-play + ABR  🔵 EN CURSO (ver estado abajo)
 El path HLS **siempre re-encoda** (incluso mp4 h264/aac ya compatible). `DecideAction`
 (passthrough/remux) existe pero muerto en el path browser. Sin negociación por
 capacidades del dispositivo. Sin ABR multi-bitrate.
+Diseño por fases (3a direct-play / 3b remux-HLS / 3c capability-negotiation / 3d ABR)
+en el estado abajo. Fase 3a en implementación.
 
 ### Huecos medios  ⬜
 - Sin gestión de espacio en disco (`Statfs`) → disco lleno revienta a mitad.
@@ -194,3 +196,92 @@ Empezar por 2a (valor inmediato, riesgo bajo), 2b y 2c como iteraciones.
 **Mejora detectada:** `resolve.go:22` ordena `torrent > debrid > usenet`; para el
 diferenciador cache-fast convendría que, **cuando hay cache debrid confirmada**,
 el orden de STREAMING (no el de descarga) prefiera debrid.
+
+---
+
+### Hueco #3 — Device-profile + direct-play + ABR
+**Estado:** 🔵 EN CURSO (2026-05-31). Análisis cerrado; fase 3a en implementación.
+
+**Problema (confirmado en el análisis):**
+- El path browser usa **HLS y SIEMPRE re-encoda**: `buildHLSFFmpegArgsAt`
+  (`engine/hls.go`) pone `-c:v libx264|nvenc|…` + cadena de filtros completa
+  (scale/format/setparams) + AAC, sin rama de copia. Un mp4 h264/aac 8-bit SDR
+  que el navegador reproduciría tal cual se transcodifica entero. Coste de CPU
+  puro desperdicio.
+- `DecideAction` + `diskFileSource`/`transcodeSource` (`engine/probe.go`,
+  `engine/stream_source.go`) **son código muerto**: cero callers en producción,
+  solo tests. Distinguen `passthrough/remux/remux-audio/transcode-video` y detectan
+  10-bit/HDR — la lógica de decisión ya existe, no está cableada.
+
+**Lo que ya hay y se reaprovecha:**
+- El agente ya expone **dos paths** en el StreamServer (puerto 11818):
+  - `/stream` → sirve el fichero crudo con `http.ServeContent` (HTTP Range
+    completo, sin ffmpeg, ya tokenizado). **Direct-play ya es posible aquí.**
+  - `/hls/<id>/…` → transcode HLS.
+- El web **construye las URLs** (HLS hoy) desde la info de red del agente
+  (`streamPort`, `tailscaleIp`, `lanIp`, `funnelUrl`, `streamSecret`) y **puede
+  mintear tokens** (`mintStreamToken`, scope `stream` es constante). O sea: el web
+  puede construir la URL `/stream?t=…` de direct-play él mismo.
+- `libraryItem` ya guarda del scan: `videoCodec`, `audioCodec`, `bitDepth`, `hdr`,
+  `resolution`. Con el contenedor (extensión de `fileName`), el web tiene todo
+  para decidir direct-play SIN re-probar.
+
+**Diseño por fases (de menos a más riesgo):**
+
+- **Fase 3a — direct-play passthrough para items de biblioteca.** *El web decide.*
+  *Slice acotado, ambos sentidos de version-skew seguros vía gate de versión.*
+  1. WEB `decidePlayMethod({videoCodec,audioCodec,bitDepth,hdr,container})` →
+     `"direct" | "hls"` (espeja la rama passthrough de Go `DecideAction`: solo
+     `mp4/m4v` + `h264` + `aac` + 8-bit + SDR → direct; todo lo demás → hls).
+  2. WEB gate: `supportsDirectPlay(agentVersion)` (constante de versión mínima).
+     Direct-play solo si el agente la soporta; si no → hls (sin regresión).
+  3. WEB sesión: en la rama `libraryItemPublicId`, seleccionar los campos codec;
+     calcular `playMethod` (gated); persistirlo en `streamingSession.play_method`
+     (migración aditiva, `db:generate`); devolver `playMethod` + `streamUrls`
+     (`/stream?t=` minteadas por el web, lan/ts/funnel) en la respuesta.
+  4. WEB sync: `getPendingStreamSessions` emite `playMethod` al agente.
+  5. CLI: `StreamSession.PlayMethod string`; en `OnStreamSession`, si
+     `PlayMethod=="direct"` → `streamSrv.SetFile(NewDiskFileProvider(path))` +
+     `MarkSessionReady` (sin ffmpeg). Else → `StartHLSSession` (actual).
+  6. WEB player (`HlsStreamPlayer.tsx`): si `data.playMethod==="direct"` → usar
+     `data.streamUrls` + attach nativo `<video src>` (mp4 = reproducible en todo
+     navegador, sin hls.js). Else → flujo HLS actual.
+  - **Limitación honesta:** solo cubre items de biblioteca (escaneados, con
+    metadata codec). Raw `infoHash`/`taskId` → hls (sin probe). Cubrir esos
+    casos = fase 3a-bis (el agente decide tras probar, reportando playMethod por
+    `MarkSessionReady` — requiere extender el payload + SSE + diferir el attach
+    del player al evento ready). Diferido por mayor superficie.
+
+- **Fase 3b — remux HLS (`-c:v copy`) para contenedores no-mp4 compatibles.**
+  Caso `mkv` h264/aac (no direct-playable por contenedor). `-c:v copy` evita el
+  re-encode de vídeo. **Parte difícil:** con `-c copy` ffmpeg corta segmentos en
+  keyframes del GOP origen → duraciones variables que NO casan con el manifiesto
+  pre-renderizado uniforme (`renderVideoPlaylist`) → rompe seek/playback. Hay que
+  servir el manifiesto que genera ffmpeg (no el pre-render) o reescribir el seek.
+  Mayor que 3a.
+
+- **Fase 3c — capability negotiation (device-profile).** El web envía
+  `{maxHeight, codecs:[h264,hevc,av1], containers}` (de UA + `canPlayType`).
+  `decidePlayMethod` se hace device-aware: p.ej. Safari/AppleTV que reproduce HEVC
+  nativo → passthrough HEVC en vez de transcode HEVC→h264. Reemplaza el heurístico
+  UA-burdo de `resolveAutoQuality`. Web+CLI.
+
+- **Fase 3d — ABR multi-bitrate.** Ladder de renditions en el master playlist +
+  N pipelines ffmpeg / segmentos por rendition. Alto esfuerzo, baja prioridad;
+  el modelo single-viewer reduce su valor. Último.
+
+**Ficheros a tocar (3a):** CLI `internal/agent/types.go` (+PlayMethod),
+`internal/cmd/daemon.go` (branch SetFile vs HLS). WEB
+`src/lib/services/agent-version-compare.ts` (gate), `src/lib/stream/play-method.ts`
+(nuevo), `src/lib/stream-token.ts` (scope stream), `src/lib/db/schema.ts` +
+migración (`streamingSession.play_method`), `src/app/api/internal/stream/session/route.ts`
+(decisión + URLs), `src/lib/services/agent.ts` (`getPendingStreamSessions` emite
+playMethod), `src/components/stream/HlsStreamPlayer.tsx` (attach nativo).
+
+**Seguridad de version-skew (3a):**
+- Web nuevo + agente viejo: gate `supportsDirectPlay` ve versión vieja → hls. ✓
+- Web viejo + agente nuevo: web nunca manda `direct` → agente hls. ✓
+- Campo `PlayMethod` desconocido en agente viejo = ignorado por el unmarshal. ✓
+
+**Empezar por 3a** (valor inmediato — el caso primario de unarr es la biblioteca
+local escaneada; mp4-h264-aac es común en web-dl/YIFY). 3b/3c/3d como iteraciones.
