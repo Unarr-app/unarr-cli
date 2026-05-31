@@ -43,7 +43,7 @@ Sólido salvo nota:
 funnel/UPnP el stream queda público en internet. Plan previo
 `Docs/plans/security-stream-token.md` (deferido, sin código).
 
-### Hueco #2 — Debrid en el path de streaming  🟡 2a+2b CERRADO (2026-05-31); 2c pendiente
+### Hueco #2 — Debrid en el path de streaming  ✅ CERRADO (2a+2b+2c, 2026-05-31)
 Hoy debrid es **solo descarga**, resuelto server-side; el streaming es 100%
 torrent. La promesa "play instantáneo cache-fast" no ocurre. Falta: source debrid
 en el path de streaming + cache-availability + **fallback torrent↔debrid mid-stream**.
@@ -149,8 +149,26 @@ WEB (`torrentclaw-web`):
 ---
 
 ### Hueco #2 — Debrid en el path de streaming
-**Estado:** 🟡 Fases 2a + 2b CERRADAS (2026-05-31). 2c (preferencia cache-fast
-sobre torrent + fallback mid-stream) pendiente.
+**Estado:** ✅ CERRADO (2a+2b+2c, 2026-05-31).
+
+**CERRADO 2c (2026-05-31):** fallback mid-stream, alcance = **refresh de URL
+debrid** (decisión del usuario; el swap cross-source torrent↔debrid se difiere —
+caso raro, gran complejidad). La preferencia cache-fast (preferir debrid
+cacheado sobre torrent en streaming) ya la daban 2a/2b por orden de resolución.
+Los links debrid caducan; una peli larga sobrevive al link → al detectar expiry
+(401/403/404/410 en direct-play, o salida de red de ffmpeg en HLS) el agente
+re-resuelve (mismo info_hash → link fresco) y reanuda sin reiniciar.
+- WEB: endpoint `POST /api/internal/agent/stream-url` (withAgentAuth) →
+  re-resuelve + actualiza fila + devuelve URL. Guard: sesión debrid viva
+  (`direct_url IS NOT NULL`). 409 sin sesión, 410 si re-resolución falla.
+- CLI: `agentClient.RefreshStreamURL`; `debridFileProvider` URL mutable bajo
+  mutex + reader refresca en expiry (bounded 1+1) + **coalescing singleflight**
+  (N readers del `<video>` → 1 re-resolución); HLS refresca `s.liveURL` (guarded,
+  cfg inmutable → race-free con el seek-restart del handler HTTP) antes del
+  auto-restart de ffmpeg.
+- Validado: reader refresh + coalescing unit-tested (incl. -race); endpoint
+  e2e contra AllDebrid real (URL fresca + fila). El swap torrent↔debrid queda
+  como mejora futura si aparece demanda.
 
 **CERRADO 2b (2026-05-31):** HLS-desde-URL para contenido debrid no-nativo
 (mkv/HEVC/…). ffmpeg lee la URL debrid directa (`-i <url>` + flags de red
