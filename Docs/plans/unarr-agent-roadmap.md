@@ -314,10 +314,30 @@ local escaneada; mp4-h264-aac es común en web-dl/YIFY). 3b/3c/3d como iteracion
 (servir el fichero entero no respeta una pista de audio no-default elegida por el
 usuario → esos casos van a HLS con `-map 0:a:N`).
 
-**Pendiente de validación (3a):** **smoke e2e real no hecho** (requiere un agente
-desplegado >= 0.10.0 + un item de biblioteca mp4-h264-aac + browser). Los tests
-cubren la decisión + paridad de token, no el round-trip /stream en vivo. El agente
-dev (`unarr-dev`) debe reportar versión >= 0.10.0 o el gate bloquea direct-play.
+**Smoke e2e (3a) — PASADO 2026-05-31** (agente dev 0.10.0 build local + item de
+biblioteca mp4-h264-aac `/mnt/nas/peliculas/.../Tangled.Ever.After...mp4` + browser):
+- POST `/api/internal/stream/session` → `playMethod: direct`, `streamUrls` con
+  `/stream?t=` (token web scope `stream`), `hlsUrls: null`. ✓
+- Agente: `[stream …] direct-play: Tangled…mp4` (SetFile, sin ffmpeg). ✓
+- `/stream`: HEAD 200 `video/mp4` `Content-Length 128321419`; GET Range 0-1023 →
+  206 + bytes mp4 reales (`ftyp isom…avc1`). **Token web verificado por Go → paridad
+  cross-lenguaje confirmada en vivo** (sin token → 404). ✓
+- CORS desde origen browser (`localhost:3030`): ACAO correcto, preflight 204. ✓
+- Browser: `<video>.currentSrc` = `/stream?t=…` (NO `/hls`), `readyState 4`,
+  reproduciéndose, 1920×1080 nativo, **13 reqs `/stream`, 0 `/hls`**, attach
+  **nativo** (`[hls] (native) loadedmetadata`, sin hls.js). Telemetría
+  metric/progress OK. ✓
+
+**Bug pre-existente encontrado + arreglado durante el smoke** (web 764f5b01): el
+allow-list de la marca unarr (`src/lib/branding/routes.ts`) NO incluía
+`/api/internal/agent` ni `/api/internal/stream` → en unarr el agente daba 404 al
+registrar y el player 404 al crear sesión. **El streaming + agente de unarr estaban
+rotos de raíz.** Añadidos al allow-list (superficie del agente/media propio del
+usuario, cero superficie torrent).
+
+**Nota de release:** versión bumpeada a **0.10.0** (`version.go`, CLI 944d652) — solo
+binario local para el smoke, **sin publicar nada**. `DIRECT_PLAY_MIN_VERSION = 0.10.0`
+(web 52d958f0). Al publicar la release real del CLI, debe ser >= 0.10.0.
 
 **Backlog detectado en 3a (baja prioridad):**
 - `streaming_session.transport` queda `"hls"` también para sesiones direct
