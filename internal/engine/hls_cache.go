@@ -162,6 +162,16 @@ func (c *HLSCache) KeyFor(sourcePath, quality string, audioIndex int) string {
 	return hex.EncodeToString(h[:8]) // 16 hex chars — collision-safe enough for per-host cache
 }
 
+// KeyForID derives a cache key from a caller-supplied stable identity instead
+// of a filesystem path (hueco #2 / 2b). Used for debrid HLS-from-URL sessions:
+// the debrid direct URL is re-resolved per play and would never cache-hit, so
+// we key by the torrent info_hash — the same content always maps to the same
+// key across plays. NOT run through filepath.Abs (an id/URL is not a path).
+func (c *HLSCache) KeyForID(id, quality string, audioIndex int) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", id, quality, audioIndex)))
+	return hex.EncodeToString(h[:8])
+}
+
 // DirFor returns the on-disk directory for a cache key. Caller is responsible
 // for creating it.
 func (c *HLSCache) DirFor(key string) string {
@@ -407,4 +417,3 @@ func (c *HLSCache) StartSweeper(ctx context.Context, interval time.Duration) {
 func (c *HLSCache) Invalidate(key string) error {
 	return os.RemoveAll(c.DirFor(key))
 }
-

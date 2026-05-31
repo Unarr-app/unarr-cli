@@ -567,15 +567,36 @@ func runDaemonStart() error {
 			return // already running
 		}
 
+		// startHLSPlayback starts an HLS encode (local file or debrid URL) and
+		// wires it into the StreamServer. Shared by the local-file HLS path and
+		// the debrid HLS-from-URL path (hueco #2 / 2b) so both register, probe
+		// off the sync loop, and report readiness identically.
+		startHLSPlayback := func(hlsCfg engine.HLSSessionConfig, hlsCtx context.Context, hlsCancel context.CancelFunc) {
+			playerSessionRegistry.add(hlsCfg.SessionID, hlsCancel)
+			go func() {
+				hsess, err := engine.StartHLSSession(hlsCtx, hlsCfg)
+				if err != nil {
+					playerSessionRegistry.remove(hlsCfg.SessionID)
+					hlsCancel()
+					log.Printf("[hls %s] start failed: %v", agent.ShortID(hlsCfg.SessionID), err)
+					return
+				}
+				streamSrv.HLS().Register(hsess)
+				go watchSessionReady(hlsCtx, agentClient, hsess, hlsCfg.SessionID)
+			}()
+		}
+
 		// Debrid direct-play (hueco #2 / 2a): the source has no local file — the
 		// web resolved an HTTPS debrid link (cache-confirmed, browser-native
 		// container) and the daemon streams /stream from it via ranged GETs.
 		// Runs BEFORE the filePath checks (there is no local path) and needs no
-		// ffmpeg. Provider setup does a HEAD, so hand it off to a goroutine to
-		// keep the sync loop from blocking other pending actions; register the
+		// ffmpeg. PlayMethod != "hls" distinguishes this from the debrid
+		// HLS-from-URL branch below (a non-native container the web wants
+		// transcoded). Provider setup does a HEAD, so hand it off to a goroutine
+		// to keep the sync loop from blocking other pending actions; register the
 		// session up front so a duplicate sync within the setup window is a
 		// no-op (matches the HLS branch's handoff rationale).
-		if sess.DirectURL != "" {
+		if sess.DirectURL != "" && sess.PlayMethod != "hls" {
 			playerSessionRegistry.add(sess.SessionID, func() { streamSrv.ClearFile() })
 			go func() {
 				bctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -595,6 +616,32 @@ func runDaemonStart() error {
 					log.Printf("[stream %s] mark-ready failed: %v", agent.ShortID(sess.SessionID), err)
 				}
 			}()
+			return
+		}
+
+		// Debrid HLS-from-URL (hueco #2 / 2b): the source is debrid-cached but
+		// NOT browser-native (mkv/HEVC/…), so the web set playMethod="hls"
+		// alongside the DirectURL. ffmpeg transcodes straight from the HTTP URL —
+		// no local file, no torrent. Cache is keyed by info_hash (not the
+		// per-resolution URL) so a re-play hits the segment cache.
+		if sess.DirectURL != "" { // playMethod == "hls" implied (2a returned above)
+			tcRuntime := buildTranscodeRuntime(ctx, cfg)
+			if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
+				log.Printf("[hls %s] rejected: ffmpeg/ffprobe unavailable (debrid HLS)", agent.ShortID(sess.SessionID))
+				return
+			}
+			hlsCtx, hlsCancel := context.WithCancel(ctx)
+			startHLSPlayback(engine.HLSSessionConfig{
+				SessionID:  sess.SessionID,
+				SourceURL:  sess.DirectURL,
+				CacheID:    sess.InfoHash,
+				FileName:   sess.FileName,
+				Quality:    sess.Quality,
+				AudioIndex: sess.AudioIndex,
+				Transcode:  tcRuntime,
+				Cache:      hlsCache,
+			}, hlsCtx, hlsCancel)
+			log.Printf("[hls %s] debrid HLS-from-URL: %s", agent.ShortID(sess.SessionID), sess.FileName)
 			return
 		}
 
@@ -693,9 +740,12 @@ func runDaemonStart() error {
 			return
 		}
 
+		// Local-file HLS (the original path). StartHLSSession runs ffprobe
+		// (15 s cap) inside startHLSPlayback's goroutine so the sync loop
+		// returns immediately — browser HEAD probes have a 30 s retry budget
+		// that absorbs the gap until the playlist registers.
 		hlsCtx, hlsCancel := context.WithCancel(ctx)
-		playerSessionRegistry.add(sess.SessionID, hlsCancel)
-		hlsCfg := engine.HLSSessionConfig{
+		startHLSPlayback(engine.HLSSessionConfig{
 			SessionID:  sess.SessionID,
 			SourcePath: filePath,
 			FileName:   sess.FileName,
@@ -703,29 +753,7 @@ func runDaemonStart() error {
 			AudioIndex: sess.AudioIndex,
 			Transcode:  tcRuntime,
 			Cache:      hlsCache,
-		}
-		// StartHLSSession runs ffprobe (15 s cap, typical 0.3–1 s) before
-		// returning. Doing this synchronously inside the sync handler holds
-		// the next sync HTTP cycle until ffprobe is done, so any other
-		// pending actions (new tasks, deletes) wait too. Hand it off so
-		// the sync loop returns immediately — browser HEAD probes already
-		// have a 30 s retry budget that absorbs the gap until
-		// `streamSrv.HLS().Register` lands.
-		go func() {
-			hsess, err := engine.StartHLSSession(hlsCtx, hlsCfg)
-			if err != nil {
-				playerSessionRegistry.remove(sess.SessionID)
-				hlsCancel()
-				log.Printf("[hls %s] start failed: %v", agent.ShortID(sess.SessionID), err)
-				return
-			}
-			streamSrv.HLS().Register(hsess)
-			// Tell the server seg-0 is on disk as soon as it lands so the
-			// player's SSE subscription flips its "Preparando…" UI without
-			// waiting for the browser HEAD-probe loop to discover it
-			// independently. Cache-HIT sessions are ready immediately.
-			go watchSessionReady(hlsCtx, agentClient, hsess, sess.SessionID)
-		}()
+		}, hlsCtx, hlsCancel)
 	}
 
 	// Periodic DHT node persistence (every 5 min)

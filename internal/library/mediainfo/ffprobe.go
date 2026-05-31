@@ -67,8 +67,14 @@ func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*Media
 
 	output, err := cmd.Output()
 	if err != nil {
-		if _, statErr := os.Stat(filePath); statErr != nil {
-			return nil, fmt.Errorf("ffprobe: file not found: %s", filePath)
+		// A remote URL (debrid HLS-from-URL, hueco #2/2b) has no local file to
+		// stat — surface ffprobe's own stderr (e.g. "Protocol not found" when the
+		// ffmpeg build lacks TLS, or an HTTP error) instead of a misleading
+		// "file not found". Only treat a genuine local path as possibly-missing.
+		if !strings.Contains(filePath, "://") {
+			if _, statErr := os.Stat(filePath); statErr != nil {
+				return nil, fmt.Errorf("ffprobe: file not found: %s", filePath)
+			}
 		}
 		return nil, fmt.Errorf("ffprobe failed (file=%s): %s", filePath, stderr.String())
 	}

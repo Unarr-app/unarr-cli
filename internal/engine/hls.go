@@ -130,8 +130,18 @@ func CleanupHLSOrphanDirs() error {
 
 // HLSSessionConfig describes a single browser playback session driven by HLS.
 type HLSSessionConfig struct {
-	SessionID  string
+	SessionID string
+	// Exactly one of SourcePath / SourceURL identifies the input. SourcePath is
+	// a local file; SourceURL is a remote HTTP(S) URL ffmpeg reads directly
+	// (hueco #2 / 2b — transcoding a debrid source that isn't browser-native).
 	SourcePath string
+	// SourceURL, when set, is fed to ffmpeg/ffprobe as the input (-i <url>) with
+	// network-resilience flags. Takes priority over SourcePath.
+	SourceURL string
+	// CacheID overrides the cache key identity. Empty → key by SourcePath (local
+	// files). Set to a stable id (the torrent info_hash) for SourceURL sessions
+	// so re-plays cache-hit even though the debrid URL changes each resolution.
+	CacheID    string
 	FileName   string
 	Quality    string // "2160p"|"1080p"|"720p"|"480p"|"original"|""
 	AudioIndex int    // 0-based ffmpeg audio stream selection (-map 0:a:N). -1 = default.
@@ -141,6 +151,29 @@ type HLSSessionConfig struct {
 	// of the same file at the same quality skip ffmpeg entirely. nil disables
 	// caching (per-session tmpdir, deleted on Close — original behavior).
 	Cache *HLSCache
+}
+
+// sourceRef returns the ffmpeg/ffprobe input: the remote URL when set, else the
+// local path. Used everywhere a `-i` argument or a probe target is needed so
+// the local-file and debrid-URL paths share one code path.
+func (cfg HLSSessionConfig) sourceRef() string {
+	if cfg.SourceURL != "" {
+		return cfg.SourceURL
+	}
+	return cfg.SourcePath
+}
+
+// logName is a short, log-friendly source label. For local files it's the base
+// name; for a URL source (no SourcePath) it prefers FileName over the raw URL
+// (which would leak a query-string token into the logs).
+func (cfg HLSSessionConfig) logName() string {
+	if cfg.SourcePath != "" {
+		return filepath.Base(cfg.SourcePath)
+	}
+	if cfg.FileName != "" {
+		return cfg.FileName
+	}
+	return "debrid-url"
 }
 
 // HLSSession owns a tmpdir + ffmpeg subprocess producing HLS fragments.
@@ -298,8 +331,8 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	if !validSessionID.MatchString(cfg.SessionID) {
 		return nil, errors.New("hls: invalid session id")
 	}
-	if cfg.SourcePath == "" {
-		return nil, errors.New("hls: empty source path")
+	if cfg.SourcePath == "" && cfg.SourceURL == "" {
+		return nil, errors.New("hls: no source (neither path nor URL)")
 	}
 	if cfg.Transcode.FFmpegPath == "" || cfg.Transcode.FFprobePath == "" {
 		return nil, errors.New("hls: ffmpeg/ffprobe not available")
@@ -310,7 +343,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	// the goroutine that started the session forever and the user would
 	// see the player phase stuck on "Preparando sesión".
 	probeCtx, cancelProbe := context.WithTimeout(ctx, 15*time.Second)
-	probe, err := ProbeFile(probeCtx, cfg.Transcode.FFprobePath, cfg.SourcePath)
+	probe, err := ProbeFile(probeCtx, cfg.Transcode.FFprobePath, cfg.sourceRef())
 	cancelProbe()
 	if err != nil {
 		return nil, fmt.Errorf("hls: probe: %w", err)
@@ -334,7 +367,13 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		writerLockHeld bool
 	)
 	if cfg.Cache != nil {
-		cacheKey = cfg.Cache.KeyFor(cfg.SourcePath, cfg.Quality, cfg.AudioIndex)
+		// Debrid URL sessions key by CacheID (info_hash) so re-plays hit cache
+		// despite the URL changing each resolution; local files key by path.
+		if cfg.CacheID != "" {
+			cacheKey = cfg.Cache.KeyForID(cfg.CacheID, cfg.Quality, cfg.AudioIndex)
+		} else {
+			cacheKey = cfg.Cache.KeyFor(cfg.SourcePath, cfg.Quality, cfg.AudioIndex)
+		}
 		// Integrity gate: HasComplete just stats the marker. If init.mp4 or
 		// the last segment vanished (external rm, partial-disk failure), we
 		// can't actually serve a HIT — drop the dir and re-encode.
@@ -393,14 +432,14 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	segCount := segmentCountForDuration(probe.DurationSec)
 
 	s := &HLSSession{
-		cfg:          cfg,
-		probe:        probe,
-		tmpDir:       tmpDir,
-		durationSec:  probe.DurationSec,
-		segmentCount: segCount,
-		startedAt:    time.Now(),
-		lastTouch:    time.Now(),
-		readyCh:      make(chan struct{}),
+		cfg:            cfg,
+		probe:          probe,
+		tmpDir:         tmpDir,
+		durationSec:    probe.DurationSec,
+		segmentCount:   segCount,
+		startedAt:      time.Now(),
+		lastTouch:      time.Now(),
+		readyCh:        make(chan struct{}),
 		cache:          cfg.Cache,
 		cacheKey:       cacheKey,
 		fromCache:      fromCache,
@@ -420,7 +459,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		s.readyCh = nil
 		s.readyMu.Unlock()
 		log.Printf("[hls %s] cache HIT %s: %s, %.1fs, %d segs (quality=%s)",
-			shortHLSID(cfg.SessionID), cacheKey, filepath.Base(cfg.SourcePath),
+			shortHLSID(cfg.SessionID), cacheKey, cfg.logName(),
 			probe.DurationSec, segCount, coalesce(cfg.Quality, "auto"))
 		return s, nil
 	}
@@ -464,7 +503,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		presetNote = " preset=" + profile.Preset
 	}
 	log.Printf("[hls %s] started: %s, %.1fs, %d segs (quality=%s, encoder=%s accel=%s%s)%s",
-		shortHLSID(cfg.SessionID), filepath.Base(cfg.SourcePath),
+		shortHLSID(cfg.SessionID), cfg.logName(),
 		probe.DurationSec, segCount, coalesce(cfg.Quality, "auto"),
 		profile.Codec, string(cfg.Transcode.HWAccel), presetNote, cachedNote)
 	return s, nil
@@ -1038,8 +1077,8 @@ func buildHLSFFmpegArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string)
 // (otherwise the two switches in buildHLSFFmpegArgsAt could silently drift
 // when adding a new backend).
 type EncoderProfile struct {
-	Codec     string // ffmpeg encoder name (e.g. "h264_nvenc", "libx264")
-	Preset    string // preset string, or "" when the codec has no preset knob
+	Codec         string // ffmpeg encoder name (e.g. "h264_nvenc", "libx264")
+	Preset        string // preset string, or "" when the codec has no preset knob
 	DecodeHwAccel string // ffmpeg `-hwaccel` value (e.g. "cuda", "qsv", "vaapi"), or ""
 }
 
@@ -1111,7 +1150,22 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		args = append(args, "-ss", strconv.FormatFloat(startSec, 'f', 3, 64))
 	}
 
-	args = append(args, "-i", cfg.SourcePath)
+	// Remote (debrid) input: make the HTTP read resilient. -reconnect* recovers
+	// from a dropped/idle connection (debrid CDNs close long-idle sockets);
+	// -rw_timeout (µs) bounds a stalled read so a hung CDN surfaces as a restart
+	// instead of a frozen player. A seek (-ss before -i) re-opens the URL with a
+	// Range request, which debrid supports. Flags are no-ops for local files, so
+	// only add them for a URL source.
+	if cfg.SourceURL != "" {
+		args = append(args,
+			"-reconnect", "1",
+			"-reconnect_streamed", "1",
+			"-reconnect_delay_max", "5",
+			"-rw_timeout", "30000000",
+		)
+	}
+
+	args = append(args, "-i", cfg.sourceRef())
 
 	if startSec > 0 {
 		args = append(args, "-output_ts_offset", strconv.FormatFloat(startSec, 'f', 3, 64))
@@ -1307,7 +1361,7 @@ func (s *HLSSession) extractSubtitles(ctx context.Context) {
 		out := filepath.Join(subsDir, fmt.Sprintf("sub-%d.vtt", i))
 		args := []string{
 			"-y", "-hide_banner", "-loglevel", "warning",
-			"-i", s.cfg.SourcePath,
+			"-i", s.cfg.sourceRef(),
 			"-map", fmt.Sprintf("0:s:%d?", i),
 			"-c:s", "webvtt",
 			out,
