@@ -141,7 +141,12 @@ type HLSSessionConfig struct {
 	// CacheID overrides the cache key identity. Empty → key by SourcePath (local
 	// files). Set to a stable id (the torrent info_hash) for SourceURL sessions
 	// so re-plays cache-hit even though the debrid URL changes each resolution.
-	CacheID    string
+	CacheID string
+	// RefreshURL, when set (debrid URL sessions only), re-resolves a fresh
+	// SourceURL when the current link expires mid-transcode (hueco #2 / 2c).
+	// The auto-restart supervisor calls it before relaunching ffmpeg so the
+	// restart uses a live link instead of retrying the dead one. nil = no refresh.
+	RefreshURL func(context.Context) (string, error)
 	FileName   string
 	Quality    string // "2160p"|"1080p"|"720p"|"480p"|"original"|""
 	AudioIndex int    // 0-based ffmpeg audio stream selection (-map 0:a:N). -1 = default.
@@ -204,6 +209,13 @@ type HLSSession struct {
 	ffmpegSegStart int // index of the first segment the current ffmpeg writes
 	restartCount   int // bounded auto-restart counter (resets on Close)
 	lastRestartAt  time.Time
+	// liveURL is the mutable debrid source URL (hueco #2 / 2c). Initialised to
+	// cfg.SourceURL; refreshed in place by waitFFmpeg when the link expires.
+	// Guarded by mu because restartFromSegment reads it from BOTH the supervisor
+	// goroutine (auto-restart) AND the HTTP handler goroutine (seek-restart),
+	// while waitFFmpeg writes it. Empty for local-file sessions. cfg itself is
+	// treated as immutable after construction so copying it stays race-free.
+	liveURL string
 
 	// readyCh + readyMax track how many segments ffmpeg has finished writing.
 	// readyMax is a COUNT (not an index): readyMax=N means seg-0 … seg-(N-1)
@@ -444,6 +456,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		cacheKey:       cacheKey,
 		fromCache:      fromCache,
 		writerLockHeld: writerLockHeld,
+		liveURL:        cfg.SourceURL, // mutable copy; cfg stays immutable
 	}
 	s.manifestVideo = renderVideoPlaylist(probe.DurationSec, segCount)
 	s.manifestRoot = renderMasterPlaylist(probe, cfg.Quality)
@@ -483,9 +496,14 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 
 	if len(probe.SubtitleTracks) > 0 {
 		s.subsDone = make(chan struct{})
+		// Capture the source ref now (by value): subs are extracted once at
+		// startup, and a later URL refresh (2c) mutates s.cfg.SourceURL from the
+		// waitFFmpeg goroutine — passing the URL in keeps extractSubtitles from
+		// racing that write.
+		subSrc := cfg.sourceRef()
 		go func() {
 			defer close(s.subsDone)
-			s.extractSubtitles(ffCtx)
+			s.extractSubtitles(ffCtx, subSrc)
 		}()
 	}
 
@@ -750,6 +768,26 @@ func (s *HLSSession) waitFFmpeg() {
 	s.lastRestartAt = time.Now()
 	s.mu.Unlock()
 
+	// Debrid URL session (hueco #2 / 2c): the likeliest cause of an ffmpeg
+	// network exit is the debrid link expiring. Re-resolve a fresh one before
+	// restarting, else the restart just retries the dead URL and burns the
+	// retry budget. The network call runs lock-free; the result is stored in
+	// s.liveURL under s.mu because restartFromSegment reads it from the HTTP
+	// handler goroutine too (seek-restart), not just this supervisor goroutine.
+	if s.cfg.SourceURL != "" && s.cfg.RefreshURL != nil {
+		rctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		newURL, rerr := s.cfg.RefreshURL(rctx)
+		cancel()
+		if rerr != nil {
+			log.Printf("[hls %s] URL refresh before restart failed: %v", shortHLSID(s.cfg.SessionID), rerr)
+		} else {
+			s.mu.Lock()
+			s.liveURL = newURL
+			s.mu.Unlock()
+			log.Printf("[hls %s] debrid URL refreshed before restart", shortHLSID(s.cfg.SessionID))
+		}
+	}
+
 	// Restart from the last segment we know is safely on disk. If readyMax
 	// is 0 (never produced anything), retry from segment 0 — covers initial
 	// startup failures on transient errors.
@@ -1005,8 +1043,15 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 	// Build args for the new ffmpeg with -ss offset. Segments are non-uniform
 	// (seg-0 is hlsInitSegmentDuration s, the rest are hlsSegmentDuration s),
 	// so use segmentStartSec for the seek time instead of multiplying.
+	// Use a local cfg copy carrying the live (possibly-refreshed) debrid URL,
+	// read under s.mu — this runs from the HTTP handler goroutine too, so it
+	// can't read s.liveURL unsynchronised while waitFFmpeg writes it (2c).
 	startSec := segmentStartSec(targetIdx)
-	args := buildHLSFFmpegArgsAt(s.cfg, s.probe, s.tmpDir, targetIdx, startSec)
+	cfg := s.cfg
+	s.mu.Lock()
+	cfg.SourceURL = s.liveURL // "" for local-file sessions — no-op, sourceRef falls back to SourcePath
+	s.mu.Unlock()
+	args := buildHLSFFmpegArgsAt(cfg, s.probe, s.tmpDir, targetIdx, startSec)
 
 	ffCtx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
@@ -1352,7 +1397,7 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 // extractSubtitles spawns short-lived ffmpeg jobs to convert each text-based
 // subtitle track to WebVTT in parallel. Bitmap subs (PGS, DVB) are skipped —
 // they would require burn-in into the video encode, which is out of scope.
-func (s *HLSSession) extractSubtitles(ctx context.Context) {
+func (s *HLSSession) extractSubtitles(ctx context.Context, src string) {
 	subsDir := filepath.Join(s.tmpDir, "subs")
 	for i, sub := range s.probe.SubtitleTracks {
 		if !sub.IsTextSubtitle() {
@@ -1361,7 +1406,7 @@ func (s *HLSSession) extractSubtitles(ctx context.Context) {
 		out := filepath.Join(subsDir, fmt.Sprintf("sub-%d.vtt", i))
 		args := []string{
 			"-y", "-hide_banner", "-loglevel", "warning",
-			"-i", s.cfg.sourceRef(),
+			"-i", src,
 			"-map", fmt.Sprintf("0:s:%d?", i),
 			"-c:s", "webvtt",
 			out,

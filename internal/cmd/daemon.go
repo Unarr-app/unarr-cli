@@ -598,10 +598,16 @@ func runDaemonStart() error {
 		// no-op (matches the HLS branch's handoff rationale).
 		if sess.DirectURL != "" && sess.PlayMethod != "hls" {
 			playerSessionRegistry.add(sess.SessionID, func() { streamSrv.ClearFile() })
+			// refresh re-resolves a fresh debrid link when this one expires
+			// mid-stream (hueco #2 / 2c). Bound to the daemon ctx so a shutdown
+			// cancels an in-flight refresh.
+			refresh := func(rctx context.Context) (string, error) {
+				return agentClient.RefreshStreamURL(rctx, sess.SessionID)
+			}
 			go func() {
 				bctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 				defer cancel()
-				provider, perr := engine.NewDebridFileProvider(bctx, sess.DirectURL, sess.FileName, sess.FileSize)
+				provider, perr := engine.NewDebridFileProvider(bctx, sess.DirectURL, sess.FileName, sess.FileSize, refresh)
 				if perr != nil {
 					playerSessionRegistry.remove(sess.SessionID)
 					log.Printf("[stream %s] debrid provider failed: %v", agent.ShortID(sess.SessionID), perr)
@@ -640,6 +646,11 @@ func runDaemonStart() error {
 				AudioIndex: sess.AudioIndex,
 				Transcode:  tcRuntime,
 				Cache:      hlsCache,
+				// 2c: refresh the debrid link if it expires mid-transcode; the
+				// auto-restart supervisor calls this before relaunching ffmpeg.
+				RefreshURL: func(rctx context.Context) (string, error) {
+					return agentClient.RefreshStreamURL(rctx, sess.SessionID)
+				},
 			}, hlsCtx, hlsCancel)
 			log.Printf("[hls %s] debrid HLS-from-URL: %s", agent.ShortID(sess.SessionID), sess.FileName)
 			return

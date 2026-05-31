@@ -130,6 +130,27 @@ func (c *Client) MarkSessionReady(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// RefreshStreamURL re-resolves a fresh debrid direct URL for a live streaming
+// session (hueco #2 / 2c). Called by the daemon when a debrid source expires
+// mid-stream (the link is time-limited; the content is still cached). Returns
+// the new URL on success; an error (incl. 409/410) means refresh isn't
+// possible and the caller should stop trying.
+func (c *Client) RefreshStreamURL(ctx context.Context, sessionID string) (string, error) {
+	req := struct {
+		SessionID string `json:"sessionId"`
+	}{SessionID: sessionID}
+	var resp struct {
+		DirectURL string `json:"directUrl"`
+	}
+	if err := c.doPost(ctx, "/api/internal/agent/stream-url", req, &resp); err != nil {
+		return "", fmt.Errorf("refresh stream url: %w", err)
+	}
+	if resp.DirectURL == "" {
+		return "", fmt.Errorf("refresh stream url: empty url in response")
+	}
+	return resp.DirectURL, nil
+}
+
 // ReportStatus reports download progress. Returns server-side flags the CLI must act on.
 func (c *Client) ReportStatus(ctx context.Context, update StatusUpdate) (*StatusResponse, error) {
 	var resp StatusResponse

@@ -3,9 +3,12 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -39,7 +42,7 @@ func TestDebridProviderHeadSize(t *testing.T) {
 	defer srv.Close()
 
 	// HEAD reports the real size; fallback is ignored when HEAD succeeds.
-	p, err := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 999)
+	p, err := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 999, nil)
 	if err != nil {
 		t.Fatalf("NewDebridFileProvider: %v", err)
 	}
@@ -60,7 +63,7 @@ func TestDebridProviderNameFromURLWhenNoExtension(t *testing.T) {
 		http.ServeContent(w, r, "x", time.Time{}, bytes.NewReader(data))
 	}))
 	defer srv.Close()
-	p, err := NewDebridFileProvider(context.Background(), srv.URL+"/Movie.2026.1080p.mp4?token=abc", "Project Hail Mary (2026) 1080p web", 0)
+	p, err := NewDebridFileProvider(context.Background(), srv.URL+"/Movie.2026.1080p.mp4?token=abc", "Project Hail Mary (2026) 1080p web", 0, nil)
 	if err != nil {
 		t.Fatalf("provider: %v", err)
 	}
@@ -68,7 +71,7 @@ func TestDebridProviderNameFromURLWhenNoExtension(t *testing.T) {
 		t.Fatalf("FileName = %q, want Movie.2026.1080p.mp4 (derived from URL)", got)
 	}
 	// A passed name WITH an extension is kept as-is.
-	p2, _ := NewDebridFileProvider(context.Background(), srv.URL+"/whatever.mp4", "Nice Title.mp4", 0)
+	p2, _ := NewDebridFileProvider(context.Background(), srv.URL+"/whatever.mp4", "Nice Title.mp4", 0, nil)
 	if got := p2.FileName(); got != "Nice Title.mp4" {
 		t.Fatalf("FileName = %q, want Nice Title.mp4 (kept)", got)
 	}
@@ -87,7 +90,7 @@ func TestDebridProviderFallbackSizeWhenNoHead(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p, err := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", int64(len(data)))
+	p, err := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", int64(len(data)), nil)
 	if err != nil {
 		t.Fatalf("NewDebridFileProvider: %v", err)
 	}
@@ -103,10 +106,10 @@ func TestDebridProviderNoSizeFails(t *testing.T) {
 	defer srv.Close()
 	// No HEAD size and fallback 0 → must error (ServeContent can't range-serve
 	// size 0 without handing the browser an empty file).
-	if _, err := NewDebridFileProvider(context.Background(), srv.URL, "", 0); err == nil {
+	if _, err := NewDebridFileProvider(context.Background(), srv.URL, "", 0, nil); err == nil {
 		t.Fatal("expected error when size is unknown, got nil")
 	}
-	if _, err := NewDebridFileProvider(context.Background(), "", "movie.mp4", 100); err == nil {
+	if _, err := NewDebridFileProvider(context.Background(), "", "movie.mp4", 100, nil); err == nil {
 		t.Fatal("expected error for empty URL, got nil")
 	}
 }
@@ -116,7 +119,7 @@ func TestDebridReaderSequentialRead(t *testing.T) {
 	srv, gets := rangeServer(data)
 	defer srv.Close()
 
-	p, err := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0)
+	p, err := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0, nil)
 	if err != nil {
 		t.Fatalf("provider: %v", err)
 	}
@@ -140,7 +143,7 @@ func TestDebridReaderSeekEndReportsSize(t *testing.T) {
 	data := makeData(5000)
 	srv, _ := rangeServer(data)
 	defer srv.Close()
-	p, _ := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0)
+	p, _ := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0, nil)
 	rd := p.NewFileReader(context.Background())
 	defer rd.Close()
 
@@ -159,7 +162,7 @@ func TestDebridReaderSeekThenRead(t *testing.T) {
 	data := makeData(50_000)
 	srv, gets := rangeServer(data)
 	defer srv.Close()
-	p, _ := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0)
+	p, _ := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0, nil)
 	rd := p.NewFileReader(context.Background())
 	defer rd.Close()
 
@@ -187,7 +190,7 @@ func TestDebridReaderServeContentRoundTrip(t *testing.T) {
 	data := makeData(80_000)
 	srv, _ := rangeServer(data)
 	defer srv.Close()
-	p, _ := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0)
+	p, _ := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0, nil)
 
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rd := p.NewFileReader(r.Context())
@@ -217,7 +220,7 @@ func TestDebridReaderSeekPastEnd(t *testing.T) {
 	data := makeData(1000)
 	srv, _ := rangeServer(data)
 	defer srv.Close()
-	p, _ := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0)
+	p, _ := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0, nil)
 	rd := p.NewFileReader(context.Background())
 	defer rd.Close()
 
@@ -228,6 +231,113 @@ func TestDebridReaderSeekPastEnd(t *testing.T) {
 	n, err := rd.Read(make([]byte, 16))
 	if n != 0 || err != io.EOF {
 		t.Fatalf("read past end = (%d, %v), want (0, EOF)", n, err)
+	}
+}
+
+// hueco #2 / 2c — an expired link (401) is recovered by re-resolving a fresh
+// URL via the refresh callback and retrying, transparent to the reader.
+func TestDebridReaderRefreshOnExpiry(t *testing.T) {
+	data := makeData(20_000)
+	live, _ := rangeServer(data)
+	defer live.Close()
+	expired := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized) // link expired
+	}))
+	defer expired.Close()
+
+	refreshed := 0
+	refresh := func(_ context.Context) (string, error) {
+		refreshed++
+		return live.URL, nil
+	}
+	// HEAD on the expired URL 401s → falls back to the provided size.
+	p, err := NewDebridFileProvider(context.Background(), expired.URL, "movie.mp4", int64(len(data)), refresh)
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	rd := p.NewFileReader(context.Background())
+	defer rd.Close()
+
+	got, err := io.ReadAll(rd)
+	if err != nil {
+		t.Fatalf("ReadAll after expiry+refresh: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("post-refresh read mismatch: got %d bytes, want %d", len(got), len(data))
+	}
+	if refreshed == 0 {
+		t.Fatal("expected the reader to refresh the expired URL")
+	}
+}
+
+// Coalescing: when N readers hit an expired link at once, only ONE refresh
+// runs (singleflight) and they all share its result — not N re-resolutions
+// hammering the web (hueco #2 / 2c).
+func TestDebridProviderRefreshCoalesces(t *testing.T) {
+	data := makeData(8000)
+	live, _ := rangeServer(data)
+	defer live.Close()
+
+	var refreshCalls int64
+	refresh := func(_ context.Context) (string, error) {
+		atomic.AddInt64(&refreshCalls, 1)
+		time.Sleep(80 * time.Millisecond) // simulate a slow re-resolution
+		return live.URL, nil
+	}
+	p := &debridFileProvider{url: "https://expired.invalid/x.mp4", refresh: refresh}
+
+	const N = 8
+	var wg sync.WaitGroup
+	errs := make([]error, N)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = p.refreshURL(context.Background())
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("reader %d refresh failed: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt64(&refreshCalls); got != 1 {
+		t.Fatalf("expected 1 coalesced refresh for %d concurrent readers, got %d", N, got)
+	}
+	if p.currentURL() != live.URL {
+		t.Fatalf("provider URL = %q, want the refreshed live URL", p.currentURL())
+	}
+}
+
+func TestDebridReaderRefreshFailsSurfacesError(t *testing.T) {
+	expired := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer expired.Close()
+	refresh := func(_ context.Context) (string, error) {
+		return "", errors.New("debrid gone")
+	}
+	p, _ := NewDebridFileProvider(context.Background(), expired.URL, "movie.mp4", 1000, refresh)
+	rd := p.NewFileReader(context.Background())
+	defer rd.Close()
+	if _, err := rd.Read(make([]byte, 16)); err == nil {
+		t.Fatal("expected an error when refresh fails, got nil")
+	}
+}
+
+func TestDebridReaderNoRefresherExpiryIsHardError(t *testing.T) {
+	// refresh == nil (2a behaviour): an expired link is a hard error, no retry.
+	expired := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusGone)
+	}))
+	defer expired.Close()
+	p, _ := NewDebridFileProvider(context.Background(), expired.URL, "movie.mp4", 1000, nil)
+	rd := p.NewFileReader(context.Background())
+	defer rd.Close()
+	if _, err := rd.Read(make([]byte, 16)); err == nil {
+		t.Fatal("expected a hard error with no refresher, got nil")
 	}
 }
 
@@ -242,7 +352,7 @@ func TestDebridReaderRejectsServerIgnoringRange(t *testing.T) {
 		w.Write(data)
 	}))
 	defer srv.Close()
-	p, err := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", int64(len(data)))
+	p, err := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", int64(len(data)), nil)
 	if err != nil {
 		t.Fatalf("provider: %v", err)
 	}

@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -47,7 +48,10 @@ var debridHTTPClient = &http.Client{
 // Returns an error only when neither a HEAD size nor a fallback is available —
 // http.ServeContent needs a real size to range-serve, and serving size 0 would
 // hand the browser an empty file.
-func NewDebridFileProvider(ctx context.Context, directURL, fileName string, fallbackSize int64) (FileProvider, error) {
+// refresh, when non-nil, re-resolves a fresh debrid URL for the same content
+// (hueco #2 / 2c) — called when the current link expires mid-stream. nil keeps
+// 2a behaviour (an expired link is a hard error, no recovery).
+func NewDebridFileProvider(ctx context.Context, directURL, fileName string, fallbackSize int64, refresh func(context.Context) (string, error)) (FileProvider, error) {
 	if directURL == "" {
 		return nil, errors.New("debrid provider: empty direct URL")
 	}
@@ -69,23 +73,95 @@ func NewDebridFileProvider(ctx context.Context, directURL, fileName string, fall
 		name = debridNameFromURL(directURL)
 	}
 	return &debridFileProvider{
-		url:  directURL,
-		name: name,
-		size: size,
+		url:     directURL,
+		name:    name,
+		size:    size,
+		refresh: refresh,
 	}, nil
 }
 
-// debridFileProvider serves a file from a debrid HTTPS URL via ranged GETs.
+// debridFileProvider serves a file from a debrid HTTPS URL via ranged GETs. The
+// URL is mutable: when it expires mid-stream, refreshURL swaps in a fresh one
+// (shared across all readers this provider hands out) so the next range request
+// uses the live link.
 type debridFileProvider struct {
-	url  string
+	mu            sync.Mutex
+	url           string
+	lastRefreshAt time.Time
+	inflight      *refreshCall // non-nil while a refresh is running; coalesces concurrent callers
+	refresh       func(context.Context) (string, error)
+
 	name string
 	size int64
+}
+
+// refreshCall is a single in-flight refresh whose result is shared by every
+// reader that piles up behind it (singleflight). done is closed on completion.
+type refreshCall struct {
+	done chan struct{}
+	url  string
+	err  error
+}
+
+// currentURL returns the live debrid URL (mutated by refreshURL on expiry).
+func (p *debridFileProvider) currentURL() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.url
+}
+
+// refreshURL re-resolves a fresh debrid link and stores it. A browser's <video>
+// opens several concurrent range connections, so when a link expires N readers
+// hit it at once — they must NOT each fire a (multi-second) re-resolution.
+// Coalescing is two-layer: (1) a result refreshed in the last few seconds is
+// reused without any call; (2) while a refresh is in flight, late callers wait
+// on it and share its result (singleflight) rather than starting their own.
+func (p *debridFileProvider) refreshURL(ctx context.Context) (string, error) {
+	if p.refresh == nil {
+		return "", errors.New("debrid provider: no URL refresher (refresh disabled)")
+	}
+	p.mu.Lock()
+	if time.Since(p.lastRefreshAt) < 5*time.Second && p.url != "" {
+		u := p.url
+		p.mu.Unlock()
+		return u, nil // refreshed very recently — reuse it
+	}
+	if call := p.inflight; call != nil {
+		p.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.url, call.err // shared result from the in-flight refresh
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	call := &refreshCall{done: make(chan struct{})}
+	p.inflight = call
+	p.mu.Unlock()
+
+	u, err := p.refresh(ctx)
+
+	p.mu.Lock()
+	if err == nil {
+		p.url = u
+		p.lastRefreshAt = time.Now()
+	}
+	call.url, call.err = u, err
+	p.inflight = nil
+	close(call.done)
+	p.mu.Unlock()
+
+	if err != nil {
+		return "", err
+	}
+	log.Printf("[stream] debrid URL refreshed (expired mid-stream)")
+	return u, nil
 }
 
 func (p *debridFileProvider) NewFileReader(ctx context.Context) io.ReadSeekCloser {
 	return &debridRangeReader{
 		ctx:  ctx,
-		url:  p.url,
+		prov: p,
 		size: p.size,
 	}
 }
@@ -102,7 +178,7 @@ func (p *debridFileProvider) FileSize() int64  { return p.size }
 // the player become a single reopened GET, never a full re-download.
 type debridRangeReader struct {
 	ctx  context.Context
-	url  string
+	prov *debridFileProvider
 	size int64
 
 	pos    int64         // logical position (moved by Seek, advanced by Read)
@@ -166,43 +242,61 @@ func (r *debridRangeReader) Close() error {
 }
 
 // reopen issues a fresh ranged GET from the current logical position. Closes
-// any previously held body first.
+// any previously held body first. On an expired-link status (401/403/404/410)
+// it re-resolves a fresh debrid URL via the provider and retries — bounded, so
+// a permanently-dead link surfaces an error instead of looping (hueco #2 / 2c).
 func (r *debridRangeReader) reopen() error {
 	if r.body != nil {
 		_ = r.body.Close()
 		r.body = nil
 	}
-	req, err := http.NewRequestWithContext(r.ctx, http.MethodGet, r.url, nil)
-	if err != nil {
-		return fmt.Errorf("debrid reader: build request: %w", err)
-	}
-	// Always send a Range so a seek to 0 still gets a 206 (and so partial
-	// reopens after a mid-file seek work). An open-ended range runs to EOF.
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-", r.pos))
-	resp, err := debridHTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("debrid reader: GET: %w", err)
-	}
-	switch resp.StatusCode {
-	case http.StatusPartialContent:
-		// Expected.
-	case http.StatusOK:
-		// Server ignored Range and is sending the whole file from 0. Only valid
-		// when we asked from 0; otherwise the bytes wouldn't line up with pos.
-		if r.pos != 0 {
-			resp.Body.Close()
-			return fmt.Errorf("debrid reader: server ignored Range at offset %d (got 200)", r.pos)
+	// Attempts: 1 initial + 1 after a URL refresh. One fresh link is enough for
+	// an expiry; if the refreshed link ALSO fails the content is genuinely gone,
+	// so surface the error rather than burning more multi-second resolutions.
+	const maxAttempts = 2
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(r.ctx, http.MethodGet, r.prov.currentURL(), nil)
+		if err != nil {
+			return fmt.Errorf("debrid reader: build request: %w", err)
 		}
-	case http.StatusRequestedRangeNotSatisfiable:
-		resp.Body.Close()
-		return io.EOF // seeked past end — treat as EOF, not a hard error
-	default:
-		resp.Body.Close()
-		return fmt.Errorf("debrid reader: unexpected status %d %s", resp.StatusCode, resp.Status)
+		// Always send a Range so a seek to 0 still gets a 206 (and so partial
+		// reopens after a mid-file seek work). An open-ended range runs to EOF.
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", r.pos))
+		resp, err := debridHTTPClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("debrid reader: GET: %w", err)
+		}
+		switch resp.StatusCode {
+		case http.StatusPartialContent:
+			r.body = resp.Body
+			r.bodyAt = r.pos
+			return nil
+		case http.StatusOK:
+			// Server ignored Range and is sending the whole file from 0. Only
+			// valid when we asked from 0; otherwise bytes wouldn't line up.
+			if r.pos != 0 {
+				resp.Body.Close()
+				return fmt.Errorf("debrid reader: server ignored Range at offset %d (got 200)", r.pos)
+			}
+			r.body = resp.Body
+			r.bodyAt = r.pos
+			return nil
+		case http.StatusRequestedRangeNotSatisfiable:
+			resp.Body.Close()
+			return io.EOF // seeked past end — treat as EOF, not a hard error
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+			// Expired/dead debrid link — re-resolve and retry with the fresh URL.
+			resp.Body.Close()
+			if _, rerr := r.prov.refreshURL(r.ctx); rerr != nil {
+				return fmt.Errorf("debrid reader: link expired (%d) and refresh failed: %w", resp.StatusCode, rerr)
+			}
+			continue
+		default:
+			resp.Body.Close()
+			return fmt.Errorf("debrid reader: unexpected status %d %s", resp.StatusCode, resp.Status)
+		}
 	}
-	r.body = resp.Body
-	r.bodyAt = r.pos
-	return nil
+	return fmt.Errorf("debrid reader: link still failing after %d refresh attempts", maxAttempts)
 }
 
 // debridHeadSize issues a HEAD and returns the Content-Length when present.
