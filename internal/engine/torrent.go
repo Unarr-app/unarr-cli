@@ -642,7 +642,10 @@ func (d *TorrentDownloader) GetStreamProvider(taskID string) (FileProvider, erro
 		return nil, fmt.Errorf("torrent has no files")
 	}
 
-	return NewTorrentFileProvider(video), nil
+	// The provider probes the bitrate asynchronously (to size the streaming
+	// readahead) — passing DataDir lets it locate the on-disk file without
+	// blocking stream start.
+	return NewTorrentFileProvider(video, d.cfg.DataDir), nil
 }
 
 // VideoExts is the canonical set of video file extensions used for file selection.

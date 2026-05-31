@@ -235,7 +235,9 @@ func (s *StreamEngine) WaitBuffer(ctx context.Context, progressFn func(buffered,
 func (s *StreamEngine) NewFileReader(ctx context.Context) io.ReadSeekCloser {
 	reader := s.file.NewReader()
 	reader.SetResponsive()
-	reader.SetReadahead(5 * 1024 * 1024) // 5MB readahead
+	// Generous default window (vs the old static 5 MiB that stalled HD/4K). This
+	// CLI path has no bitrate probe, so dynamicReadahead(0) returns the default.
+	reader.SetReadahead(dynamicReadahead(0))
 	reader.SetContext(ctx)
 	return reader
 }

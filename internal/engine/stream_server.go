@@ -1129,19 +1129,37 @@ func (p *diskFileProvider) FileSize() int64 {
 }
 
 // NewTorrentFileProvider creates a FileProvider from an active torrent file.
-func NewTorrentFileProvider(file *torrent.File) FileProvider {
-	return &torrentFileProvider{file: file}
+// dataDir locates the on-disk file for a best-effort bitrate probe that sizes
+// the streaming readahead. The probe runs ASYNC so stream start never blocks on
+// ffprobe (a missing header would otherwise stall up to the probe timeout);
+// until it resolves, readers use the default window, and readers created after
+// it resolves pick up the accurate size.
+func NewTorrentFileProvider(file *torrent.File, dataDir string) FileProvider {
+	p := &torrentFileProvider{file: file}
+	if dataDir != "" {
+		go func() {
+			if bps := probeMediaInfo(filepath.Join(dataDir, file.DisplayPath())).bitrateBps; bps > 0 {
+				p.bitrateBps.Store(bps)
+			}
+		}()
+	}
+	return p
 }
 
 // torrentFileProvider wraps a torrent.File to implement FileProvider.
 type torrentFileProvider struct {
 	file *torrent.File
+	// bitrateBps sizes the reader's readahead window (see dynamicReadahead).
+	// Set asynchronously by the bitrate probe; 0 until then → default window.
+	bitrateBps atomic.Int64
 }
 
 func (p *torrentFileProvider) NewFileReader(ctx context.Context) io.ReadSeekCloser {
 	reader := p.file.NewReader()
 	reader.SetResponsive()
-	reader.SetReadahead(5 * 1024 * 1024)
+	// Bitrate-sized window (vs the old static 5 MiB that stalled HD/4K). anacrolix
+	// prioritises pieces in this window ahead of the read position + on seek.
+	reader.SetReadahead(dynamicReadahead(p.bitrateBps.Load()))
 	reader.SetContext(ctx)
 	return reader
 }
