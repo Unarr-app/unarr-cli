@@ -566,6 +566,38 @@ func runDaemonStart() error {
 		if playerSessionRegistry.has(sess.SessionID) {
 			return // already running
 		}
+
+		// Debrid direct-play (hueco #2 / 2a): the source has no local file — the
+		// web resolved an HTTPS debrid link (cache-confirmed, browser-native
+		// container) and the daemon streams /stream from it via ranged GETs.
+		// Runs BEFORE the filePath checks (there is no local path) and needs no
+		// ffmpeg. Provider setup does a HEAD, so hand it off to a goroutine to
+		// keep the sync loop from blocking other pending actions; register the
+		// session up front so a duplicate sync within the setup window is a
+		// no-op (matches the HLS branch's handoff rationale).
+		if sess.DirectURL != "" {
+			playerSessionRegistry.add(sess.SessionID, func() { streamSrv.ClearFile() })
+			go func() {
+				bctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				defer cancel()
+				provider, perr := engine.NewDebridFileProvider(bctx, sess.DirectURL, sess.FileName, sess.FileSize)
+				if perr != nil {
+					playerSessionRegistry.remove(sess.SessionID)
+					log.Printf("[stream %s] debrid provider failed: %v", agent.ShortID(sess.SessionID), perr)
+					return
+				}
+				streamSrv.SetFile(provider, sess.TaskID)
+				log.Printf("[stream %s] debrid direct-play: %s (%d bytes)",
+					agent.ShortID(sess.SessionID), provider.FileName(), provider.FileSize())
+				rctx, rcancel := context.WithTimeout(ctx, 10*time.Second)
+				defer rcancel()
+				if err := agentClient.MarkSessionReady(rctx, sess.SessionID); err != nil {
+					log.Printf("[stream %s] mark-ready failed: %v", agent.ShortID(sess.SessionID), err)
+				}
+			}()
+			return
+		}
+
 		filePath := sess.FilePath
 		if filePath == "" {
 			log.Printf("[hls %s] rejected: empty file path", agent.ShortID(sess.SessionID))

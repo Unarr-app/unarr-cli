@@ -43,7 +43,7 @@ Sólido salvo nota:
 funnel/UPnP el stream queda público en internet. Plan previo
 `Docs/plans/security-stream-token.md` (deferido, sin código).
 
-### Hueco #2 — Debrid en el path de streaming  🔵 DISEÑADO (ver estado abajo)
+### Hueco #2 — Debrid en el path de streaming  🟡 2a CERRADO (2026-05-31); 2b/2c pendientes
 Hoy debrid es **solo descarga**, resuelto server-side; el streaming es 100%
 torrent. La promesa "play instantáneo cache-fast" no ocurre. Falta: source debrid
 en el path de streaming + cache-availability + **fallback torrent↔debrid mid-stream**.
@@ -149,7 +149,35 @@ WEB (`torrentclaw-web`):
 ---
 
 ### Hueco #2 — Debrid en el path de streaming
-**Estado:** 🔵 DISEÑADO (2026-05-31), listo para implementar en sesión fresca.
+**Estado:** 🟡 Fase 2a CERRADA (2026-05-31). 2b (HLS-desde-URL) + 2c (cache-fast
++ fallback mid-stream) pendientes.
+
+**CERRADO 2a (2026-05-31):** debrid como fuente de `/stream` (direct-play),
+validado e2e contra AllDebrid real (cuenta hello@torrentclaw.com): play de un
+infoHash cacheado mp4 → web resuelve la DirectURL → agente sirve `/stream` por
+GETs ranged → Chrome reproduce el mp4 1080p real (incluido seek a offset alto
+para el moov de un fichero sin faststart). CLI bump 0.10.0→0.11.0 (binario local,
+sin publicar). Fichero clave: `internal/engine/stream_source_debrid.go`.
+- CLI: `StreamSession.DirectURL`; `debridFileProvider` (`io.ReadSeekCloser` sobre
+  HTTP Range, Seek sin red + GET lazy + reopen-on-seek + HEAD para tamaño +
+  nombre derivado de URL para Content-Type correcto); branch en
+  `daemon.OnStreamSession` (DirectURL presente → provider en goroutine →
+  SetFile → MarkSessionReady), antes de validar filePath y sin ffmpeg.
+- WEB: columna `streaming_session.direct_url` (mig 0137) + índice
+  `idx_debrid_cache_info_hash` (mig 0138, getHashCacheTier filtra por info_hash);
+  helper `resolveDebridStreamSource` (honesty gate: sin fichero local + infoHash
+  + agente ≥0.11.0 + `getHashCacheTier`==="verified" + container mp4/m4v +
+  audioIndex -1 + !forceTranscode → resuelve DirectURL, playMethod="direct",
+  quality "original"); gate de versión `DEBRID_STREAM_MIN_VERSION`/
+  `supportsDebridStream`; `getPendingStreamSessions` emite `directUrl` + fallback
+  fileName/fileSize vía join a `torrent` (cubre el caso HEAD-falla del provider).
+- Player: sin cambios — reusa el path direct-play del hueco #3 (playMethod=direct
+  + streamUrls).
+- Limitación 2a (honesta): solo contenido debrid mp4/m4v browser-native; mkv/HEVC
+  debrid → fallback a torrent hasta 2b (HLS-desde-URL). Si AllDebrid no marca el
+  torrent "ready" al primer addMagnet → fallback a torrent (sin callejón).
+
+**Diseño original (2b/2c siguen vigentes):**
 
 **Problema (confirmado en el análisis):** hoy `debrid` es **solo descarga**
 (`engine/debrid.go` baja la `DirectURL` HTTPS resuelta server-side). El

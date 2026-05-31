@@ -417,6 +417,15 @@ type StreamSession struct {
 	//              the raw file over /stream (HTTP Range, no ffmpeg) instead of
 	//              transcoding to HLS. See hueco #3 phase 3a in the roadmap.
 	PlayMethod string `json:"playMethod,omitempty"`
+	// DirectURL, when set, is an HTTPS link to the media resolved server-side
+	// from the user's debrid account (hueco #2 / 2a). The source has no local
+	// file: the daemon streams /stream from this URL via ranged GETs
+	// (debridFileProvider) instead of from disk/torrent. Carries the "play
+	// instantáneo cache-fast" promise — the web only sets it when the hash is
+	// confirmed debrid-cached and the container is browser-native (mp4/m4v),
+	// and gates it on an agent-version floor so older daemons never receive a
+	// field they can't serve. Takes priority over FilePath when present.
+	DirectURL string `json:"directUrl,omitempty"`
 }
 
 // SyncResponse is returned by the server with all pending actions for the CLI.
