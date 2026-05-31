@@ -261,13 +261,38 @@ el orden de STREAMING (no el de descarga) prefiera debrid.
     `MarkSessionReady` — requiere extender el payload + SSE + diferir el attach
     del player al evento ready). Diferido por mayor superficie.
 
-- **Fase 3b — remux HLS (`-c:v copy`) para contenedores no-mp4 compatibles.**
-  Caso `mkv` h264/aac (no direct-playable por contenedor). `-c:v copy` evita el
-  re-encode de vídeo. **Parte difícil:** con `-c copy` ffmpeg corta segmentos en
-  keyframes del GOP origen → duraciones variables que NO casan con el manifiesto
-  pre-renderizado uniforme (`renderVideoPlaylist`) → rompe seek/playback. Hay que
-  servir el manifiesto que genera ffmpeg (no el pre-render) o reescribir el seek.
-  Mayor que 3a.
+- **Fase 3b — remux fMP4 progresivo vía /stream (ENFOQUE ELEGIDO 2026-05-31).**
+  Caso `mkv` (u otro contenedor no-mp4) con h264 + aac + 8-bit + SDR: codecs ya
+  browser-native, solo el contenedor estorba. `-c copy` evita el re-encode de vídeo.
+  Descartado HLS-copy (duraciones de segmento variables vs manifiesto pre-render →
+  rompe seek; arreglarlo = probe de keyframes lento o reescribir el núcleo HLS).
+  **Enfoque:** ffmpeg `-c copy -movflags +frag_keyframe+empty_moov+default_base_moof
+  -f mp4` mkv→fMP4 a fichero temporal **creciente**; servir ese fMP4 por **/stream**
+  (mismo path direct-play 3a, attach nativo, sin hls.js, sin manifiesto).
+  **Núcleo real (la parte no-trivial):** servir un fichero que **crece** mientras
+  ffmpeg escribe. El `/stream` actual usa `http.ServeContent` (asume fichero completo
+  y seekable). Hay que:
+  - Resucitar/adaptar el `transcodeSource` muerto (`engine/stream_source.go`):
+    ffmpeg→tmp creciente, `ReadAt` con bloqueo hasta que los bytes existan
+    (`readBlockTimeout`), `EstimatedSize` = bitrate×duración para que la barra del
+    player tenga timeline.
+  - Un **responder de Range manual** en /stream para fuentes no-finales (en vez de
+    `http.ServeContent`): leer `Range`, `ReadAt` la fuente, escribir 206 +
+    `Content-Range` con el tamaño estimado. El path mp4-completo (3a) sigue usando
+    ServeContent (rápido).
+  - Caveat: seek-adelante a zona no-remuxada bloquea hasta que el copy la alcanza
+    (copy es I/O-bound, rápido). Seek-atrás (bytes ya en disco) inmediato.
+  **Plan de incrementos seguros:**
+  - **3b-i (agente, dormido):** `remuxSource` + responder Range para fuentes
+    crecientes, gateado tras `PlayMethod=="remux"` (que el web aún no envía) →
+    commiteable sin romper nada, con tests.
+  - **3b-ii (web+player):** `decidePlayMethod` devuelve `"remux"` para
+    contenedor-no-mp4 + h264/aac/8-bit/SDR; player trata `playMethod != "hls"` igual
+    que direct (streamUrls + attach nativo). Activa 3b. Mismo gate de versión.
+  **Ficheros:** CLI `engine/stream_source.go` (remuxSource), `engine/stream_server.go`
+  (range responder + provider creciente), `cmd/daemon.go` (branch `remux`),
+  `engine/transcoder.go` (args `-c copy` fMP4). WEB `lib/stream/play-method.ts`
+  (+"remux"), `stream/session/route.ts`, `HlsStreamPlayer.tsx` (`!= "hls"`).
 
 - **Fase 3c — capability negotiation (device-profile).** El web envía
   `{maxHeight, codecs:[h264,hevc,av1], containers}` (de UA + `canPlayType`).
