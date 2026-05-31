@@ -27,6 +27,11 @@ type TranscodeOpts struct {
 	SourceHeight int    // probed source height — used to derive a sane H.264 level
 	StartSeconds float64
 	FFmpegPath   string
+	// VideoTag forces the output stream's codec tag on a copy remux. HEVC muxed
+	// into MP4 must carry the `hvc1` tag (not the default `hev1`) or Safari /
+	// Apple devices refuse to decode it. Empty = leave ffmpeg's default. Only
+	// applied on copy actions (passthrough/remux); a real re-encode sets its own.
+	VideoTag string
 }
 
 // Transcoder wraps a long-running ffmpeg child process whose stdout streams
@@ -222,8 +227,16 @@ func buildFFmpegArgs(filePath string, opts TranscodeOpts) []string {
 	switch opts.Action {
 	case ActionPassthrough, ActionRemux:
 		args = append(args, "-c:v", "copy", "-c:a", "copy")
+		// HEVC → MP4 needs the hvc1 tag for Apple/Safari (hueco #3 / 3c).
+		if opts.VideoTag != "" {
+			args = append(args, "-tag:v", opts.VideoTag)
+		}
 	case ActionRemuxAudio:
-		args = append(args, "-c:v", "copy", "-c:a", "aac", "-b:a", coalesce(opts.AudioBitrate, "192k"))
+		args = append(args, "-c:v", "copy")
+		if opts.VideoTag != "" {
+			args = append(args, "-tag:v", opts.VideoTag) // HEVC → hvc1 for Apple
+		}
+		args = append(args, "-c:a", "aac", "-b:a", coalesce(opts.AudioBitrate, "192k"))
 	case ActionTranscodeVideo:
 		videoCodec := opts.HWAccel.FFmpegVideoCodec("h264")
 		args = append(args, "-c:v", videoCodec)

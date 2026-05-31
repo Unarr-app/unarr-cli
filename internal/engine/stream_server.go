@@ -863,6 +863,7 @@ func (ss *StreamServer) serveGrowing(w http.ResponseWriter, r *http.Request, src
 
 	buf := make([]byte, 256*1024)
 	off := start
+	firstRead := true
 	for {
 		if explicitEnd >= 0 && off > explicitEnd {
 			return
@@ -870,7 +871,19 @@ func (ss *StreamServer) serveGrowing(w http.ResponseWriter, r *http.Request, src
 		if r.Context().Err() != nil {
 			return // client disconnected / request cancelled
 		}
+		readStart := time.Now()
 		n, err := src.ReadAt(buf, off)
+		// TTFF diagnosis: a read that blocks means the client asked for bytes the
+		// remux hasn't produced yet (a seek ahead of the live edge, or the very
+		// first read before ffmpeg's init lands). Log it so a slow start is
+		// attributable to "waiting on ffmpeg" vs network/decoder.
+		if waited := time.Since(readStart); waited > 250*time.Millisecond {
+			log.Printf("[stream] serveGrowing read off=%d blocked %v (produced=%d est=%d)",
+				off, waited.Round(time.Millisecond), src.Size(), src.EstimatedSize())
+		} else if firstRead {
+			log.Printf("[stream] serveGrowing start off=%d (produced=%d est=%d)", start, src.Size(), src.EstimatedSize())
+		}
+		firstRead = false
 		if n > 0 {
 			toWrite := n
 			if explicitEnd >= 0 {

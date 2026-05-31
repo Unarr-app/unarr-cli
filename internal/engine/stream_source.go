@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,8 +173,21 @@ func newTranscodeSource(
 // before sending PlayMethod="remux". The browser plays the result progressively
 // via byte-range. Caller MUST Close() it (kills ffmpeg + removes the temp file).
 func NewRemuxSource(ctx context.Context, srcPath string, probe *StreamProbe, ffmpegPath, displayName string) (GrowingSource, error) {
-	opts := TranscodeOpts{Action: ActionRemux, FFmpegPath: ffmpegPath}
-	return newTranscodeSource(ctx, srcPath, probe, ActionRemux, opts, displayName)
+	// Audio: copy when already AAC; otherwise transcode to AAC (ActionRemuxAudio).
+	// Either way the VIDEO is copied — the expensive part is never re-encoded.
+	// This lets remux cover the very common h264+AC3/DTS mkv case (hueco #3 / 3c),
+	// not just h264+AAC.
+	action := ActionRemux
+	if probe != nil && probe.AudioCodec != "" && probe.AudioCodec != "aac" {
+		action = ActionRemuxAudio
+	}
+	opts := TranscodeOpts{Action: action, FFmpegPath: ffmpegPath}
+	// HEVC muxed into MP4 must carry the hvc1 tag or Apple/Safari won't decode
+	// it (hueco #3 / 3c). h264 (avc1) needs no override.
+	if probe != nil && probe.VideoCodec == "hevc" {
+		opts.VideoTag = "hvc1"
+	}
+	return newTranscodeSource(ctx, srcPath, probe, action, opts, displayName)
 }
 
 // signalNotify wakes any goroutine blocked in ReadAt. Non-blocking: if a
@@ -209,6 +223,13 @@ func (t *transcodeSource) watchSize(ctx context.Context) {
 		}
 		current := stat.Size()
 		if current > t.size.Load() {
+			if t.size.Load() == 0 && current > 0 {
+				// TTFF diagnosis: how long from ffmpeg spawn to the first
+				// fMP4 bytes (init + first fragment) landing — the floor on
+				// when /stream can serve anything playable.
+				log.Printf("[stream] %s first fMP4 bytes after %v (%d KB)",
+					t.name, time.Since(t.startedAt).Round(time.Millisecond), current/1024)
+			}
 			t.size.Store(current)
 			t.signalNotify()
 		}

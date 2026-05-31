@@ -624,6 +624,7 @@ func runDaemonStart() error {
 		// over /stream — no video re-encode, no HLS. The web decided this from
 		// scan metadata + version gate; we still need ffmpeg (copy uses it).
 		if sess.PlayMethod == "remux" {
+			tStart := time.Now()
 			probeCtx, cancelProbe := context.WithTimeout(ctx, 15*time.Second)
 			probe, perr := engine.ProbeFile(probeCtx, tcRuntime.FFprobePath, filePath)
 			cancelProbe()
@@ -631,6 +632,7 @@ func runDaemonStart() error {
 				log.Printf("[stream %s] remux probe failed: %v", agent.ShortID(sess.SessionID), perr)
 				return
 			}
+			tProbe := time.Now()
 			remuxCtx, remuxCancel := context.WithCancel(ctx)
 			src, serr := engine.NewRemuxSource(remuxCtx, filePath, probe, tcRuntime.FFmpegPath, sess.FileName)
 			if serr != nil {
@@ -642,7 +644,13 @@ func runDaemonStart() error {
 			// cancel stops the ffmpeg copy; SetGrowingFile/ClearFile also Close()
 			// the source, so the temp file is always cleaned up.
 			playerSessionRegistry.add(sess.SessionID, func() { remuxCancel(); streamSrv.ClearFile() })
-			log.Printf("[stream %s] remux (copy) → fMP4: %s", agent.ShortID(sess.SessionID), filepath.Base(filePath))
+			// Startup timing (TTFF diagnosis): probe = ffprobe on the source;
+			// spawn = ffmpeg launch + tmp setup. First-fMP4-byte is logged by the
+			// source itself; serveGrowing logs any client read that blocks waiting
+			// for ffmpeg to catch up.
+			log.Printf("[stream %s] remux (copy) → fMP4: %s [probe=%v spawn=%v]",
+				agent.ShortID(sess.SessionID), filepath.Base(filePath),
+				tProbe.Sub(tStart).Round(time.Millisecond), time.Since(tProbe).Round(time.Millisecond))
 			go func() {
 				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
