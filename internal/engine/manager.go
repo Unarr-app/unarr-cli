@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sync"
+	"sync/atomic"
 
 	"github.com/torrentclaw/unarr/internal/agent"
 )
@@ -37,7 +38,25 @@ type Manager struct {
 	// The sync goroutine reads and clears this to include final states in the next sync.
 	recentMu       sync.Mutex
 	recentFinished []agent.TaskState
+
+	// taskStore persists in-flight download payloads so the daemon can re-submit
+	// them after a restart (the downloaders resume the partial data). nil = no
+	// persistence. shuttingDown gates removal: a task interrupted by a graceful
+	// shutdown keeps its store entry (so it resumes), unlike a genuine terminal.
+	taskStore    taskPersister
+	shuttingDown atomic.Bool
 }
+
+// taskPersister is the resume store the manager records in-flight downloads to.
+// Satisfied by *agent.ActiveTaskStore; an interface so tests can inject a fake.
+type taskPersister interface {
+	Add(agent.Task)
+	Remove(taskID string)
+}
+
+// SetTaskStore wires the resume store. Call once before Submit. Optional —
+// without it, downloads are not persisted for cross-restart resume.
+func (m *Manager) SetTaskStore(s taskPersister) { m.taskStore = s }
 
 // NewManager creates a download manager.
 func NewManager(cfg ManagerConfig, reporter *ProgressReporter, downloaders ...Downloader) *Manager {
@@ -68,9 +87,27 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 	taskCtx, taskCancel := context.WithCancel(ctx)
 
 	m.activeMu.Lock()
+	// Dedup: a task can arrive twice — once when the daemon re-submits it from
+	// the resume store on startup, and again when the web re-dispatches it. The
+	// second arrival must NOT launch a parallel goroutine for the same files.
+	if _, exists := m.active[task.ID]; exists {
+		m.activeMu.Unlock()
+		taskCancel()
+		log.Printf("[%s] already active — ignoring duplicate submit", agent.ShortID(task.ID))
+		return
+	}
 	m.active[task.ID] = task
 	m.cancels[task.ID] = taskCancel
 	m.activeMu.Unlock()
+
+	// Persist real downloads so a daemon restart can resume them (torrent via
+	// the piece-completion DB, debrid via Range, usenet via its tracker). Stream
+	// and seed-file tasks are transient — not resumed. Upgrade downloads
+	// (ReplacePath set) are excluded too: re-running one after an interrupted
+	// organize could double-download or replace the wrong target.
+	if m.taskStore != nil && (at.Mode == "" || at.Mode == "download") && at.ReplacePath == "" {
+		m.taskStore.Add(at)
+	}
 
 	m.reporter.Track(task)
 
@@ -176,6 +213,13 @@ func (m *Manager) TaskStates() []agent.TaskState {
 
 // recordFinished stores a completed/failed task for the next sync cycle.
 func (m *Manager) recordFinished(update agent.StatusUpdate) {
+	// Drop from the resume store on a genuine terminal state (completed / failed
+	// / user-cancelled). A shutdown-interrupted task is NOT removed — it stays so
+	// the daemon re-submits and resumes it on the next start.
+	if m.taskStore != nil && !m.shuttingDown.Load() {
+		m.taskStore.Remove(update.TaskID)
+	}
+
 	m.recentMu.Lock()
 	defer m.recentMu.Unlock()
 	m.recentFinished = append(m.recentFinished, agent.TaskStateFromUpdate(update))
@@ -271,6 +315,23 @@ func (m *Manager) Wait() {
 
 // Shutdown stops accepting tasks and waits for active downloads to finish.
 func (m *Manager) Shutdown(ctx context.Context) {
+	// Flag shutdown BEFORE cancelling task contexts: tasks interrupted by the
+	// shutdown then keep their resume-store entry (recordFinished skips the
+	// removal) so the daemon re-submits and resumes them on the next start.
+	m.shuttingDown.Store(true)
+
+	// Cancel every task context NOW (before waiting). Downloads block on their
+	// context, so this is what actually unblocks them — and because shuttingDown
+	// is already set, their recordFinished keeps the resume entry. (Waiting first
+	// would just stall until the timeout, and relying on the daemon's outer ctx
+	// cancel would race ahead of shuttingDown and wipe the entries.)
+	m.activeMu.Lock()
+	for id, cancel := range m.cancels {
+		cancel()
+		delete(m.cancels, id)
+	}
+	m.activeMu.Unlock()
+
 	// Wait for goroutines with timeout
 	done := make(chan struct{})
 	go func() {
@@ -281,7 +342,7 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		log.Println("shutdown timeout, cancelling active downloads")
+		log.Println("shutdown timeout, abandoning active downloads")
 	}
 
 	// Shutdown all downloaders
@@ -291,12 +352,7 @@ func (m *Manager) Shutdown(ctx context.Context) {
 		}
 	}
 
-	// Clean active map and cancel functions
 	m.activeMu.Lock()
-	for id, cancel := range m.cancels {
-		cancel()
-		delete(m.cancels, id)
-	}
 	m.active = make(map[string]*Task)
 	m.activeMu.Unlock()
 }

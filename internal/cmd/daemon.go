@@ -316,6 +316,11 @@ func runDaemonStart() error {
 		},
 	}, reporter, torrentDl, debridDl, usenetDl)
 
+	// Resume store: persist in-flight downloads so a daemon restart can re-submit
+	// them (the downloaders resume the partial data). Wire it before any Submit.
+	taskStore := agent.NewActiveTaskStore()
+	manager.SetTaskStore(taskStore)
+
 	// Create persistent stream server
 	streamSrv := engine.NewStreamServer(cfg.Download.StreamPort)
 	streamSrv.SetUPnPEnabled(cfg.Download.EnableUPnP)
@@ -423,6 +428,20 @@ func runDaemonStart() error {
 			} else {
 				manager.Submit(ctx, t)
 			}
+		}
+	}
+
+	// Resume downloads interrupted by the previous shutdown/crash. Re-submit
+	// each persisted task; its downloader picks up the partial data (torrent via
+	// the piece-completion DB, debrid via Range, usenet via its tracker). Done
+	// before the sync loop starts; a later web re-dispatch of the same id is
+	// deduped by the manager.
+	if resume := taskStore.Load(); len(resume) > 0 {
+		log.Printf("[resume] re-submitting %d interrupted download(s)", len(resume))
+		for _, t := range resume {
+			t.ForceStart = false // respect MaxConcurrent on bulk auto-resume
+			log.Printf("[resume] %s — %s", agent.ShortID(t.ID), t.Title)
+			manager.Submit(ctx, t)
 		}
 	}
 
@@ -847,13 +866,16 @@ func runDaemonStart() error {
 		cancelStreamContexts()
 		cancelAllPlayerSessions()
 		streamSrv.Shutdown(context.Background())
-		cancel()
 
-		// Give active downloads 30s to finish
+		// Drain active downloads BEFORE cancelling the daemon context. Shutdown
+		// sets shuttingDown + cancels each task context itself, so interrupted
+		// downloads keep their resume-store entry. Cancelling the shared ctx first
+		// would make them look like genuine failures and wipe the entry → no resume.
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer shutdownCancel()
 		manager.Shutdown(shutdownCtx)
 
+		cancel()
 		d.Deregister()
 		fmt.Println("  Daemon stopped.")
 		return nil
