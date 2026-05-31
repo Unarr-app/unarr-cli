@@ -14,6 +14,10 @@ type TranscodeRuntime struct {
 	// browser-friendly. Useful when the user explicitly turns transcoding
 	// off in config.
 	Disabled bool
+	// TonemapHDR enables HDR→SDR tonemapping of HDR sources during transcode.
+	// Set only when the ffmpeg build has zscale (FFmpegSupportsZscale); without
+	// it the tonemap filter would error and break playback, so it stays off.
+	TonemapHDR bool
 }
 
 // qualityCap maps a session's Quality label to a (MaxHeight, VideoBitrate)

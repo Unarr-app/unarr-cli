@@ -1347,16 +1347,23 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		hwUploadTail = ",hwupload"
 		colorTail = ""
 	}
+	// HDR→SDR tonemap, inserted after the scale (downscale-first = fewer pixels
+	// to tonemap) and before format=. Only for an HDR source on a zscale-capable
+	// ffmpeg; the trailing comma in hdrTonemapChain slots it in front of format=.
+	tonemap := ""
+	if probe.HDR != "" && cfg.Transcode.TonemapHDR {
+		tonemap = hdrTonemapChain
+	}
 	var filterChain string
 	if maxH > 0 && probe.Height > maxH {
 		filterChain = fmt.Sprintf(
-			"scale=-2:%d:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=%s%s%s",
-			maxH, pixFormat, colorTail, hwUploadTail,
+			"scale=-2:%d:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,%sformat=%s%s%s",
+			maxH, tonemap, pixFormat, colorTail, hwUploadTail,
 		)
 	} else {
 		filterChain = fmt.Sprintf(
-			"scale=trunc(iw/2)*2:trunc(ih/2)*2,format=%s%s%s",
-			pixFormat, colorTail, hwUploadTail,
+			"scale=trunc(iw/2)*2:trunc(ih/2)*2,%sformat=%s%s%s",
+			tonemap, pixFormat, colorTail, hwUploadTail,
 		)
 	}
 	args = append(args, "-vf", filterChain)

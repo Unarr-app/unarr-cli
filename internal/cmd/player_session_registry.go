@@ -92,5 +92,8 @@ func buildTranscodeRuntime(ctx context.Context, cfg config.Config) engine.Transc
 		VideoBitrate: cfg.Download.Transcode.VideoBitrate,
 		AudioBitrate: cfg.Download.Transcode.AudioBitrate,
 		MaxHeight:    cfg.Download.Transcode.MaxHeight,
+		// Tonemap HDR→SDR only when this ffmpeg build has zscale; otherwise the
+		// filter would error and break playback, so HDR plays untonemapped.
+		TonemapHDR: engine.FFmpegSupportsZscale(ffmpegPath),
 	}
 }
