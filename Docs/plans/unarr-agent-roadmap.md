@@ -56,6 +56,15 @@ capacidades del dispositivo. Sin ABR multi-bitrate.
 Diseño por fases (3a direct-play / 3b remux-HLS / 3c capability-negotiation / 3d ABR)
 en el estado abajo. **Fase 3a CERRADA** (CLI c8d7c4b + web 636fbe59); 3b/3c/3d pendientes.
 
+### Hueco #4 — Pre-transcode (transcode-on-download)  🔵 DISEÑADO (ver estado abajo)
+Al completar una descarga/import, transcodificar/remuxar en background para que el
+PRIMER play sea instantáneo (direct o cache-HIT), sin transcode en vivo.
+Optimización, nunca bloqueante: si no terminó a tiempo → fallback a transcode en
+vivo (HLS actual). Reaprovecha `hls_cache.go` (cache-HIT ya sirve instantáneo) +
+el pipeline de `prewarm` (ya hace encode de la siguiente ep) — generaliza prewarm a
+"todo download, configurable" y puebla también el artefacto direct-play. Configurable
+desde la web. Diseño + set de opciones en el estado abajo.
+
 ### Huecos medios  ⬜
 - Sin gestión de espacio en disco (`Statfs`) → disco lleno revienta a mitad.
 - Resume de torrent NO persiste reinicio del daemon (usenet sí).
@@ -320,3 +329,85 @@ dev (`unarr-dev`) debe reportar versión >= 0.9.20 o el gate bloquea direct-play
   embebidas vía `<video>` nativo); subs bitmap no se ven. Aceptable en 3a.
 - Listener `loadedmetadata {once:true}` del attach nativo no se limpia
   explícitamente en cleanup (idempotente, impacto nulo).
+
+---
+
+### Hueco #4 — Pre-transcode (transcode-on-download)
+**Estado:** 🔵 DISEÑADO (2026-05-31), pendiente de implementar.
+
+**Qué es:** al completar una descarga (o import a biblioteca), procesar en
+background para que la reproducción sea **instantánea** sin transcode en vivo.
+Es una optimización: si no terminó cuando el usuario da play → fallback al
+transcode en vivo (HLS actual). **Nunca bloquea.**
+
+**Sinergia con lo existente (clave — gran parte de la infra ya está):**
+- `hls_cache.go`: un encode HLS completo se cachea y el cache-HIT lo sirve
+  instantáneo (cero ffmpeg). Pre-transcode = poblar esa cache antes del play.
+- `stream-prewarm.ts` + `createPrewarmSession`: ya lanza un encode HLS de la
+  siguiente ep en background. Pre-transcode = generalizar prewarm a "cualquier
+  download, configurable", + producir también el artefacto direct-play (3a).
+- Por tanto el trabajo NUEVO es: (1) disparador on-download-complete, (2)
+  superficie de config en web, (3) gobernanza de recursos + cola, (4) decisión
+  "qué producir" (remux mp4 para 3a vs HLS cache vs nada si ya es native).
+
+**Opciones a exponer en la web (set propuesto):**
+
+1. **Activación + disparador**
+   - Toggle global on/off (default OFF — CPU/disco intensivo).
+   - Disparador: al completar descarga / al escanear-importar / manual
+     ("optimizar ahora" por item) / programado (ventana horaria).
+   - Default recomendado: on-download-complete, pero solo en ventana idle + sin
+     stream en vivo activo.
+
+2. **Qué producir (target) — modo Auto recomendado (por probe):**
+   - ya browser-native (mp4 h264/aac 8-bit SDR) → **nada** (3a lo sirve crudo).
+   - solo contenedor incompatible (mkv h264/aac) → **remux** a mp4 (barato, sin
+     re-encode; habilita 3a direct-play). *(necesita 3b para el manifiesto.)*
+   - codec incompatible (HEVC/AV1/10-bit/HDR) → **transcode** a H.264 (caro).
+   - Modos: solo-remux / remux+transcode / forzar H.264 universal.
+   - Formato salida: mp4 direct-play (seek nativo) vs HLS cache (multi-network)
+     vs ambos. Recomendado: mp4 si compatible, HLS si requiere transcode.
+
+3. **Calidad**
+   - Mantener original (passthrough cuando se pueda) / cap 1080p / ladder ABR
+     (480/720/1080/original — encaja con 3d).
+   - "Solo transcodear si ayuda" (no tocar lo ya compatible).
+
+4. **Selección / alcance**
+   - Todo / solo biblioteca (pelis+series) / solo lo problemático (p.ej. solo
+     4K HEVC, dejar h264).
+   - Solo watchlist / recién añadido / todo. Reglas por carpeta de biblioteca.
+
+5. **Gobernanza de recursos (lo más importante — es pesado):**
+   - Concurrencia (N transcodes paralelos, default 1).
+   - HW accel si disponible (nvenc/qsv/vaapi); cap de threads CPU.
+   - Ventana horaria (solo idle, p.ej. 02:00–08:00).
+   - **Pausar cuando hay stream en vivo** (no pelear por CPU con la reproducción).
+   - Prioridad de cola (watchlist primero / más pequeño primero / más nuevo).
+   - (Laptops) solo con AC / no en batería.
+
+6. **Disco / retención (liga con el hueco medio de espacio en disco):**
+   - Dónde guardar (cache dir) + tamaño máx + evicción LRU (ya parcial en cache).
+   - Mantener SIEMPRE el original; el transcode es artefacto adicional.
+   - TTL: borrar pre-transcode no visto en N días; pin a visto/favorito.
+   - Re-transcodear al cambiar la config de calidad (invalidación).
+
+7. **UX / estado**
+   - Cola + progreso por item en la web ("Optimizando para reproducción
+     instantánea…"). Badge en library card: "listo para play instantáneo" vs
+     "se transcodificará al reproducir". Notificación al terminar (opcional).
+
+8. **Fallback / límites**
+   - Si no terminó a tiempo → transcode en vivo (HLS). Nunca bloquea el play.
+   - Solo ficheros locales en disco (no debrid/torrent sin bajar).
+
+**MVP recomendado (fase 4a):** toggle on/off + disparador on-download-complete +
+modo Auto (remux-si-compatible / transcode-si-no) + concurrencia 1 +
+pausar-si-stream-activo + reusar `hls_cache` + badge "listo". El resto (ladder
+ABR, ventanas horarias, reglas por carpeta, TTL avanzado, formato mp4 vs HLS
+configurable) en fases 4b/4c.
+
+**Dependencias:** el camino mp4/remux depende del hueco #3 (3a ya hecho; 3b para
+el remux-a-mp4 con manifiesto correcto). El camino HLS-cache es implementable ya
+(reusa cache + prewarm). La gobernanza (pausar-si-stream) necesita señal de
+"stream activo" en el daemon (la hay: `streamSrv.HasFile()` + registro HLS).
