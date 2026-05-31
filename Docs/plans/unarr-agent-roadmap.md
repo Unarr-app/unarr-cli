@@ -54,7 +54,7 @@ El path HLS **siempre re-encoda** (incluso mp4 h264/aac ya compatible). `DecideA
 (passthrough/remux) existe pero muerto en el path browser. Sin negociación por
 capacidades del dispositivo. Sin ABR multi-bitrate.
 Diseño por fases (3a direct-play / 3b remux-HLS / 3c capability-negotiation / 3d ABR)
-en el estado abajo. Fase 3a en implementación.
+en el estado abajo. **Fase 3a CERRADA** (CLI c8d7c4b + web 636fbe59); 3b/3c/3d pendientes.
 
 ### Huecos medios  ⬜
 - Sin gestión de espacio en disco (`Statfs`) → disco lleno revienta a mitad.
@@ -285,3 +285,38 @@ playMethod), `src/components/stream/HlsStreamPlayer.tsx` (attach nativo).
 
 **Empezar por 3a** (valor inmediato — el caso primario de unarr es la biblioteca
 local escaneada; mp4-h264-aac es común en web-dl/YIFY). 3b/3c/3d como iteraciones.
+
+**Hecho (Fase 3a CERRADA 2026-05-31):**
+- CLI (`feat/unarr-agent` c8d7c4b): `StreamSession.PlayMethod`; `OnStreamSession`
+  ramifica `direct` → `SetFile(NewDiskFileProvider)` + `MarkSessionReady` (sin
+  ffmpeg, antes del check de ffmpeg para funcionar con transcode off). `go build`
+  + `vet` + tests verdes.
+- WEB (`feat/unarr-brand` 636fbe59): `decidePlayMethod()` (espeja la rama
+  passthrough de Go, conservador) + test unitario; gate `supportsDirectPlay`
+  (`DIRECT_PLAY_MIN_VERSION = 0.9.20`); decisión en la ruta de sesión (solo
+  library item + sin downscale + `audioIndex == -1`); `buildStreamUrls` mintea
+  token scope `stream` (paridad Go); `streaming_session.play_method` (migración
+  0135) emitido al agente vía `getPendingStreamSessions`; player ramifica a
+  `<video src>` nativo. lint + typecheck:all + 2333 unit + build (brand unarr) OK.
+- Revisión adversarial (correctness + security/parity, 2 agentes): **0 hallazgos
+  bloqueantes**. Token parity y version-skew (ambos sentidos) confirmados.
+
+**Correcciones de la revisión propia (3a):** direct-play exige `audioIndex == -1`
+(servir el fichero entero no respeta una pista de audio no-default elegida por el
+usuario → esos casos van a HLS con `-map 0:a:N`).
+
+**Pendiente de validación (3a):** **smoke e2e real no hecho** (requiere un agente
+desplegado >= 0.9.20 + un item de biblioteca mp4-h264-aac + browser). Los tests
+cubren la decisión + paridad de token, no el round-trip /stream en vivo. El agente
+dev (`unarr-dev`) debe reportar versión >= 0.9.20 o el gate bloquea direct-play.
+
+**Backlog detectado en 3a (baja prioridad):**
+- `streaming_session.transport` queda `"hls"` también para sesiones direct
+  (el enum `TRANSPORT_VALUES` solo tiene `"hls"`); telemetría imprecisa, no bug.
+  Añadir `"direct"` al vocabulario cuando se toque la métrica.
+- Modelo single-viewer: dos plays direct simultáneos → el último `SetFile` gana;
+  el tab viejo reproduciría contenido nuevo en silencio (HLS al menos 404ea).
+- Direct-play no aplica `audioIndex` ni extrae subs a WebVTT (usa pistas
+  embebidas vía `<video>` nativo); subs bitmap no se ven. Aceptable en 3a.
+- Listener `loadedmetadata {once:true}` del attach nativo no se limpia
+  explícitamente en cleanup (idempotente, impacto nulo).
