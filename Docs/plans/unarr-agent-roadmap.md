@@ -72,7 +72,7 @@ desde la web. Diseño + set de opciones en el estado abajo.
 - Sin seeding/ratio lifecycle (flags existen, nadie los aplica).
 - Reproducir-mientras-baja: readahead estático 5MB, sin playhead→prioridad dinámica.
 - HDR→SDR sin tonemap (zscale/zimg) → HDR desaturado.
-- Sin thumbnails/sprites/trickplay.
+- ~~Sin thumbnails~~ ✅ **Fotogramas bajo demanda (2026-05-31)** — `GET /thumbnail` (ffmpeg 1 frame, `-ss` antes de `-i`, MJPEG) + panel "Características del fichero" (ruta + mediainfo completa + tira de ~5 frames). Sprites/trickplay (scrubber pregenerado) siguen pendientes. Ver estado abajo.
 - Subtítulos bitmap (PGS/DVB) sin burn-in.
 - Audio siempre downmix estéreo AAC (sin passthrough 5.1).
 - Mediaserver solo DETECTA Plex/Jellyfin/Emby — no biblioteca navegable propia.
@@ -96,6 +96,15 @@ WireGuard endpoint sin pin · sesión única (1 viewer).
 - **Refrescar/limpiar streamUrl al re-registrar** (baja): tras reinicio del daemon el secreto cambia; URLs `?t=` ya guardadas en `download_task.streamUrl` quedan stale hasta re-stream. Es auto-curativo, pero el web podría limpiar streamUrl en el re-register del agente.
 - **gofmt preexistente** en `internal/agent/types.go` (StreamSession) y `hls.go`/`torrent.go`/`stream_source.go` (no introducido por este trabajo) — chore aparte.
 - **Funnel = SPOF CloudFlare** (ya en huecos medios): el funnel sigue siendo trycloudflare; relay propio pendiente.
+- **Rutas localizadas unarr 404 (media)**: bajo `NEXT_PUBLIC_BRAND=unarr` el allowlist `UNARR_PAGE_PREFIXES` solo lista los paths EN (`/library`, `/title`, …), pero next-intl sirve los localizados (`/es/biblioteca`, `/es/descargas`, `/es/perfil`) → 404 al navegar la biblioteca en español. Las páginas EN (`/title/<id>`) funcionan. Hallado durante el smoke de "características del fichero" (2026-05-31). Fix: añadir los pathnames localizados al allowlist o derivarlos del mapeo de next-intl. Ajeno a este hueco.
+- **Thumbnails — sprites/trickplay (media)**: cerrado solo el camino bajo demanda (N frames en vivo). El scrubber pregenerado (sprite/BIF de toda la timeline, preview al pasar el ratón por la barra) queda como hueco propio: reaprovecharía `/thumbnail` + cacheo en disco del agente. Decidido alcance "solo bajo demanda" con el usuario (2026-05-31).
+
+### Hueco medio — Características del fichero + thumbnails bajo demanda  ✅ CERRADO (2026-05-31)
+Panel "ver características del fichero" (ruta + mediainfo completa: codec/HDR/bit-depth/tracks audio+subs/tamaño/duración — ya en DB vía ffprobe, solo faltaba surface) + tira de fotogramas extraídos en vivo por el agente.
+- **CLI**: `GET /thumbnail?p=&pos=&w=&t=` en el stream server (ffmpeg `-ss <pos>` antes de `-i`, `-frames:v 1`, MJPEG a stdout). Token scope `thumb:<sha256(path)>` (mismo HMAC que `/stream`/`/hls`; web mintea, agente verifica; vector cross-lang Go↔TS pinneado). Clamp a fichero regular, 404-sin-oracle, timeout 20s. `ffmpegPath` cableado en `daemon.go`. Floor `0.13.0`.
+- **WEB**: endpoints bajo `/api/internal/stream/` (permitido en unarr; `/api/internal/library` NO) — `file-details` (mediainfo + URLs de frames vía funnel HTTPS) + `owned-files` (lista mínima por contentId, solo items con ffprobe). Lógica pura testeada en `src/lib/stream/thumbnails.ts`. Modal compartido `FileDetailsModal`/`useFileDetails` con skeleton + carga progresiva ("Generando X/N…") + fallback por frame. Gating `supportsThumbnails`/`THUMBNAIL_MIN_VERSION`.
+- **Alcance en ambas marcas**: torrentclaw → acción en los 3 builders de menú de biblioteca (`fileInfoMenuItem` compartido). unarr → `UnarrFileDetailsButton` en `/title/<id>` (la biblioteca unarr son estanterías, no `LibraryPage`). Modal reutiliza labels neutrales (namespace `library`, no `torrent`) → marca limpia.
+- **Tests/smoke**: Go (token vector, args, 400/404/503, stub-ffmpeg success) + web (resolveThumbnails, parity, version gate, i18n 7 locales). Smoke real contra biblioteca local 4K (Frankenstein, HEVC DV+HDR10): ffmpeg extrae JPEG válido, modal unarr muestra mediainfo + 5 frames vía funnel. /critico 4 revisores → 5 fixes (clipboard promise, dedup posiciones short-clip, tipos compartidos, guard videoInfo, helper menú).
 
 ---
 

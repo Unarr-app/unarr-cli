@@ -90,6 +90,11 @@ type StreamServer struct {
 	streamSecret []byte
 	requireToken bool
 
+	// ffmpegPath is the resolved ffmpeg binary, used by /thumbnail to extract a
+	// single frame on demand. Empty = thumbnails disabled (503). Set once before
+	// Listen() via SetFFmpegPath; read-only thereafter so the handler needs no lock.
+	ffmpegPath string
+
 	lastActivity  atomic.Int64
 	maxByteOffset atomic.Int64 // highest sequential read position (main playback connection)
 	totalFileSize atomic.Int64
@@ -145,6 +150,13 @@ func (ss *StreamServer) checkStreamToken(scope, token string) bool {
 // Listen(); changes after Listen() are ignored for the active server.
 func (ss *StreamServer) SetUPnPEnabled(enabled bool) {
 	ss.enableUPnP = enabled
+}
+
+// SetFFmpegPath sets the ffmpeg binary used by /thumbnail to extract single
+// frames on demand. Call before Listen(); empty leaves thumbnails disabled
+// (the handler returns 503). Read-only after Listen() — no locking in the handler.
+func (ss *StreamServer) SetFFmpegPath(path string) {
+	ss.ffmpegPath = path
 }
 
 // SetCORSAllowedOrigins replaces the operator-supplied extra origins. The
@@ -203,6 +215,7 @@ func (ss *StreamServer) Listen(ctx context.Context) error {
 	mux.HandleFunc("/health", ss.healthHandler)
 	mux.HandleFunc("/playlist.m3u", ss.playlistHandler)
 	mux.HandleFunc("/hls/", ss.hlsHandler)
+	mux.HandleFunc("/thumbnail", ss.thumbnailHandler)
 
 	// SO_REUSEADDR allows immediate rebind if the port is in TIME_WAIT (e.g. after agent restart)
 	lc := net.ListenConfig{
@@ -800,6 +813,127 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	http.ServeContent(w, r, provider.FileName(), time.Time{}, reader)
+}
+
+// thumbnailHandler serves ONE JPEG frame decoded from a file at a timestamp.
+// It backs the web's "file characteristics" panel (frames on demand, hueco
+// medio): the panel renders a strip of <img> at several positions, each hitting
+// this route. Independent of the active /stream — no session, no provider, no
+// effect on playback; ffmpeg just seeks the path and emits a single frame.
+//
+// Auth: a token scoped thumb:<sha256(path)> minted by the web with this agent's
+// stream secret. The path travels in ?p= (already client-visible — the library
+// UI shows it) and the token's scope binds that exact path, so a tampered p
+// fails verification. 404 (not 401/403) on a bad token — no oracle, same as
+// /stream. The path is additionally clamped to a real regular file as
+// defense-in-depth against a (trusted) web bug pointing ffmpeg at a device/FIFO.
+func (ss *StreamServer) thumbnailHandler(w http.ResponseWriter, r *http.Request) {
+	ss.lastActivity.Store(time.Now().UnixNano())
+	if ss.writeCORSHeaders(w, r, "") {
+		return
+	}
+
+	q := r.URL.Query()
+	rawPath := q.Get("p")
+	if rawPath == "" {
+		http.Error(w, "missing path", http.StatusBadRequest)
+		return
+	}
+	if !ss.checkStreamToken(streamScopeThumb(rawPath), q.Get("t")) {
+		clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+		log.Printf("[thumbnail] rejected from %s — bad/absent token", clientIP)
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if fi, err := os.Stat(rawPath); err != nil || !fi.Mode().IsRegular() {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if ss.ffmpegPath == "" {
+		http.Error(w, "thumbnails unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	pos := parseThumbPos(q.Get("pos"))
+	width := parseThumbWidth(q.Get("w"))
+
+	// Cap the work: a single keyframe decode is fast, but a corrupt/huge file or
+	// a seek past EOF could hang ffmpeg. 20s is generous for a keyframe seek.
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, ss.ffmpegPath, buildThumbnailArgs(rawPath, pos, width)...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		// A seek past EOF yields no frame — a benign empty output, not an error
+		// worth alarming on. Log at most a short line for diagnosis.
+		log.Printf("[thumbnail] no frame (pos=%.1f w=%d path=%q): err=%v %s",
+			pos, width, rawPath, err, strings.TrimSpace(stderr.String()))
+		http.Error(w, "thumbnail failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/jpeg")
+	// path+pos is stable content; let the browser cache so re-opening the panel
+	// doesn't re-run ffmpeg. private — it's a frame of the user's own file.
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
+	if _, err := w.Write(out); err != nil {
+		log.Printf("[thumbnail] write failed: %v", err)
+	}
+}
+
+// buildThumbnailArgs builds the ffmpeg argv that decodes ONE frame at posSec and
+// writes a scaled JPEG to stdout. `-ss` BEFORE `-i` does an input (keyframe)
+// seek — near-constant time regardless of position — instead of decoding from
+// the start. scale=w:-2 preserves aspect with an even height (mjpeg/yuv420
+// requires even dimensions). `-an -sn` drops audio/subtitle streams.
+func buildThumbnailArgs(path string, posSec float64, width int) []string {
+	return []string{
+		"-nostdin",
+		"-loglevel", "error",
+		"-ss", strconv.FormatFloat(posSec, 'f', 3, 64),
+		"-i", path,
+		"-frames:v", "1",
+		"-vf", fmt.Sprintf("scale=%d:-2", width),
+		"-an", "-sn",
+		"-f", "mjpeg",
+		"pipe:1",
+	}
+}
+
+// parseThumbPos parses a non-negative seconds offset; defaults to 0 on garbage.
+func parseThumbPos(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
+}
+
+// parseThumbWidth parses the requested width, defaulting to 320 and clamping to
+// [80, 640] so a caller can't ask ffmpeg to upscale to an absurd size.
+func parseThumbWidth(s string) int {
+	const def, min, max = 320, 80, 640
+	if s == "" {
+		return def
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return def
+	}
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
 }
 
 // serveGrowing range-serves a growing remux source (hueco #3 / 3b). Unlike

@@ -49,6 +49,17 @@ const (
 // id means a token minted for one session never validates another.
 func streamScopeHLS(sessionID string) string { return "hls:" + sessionID }
 
+// streamScopeThumb is the token scope for a single-frame thumbnail of a
+// specific file (the web's "file characteristics" panel). Binding the file
+// path's SHA-256 into the scope means a token minted for one file never
+// validates a thumbnail request for another — a leaked thumbnail URL exposes
+// only the one frame-source it was signed for. The web mints the matching
+// scope in src/lib/stream-token.ts (streamScopeThumb), byte-for-byte.
+func streamScopeThumb(filePath string) string {
+	sum := sha256.Sum256([]byte(filePath))
+	return "thumb:" + hex.EncodeToString(sum[:])
+}
+
 // newStreamSecret returns 32 cryptographically-random bytes used to sign stream
 // tokens for the lifetime of the daemon. Regenerated each start, so tokens from
 // a previous run stop validating (the web re-resolves the URL on demand).

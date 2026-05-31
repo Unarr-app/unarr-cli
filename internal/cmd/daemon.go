@@ -310,6 +310,9 @@ func runDaemonStart() error {
 	// Create persistent stream server
 	streamSrv := engine.NewStreamServer(cfg.Download.StreamPort)
 	streamSrv.SetUPnPEnabled(cfg.Download.EnableUPnP)
+	// Wire ffmpeg so /thumbnail can extract single frames for the web's "file
+	// characteristics" panel (frames on demand). Empty = thumbnails 503.
+	streamSrv.SetFFmpegPath(ffmpegResolved)
 	streamSrv.SetRequireStreamToken(cfg.Download.RequireStreamToken)
 	// Report the stream-token signing key ONLY when enforcing, so the web's
 	// "secret present → mint HLS token" signal accurately means "this agent
