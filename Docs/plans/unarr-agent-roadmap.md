@@ -49,13 +49,13 @@ torrent. La promesa "play instantáneo cache-fast" no ocurre. Falta: source debr
 en el path de streaming + cache-availability + **fallback torrent↔debrid mid-stream**.
 Diseño por fases (2a direct-play / 2b HLS-desde-URL / 2c fallback) en el estado abajo.
 
-### Hueco #3 — Device-profile + direct-play + ABR  🔵 EN CURSO (ver estado abajo)
-El path HLS **siempre re-encoda** (incluso mp4 h264/aac ya compatible). `DecideAction`
-(passthrough/remux) existe pero muerto en el path browser. Sin negociación por
-capacidades del dispositivo. Sin ABR multi-bitrate.
+### Hueco #3 — Device-profile + direct-play + ABR  ✅ CERRADO (2026-05-31) / ver estado abajo
+El path HLS re-encodaba todo (incluso mp4 h264/aac ya compatible). `DecideAction`
+muerto. Sin negociación por capacidades. Sin adaptación de calidad.
 Diseño por fases (3a direct-play / 3b remux fMP4 / 3c capability-negotiation / 3d ABR)
-en el estado abajo. **Fases 3a + 3b + 3c CERRADAS** (smoke e2e, incl. HEVC en iPhone
-Safari real); 3d (ABR) pendiente, baja prioridad.
+en el estado abajo. **3a + 3b + 3c CERRADAS** (smoke e2e, incl. HEVC en iPhone Safari
+real). **3d resuelto como 3d-lite (auto-downshift)** — ABR multi-rendition real
+descartada (N× CPU inviable single-viewer; no aplica a paths copy). Hueco COMPLETO.
 
 ### Hueco #4 — Pre-transcode (transcode-on-download)  🔵 DISEÑADO (ver estado abajo)
 Al completar una descarga/import, transcodificar/remuxar en background para que el
@@ -324,9 +324,17 @@ el orden de STREAMING (no el de descarga) prefiera debrid.
   nativo → passthrough HEVC en vez de transcode HEVC→h264. Reemplaza el heurístico
   UA-burdo de `resolveAutoQuality`. Web+CLI.
 
-- **Fase 3d — ABR multi-bitrate.** Ladder de renditions en el master playlist +
-  N pipelines ffmpeg / segmentos por rendition. Alto esfuerzo, baja prioridad;
-  el modelo single-viewer reduce su valor. Último.
+- **Fase 3d — ABR.** ABR multi-rendition real **DESCARTADA**: N pipelines ffmpeg
+  simultáneos = N× CPU para 1 espectador (mata NAS/Pi), y no aplica a los paths
+  copy (direct/remux = 1 bitrate). Resuelto como **3d-lite (auto-downshift)**:
+  el player ya tenía sondeo de ancho de banda + recomendación + selector manual;
+  3d-lite automatiza la bajada — buffering sostenido 10s → siguiente calidad menor
+  (nueva sesión a bitrate menor), progresivo hasta 480p. Reusa
+  `recommendLowerQuality`/`setQuality`. `setQuality(.., {persist:false})` para no
+  pisar la preferencia del usuario por un stall transitorio. **CERRADO (web 8bf8e416)**;
+  smoke en Chrome (Slow-3G + seek → consola `auto-downshift 720p → 480p`, nueva
+  sesión reproduce). Hallazgo: este Chrome reproduce HLS **nativo** (como Safari);
+  hls.js es fallback.
 
 **Ficheros a tocar (3a):** CLI `internal/agent/types.go` (+PlayMethod),
 `internal/cmd/daemon.go` (branch SetFile vs HLS). WEB
