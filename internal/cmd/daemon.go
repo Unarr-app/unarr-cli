@@ -589,6 +589,30 @@ func runDaemonStart() error {
 			filePath = found
 		}
 
+		// Direct-play (hueco #3 / 3a): the web decided this source is already
+		// browser-native (mp4 h264/aac 8-bit SDR) from library scan metadata,
+		// gated on agent version. Serve the raw file over /stream (HTTP Range,
+		// no ffmpeg) instead of transcoding to HLS — zero CPU, instant seek.
+		// Runs BEFORE the ffmpeg-availability check on purpose: direct-play
+		// needs no ffmpeg, so it must work even when transcode is disabled.
+		if sess.PlayMethod == "direct" {
+			streamSrv.SetFile(engine.NewDiskFileProvider(filePath), sess.TaskID)
+			// cancel just clears the served file so daemon shutdown / drain
+			// stops exposing it on /stream. There's no ffmpeg child to kill.
+			playerSessionRegistry.add(sess.SessionID, func() { streamSrv.ClearFile() })
+			log.Printf("[stream %s] direct-play: %s", agent.ShortID(sess.SessionID), filepath.Base(filePath))
+			// File is on disk → ready immediately. Tell the web so the player
+			// attaches <video src> without burning its HEAD-probe retry budget.
+			go func() {
+				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				if err := agentClient.MarkSessionReady(rctx, sess.SessionID); err != nil {
+					log.Printf("[stream %s] mark-ready failed: %v", agent.ShortID(sess.SessionID), err)
+				}
+			}()
+			return
+		}
+
 		tcRuntime := buildTranscodeRuntime(ctx, cfg)
 		if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
 			log.Printf("[hls %s] rejected: ffmpeg/ffprobe unavailable", agent.ShortID(sess.SessionID))

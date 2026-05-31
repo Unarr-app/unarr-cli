@@ -410,6 +410,13 @@ type StreamSession struct {
 	// AudioIndex selects the source audio track (-map 0:a:N). -1 means
 	// "use the default/first track".
 	AudioIndex int `json:"audioIndex,omitempty"`
+	// PlayMethod is how the daemon should serve this session:
+	//   ""       — default (HLS transcode); also what legacy servers send.
+	//   "direct" — the source is already browser-native (the web decided this
+	//              from library scan metadata + an agent-version gate). Serve
+	//              the raw file over /stream (HTTP Range, no ffmpeg) instead of
+	//              transcoding to HLS. See hueco #3 phase 3a in the roadmap.
+	PlayMethod string `json:"playMethod,omitempty"`
 }
 
 // SyncResponse is returned by the server with all pending actions for the CLI.
