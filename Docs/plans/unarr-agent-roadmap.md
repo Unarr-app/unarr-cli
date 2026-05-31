@@ -43,7 +43,7 @@ Sólido salvo nota:
 funnel/UPnP el stream queda público en internet. Plan previo
 `Docs/plans/security-stream-token.md` (deferido, sin código).
 
-### Hueco #2 — Debrid en el path de streaming  🟡 2a CERRADO (2026-05-31); 2b/2c pendientes
+### Hueco #2 — Debrid en el path de streaming  🟡 2a+2b CERRADO (2026-05-31); 2c pendiente
 Hoy debrid es **solo descarga**, resuelto server-side; el streaming es 100%
 torrent. La promesa "play instantáneo cache-fast" no ocurre. Falta: source debrid
 en el path de streaming + cache-availability + **fallback torrent↔debrid mid-stream**.
@@ -149,8 +149,25 @@ WEB (`torrentclaw-web`):
 ---
 
 ### Hueco #2 — Debrid en el path de streaming
-**Estado:** 🟡 Fase 2a CERRADA (2026-05-31). 2b (HLS-desde-URL) + 2c (cache-fast
-+ fallback mid-stream) pendientes.
+**Estado:** 🟡 Fases 2a + 2b CERRADAS (2026-05-31). 2c (preferencia cache-fast
+sobre torrent + fallback mid-stream) pendiente.
+
+**CERRADO 2b (2026-05-31):** HLS-desde-URL para contenido debrid no-nativo
+(mkv/HEVC/…). ffmpeg lee la URL debrid directa (`-i <url>` + flags de red
+`-reconnect*`/`-rw_timeout`) y transcodifica a HLS; el seek reinicia ffmpeg con
+`-ss` antes de `-i` (input-seek vía Range). Cache de segmentos por `CacheID`
+(info_hash) → replay hace cache-HIT pese a que la URL cambia cada resolución.
+Validado e2e contra AllDebrid real: mkv HEVC x265 → h264_nvenc desde la URL →
+Chrome reproduce 1080p vía hls.js, subtítulos extraídos del mkv remoto. Bump
+CLI 0.11.0→0.12.0 (gate `DEBRID_HLS_MIN_VERSION`). Ficheros: CLI
+`engine/hls.go` (SourceURL/CacheID/sourceRef + flags red), `cmd/daemon.go`
+(branch 2b + helper `startHLSPlayback`), `engine/hls_cache.go` (`KeyForID`),
+`library/mediainfo/ffprobe.go` (no enmascarar errores de URL). WEB
+`stream/debrid-stream-source.ts` (playMethod direct|hls por contenedor),
+`services/agent-version-compare.ts` (`supportsDebridHls`).
+Limitación: solo audio default (raw debrid sin UI de pistas); subs bitmap (PGS)
+no soportados (igual que HLS local). Si AllDebrid no marca "ready" al primer
+addMagnet → fallback torrent (sin callejón).
 
 **CERRADO 2a (2026-05-31):** debrid como fuente de `/stream` (direct-play),
 validado e2e contra AllDebrid real (cuenta hello@torrentclaw.com): play de un
