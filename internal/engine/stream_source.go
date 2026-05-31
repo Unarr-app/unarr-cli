@@ -125,7 +125,20 @@ func newTranscodeSource(
 		return nil, err
 	}
 
-	estimate := estimateOutputSize(probe, opts)
+	// Size estimate for the scrubber timeline. A copy remux (video not
+	// re-encoded) lands within container overhead of the source file, so the
+	// source size is a far better estimate than bitrate×duration — use it.
+	// A real transcode re-encodes, so fall back to the bitrate×duration model.
+	var estimate int64
+	switch action {
+	case ActionPassthrough, ActionRemux, ActionRemuxAudio:
+		if fi, statErr := os.Stat(srcPath); statErr == nil {
+			estimate = fi.Size()
+		}
+	}
+	if estimate <= 0 {
+		estimate = estimateOutputSize(probe, opts)
+	}
 
 	t := &transcodeSource{
 		tmpPath:   tmpPath,
@@ -149,6 +162,18 @@ func newTranscodeSource(
 	go t.watchSize(ctx)
 	go t.watchExit()
 	return t, nil
+}
+
+// NewRemuxSource starts an ffmpeg `-c copy` remux of srcPath into a growing
+// fragmented-MP4 temp file and returns it as a GrowingSource for /stream
+// (hueco #3 / 3b). The video + audio are copied (never re-encoded), so this is
+// only valid when the codecs are already browser-native (h264 + aac) and only
+// the container needs changing — the web's decidePlayMethod enforces that
+// before sending PlayMethod="remux". The browser plays the result progressively
+// via byte-range. Caller MUST Close() it (kills ffmpeg + removes the temp file).
+func NewRemuxSource(ctx context.Context, srcPath string, probe *StreamProbe, ffmpegPath, displayName string) (GrowingSource, error) {
+	opts := TranscodeOpts{Action: ActionRemux, FFmpegPath: ffmpegPath}
+	return newTranscodeSource(ctx, srcPath, probe, ActionRemux, opts, displayName)
 }
 
 // signalNotify wakes any goroutine blocked in ReadAt. Non-blocking: if a

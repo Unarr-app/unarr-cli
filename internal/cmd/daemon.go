@@ -618,6 +618,41 @@ func runDaemonStart() error {
 			log.Printf("[hls %s] rejected: ffmpeg/ffprobe unavailable", agent.ShortID(sess.SessionID))
 			return
 		}
+
+		// Remux path (hueco #3 / 3b): codecs are browser-native (h264/aac) but
+		// the container isn't (mkv). ffmpeg `-c copy` → growing fMP4 served raw
+		// over /stream — no video re-encode, no HLS. The web decided this from
+		// scan metadata + version gate; we still need ffmpeg (copy uses it).
+		if sess.PlayMethod == "remux" {
+			probeCtx, cancelProbe := context.WithTimeout(ctx, 15*time.Second)
+			probe, perr := engine.ProbeFile(probeCtx, tcRuntime.FFprobePath, filePath)
+			cancelProbe()
+			if perr != nil {
+				log.Printf("[stream %s] remux probe failed: %v", agent.ShortID(sess.SessionID), perr)
+				return
+			}
+			remuxCtx, remuxCancel := context.WithCancel(ctx)
+			src, serr := engine.NewRemuxSource(remuxCtx, filePath, probe, tcRuntime.FFmpegPath, sess.FileName)
+			if serr != nil {
+				remuxCancel()
+				log.Printf("[stream %s] remux start failed: %v", agent.ShortID(sess.SessionID), serr)
+				return
+			}
+			streamSrv.SetGrowingFile(src, sess.TaskID)
+			// cancel stops the ffmpeg copy; SetGrowingFile/ClearFile also Close()
+			// the source, so the temp file is always cleaned up.
+			playerSessionRegistry.add(sess.SessionID, func() { remuxCancel(); streamSrv.ClearFile() })
+			log.Printf("[stream %s] remux (copy) → fMP4: %s", agent.ShortID(sess.SessionID), filepath.Base(filePath))
+			go func() {
+				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				if err := agentClient.MarkSessionReady(rctx, sess.SessionID); err != nil {
+					log.Printf("[stream %s] mark-ready failed: %v", agent.ShortID(sess.SessionID), err)
+				}
+			}()
+			return
+		}
+
 		hlsCtx, hlsCancel := context.WithCancel(ctx)
 		playerSessionRegistry.add(sess.SessionID, hlsCancel)
 		hlsCfg := engine.HLSSessionConfig{
