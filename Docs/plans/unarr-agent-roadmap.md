@@ -54,7 +54,8 @@ El path HLS **siempre re-encoda** (incluso mp4 h264/aac ya compatible). `DecideA
 (passthrough/remux) existe pero muerto en el path browser. Sin negociación por
 capacidades del dispositivo. Sin ABR multi-bitrate.
 Diseño por fases (3a direct-play / 3b remux fMP4 / 3c capability-negotiation / 3d ABR)
-en el estado abajo. **Fases 3a + 3b CERRADAS** (smoke e2e en browser); 3c/3d pendientes.
+en el estado abajo. **Fases 3a + 3b + 3c CERRADAS** (smoke e2e, incl. HEVC en iPhone
+Safari real); 3d (ABR) pendiente, baja prioridad.
 
 ### Hueco #4 — Pre-transcode (transcode-on-download)  🔵 DISEÑADO (ver estado abajo)
 Al completar una descarga/import, transcodificar/remuxar en background para que el
@@ -397,6 +398,38 @@ binario local para el smoke, **sin publicar nada**. `DIRECT_PLAY_MIN_VERSION = 0
   embebidas vía `<video>` nativo); subs bitmap no se ven. Aceptable en 3a.
 - Listener `loadedmetadata {once:true}` del attach nativo no se limpia
   explícitamente en cleanup (idempotente, impacto nulo).
+
+**Fase 3c CERRADA 2026-05-31** (capability-negotiation, alcance ampliado):
+- CLI (`feat/unarr-agent` 957d499): `NewRemuxSource` copia el vídeo para cualquier
+  codec decodificable: h264, o HEVC/AV1 si el dispositivo lo declara. HEVC se muxea
+  con `-tag:v hvc1` (Apple lo exige). Audio no-aac (ac3/eac3/dts) se transcodifica a
+  aac copiando el vídeo (`ActionRemuxAudio`) → cubre el muy común **h264+ac3 mkv**.
+- WEB (`feat/unarr-brand` b0681d99): player sondea `canPlayType` (`detectDeviceCaps`)
+  y envía `{hevc,av1}` en el POST; `decidePlayMethod(p, caps)` device-aware:
+  HEVC/AV1 → `remux` solo si el dispositivo decodifica; audio no-aac ya no fuerza
+  `hls`. Tests caps actualizados (10).
+- **Smoke e2e:** caps gate (sin caps→`hls`, con caps→`remux`); h264+ac3 remux
+  reproduce en Chrome (audio transcodeado, vídeo copiado); retag verificado por
+  ffprobe (`codec_name=hevc`, `codec_tag_string=hvc1`); **HEVC reproduce en iPhone
+  Safari real (Tailscale) — confirmado por el usuario.** ✓
+- **Caveat:** playback HEVC en Apple no se puede smokear en este host (Chrome-Linux
+  no decodifica HEVC; Mac-mini Safari por SSH bloqueado por TCC: Automation +
+  Screen Recording necesitan click GUI). Verificado vía iPhone del usuario.
+
+**Diagnóstico time-to-first-frame (2026-05-31)** (instrumentación en 957d499:
+timers `probe`/`spawn`, `first fMP4 bytes after`, `serveGrowing blocked`):
+- Agente NO es el cuello: probe 16–98ms, spawn 1–194ms, primer byte fMP4 ~201ms,
+  **0 bloqueos** en `serveGrowing` (LAN ni remoto). Remux `-c copy` completo de un
+  fichero de ~780MB en ~16s (limitado por lectura NAS).
+- `moov` al frente (empty_moov OK) → el player no busca metadata al final.
+- Cliente (Chrome/LAN): POST→primer request ~480ms (sobre todo carga de página).
+- **1ª reproducción lenta = warm-up de red (Tailscale); 2ª/3ª rápidas** (confirmado
+  por el usuario). No es un problema de código.
+- Player YA da feedback (fases `loading-meta`/`probing-transport`/`playing` +
+  overlay "Preparando…" + spinner de buffering + mensaje stuck >10s). El "sin
+  feedback" del test fue por usar URL cruda (sin UI), no el flujo real.
+- **Conclusión:** sin optimización de código necesaria. Arranque garantizado-instante
+  = **hueco #4 (pre-transcode)**: dejar el remux/encode hecho antes del play.
 
 ---
 
