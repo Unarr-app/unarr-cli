@@ -204,6 +204,9 @@ func runDaemonStart() error {
 	metaTimeout, _ := time.ParseDuration(cfg.Download.MetadataTimeout)
 	stallTimeout, _ := time.ParseDuration(cfg.Download.StallTimeout)
 
+	// Parse the seeding time target (0/"" = no time target — ratio-only or forever)
+	seedTime, _ := time.ParseDuration(cfg.Download.SeedTime)
+
 	// Create progress reporter — only used for stream tasks (handleStreamTask)
 	// The sync goroutine handles all regular progress reporting.
 	statusInterval, _ := time.ParseDuration(cfg.Daemon.StatusInterval)
@@ -273,7 +276,9 @@ func runDaemonStart() error {
 		MaxDownloadRate:    maxDl,
 		MaxUploadRate:      maxUl,
 		ListenPort:         cfg.Download.ListenPort,
-		SeedEnabled:        false,
+		SeedEnabled:        cfg.Download.SeedEnabled,
+		SeedRatio:          cfg.Download.SeedRatio,
+		SeedTime:           seedTime,
 		VPNTunnel:          vpnTunnel,
 	})
 	if err != nil {
@@ -289,6 +294,19 @@ func runDaemonStart() error {
 			ulStr = formatSpeedLog(maxUl)
 		}
 		log.Printf("Speed limits: download=%s upload=%s", dlStr, ulStr)
+	}
+
+	if cfg.Download.SeedEnabled {
+		switch {
+		case cfg.Download.SeedRatio > 0 && seedTime > 0:
+			log.Printf("[torrent] seeding enabled (stop at ratio %.2f or %s, whichever first)", cfg.Download.SeedRatio, seedTime)
+		case cfg.Download.SeedRatio > 0:
+			log.Printf("[torrent] seeding enabled (stop at ratio %.2f)", cfg.Download.SeedRatio)
+		case seedTime > 0:
+			log.Printf("[torrent] seeding enabled (stop after %s)", seedTime)
+		default:
+			log.Printf("[torrent] seeding enabled (no ratio/time target — seeds until shutdown)")
+		}
 	}
 
 	// Create debrid downloader

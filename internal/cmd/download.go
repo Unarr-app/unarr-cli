@@ -113,7 +113,9 @@ func runDownloadWithDeps(input, method string, deps downloadDeps) error {
 		MetadataTimeout: 15 * time.Minute,
 		StallTimeout:    10 * time.Minute,
 		MaxTimeout:      0, // unlimited
-		SeedEnabled:     false,
+		// One-shot foreground download: leech then exit. Seeding only makes sense
+		// for the always-on daemon (see DownloadConfig.SeedEnabled).
+		SeedEnabled: false,
 	})
 	if err != nil {
 		return fmt.Errorf("create downloader: %w", err)

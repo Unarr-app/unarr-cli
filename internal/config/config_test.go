@@ -246,6 +246,55 @@ enabled = false
 	}
 }
 
+func TestLoadSeedingDefaultsOff(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+
+	// No [downloads] seeding keys — seeding must stay off by default.
+	os.WriteFile(path, []byte(`[auth]
+api_key = "tc_x"
+`), 0o644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Download.SeedEnabled {
+		t.Error("SeedEnabled should default to false")
+	}
+	if cfg.Download.SeedRatio != 0 {
+		t.Errorf("SeedRatio = %v, want 0", cfg.Download.SeedRatio)
+	}
+	if cfg.Download.SeedTime != "" {
+		t.Errorf("SeedTime = %q, want empty", cfg.Download.SeedTime)
+	}
+}
+
+func TestLoadSeedingExplicit(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+
+	os.WriteFile(path, []byte(`[downloads]
+seed_enabled = true
+seed_ratio = 2.0
+seed_time = "24h"
+`), 0o644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Download.SeedEnabled {
+		t.Error("SeedEnabled = false, want true")
+	}
+	if cfg.Download.SeedRatio != 2.0 {
+		t.Errorf("SeedRatio = %v, want 2.0", cfg.Download.SeedRatio)
+	}
+	if cfg.Download.SeedTime != "24h" {
+		t.Errorf("SeedTime = %q, want 24h", cfg.Download.SeedTime)
+	}
+}
+
 func TestLoadInvalidTOML(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "config.toml")

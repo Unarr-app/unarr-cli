@@ -43,14 +43,20 @@ type DownloadConfig struct {
 	PreferredMethod  string `toml:"preferred_method"`
 	PreferredQuality string `toml:"preferred_quality"` // "2160p", "1080p", "720p" — hint for auto-selection
 	MaxConcurrent    int    `toml:"max_concurrent"`
-	MinFreeDiskMB    int    `toml:"min_free_disk_mb"` // refuse a download if it would leave less than this free (reserve to keep the FS healthy); default 2048, 0 = disable
+	MinFreeDiskMB    int    `toml:"min_free_disk_mb"`   // refuse a download if it would leave less than this free (reserve to keep the FS healthy); default 2048, 0 = disable
 	MaxDownloadSpeed string `toml:"max_download_speed"` // e.g. "10MB", "500KB", "0" = unlimited
 	MaxUploadSpeed   string `toml:"max_upload_speed"`   // e.g. "1MB", "0" = unlimited
-	MetadataTimeout  string `toml:"metadata_timeout"`   // e.g. "1h", "30m", "0" = unlimited (default: "0")
-	StallTimeout     string `toml:"stall_timeout"`      // e.g. "30m", "1h", "0" = unlimited (default: "30m")
-	ListenPort       int    `toml:"listen_port"`        // fixed port for incoming peer connections (default: 42069, 0 = random)
-	StreamPort       int    `toml:"stream_port"`        // fixed port for streaming HTTP server (default: 11818)
-	EnableUPnP       bool   `toml:"enable_upnp"`        // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in)
+	// Seeding lifecycle (BitTorrent only). Off by default — the daemon leeches
+	// then drops the torrent. Enable to keep uploading after a download finishes;
+	// seeding stops at whichever target is hit first, or never if both are unset.
+	SeedEnabled     bool    `toml:"seed_enabled"`     // keep uploading after completion (default: false)
+	SeedRatio       float64 `toml:"seed_ratio"`       // stop once uploaded/size reaches this ratio (0 = no ratio target)
+	SeedTime        string  `toml:"seed_time"`        // stop after this long since completion, e.g. "24h" (0/"" = no time target)
+	MetadataTimeout string  `toml:"metadata_timeout"` // e.g. "1h", "30m", "0" = unlimited (default: "0")
+	StallTimeout    string  `toml:"stall_timeout"`    // e.g. "30m", "1h", "0" = unlimited (default: "30m")
+	ListenPort      int     `toml:"listen_port"`      // fixed port for incoming peer connections (default: 42069, 0 = random)
+	StreamPort      int     `toml:"stream_port"`      // fixed port for streaming HTTP server (default: 11818)
+	EnableUPnP      bool    `toml:"enable_upnp"`      // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in)
 	// RequireStreamToken gates remote (non-loopback) /stream + /hls requests on a
 	// signed, short-lived token embedded in the URLs the agent reports. Default
 	// true (secure by default); loopback callers (local mpv/vlc) are always exempt.

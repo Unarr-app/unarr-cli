@@ -16,6 +16,7 @@ import (
 	alog "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/storage"
+	"github.com/torrentclaw/unarr/internal/agent"
 	"github.com/torrentclaw/unarr/internal/config"
 	"github.com/torrentclaw/unarr/internal/vpn"
 	"golang.org/x/term"
@@ -61,21 +62,21 @@ var defaultTrackers = []string{
 
 // TorrentConfig holds settings for the BitTorrent downloader.
 type TorrentConfig struct {
-	DataDir             string
+	DataDir string
 	// PieceCompletionDir, when non-empty, stores the piece-completion SQLite DB
 	// in this directory instead of DataDir. Use the agent's local state dir
 	// (not the download dir) so the DB never lands on NFS/SMB volumes where
 	// SQLite locking times out.
-	PieceCompletionDir  string
-	MetadataTimeout time.Duration // how long to wait for torrent metadata (default 15m, 0 = unlimited)
-	StallTimeout    time.Duration // no progress during download for this long = stall (default 10m)
-	MaxTimeout      time.Duration // absolute maximum per torrent (default 0 = unlimited)
-	MaxDownloadRate int64         // bytes/s, 0 = unlimited
-	MaxUploadRate   int64         // bytes/s, 0 = unlimited
-	ListenPort      int           // fixed port for incoming peers (default 42069, 0 = random)
-	SeedEnabled     bool
-	SeedRatio       float64       // target seed ratio (default 0, meaning seed until SeedTime)
-	SeedTime        time.Duration // min seed time after completion (default 0)
+	PieceCompletionDir string
+	MetadataTimeout    time.Duration // how long to wait for torrent metadata (default 15m, 0 = unlimited)
+	StallTimeout       time.Duration // no progress during download for this long = stall (default 10m)
+	MaxTimeout         time.Duration // absolute maximum per torrent (default 0 = unlimited)
+	MaxDownloadRate    int64         // bytes/s, 0 = unlimited
+	MaxUploadRate      int64         // bytes/s, 0 = unlimited
+	ListenPort         int           // fixed port for incoming peers (default 42069, 0 = random)
+	SeedEnabled        bool
+	SeedRatio          float64       // target seed ratio (default 0, meaning seed until SeedTime)
+	SeedTime           time.Duration // min seed time after completion (default 0)
 
 	// VPNTunnel, when set, split-tunnels the torrent client's peer + tracker
 	// traffic through an in-process userspace WireGuard tunnel (managed-VPN
@@ -90,6 +91,15 @@ type TorrentDownloader struct {
 
 	activeMu sync.Mutex
 	active   map[string]*torrent.Torrent // taskID -> torrent handle
+
+	// seedCtx scopes the background seeders. Cancelled at Shutdown so they stop
+	// uploading and exit; it must outlive any single download's task context
+	// (which is cancelled the moment Download returns and the queue slot frees).
+	seedCtx    context.Context
+	seedCancel context.CancelFunc
+	// seedCheckInterval is how often the background seeder re-checks its stop
+	// condition. Defaults to defaultSeedCheckInterval; tests lower it.
+	seedCheckInterval time.Duration
 
 	minFreeBytes int64 // disk reserve for the pre-flight space check (0 = reserve disabled)
 }
@@ -278,10 +288,14 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 		}
 	}
 
+	seedCtx, seedCancel := context.WithCancel(context.Background())
 	return &TorrentDownloader{
-		client: client,
-		cfg:    cfg,
-		active: make(map[string]*torrent.Torrent),
+		client:            client,
+		cfg:               cfg,
+		active:            make(map[string]*torrent.Torrent),
+		seedCtx:           seedCtx,
+		seedCancel:        seedCancel,
+		seedCheckInterval: defaultSeedCheckInterval,
 	}, nil
 }
 
@@ -304,14 +318,11 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 	d.active[task.ID] = t
 	d.activeMu.Unlock()
 
-	cleanup := func() {
-		d.activeMu.Lock()
-		delete(d.active, task.ID)
-		d.activeMu.Unlock()
-		if !d.cfg.SeedEnabled {
-			t.Drop()
-		}
-	}
+	// cleanup drops the torrent and stops tracking it. Used by every error path
+	// (metadata timeout, disk guard, poll failure) and by the non-seeding success
+	// path — all of which must drop. The seeding success path deliberately does
+	// NOT call cleanup (it hands off to seedAndDrop).
+	cleanup := func() { d.dropTracked(task.ID, t) }
 
 	// 1. Wait for metadata (0 = unlimited, like qBittorrent)
 	if d.cfg.MetadataTimeout > 0 {
@@ -396,9 +407,14 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 	// readable mode is preserved through the rename.
 	makeReadable(filePath)
 
-	// If seeding enabled, keep alive (don't cleanup).
-	// The manager handles seeding lifecycle.
-	if !d.cfg.SeedEnabled {
+	// Seeding handoff: with seeding enabled, keep the torrent uploading in the
+	// background — seedAndDrop drops it once the ratio/time target is hit (or at
+	// shutdown). Otherwise drop now. seedAndDrop must NOT use ctx: the task
+	// context is cancelled the moment Download returns and the manager frees the
+	// queue slot, which would kill the seeder instantly.
+	if d.cfg.SeedEnabled {
+		go d.seedAndDrop(task.ID, t, totalBytes)
+	} else {
 		cleanup()
 	}
 
@@ -503,6 +519,97 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 	}
 }
 
+// dropTracked stops tracking taskID and drops the torrent handle. The delete is
+// guarded on the entry still being this handle, so a concurrent Pause/Cancel that
+// already removed/replaced it isn't clobbered; t.Drop() is idempotent. Shared by
+// the error/non-seeding cleanup path and the post-seeding drop.
+func (d *TorrentDownloader) dropTracked(taskID string, t *torrent.Torrent) {
+	d.activeMu.Lock()
+	if cur, ok := d.active[taskID]; ok && cur == t {
+		delete(d.active, taskID)
+	}
+	d.activeMu.Unlock()
+	t.Drop()
+}
+
+// defaultSeedCheckInterval is how often the background seeder re-evaluates the
+// ratio / time stop condition. Seeding is long-running and low-urgency, so a
+// coarse interval keeps the overhead negligible. Stored on the downloader so
+// tests can lower it.
+const defaultSeedCheckInterval = 30 * time.Second
+
+// seedTargetReached reports why seeding should stop, or "" to keep going.
+// Ratio is uploaded-data / selected-size ("uploaded N× the content"), which is
+// stable across resumes — unlike uploaded/downloaded-this-session. The two
+// targets are independent: whichever of ratio (>0) or time (>0) fires first
+// wins; with both unset nothing ever fires (the caller seeds indefinitely).
+func seedTargetReached(ratioTarget float64, timeTarget time.Duration, uploaded, size int64, elapsed time.Duration) string {
+	var ratio float64
+	if size > 0 {
+		ratio = float64(uploaded) / float64(size)
+	}
+	switch {
+	case ratioTarget > 0 && ratio >= ratioTarget:
+		return fmt.Sprintf("ratio %.2f reached (target %.2f)", ratio, ratioTarget)
+	case timeTarget > 0 && elapsed >= timeTarget:
+		return fmt.Sprintf("seed time %s reached (target %s)", elapsed.Round(time.Second), timeTarget)
+	}
+	return ""
+}
+
+// seedAndDrop keeps a completed torrent uploading until the configured ratio or
+// time target is reached, then drops it (stops seeding, releases the handle and
+// its queue tracking). Runs detached on d.seedCtx — see the Download call site
+// for why it can't use the task context. With no ratio/time target it returns
+// immediately and the torrent seeds until Shutdown (or a user cancel/pause drops
+// it). It exits without dropping if the handle was already removed elsewhere, so
+// it never reads stats off a closed torrent nor double-drops.
+func (d *TorrentDownloader) seedAndDrop(taskID string, t *torrent.Torrent, totalBytes int64) {
+	sid := agent.ShortID(taskID)
+
+	ratioTarget := d.cfg.SeedRatio
+	timeTarget := d.cfg.SeedTime
+	if ratioTarget <= 0 && timeTarget <= 0 {
+		log.Printf("[%s] seeding indefinitely (no ratio/time target) — drops at shutdown", sid)
+		return
+	}
+	log.Printf("[%s] seeding (ratio target: %.2f, time target: %s)", sid, ratioTarget, timeTarget)
+
+	interval := d.seedCheckInterval
+	if interval <= 0 {
+		interval = defaultSeedCheckInterval
+	}
+	start := time.Now()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.seedCtx.Done():
+			return // daemon shutting down — Shutdown drops the handle
+		case <-ticker.C:
+			// Bail if the handle was dropped elsewhere (user cancel/pause).
+			d.activeMu.Lock()
+			cur, ok := d.active[taskID]
+			d.activeMu.Unlock()
+			if !ok || cur != t {
+				return
+			}
+
+			stats := t.Stats()
+			uploaded := stats.BytesWrittenData.Int64()
+			reason := seedTargetReached(ratioTarget, timeTarget, uploaded, totalBytes, time.Since(start))
+			if reason == "" {
+				continue
+			}
+
+			log.Printf("[%s] seeding complete: %s, uploaded %s — dropping", sid, reason, formatBytes(uploaded))
+			d.dropTracked(taskID, t)
+			return
+		}
+	}
+}
+
 // makeReadable relaxes permissions on a completed download so it can be
 // re-opened by streaming/ffprobe/organize. anacrolix mmap storage creates
 // files with mode 0000; we set files to 0644 and directories to 0755. Errors
@@ -588,6 +695,12 @@ func (d *TorrentDownloader) Cancel(taskID string) error {
 }
 
 func (d *TorrentDownloader) Shutdown(ctx context.Context) error {
+	// Stop background seeders first so they don't read stats off / re-drop the
+	// handles we're about to close.
+	if d.seedCancel != nil {
+		d.seedCancel()
+	}
+
 	// Save DHT nodes in binary format for next session (warm start)
 	saveDhtNodesBinary(d.client)
 
