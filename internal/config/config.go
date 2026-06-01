@@ -151,6 +151,11 @@ type DaemonConfig struct {
 	// logs "new version available" and the operator must run `unarr update`
 	// manually. Default: true. Available since unarr 0.9.6.
 	AutoUpgrade *bool `toml:"auto_upgrade"`
+	// Downlink selects the server→agent realtime transport. "auto" (default)
+	// uses an SSE push connection with the long-poll wake as a buffering-tolerant
+	// fallback; "sse" forces SSE only (no fallback); "poll" forces the pre-0.14
+	// long-poll wake only. Empty = "auto". Available since unarr 0.14.0.
+	Downlink string `toml:"downlink"`
 }
 
 // AutoUpgradeEnabled returns the resolved AutoUpgrade flag — defaults to true

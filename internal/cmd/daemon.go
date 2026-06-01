@@ -179,6 +179,7 @@ func runDaemonStart() error {
 		HWEncoders:         hwDiag.Encoders,
 		HWDevices:          hwDiag.Devices,
 		AutoUpgrade:        cfg.Daemon.AutoUpgradeEnabled(),
+		Downlink:           cfg.Daemon.Downlink,
 	}
 
 	// Create HTTP client with mirror failover so a `.com` block-out rolls

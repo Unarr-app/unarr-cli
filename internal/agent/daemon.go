@@ -38,6 +38,7 @@ type DaemonConfig struct {
 	HWEncoders    []string // HW-class encoder names found in `ffmpeg -encoders`
 	HWDevices     []string // device files + driver bins detected at probe time
 	AutoUpgrade   bool     // honor server-flagged upgrades by downloading + restarting (default: true)
+	Downlink      string   // realtime downlink transport: "auto" (SSE+long-poll fallback) | "sse" | "poll"
 }
 
 // Daemon manages agent registration and the sync loop.

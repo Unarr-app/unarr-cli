@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,6 +17,23 @@ const (
 	// SyncIntervalIdle is the sync interval when nobody is watching.
 	// Keep this short enough to pick up stream requests quickly without hammering the server.
 	SyncIntervalIdle = 10 * time.Second
+
+	// --- Downlink (server→agent realtime) tuning ---
+
+	// downlinkLivenessTimeout is the maximum time to wait for ANY SSE frame
+	// (heartbeat comment or event) before declaring the stream dead. The server
+	// heartbeats every ~15s; ~2.5× gives slack for jitter while still catching a
+	// path that connects 200 OK but silently buffers (delivers nothing until
+	// close) — the failure mode that justifies the long-poll fallback.
+	downlinkLivenessTimeout = 40 * time.Second
+	// sseReconnectDelay is the pause between SSE connection attempts.
+	sseReconnectDelay = 2 * time.Second
+	// maxSSEFailures is the number of consecutive failed/dead SSE attempts
+	// before "auto" mode falls back to the long-poll wake downlink.
+	maxSSEFailures = 3
+	// downlinkFallbackWindow is how long to ride long-poll before re-probing SSE,
+	// so a transient proxy hiccup doesn't pin the agent on polling forever.
+	downlinkFallbackWindow = 5 * time.Minute
 )
 
 // SyncClient handles bidirectional state synchronization between the CLI and server.
@@ -53,6 +72,11 @@ type SyncClient struct {
 	watching atomic.Bool
 	interval atomic.Int64 // stored as nanoseconds
 
+	// livenessTimeout is the max wait for any SSE frame before the downlink
+	// treats the stream as dead/buffered. Defaults to downlinkLivenessTimeout;
+	// overridable in tests.
+	livenessTimeout time.Duration
+
 	// pendingDeleteConfirmed holds item IDs to report as deleted in the next sync.
 	pendingDeleteMu        sync.Mutex
 	pendingDeleteConfirmed []int
@@ -64,10 +88,11 @@ type SyncClient struct {
 // NewSyncClient creates a sync client.
 func NewSyncClient(client *Client, cfg DaemonConfig, state *LocalState) *SyncClient {
 	sc := &SyncClient{
-		client:  client,
-		cfg:     cfg,
-		state:   state,
-		SyncNow: make(chan struct{}, 1),
+		client:          client,
+		cfg:             cfg,
+		state:           state,
+		SyncNow:         make(chan struct{}, 1),
+		livenessTimeout: downlinkLivenessTimeout,
 	}
 	sc.interval.Store(int64(SyncIntervalIdle))
 	return sc
@@ -88,8 +113,9 @@ func (sc *SyncClient) TriggerSync() {
 
 // Run starts the adaptive sync loop. Blocks until ctx is cancelled.
 func (sc *SyncClient) Run(ctx context.Context) error {
-	// Start wake listener in background — triggers immediate syncs on demand.
-	go sc.runWakeListener(ctx)
+	// Start the realtime downlink in background — pushes immediate syncs +
+	// typed control commands on demand (SSE-first, long-poll fallback).
+	go sc.runDownlink(ctx)
 
 	// Initial sync immediately
 	sc.doSync(ctx)
@@ -281,6 +307,176 @@ func (sc *SyncClient) runWakeListener(ctx context.Context) {
 			sc.TriggerSync()
 		}
 		// On timeout (woke=false) or after a wake, reconnect immediately.
+	}
+}
+
+// runWakeListenerFor runs the long-poll wake listener for up to `dur`, then
+// returns so the caller can re-probe SSE. Used as the auto-mode fallback.
+func (sc *SyncClient) runWakeListenerFor(ctx context.Context, dur time.Duration) {
+	childCtx, cancel := context.WithTimeout(ctx, dur)
+	defer cancel()
+	sc.runWakeListener(childCtx)
+}
+
+// downlinkMode resolves the configured downlink transport:
+//   - "auto" (default): SSE-first, fall back to long-poll wake if SSE is
+//     unavailable or silently buffered, then periodically re-probe SSE.
+//   - "sse": SSE only, no long-poll fallback (testing / known-good networks).
+//   - "poll": long-poll wake only (the pre-0.14 behavior).
+func (sc *SyncClient) downlinkMode() string {
+	switch strings.ToLower(strings.TrimSpace(sc.cfg.Downlink)) {
+	case "poll":
+		return "poll"
+	case "sse":
+		return "sse"
+	default:
+		return "auto"
+	}
+}
+
+// runDownlink is the server→agent realtime loop. It supersedes the bare
+// long-poll wake listener: an SSE connection pushes typed control commands and
+// sync nudges over a single persistent connection, with the long-poll wake as a
+// buffering-tolerant fallback (long-poll survives proxies that buffer the
+// response body and break SSE). Runs until ctx is cancelled.
+func (sc *SyncClient) runDownlink(ctx context.Context) {
+	switch sc.downlinkMode() {
+	case "poll":
+		log.Printf("downlink: long-poll wake (downlink=poll)")
+		sc.runWakeListener(ctx)
+	case "sse":
+		log.Printf("downlink: SSE only (downlink=sse) — no long-poll fallback")
+		sc.runSSELoop(ctx, false)
+	default:
+		sc.runSSELoop(ctx, true)
+	}
+}
+
+// runSSELoop maintains the SSE downlink, reconnecting across server recycles
+// and transient drops. When allowFallback is true (auto mode), it switches to
+// the long-poll wake after maxSSEFailures consecutive dead attempts, then
+// re-probes SSE after downlinkFallbackWindow.
+func (sc *SyncClient) runSSELoop(ctx context.Context, allowFallback bool) {
+	failures := 0
+	for ctx.Err() == nil {
+		healthy := sc.runEventStreamOnce(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if healthy {
+			failures = 0
+			// A healthy stream that ended is a normal server recycle — reconnect.
+			sc.sleep(ctx, sseReconnectDelay)
+			continue
+		}
+
+		failures++
+		if allowFallback && failures >= maxSSEFailures {
+			log.Printf("downlink: SSE unavailable after %d attempts — falling back to long-poll for %s", failures, downlinkFallbackWindow)
+			sc.runWakeListenerFor(ctx, downlinkFallbackWindow)
+			failures = 0
+			continue
+		}
+		sc.sleep(ctx, sseReconnectDelay)
+	}
+}
+
+// runEventStreamOnce opens one SSE connection and consumes it until it dies or
+// ctx is cancelled. Returns true if the stream was "healthy" — i.e. it
+// delivered at least one frame (event or heartbeat) — and false if it failed to
+// connect or delivered nothing within downlinkLivenessTimeout (dead or silently
+// buffered). The caller uses that signal to decide whether to fall back.
+func (sc *SyncClient) runEventStreamOnce(ctx context.Context) bool {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	stream, err := sc.client.OpenEventStream(streamCtx)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("downlink: SSE connect failed: %v", err)
+		}
+		return false
+	}
+	defer stream.Close()
+
+	healthy := false
+	liveness := time.NewTimer(sc.livenessTimeout)
+	defer liveness.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return healthy
+		case <-liveness.C:
+			// No frame within the deadline. The server heartbeats every ~15s, so
+			// silence past livenessTimeout (40s) means the path is dead OR
+			// silently buffering — INCLUDING a proxy that flushed the connect
+			// preamble (one ping) then stalled. Return false REGARDLESS of any
+			// earlier frame, so this counts toward the long-poll fallback; a
+			// stream that flushes one ping and goes quiet must not be treated as
+			// healthy or the fallback never triggers for partial bufferers.
+			if ctx.Err() == nil {
+				log.Printf("downlink: no SSE frame within %s — dropping (dead or buffered path)", sc.livenessTimeout)
+			}
+			return false
+		case ev, ok := <-stream.Events():
+			if !ok {
+				if e := stream.Err(); e != nil && ctx.Err() == nil {
+					log.Printf("downlink: SSE stream ended: %v", e)
+				}
+				return healthy
+			}
+			if !healthy {
+				// First frame on this connection — the path flushes, so log once
+				// (on a silently-buffered path no frame ever arrives and we never
+				// claim connected).
+				log.Printf("downlink: SSE connected")
+			}
+			healthy = true
+			if !liveness.Stop() {
+				select {
+				case <-liveness.C:
+				default:
+				}
+			}
+			liveness.Reset(sc.livenessTimeout)
+			sc.handleDownlinkEvent(ev)
+		}
+	}
+}
+
+// handleDownlinkEvent applies one pushed downlink event. Pings are liveness-only;
+// "sync" nudges an immediate full sync; "command" carries typed control actions
+// applied via the same OnControl callback /agent/sync uses (idempotent, so the
+// authoritative sync re-delivering them is harmless).
+func (sc *SyncClient) handleDownlinkEvent(ev DownlinkEvent) {
+	switch ev.Event {
+	case DownlinkEventPing:
+		// Liveness only.
+	case DownlinkEventSync:
+		sc.TriggerSync()
+	case DownlinkEventCommand:
+		var cmd CommandEvent
+		if err := json.Unmarshal(ev.Data, &cmd); err != nil {
+			log.Printf("downlink: bad command payload: %v", err)
+			return
+		}
+		for _, ctrl := range cmd.Controls {
+			log.Printf("downlink: control %s on task %s", ctrl.Action, ShortID(ctrl.TaskID))
+			if sc.OnControl != nil {
+				sc.OnControl(ctrl.Action, ctrl.TaskID, ctrl.DeleteFiles)
+			}
+		}
+	default:
+		// Unknown event from a newer server — ignore forward-compatibly.
+	}
+}
+
+// sleep blocks for d or until ctx is cancelled.
+func (sc *SyncClient) sleep(ctx context.Context, d time.Duration) {
+	select {
+	case <-time.After(d):
+	case <-ctx.Done():
 	}
 }
 
