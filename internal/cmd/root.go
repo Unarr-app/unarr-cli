@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	tc "github.com/torrentclaw/go-client"
+	"github.com/torrentclaw/unarr/internal/agent"
 	"github.com/torrentclaw/unarr/internal/config"
 	"github.com/torrentclaw/unarr/internal/sentry"
 	"github.com/torrentclaw/unarr/internal/upgrade"
@@ -234,6 +237,21 @@ func getClient() *tc.Client {
 	}
 
 	opts = append(opts, tc.WithUserAgent("unarr/"+Version))
+
+	// Mirror failover for the public-API client, matching the agent control-plane
+	// client's resilience: wrap the transport so search/popular/etc. rotate across
+	// cfg.Auth.Mirrors on a primary takedown, using the same MirrorPool TYPE +
+	// IsTransient policy the agent client uses (a fresh pool instance — the two
+	// clients fail over independently). WithRetry(0) disables the go-client's own
+	// retry loop so the transport owns failover exclusively (no nested
+	// retry×backoff on an outage). WithTimeout(30s) is set idiomatically and gives
+	// room for a couple of mirror attempts (go-client's bare default is 15s).
+	pool := agent.NewMirrorPool(cfg.Auth.APIURL, cfg.Auth.Mirrors)
+	opts = append(opts,
+		tc.WithHTTPClient(&http.Client{Transport: agent.NewMirrorRoundTripper(pool, nil)}),
+		tc.WithTimeout(30*time.Second),
+		tc.WithRetry(0, 0, 0),
+	)
 
 	apiClient = tc.NewClient(opts...)
 	return apiClient
