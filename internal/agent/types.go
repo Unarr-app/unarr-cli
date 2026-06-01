@@ -398,18 +398,26 @@ type LibraryDeleteRequest struct {
 // HLS registry; source bytes come from FilePath (or, when only InfoHash is
 // set, from a download_task on disk).
 type StreamSession struct {
-	SessionID  string `json:"sessionId"`
-	FilePath   string `json:"filePath,omitempty"`
-	InfoHash   string `json:"infoHash,omitempty"`
-	TaskID     string `json:"taskId,omitempty"`
-	FileName   string `json:"fileName,omitempty"`
-	FileSize   int64  `json:"fileSize,omitempty"`
+	SessionID string `json:"sessionId"`
+	FilePath  string `json:"filePath,omitempty"`
+	InfoHash  string `json:"infoHash,omitempty"`
+	TaskID    string `json:"taskId,omitempty"`
+	FileName  string `json:"fileName,omitempty"`
+	FileSize  int64  `json:"fileSize,omitempty"`
 	// Quality target the daemon should aim for when transcoding. One of
 	// "2160p" | "1080p" | "720p" | "480p" | "original" | "" (defer to config).
 	Quality string `json:"quality,omitempty"`
 	// AudioIndex selects the source audio track (-map 0:a:N). -1 means
 	// "use the default/first track".
 	AudioIndex int `json:"audioIndex,omitempty"`
+	// BurnSubtitleIndex, when set, is the 0-based subtitle stream index
+	// (-map 0:s:N) of a BITMAP subtitle (PGS/DVB) to burn into the video. Text
+	// subtitles are served as separate WebVTT tracks and never burned. A pointer
+	// (not int) so absent/null = "no burn": the zero value 0 is a valid track
+	// index, so an int sentinel would silently burn track 0 when the field is
+	// omitted. Forces a full video re-encode (the overlay can't ride a copy
+	// path), so the web only sends it when the user picks a bitmap sub.
+	BurnSubtitleIndex *int `json:"burnSubtitleIndex,omitempty"`
 	// PlayMethod is how the daemon should serve this session:
 	//   ""       — default (HLS transcode); also what legacy servers send.
 	//   "direct" — the source is already browser-native (the web decided this

@@ -61,7 +61,7 @@ type ProbeSubtitleTrack struct {
 // without re-rendering. Bitmap subs (PGS, DVB) need burn-in.
 func (s ProbeSubtitleTrack) IsTextSubtitle() bool {
 	switch s.Codec {
-	case "subrip", "srt", "ass", "ssa", "webvtt", "mov_text":
+	case "subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text":
 		return true
 	}
 	return false

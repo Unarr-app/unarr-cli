@@ -111,12 +111,80 @@ func TestHLSSourceRefAndCacheID(t *testing.T) {
 
 	c := &HLSCache{root: "/tmp/cache"}
 	// Same CacheID + quality + audio → same key regardless of the (volatile) URL.
-	k1 := c.KeyForID("hash1", "720p", -1)
-	k2 := c.KeyForID("hash1", "720p", -1)
+	k1 := c.KeyForID("hash1", "720p", -1, -1)
+	k2 := c.KeyForID("hash1", "720p", -1, -1)
 	if k1 != k2 {
 		t.Errorf("KeyForID not stable: %q != %q", k1, k2)
 	}
-	if c.KeyForID("hash2", "720p", -1) == k1 {
+	if c.KeyForID("hash2", "720p", -1, -1) == k1 {
 		t.Error("KeyForID collision across distinct ids")
 	}
+}
+
+// Burn-in: a bitmap subtitle index routes the video through -filter_complex with
+// scale2ref + overlay and maps [vout]; a nil / text / out-of-range index keeps
+// the plain -vf path (text subs are served as WebVTT, never burned).
+func TestBuildHLSFFmpegArgsBurnSubtitle(t *testing.T) {
+	idx := func(n int) *int { return &n }
+	base := func() HLSSessionConfig {
+		return HLSSessionConfig{
+			SessionID:  "burn",
+			SourcePath: "/tmp/movie.mkv",
+			Quality:    "1080p",
+			Transcode: TranscodeRuntime{
+				FFmpegPath:  "/usr/bin/ffmpeg",
+				FFprobePath: "/usr/bin/ffprobe",
+				HWAccel:     HWAccelNone,
+			},
+		}
+	}
+	probe := &StreamProbe{
+		Width: 1920, Height: 1080, DurationSec: 100,
+		SubtitleTracks: []ProbeSubtitleTrack{
+			{Index: 0, Codec: "subrip"},            // text → not burnable
+			{Index: 1, Codec: "hdmv_pgs_subtitle"}, // bitmap → burnable
+		},
+	}
+
+	t.Run("nil = clean -vf path", func(t *testing.T) {
+		got := strings.Join(buildHLSFFmpegArgsAt(base(), probe, "/tmp/d", 0, 0), " ")
+		if strings.Contains(got, "-filter_complex") || strings.Contains(got, "overlay") {
+			t.Errorf("no-burn argv must not overlay: %s", got)
+		}
+		if !strings.Contains(got, "-map 0:v:0") || !strings.Contains(got, "-vf") {
+			t.Errorf("no-burn argv must -map 0:v:0 with -vf: %s", got)
+		}
+	})
+
+	t.Run("bitmap index burns via filter_complex", func(t *testing.T) {
+		cfg := base()
+		cfg.BurnSubtitleIndex = idx(1)
+		got := strings.Join(buildHLSFFmpegArgsAt(cfg, probe, "/tmp/d", 0, 0), " ")
+		for _, want := range []string{"-filter_complex", "[0:s:1]", "scale2ref", "overlay", "-map [vout]"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("burn argv missing %q: %s", want, got)
+			}
+		}
+		if strings.Contains(got, "-map 0:v:0") {
+			t.Errorf("burn argv must map [vout], not 0:v:0: %s", got)
+		}
+	})
+
+	t.Run("text index is ignored (served as WebVTT)", func(t *testing.T) {
+		cfg := base()
+		cfg.BurnSubtitleIndex = idx(0) // subrip → not a bitmap track
+		got := strings.Join(buildHLSFFmpegArgsAt(cfg, probe, "/tmp/d", 0, 0), " ")
+		if strings.Contains(got, "overlay") || strings.Contains(got, "-filter_complex") {
+			t.Errorf("text-sub burn must fall back to clean encode: %s", got)
+		}
+	})
+
+	t.Run("out-of-range index is ignored", func(t *testing.T) {
+		cfg := base()
+		cfg.BurnSubtitleIndex = idx(9)
+		got := strings.Join(buildHLSFFmpegArgsAt(cfg, probe, "/tmp/d", 0, 0), " ")
+		if strings.Contains(got, "overlay") {
+			t.Errorf("out-of-range burn must fall back to clean encode: %s", got)
+		}
+	})
 }

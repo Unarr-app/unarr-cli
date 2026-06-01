@@ -98,7 +98,7 @@ func TestHLSCacheSmoke(t *testing.T) {
 	encodeDur := time.Since(t0)
 	t.Logf("session 1: MISS completed in %s", encodeDur.Round(time.Millisecond))
 
-	key := cache.KeyFor(source, "720p", 0)
+	key := cache.KeyFor(source, "720p", 0, -1)
 	if !cache.HasComplete(key) {
 		t.Fatalf("cache.HasComplete(%s) is false after successful encode", key)
 	}

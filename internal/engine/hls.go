@@ -151,7 +151,15 @@ type HLSSessionConfig struct {
 	FileName   string
 	Quality    string // "2160p"|"1080p"|"720p"|"480p"|"original"|""
 	AudioIndex int    // 0-based ffmpeg audio stream selection (-map 0:a:N). -1 = default.
-	Transcode  TranscodeRuntime
+	// BurnSubtitleIndex burns a BITMAP subtitle (PGS/DVB) at this 0-based
+	// subtitle stream index into the video. nil = no burn (text subs are served
+	// as separate WebVTT). A pointer (not int) so the zero value 0 — a valid
+	// stream index — can't be mistaken for a burn request when a caller leaves
+	// the field unset. Part of the cache key so a burned encode never collides
+	// with the clean one. Forces the video re-encode the HLS path already does
+	// to also composite the subtitle overlay.
+	BurnSubtitleIndex *int
+	Transcode         TranscodeRuntime
 	// Cache is an optional persistent segment cache keyed by (source, quality,
 	// audio). When set, completed encodes are kept across sessions so re-plays
 	// of the same file at the same quality skip ffmpeg entirely. nil disables
@@ -167,6 +175,15 @@ func (cfg HLSSessionConfig) sourceRef() string {
 		return cfg.SourceURL
 	}
 	return cfg.SourcePath
+}
+
+// burnSubtitleIndexOrNone resolves the optional burn-in subtitle pointer to the
+// int sentinel the cache key and filtergraph use: nil → -1 ("no burn").
+func (cfg HLSSessionConfig) burnSubtitleIndexOrNone() int {
+	if cfg.BurnSubtitleIndex == nil {
+		return -1
+	}
+	return *cfg.BurnSubtitleIndex
 }
 
 // logName is a short, log-friendly source label. For local files it's the base
@@ -383,9 +400,9 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		// Debrid URL sessions key by CacheID (info_hash) so re-plays hit cache
 		// despite the URL changing each resolution; local files key by path.
 		if cfg.CacheID != "" {
-			cacheKey = cfg.Cache.KeyForID(cfg.CacheID, cfg.Quality, cfg.AudioIndex)
+			cacheKey = cfg.Cache.KeyForID(cfg.CacheID, cfg.Quality, cfg.AudioIndex, cfg.burnSubtitleIndexOrNone())
 		} else {
-			cacheKey = cfg.Cache.KeyFor(cfg.SourcePath, cfg.Quality, cfg.AudioIndex)
+			cacheKey = cfg.Cache.KeyFor(cfg.SourcePath, cfg.Quality, cfg.AudioIndex, cfg.burnSubtitleIndexOrNone())
 		}
 		// Integrity gate: HasComplete just stats the marker. If init.mp4 or
 		// the last segment vanished (external rm, partial-disk failure), we
@@ -1217,8 +1234,31 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		args = append(args, "-output_ts_offset", strconv.FormatFloat(startSec, 'f', 3, 64))
 	}
 
-	// Map video + selected audio. Always use first video stream.
-	args = append(args, "-map", "0:v:0")
+	// Burn a bitmap subtitle (PGS/DVB) into the video when requested. Validate
+	// the index points at a real bitmap track in range — text subs are served as
+	// separate WebVTT and never burned, and a stale/out-of-range index falls
+	// back to a clean encode rather than failing the session.
+	burnIdx := -1
+	if reqBurn := cfg.burnSubtitleIndexOrNone(); reqBurn >= 0 {
+		if reqBurn < len(probe.SubtitleTracks) &&
+			!probe.SubtitleTracks[reqBurn].IsTextSubtitle() {
+			burnIdx = reqBurn
+		} else {
+			log.Printf("[hls %s] burn subtitle %d ignored — not a bitmap track in range",
+				shortHLSID(cfg.SessionID), reqBurn)
+		}
+	}
+
+	// Map video + selected audio. With burn-in the video comes from the
+	// filter_complex graph ([vout], built below); otherwise map the source video
+	// stream directly. ffmpeg resolves the [vout] label from -filter_complex
+	// regardless of argv order, so mapping it here (before audio) keeps video as
+	// output stream 0.
+	if burnIdx >= 0 {
+		args = append(args, "-map", "[vout]")
+	} else {
+		args = append(args, "-map", "0:v:0")
+	}
 	audioIdx := cfg.AudioIndex
 	if audioIdx < 0 {
 		audioIdx = 0
@@ -1362,19 +1402,37 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	if probe.HDR != "" && cfg.Transcode.TonemapHDR {
 		tonemap = hdrTonemapChain
 	}
-	var filterChain string
+	// Core video chain (scale + optional tonemap + pixel format + color metadata),
+	// WITHOUT the optional hwUploadTail — that has to run last, after any subtitle
+	// overlay, so it's appended separately below.
+	var vchain string
 	if maxH > 0 && probe.Height > maxH {
-		filterChain = fmt.Sprintf(
-			"scale=-2:%d:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,%sformat=%s%s%s",
-			maxH, tonemap, pixFormat, colorTail, hwUploadTail,
+		vchain = fmt.Sprintf(
+			"scale=-2:%d:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,%sformat=%s%s",
+			maxH, tonemap, pixFormat, colorTail,
 		)
 	} else {
-		filterChain = fmt.Sprintf(
-			"scale=trunc(iw/2)*2:trunc(ih/2)*2,%sformat=%s%s%s",
-			tonemap, pixFormat, colorTail, hwUploadTail,
+		vchain = fmt.Sprintf(
+			"scale=trunc(iw/2)*2:trunc(ih/2)*2,%sformat=%s%s",
+			tonemap, pixFormat, colorTail,
 		)
 	}
-	args = append(args, "-vf", filterChain)
+	if burnIdx >= 0 {
+		// Burn-in: process the video to its final size + SDR colorspace FIRST,
+		// then composite the subtitle. Overlaying SDR PGS/DVB graphics onto a
+		// still-HDR (PQ) frame and tonemapping afterwards would crush the
+		// subtitle brightness, so the overlay must come after the tonemap. The
+		// subtitle canvas is scaled to the processed frame via scale2ref so a
+		// PGS/DVB stream authored at any resolution lines up. hwUploadTail
+		// (VAAPI) runs last, on the composited frame.
+		filterComplex := fmt.Sprintf(
+			"[0:v:0]%s[base];[0:s:%d][base]scale2ref[sub][base2];[base2][sub]overlay%s[vout]",
+			vchain, burnIdx, hwUploadTail,
+		)
+		args = append(args, "-filter_complex", filterComplex)
+	} else {
+		args = append(args, "-vf", vchain+hwUploadTail)
+	}
 
 	// Audio: AAC stereo 48 kHz — broadest browser compatibility.
 	audioBitrate := cfg.Transcode.AudioBitrate

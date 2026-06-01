@@ -669,14 +669,15 @@ func runDaemonStart() error {
 			}
 			hlsCtx, hlsCancel := context.WithCancel(ctx)
 			startHLSPlayback(engine.HLSSessionConfig{
-				SessionID:  sess.SessionID,
-				SourceURL:  sess.DirectURL,
-				CacheID:    sess.InfoHash,
-				FileName:   sess.FileName,
-				Quality:    sess.Quality,
-				AudioIndex: sess.AudioIndex,
-				Transcode:  tcRuntime,
-				Cache:      hlsCache,
+				SessionID:         sess.SessionID,
+				SourceURL:         sess.DirectURL,
+				CacheID:           sess.InfoHash,
+				FileName:          sess.FileName,
+				Quality:           sess.Quality,
+				AudioIndex:        sess.AudioIndex,
+				BurnSubtitleIndex: sess.BurnSubtitleIndex,
+				Transcode:         tcRuntime,
+				Cache:             hlsCache,
 				// 2c: refresh the debrid link if it expires mid-transcode; the
 				// auto-restart supervisor calls this before relaunching ffmpeg.
 				RefreshURL: func(rctx context.Context) (string, error) {
@@ -788,13 +789,14 @@ func runDaemonStart() error {
 		// that absorbs the gap until the playlist registers.
 		hlsCtx, hlsCancel := context.WithCancel(ctx)
 		startHLSPlayback(engine.HLSSessionConfig{
-			SessionID:  sess.SessionID,
-			SourcePath: filePath,
-			FileName:   sess.FileName,
-			Quality:    sess.Quality,
-			AudioIndex: sess.AudioIndex,
-			Transcode:  tcRuntime,
-			Cache:      hlsCache,
+			SessionID:         sess.SessionID,
+			SourcePath:        filePath,
+			FileName:          sess.FileName,
+			Quality:           sess.Quality,
+			AudioIndex:        sess.AudioIndex,
+			BurnSubtitleIndex: sess.BurnSubtitleIndex,
+			Transcode:         tcRuntime,
+			Cache:             hlsCache,
 		}, hlsCtx, hlsCancel)
 	}
 

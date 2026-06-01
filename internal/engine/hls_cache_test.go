@@ -21,18 +21,21 @@ func newTestCache(t *testing.T, sizeGB int) *HLSCache {
 
 func TestKeyForStable(t *testing.T) {
 	c := newTestCache(t, 1)
-	k1 := c.KeyFor("/a/b/movie.mkv", "1080p", 0)
-	k2 := c.KeyFor("/a/b/movie.mkv", "1080p", 0)
+	k1 := c.KeyFor("/a/b/movie.mkv", "1080p", 0, -1)
+	k2 := c.KeyFor("/a/b/movie.mkv", "1080p", 0, -1)
 	if k1 != k2 {
 		t.Fatalf("expected stable keys, got %q vs %q", k1, k2)
 	}
-	if c.KeyFor("/a/b/movie.mkv", "720p", 0) == k1 {
+	if c.KeyFor("/a/b/movie.mkv", "720p", 0, -1) == k1 {
 		t.Fatal("quality should change key")
 	}
-	if c.KeyFor("/a/b/movie.mkv", "1080p", 1) == k1 {
+	if c.KeyFor("/a/b/movie.mkv", "1080p", 1, -1) == k1 {
 		t.Fatal("audio index should change key")
 	}
-	if c.KeyFor("/x/y/other.mkv", "1080p", 0) == k1 {
+	if c.KeyFor("/a/b/movie.mkv", "1080p", 0, 2) == k1 {
+		t.Fatal("burn subtitle index should change key")
+	}
+	if c.KeyFor("/x/y/other.mkv", "1080p", 0, -1) == k1 {
 		t.Fatal("path should change key")
 	}
 }

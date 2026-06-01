@@ -153,12 +153,12 @@ func (c *HLSCache) ReleaseWriter(key string) {
 // KeyFor derives a stable cache key for (source, quality, audioIndex). Using
 // the absolute source path means renaming a file invalidates the cache, which
 // is correct — segment content is tied to the encoded source.
-func (c *HLSCache) KeyFor(sourcePath, quality string, audioIndex int) string {
+func (c *HLSCache) KeyFor(sourcePath, quality string, audioIndex, burnSubtitleIndex int) string {
 	abs, err := filepath.Abs(sourcePath)
 	if err != nil {
 		abs = sourcePath
 	}
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", abs, quality, audioIndex)))
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%d", abs, quality, audioIndex, burnSubtitleIndex)))
 	return hex.EncodeToString(h[:8]) // 16 hex chars — collision-safe enough for per-host cache
 }
 
@@ -167,8 +167,8 @@ func (c *HLSCache) KeyFor(sourcePath, quality string, audioIndex int) string {
 // the debrid direct URL is re-resolved per play and would never cache-hit, so
 // we key by the torrent info_hash — the same content always maps to the same
 // key across plays. NOT run through filepath.Abs (an id/URL is not a path).
-func (c *HLSCache) KeyForID(id, quality string, audioIndex int) string {
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", id, quality, audioIndex)))
+func (c *HLSCache) KeyForID(id, quality string, audioIndex, burnSubtitleIndex int) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%d", id, quality, audioIndex, burnSubtitleIndex)))
 	return hex.EncodeToString(h[:8])
 }
 
