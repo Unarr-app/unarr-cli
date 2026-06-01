@@ -45,9 +45,21 @@ services:
       # Named volume keeps this off your media drive (avoids NFS locking issues).
       - unarr-data:/data
 
-    # Optional: limit CPU/RAM for transcoding on shared hosts
+    # --- NVIDIA GPU: hardware transcode (nvenc) ---
+    # Uncomment on a host with an NVIDIA GPU + nvidia-container-toolkit. The
+    # image already bundles an nvenc-enabled ffmpeg and sets
+    # NVIDIA_DRIVER_CAPABILITIES=video,compute,utility, so this device
+    # reservation is the only thing needed to enable HW transcode. Without a GPU
+    # the same image falls back to software (libx264) automatically — leave it
+    # commented.   (docker run equivalent: add  --gpus all)
     # deploy:
     #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    #     # Optional: cap CPU/RAM for transcoding on shared hosts
     #     limits:
     #       memory: 2G
     #       cpus: "4.0"
