@@ -81,12 +81,12 @@ func TestResolveEncoderProfileHonoursConfiguredPreset(t *testing.T) {
 		configured string
 		wantPreset string
 	}{
-		{HWAccelNone, "ultrafast", "ultrafast"},  // libx264 honours
-		{HWAccelNone, "medium", "medium"},        // libx264 honours
-		{HWAccelNVENC, "p1", "p3"},               // NVENC ignores, sticks to p3
-		{HWAccelNVENC, "veryfast", "p3"},         // NVENC ignores libx264 vocab
-		{HWAccelQSV, "veryslow", "veryfast"},     // QSV ignores, sticks to veryfast
-		{HWAccelVideoToolbox, "veryfast", ""},    // VideoToolbox has no preset
+		{HWAccelNone, "ultrafast", "ultrafast"}, // libx264 honours
+		{HWAccelNone, "medium", "medium"},       // libx264 honours
+		{HWAccelNVENC, "p1", "p3"},              // NVENC ignores, sticks to p3
+		{HWAccelNVENC, "veryfast", "p3"},        // NVENC ignores libx264 vocab
+		{HWAccelQSV, "veryslow", "veryfast"},    // QSV ignores, sticks to veryfast
+		{HWAccelVideoToolbox, "veryfast", ""},   // VideoToolbox has no preset
 	}
 	for _, tc := range cases {
 		got := ResolveEncoderProfile(tc.hw, tc.configured)
@@ -154,3 +154,33 @@ func TestHWAccelDiagnosticLogLineSoftwareButEncodersFound(t *testing.T) {
 	}
 }
 
+func TestH264LevelForFrame(t *testing.T) {
+	cases := []struct {
+		name          string
+		width, height int
+		want          string
+	}{
+		// 16:9 must match the height-only helper exactly (no regression).
+		{"720p 16:9", 1280, 720, "4.0"},
+		{"1080p 16:9", 1920, 1080, "4.1"},
+		{"1440p 16:9", 2560, 1440, "5.0"},
+		{"2160p 16:9", 3840, 2160, "5.1"},
+		// Anamorphic 2.39:1 at 1080 height — the regression: ~2586×1080 = 11016
+		// MBs busts level 4.1 (8192 MaxFS); must bump to 5.0.
+		{"1080h anamorphic 2.39:1", 2586, 1080, "5.0"},
+		// Anamorphic 720 height (1728×720 = 4860 MBs) still fits the 4.0 the
+		// height floor already picks for fps headroom.
+		{"720h anamorphic 2.4:1", 1728, 720, "4.0"},
+		// Source 4K anamorphic (3840×1604) encoded at source: 24240 MBs → 5.1.
+		{"4K anamorphic source", 3840, 1604, "5.1"},
+		// Width unknown → fall back to the height-only tier.
+		{"width unknown", 0, 1080, "4.1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := H264LevelForFrame(c.width, c.height); got != c.want {
+				t.Errorf("H264LevelForFrame(%d,%d) = %q, want %q", c.width, c.height, got, c.want)
+			}
+		})
+	}
+}

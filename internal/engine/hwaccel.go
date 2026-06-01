@@ -271,3 +271,60 @@ func H264LevelForHeight(height int) string {
 		return "6.0"
 	}
 }
+
+// h264LevelRank orders level strings so callers can pick the higher of two.
+var h264LevelRank = map[string]int{
+	"3.0": 30, "3.1": 31, "3.2": 32,
+	"4.0": 40, "4.1": 41, "4.2": 42,
+	"5.0": 50, "5.1": 51, "6.0": 60,
+}
+
+// levelForMacroblocks returns the lowest H.264 level whose MaxFS (frame size in
+// macroblocks) covers `mbs`. The height-based H264LevelForHeight tier is correct
+// for 16:9, but anamorphic content (2.39:1 cinemascope) scaled to a given height
+// has a much wider frame: a 2.39:1 source downscaled to 1080 height becomes
+// ~2586×1080 = 11016 MBs, which busts level 4.1's 8192-MB MaxFS. ffmpeg then
+// fails the encode — libx264 with "frame MB size > level limit", h264_nvenc with
+// "InitializeEncoder failed: invalid param (8): Invalid Level" — and emits zero
+// packets (the whole HLS session stalls at "preparando sesión"). MaxFS values
+// from the H.264 spec, Table A-1.
+func levelForMacroblocks(mbs int) string {
+	switch {
+	case mbs <= 1620:
+		return "3.0"
+	case mbs <= 3600:
+		return "3.1"
+	case mbs <= 5120:
+		return "3.2"
+	case mbs <= 8192: // levels 4.0 and 4.1 share MaxFS 8192; pick 4.1 for headroom
+		return "4.1"
+	case mbs <= 8704:
+		return "4.2"
+	case mbs <= 22080:
+		return "5.0"
+	case mbs <= 36864:
+		return "5.1"
+	default:
+		return "6.0"
+	}
+}
+
+// H264LevelForFrame returns the lowest H.264 level that satisfies BOTH the
+// height-derived tier (which carries macroblock-rate / fps headroom) and the
+// actual frame's macroblock count (which catches anamorphic frames that are far
+// wider than 16:9 at a given height). Use this instead of H264LevelForHeight
+// wherever the output width is known — it never under-levels an ultra-wide
+// frame, and for 16:9 content it returns exactly what H264LevelForHeight does.
+func H264LevelForFrame(width, height int) string {
+	byHeight := H264LevelForHeight(height)
+	if width <= 0 || height <= 0 {
+		return byHeight
+	}
+	// Macroblocks are 16×16; partial blocks at the edge still count (ceil).
+	mbs := ((width + 15) / 16) * ((height + 15) / 16)
+	byMB := levelForMacroblocks(mbs)
+	if h264LevelRank[byMB] > h264LevelRank[byHeight] {
+		return byMB
+	}
+	return byHeight
+}
