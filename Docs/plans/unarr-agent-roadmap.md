@@ -79,9 +79,14 @@ desde la web. Diseño + set de opciones en el estado abajo.
 - Mediaserver solo DETECTA Plex/Jellyfin/Emby — no biblioteca navegable propia. **(diferido al final por decisión del operador)**
 - TLS solo vía funnel; LAN/Tailscale/UPnP = HTTP plano (mixed-content desde web HTTPS). ⏸️ **Cimiento construido + DIFERIDO (2026-06-01)** — listener HTTPS por-agente con cert hot-reload (commit `27bee8c`, inerte sin cert). Decisión: MVP CF-only (single-SAN por agente, DNS-01 vía CF API, sin DNS propio); fase broker+DNS diferida. Doc: web `docs/plans/agent-tls-direct.md`.
 - Funnel = SPOF CloudFlare (rota ~6h), sin relay propio.
-- "Tailscale Funnel" mal nombrado (no usa tsnet/Funnel real).
-- Dos clientes HTTP divergentes (go-client vs agent client).
-- Long-poll en vez de WS/SSE.
+- ~~"Tailscale Funnel" mal nombrado~~ ✅ **Ya correcto (2026-06-01)** — no existe el literal en ningún sitio del código; el comando, el help y los docs nombran consistentemente "CloudFlare Quick Tunnel". La nota era stale; nada que renombrar.
+- ~~Dos clientes HTTP divergentes (go-client vs agent client)~~ ✅ (resuelto — ver sección Cerrada).
+- ~~Long-poll en vez de WS/SSE~~ ✅ **Realtime: SSE downlink + uplink event-driven + push al navegador (2026-06-01, CLI 0.14.0)** — las 3 patas de la comunicación agente↔web↔navegador:
+  1. **Downlink (server→agente):** `GET /api/internal/agent/events` (SSE) empuja `event: command` (controles tipados desde DB, no-consuming) + `event: sync` (nudge), heartbeat 15s, colgado del Redis pub/sub `agent:wake` (multi-replica). El CLI lo consume SSE-first con **fallback a long-poll liveness-probed** (SSE es buffering-intolerante; long-poll es buffering-tolerante → red de seguridad para proxies/ISP que bufferean). Config `[daemon] downlink=auto|sse|poll`. Cliente SSE resucitado del `signal_client.go` histórico.
+  2. **Uplink (agente→server):** cada transición de estado del `Task` dispara `onChange→TriggerSync` (coalescido), en vez de esperar al tick adaptativo 3s/10s. Cubre descargas y streams.
+  3. **Browser-leg (server→navegador):** `/agent/sync` publica en un signal-bus Redis genérico (`createSignalBus`); `progress-stream` se suscribe y empuja snapshot al instante (backstop 10s, antes busy-poll 3s) + dedupe de frames idénticos en el cliente. `markWatching` despierta al agente en el flanco para reporte 3s inmediato al abrir la página.
+
+  Verificado e2e (control instantáneo + fallback + push). De paso: arreglado el allow-list de marca unarr que 404eaba `/api/internal/downloads|library|profile|…`. Commits web `11b70fae`/`1e77b948`/`bdb0ab92`/`cf3e4423`, cli `1052529`/`864b6ea`.
 
 ### Deuda puntual
 VAAPI workarounds por host · sesión única (1 viewer).
