@@ -250,14 +250,10 @@ type HLSSession struct {
 	// fromCache=true means the session is replaying a completed encode and no
 	// ffmpeg subprocess was spawned. writerLockHeld=true means this session
 	// owns the per-key TryAcquireWriter claim — Close must ReleaseWriter.
-	// subsDone closes when the subtitle extractor goroutine returns (or is
-	// nil when the source had no subtitle tracks); MarkComplete waits on it
-	// so a HIT replay never serves partial .vtt files.
 	cache          *HLSCache
 	cacheKey       string
 	fromCache      bool
 	writerLockHeld bool
-	subsDone       chan struct{}
 }
 
 // hlsSeekAhead is how many segments past the writer's current position the
@@ -454,10 +450,6 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		cleanupOnError()
 		return nil, fmt.Errorf("hls: mkdir video: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Join(tmpDir, "subs"), 0o755); err != nil {
-		cleanupOnError()
-		return nil, fmt.Errorf("hls: mkdir subs: %w", err)
-	}
 
 	segCount := segmentCountForDuration(probe.DurationSec)
 
@@ -512,18 +504,12 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	go s.waitFFmpeg()
 	go s.pollSegments(ffCtx)
 
-	if len(probe.SubtitleTracks) > 0 {
-		s.subsDone = make(chan struct{})
-		// Capture the source ref now (by value): subs are extracted once at
-		// startup, and a later URL refresh (2c) mutates s.cfg.SourceURL from the
-		// waitFFmpeg goroutine — passing the URL in keeps extractSubtitles from
-		// racing that write.
-		subSrc := cfg.sourceRef()
-		go func() {
-			defer close(s.subsDone)
-			s.extractSubtitles(ffCtx, subSrc)
-		}()
-	}
+	// Subtitles are no longer extracted per-session: the web player fetches each
+	// text track on demand as WebVTT from the /sub endpoint (subtitleHandler).
+	// The old per-session extraction wrote subs/sub-N.vtt that nothing requests
+	// anymore (the master playlist no longer advertises a SUBTITLES group), so
+	// it was pure wasted ffmpeg work — and its Close() wait could block HLS cache
+	// persistence on a slow extract. Removed.
 
 	cachedNote := ""
 	if cfg.Cache != nil {
@@ -677,20 +663,7 @@ func (s *HLSSession) Close() error {
 			log.Printf("[hls %s] closed (cache reuse)", shortHLSID(s.cfg.SessionID))
 			return nil
 		}
-		// Wait briefly for the subtitle extractor to finish so a cached
-		// replay never serves half-written .vtt files. Bounded so a stuck
-		// extractor can't block Close indefinitely; on timeout we treat
-		// the cache as incomplete and drop it.
-		subsOK := true
-		if s.subsDone != nil {
-			select {
-			case <-s.subsDone:
-			case <-time.After(15 * time.Second):
-				log.Printf("[hls %s] subtitle extractor timeout — not caching", shortHLSID(s.cfg.SessionID))
-				subsOK = false
-			}
-		}
-		if subsOK && exitErr == nil && s.allSegmentsPresent() {
+		if exitErr == nil && s.allSegmentsPresent() {
 			if err := s.cache.MarkComplete(s.cacheKey); err == nil {
 				log.Printf("[hls %s] cache persisted %s", shortHLSID(s.cfg.SessionID), s.cacheKey)
 				return nil
@@ -1101,31 +1074,6 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 	return nil
 }
 
-// ServeSubtitle writes the WebVTT subtitle for the requested track index, if
-// extraction has finished.
-func (s *HLSSession) ServeSubtitle(w http.ResponseWriter, r *http.Request, idx int) {
-	s.Touch()
-	if idx < 0 || idx >= len(s.probe.SubtitleTracks) {
-		http.Error(w, "subtitle track not found", http.StatusNotFound)
-		return
-	}
-	path := filepath.Join(s.tmpDir, "subs", fmt.Sprintf("sub-%d.vtt", idx))
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
-			break
-		}
-		if s.isClosed() || time.Now().After(deadline) {
-			http.Error(w, "subtitle not yet extracted", http.StatusServiceUnavailable)
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
-	w.Header().Set("Cache-Control", "max-age=3600")
-	http.ServeFile(w, r, path)
-}
-
 // ---- ffmpeg argument builders ----
 
 // buildHLSFFmpegArgs returns the argv for the initial HLS encode (start at 0).
@@ -1467,37 +1415,6 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	return args
 }
 
-// extractSubtitles spawns short-lived ffmpeg jobs to convert each text-based
-// subtitle track to WebVTT in parallel. Bitmap subs (PGS, DVB) are skipped —
-// they would require burn-in into the video encode, which is out of scope.
-func (s *HLSSession) extractSubtitles(ctx context.Context, src string) {
-	subsDir := filepath.Join(s.tmpDir, "subs")
-	for i, sub := range s.probe.SubtitleTracks {
-		if !sub.IsTextSubtitle() {
-			continue
-		}
-		out := filepath.Join(subsDir, fmt.Sprintf("sub-%d.vtt", i))
-		args := []string{
-			"-y", "-hide_banner", "-loglevel", "warning",
-			"-i", src,
-			"-map", fmt.Sprintf("0:s:%d?", i),
-			"-c:s", "webvtt",
-			out,
-		}
-		// Run sequentially to avoid hammering the disk; subtitle extraction
-		// is fast enough that parallelism isn't worth the complexity.
-		cmd := exec.CommandContext(ctx, s.cfg.Transcode.FFmpegPath, args...)
-		if err := cmd.Run(); err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("[hls %s] subtitle %d (%s) extract failed: %v",
-				shortHLSID(s.cfg.SessionID), i, sub.Lang, err)
-			continue
-		}
-	}
-}
-
 // ---- Manifest rendering ----
 
 // renderVideoPlaylist builds the VOD media playlist for the video stream.
@@ -1538,61 +1455,22 @@ func renderMasterPlaylist(probe *StreamProbe, qualityLabel string) string {
 	b.WriteString("#EXTM3U\n")
 	b.WriteString("#EXT-X-VERSION:7\n")
 
-	// Subtitle renditions. We never set DEFAULT=YES or AUTOSELECT=YES on any
-	// rendition: anime files routinely ship a forced "signs only" English
-	// track with cues only every few minutes, and stacking that track plus
-	// the user's locale auto-select produced the "subs broken" report. The
-	// HLS spec also caps DEFAULT to one per GROUP-ID — "none" trivially
-	// satisfies it. Names disambiguate when several tracks share the same
-	// language ("ES", "ES 2", forced suffix).
-	hasSubs := false
-	langCounts := make(map[string]int)
-	for i, s := range probe.SubtitleTracks {
-		if !s.IsTextSubtitle() {
-			continue
-		}
-		hasSubs = true
-		lang := s.Lang
-		if lang == "" {
-			lang = "und"
-		}
-		base := s.Title
-		if base == "" {
-			base = strings.ToUpper(lang)
-		}
-		key := strings.ToLower(base)
-		langCounts[key]++
-		name := base
-		if langCounts[key] > 1 {
-			name = fmt.Sprintf("%s %d", base, langCounts[key])
-		}
-		if s.Forced {
-			name = name + " (forced)"
-		}
-		b.WriteString(fmt.Sprintf(
-			`#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME=%q,LANGUAGE=%q,DEFAULT=NO,AUTOSELECT=NO,FORCED=%s,URI="subs/sub-%d.m3u8"`+"\n",
-			name, lang, ynBool(s.Forced), i,
-		))
-	}
+	// Subtitles are no longer embedded as HLS renditions. The web player attaches
+	// every TEXT subtitle as an external <track> served on demand by the /sub
+	// endpoint (subtitleHandler) — ONE source for direct-play AND HLS that works
+	// under native playback and hls.js alike. Embedding them here too would
+	// double the captions menu under hls.js, and the native-HLS path (Chrome's
+	// "maybe" canPlayType) never surfaced in-manifest SUBTITLES renditions
+	// anyway, which is what made subtitles inconsistent. Bitmap subs (PGS/DVB)
+	// remain burn-in (no WebVTT form).
 
 	// Video variant. Bandwidth + resolution are best-effort estimates from probe.
 	bw := bitrateForQuality(qualityLabel)
 	w, h := scaledDimensions(probe.Width, probe.Height, qualityHeight(qualityLabel))
 	codecs := `avc1.4D4028,mp4a.40.2`
-	streamInf := fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=%q", bw, w, h, codecs)
-	if hasSubs {
-		streamInf += `,SUBTITLES="subs"`
-	}
-	b.WriteString(streamInf + "\n")
+	b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=%q\n", bw, w, h, codecs))
 	b.WriteString("video/index.m3u8\n")
 	return b.String()
-}
-
-func ynBool(b bool) string {
-	if b {
-		return "YES"
-	}
-	return "NO"
 }
 
 // bitrateForQuality returns a synthetic bandwidth attribute for the master

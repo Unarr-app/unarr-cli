@@ -261,6 +261,7 @@ func (ss *StreamServer) Listen(ctx context.Context) error {
 	mux.HandleFunc("/playlist.m3u", ss.playlistHandler)
 	mux.HandleFunc("/hls/", ss.hlsHandler)
 	mux.HandleFunc("/thumbnail", ss.thumbnailHandler)
+	mux.HandleFunc("/sub", ss.subtitleHandler)
 
 	// SO_REUSEADDR allows immediate rebind if the port is in TIME_WAIT (e.g. after agent restart)
 	lc := net.ListenConfig{
@@ -607,8 +608,6 @@ func (ss *StreamServer) HLSURLsJSON(sessionID string) string {
 //	video/index.m3u8           — video media playlist
 //	video/init.mp4             — fMP4 init segment
 //	video/seg-<n>.m4s          — video segment
-//	subs/sub-<n>.m3u8          — per-subtitle media playlist (synthesised)
-//	subs/sub-<n>.vtt           — WebVTT subtitle (extracted by ffmpeg)
 func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 	ss.lastActivity.Store(time.Now().UnixNano())
 
@@ -679,52 +678,12 @@ func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		session.ServeSegment(w, r, idx)
-	case strings.HasPrefix(resource, "subs/sub-") && strings.HasSuffix(resource, ".m3u8"):
-		idxStr := strings.TrimSuffix(strings.TrimPrefix(resource, "subs/sub-"), ".m3u8")
-		idx, err := strconv.Atoi(idxStr)
-		if err != nil {
-			http.Error(w, "bad subtitle index", http.StatusBadRequest)
-			return
-		}
-		ss.serveSubtitlePlaylist(w, r, session, idx)
-	case strings.HasPrefix(resource, "subs/sub-") && strings.HasSuffix(resource, ".vtt"):
-		idxStr := strings.TrimSuffix(strings.TrimPrefix(resource, "subs/sub-"), ".vtt")
-		idx, err := strconv.Atoi(idxStr)
-		if err != nil {
-			http.Error(w, "bad subtitle index", http.StatusBadRequest)
-			return
-		}
-		session.ServeSubtitle(w, r, idx)
 	default:
+		// Subtitles are no longer served here — the web player fetches each text
+		// track on demand from /sub (subtitleHandler). The master playlist no
+		// longer advertises a SUBTITLES group, so no player requests subs/sub-*.
 		http.Error(w, "unknown hls resource", http.StatusNotFound)
 	}
-}
-
-// serveSubtitlePlaylist generates a single-VTT-segment HLS playlist on the
-// fly so hls.js can consume it as a regular subtitle rendition. The VTT file
-// itself is extracted asynchronously by HLSSession.extractSubtitles.
-func (ss *StreamServer) serveSubtitlePlaylist(w http.ResponseWriter, r *http.Request, session *HLSSession, idx int) {
-	if idx < 0 || idx >= len(session.probe.SubtitleTracks) {
-		http.Error(w, "subtitle out of range", http.StatusNotFound)
-		return
-	}
-	dur := session.durationSec
-	if dur < 1 {
-		dur = 1
-	}
-	body := strings.Builder{}
-	body.WriteString("#EXTM3U\n")
-	body.WriteString("#EXT-X-VERSION:3\n")
-	body.WriteString("#EXT-X-PLAYLIST-TYPE:VOD\n")
-	body.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", int(dur)+1))
-	body.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
-	body.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", dur))
-	body.WriteString(fmt.Sprintf("sub-%d.vtt\n", idx))
-	body.WriteString("#EXT-X-ENDLIST\n")
-
-	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	w.Header().Set("Cache-Control", "no-cache")
-	_, _ = io.WriteString(w, body.String())
 }
 
 // healthHandler responde con el estado del servidor en JSON.
@@ -997,6 +956,93 @@ func (ss *StreamServer) thumbnailHandler(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
 	if _, err := w.Write(out); err != nil {
 		log.Printf("[thumbnail] write failed: %v", err)
+	}
+}
+
+// subtitleHandler extracts ONE embedded TEXT subtitle stream from a file and
+// serves it as WebVTT, on demand. It's the single subtitle source the web
+// player uses for BOTH direct-play and HLS (attached as an external <track>),
+// so subtitles are identical regardless of play method or whether playback runs
+// natively or via hls.js — no longer dependent on the browser's HLS engine
+// surfacing in-manifest renditions.
+//
+// Mirrors thumbnailHandler: path in ?p= (client-visible), index in ?i=, and the
+// token scope binds path+index so a tampered p/i fails verification. 404 on a
+// bad token (no oracle). The path is clamped to a regular file as defense in
+// depth. Bitmap subs (PGS/DVB) have no text form — those are burned in via the
+// HLS path and are not served here; the web only requests text tracks.
+func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) {
+	ss.lastActivity.Store(time.Now().UnixNano())
+	if ss.writeCORSHeaders(w, r, "") {
+		return
+	}
+
+	q := r.URL.Query()
+	rawPath := q.Get("p")
+	if rawPath == "" {
+		http.Error(w, "missing path", http.StatusBadRequest)
+		return
+	}
+	index, err := strconv.Atoi(q.Get("i"))
+	if err != nil || index < 0 {
+		http.Error(w, "bad index", http.StatusBadRequest)
+		return
+	}
+	if !ss.checkStreamToken(streamScopeSub(rawPath, index), q.Get("t")) {
+		clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+		log.Printf("[sub] rejected from %s — bad/absent token", clientIP)
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if fi, statErr := os.Stat(rawPath); statErr != nil || !fi.Mode().IsRegular() {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if ss.ffmpegPath == "" {
+		http.Error(w, "subtitles unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// A full subtitle track is small (KBs–low MBs); 60s is ample even for a
+	// long movie's text track and bounds a hung/corrupt ffmpeg.
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	// -map 0:s:<index> selects the Nth subtitle stream (same ordering as the
+	// library scan / probe.json / burn-in si=N). `-c:s webvtt -f webvtt` converts
+	// srt/ass/mov_text/etc. to WebVTT on stdout. `?` makes the map non-fatal if
+	// the stream is absent (yields empty output rather than a hard error).
+	args := []string{
+		"-nostdin",
+		"-loglevel", "error",
+		"-i", rawPath,
+		"-map", fmt.Sprintf("0:s:%d?", index),
+		"-c:s", "webvtt",
+		"-f", "webvtt",
+		"-",
+	}
+	cmd := exec.CommandContext(ctx, ss.ffmpegPath, args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		log.Printf("[sub] extract failed (i=%d path=%q): err=%v %s",
+			index, rawPath, err, strings.TrimSpace(stderr.String()))
+		http.Error(w, "subtitle extract failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	// path+index is stable content for the daemon's lifetime; let the browser
+	// cache so re-selecting a track doesn't re-run ffmpeg. private — the user's
+	// own file.
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
+	//nolint:gosec // G705: WebVTT served as text/vtt to a <track> element — not
+	// HTML, so cue text can't execute; the path is token-scoped + stat'd as a
+	// regular file, and ffmpeg only emits well-formed WebVTT.
+	if _, err := w.Write(out); err != nil {
+		log.Printf("[sub] write failed: %v", err)
 	}
 }
 

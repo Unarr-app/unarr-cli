@@ -7,15 +7,6 @@ import (
 	"time"
 )
 
-func TestYnBool(t *testing.T) {
-	if got := ynBool(true); got != "YES" {
-		t.Errorf("ynBool(true) = %q, want YES", got)
-	}
-	if got := ynBool(false); got != "NO" {
-		t.Errorf("ynBool(false) = %q, want NO", got)
-	}
-}
-
 func TestBitrateForQuality(t *testing.T) {
 	cases := map[string]int{
 		"2160p":   25_000_000,
@@ -144,17 +135,15 @@ func TestRenderMasterPlaylist(t *testing.T) {
 	if !strings.Contains(out, "RESOLUTION=1920x1080") {
 		t.Errorf("expected 1920x1080 resolution, got:\n%s", out)
 	}
-	if !strings.Contains(out, `SUBTITLES="subs"`) {
-		t.Errorf("expected subtitles group attached, got:\n%s", out)
+	// Subtitles are NO LONGER embedded as HLS renditions — the web player
+	// attaches them as external <track>s (served by /sub). The master playlist
+	// must therefore carry no SUBTITLES group, no EXT-X-MEDIA, and no SUBTITLES
+	// attribute on the video variant, even when the source has text subs.
+	if strings.Contains(out, "SUBTITLES") {
+		t.Errorf("subtitles must NOT be embedded in the manifest (served as external <track>), got:\n%s", out)
 	}
-	if !strings.Contains(out, `LANGUAGE="es"`) || !strings.Contains(out, `LANGUAGE="en"`) {
-		t.Errorf("expected text subs included, got:\n%s", out)
-	}
-	if strings.Contains(out, "hdmv_pgs") || strings.Contains(out, `LANGUAGE="ja"`) {
-		t.Errorf("bitmap subs should be excluded, got:\n%s", out)
-	}
-	if !strings.Contains(out, "(forced)") {
-		t.Errorf("expected forced suffix on English track, got:\n%s", out)
+	if strings.Contains(out, "EXT-X-MEDIA") {
+		t.Errorf("no EXT-X-MEDIA rendition expected, got:\n%s", out)
 	}
 }
 

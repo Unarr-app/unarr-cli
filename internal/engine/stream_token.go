@@ -60,6 +60,17 @@ func streamScopeThumb(filePath string) string {
 	return "thumb:" + hex.EncodeToString(sum[:])
 }
 
+// streamScopeSub is the token scope for on-demand WebVTT extraction of one text
+// subtitle stream from a specific file (the /sub endpoint, used identically by
+// direct-play and HLS so subtitles are consistent across both). Binds the file
+// path's SHA-256 + the subtitle stream index, so a leaked URL exposes only that
+// one track of that one file. The web mints the matching scope in
+// src/lib/stream-token.ts (streamScopeSub), byte-for-byte.
+func streamScopeSub(filePath string, index int) string {
+	sum := sha256.Sum256([]byte(filePath))
+	return "sub:" + hex.EncodeToString(sum[:]) + ":" + strconv.Itoa(index)
+}
+
 // newStreamSecret returns 32 cryptographically-random bytes used to sign stream
 // tokens for the lifetime of the daemon. Regenerated each start, so tokens from
 // a previous run stop validating (the web re-resolves the URL on demand).
