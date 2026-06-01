@@ -34,6 +34,13 @@ type Manager struct {
 	// Used by the daemon to trigger an immediate sync.
 	OnTaskDone func()
 
+	// OnStateChange is called after EVERY successful task status transition
+	// (resolving → downloading → verifying → organizing → seeding → done/failed),
+	// wired by the daemon to trigger an immediate sync so the server sees state
+	// changes in near-realtime instead of on the next adaptive tick. Coalesced
+	// downstream (TriggerSync is a buffered-1 send), so bursts collapse safely.
+	OnStateChange func()
+
 	// recentlyFinished holds tasks that completed/failed since the last sync read.
 	// The sync goroutine reads and clears this to include final states in the next sync.
 	recentMu       sync.Mutex
@@ -82,6 +89,8 @@ func NewManager(cfg ManagerConfig, reporter *ProgressReporter, downloaders ...Do
 // Submit queues a task for download. Non-blocking if capacity available.
 func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 	task := NewTaskFromAgent(at)
+	// Event-driven uplink: push every status transition to the server immediately.
+	task.SetOnChange(m.OnStateChange)
 
 	// Per-task cancellable context so CancelTask can unblock the goroutine
 	taskCtx, taskCancel := context.WithCancel(ctx)

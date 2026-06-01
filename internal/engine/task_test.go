@@ -216,3 +216,41 @@ func TestHasUntried(t *testing.T) {
 		t.Error("all methods tried")
 	}
 }
+
+func TestTransitionFiresOnChange(t *testing.T) {
+	task := NewTaskFromAgent(agent.Task{ID: "t1"}) // StatusClaimed
+
+	var fired int
+	task.SetOnChange(func() { fired++ })
+
+	// Valid transition fires the hook.
+	if err := task.Transition(StatusResolving); err != nil {
+		t.Fatalf("Transition: %v", err)
+	}
+	if fired != 1 {
+		t.Errorf("onChange fired %d times, want 1 after a valid transition", fired)
+	}
+
+	// Another valid transition fires again (event-driven, every transition).
+	if err := task.Transition(StatusDownloading); err != nil {
+		t.Fatalf("Transition: %v", err)
+	}
+	if fired != 2 {
+		t.Errorf("onChange fired %d times, want 2", fired)
+	}
+
+	// Invalid transition must NOT fire the hook.
+	if err := task.Transition(StatusClaimed); err == nil {
+		t.Error("expected error on invalid transition downloading→claimed")
+	}
+	if fired != 2 {
+		t.Errorf("onChange fired %d times, want still 2 (no fire on invalid transition)", fired)
+	}
+}
+
+func TestTransitionNilOnChangeNoPanic(t *testing.T) {
+	task := NewTaskFromAgent(agent.Task{ID: "t2"}) // no onChange set
+	if err := task.Transition(StatusResolving); err != nil {
+		t.Fatalf("Transition with nil onChange must not error: %v", err)
+	}
+}

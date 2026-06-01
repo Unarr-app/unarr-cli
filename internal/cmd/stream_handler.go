@@ -87,7 +87,7 @@ func cancelStreamTask(taskID string) {
 // handleStreamTask manages a streaming task lifecycle for active torrent downloads.
 // It creates a StreamEngine, buffers, sets the file on the persistent server,
 // and reports progress until the task is cancelled or the download completes.
-func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client, srv *engine.StreamServer) {
+func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client, srv *engine.StreamServer, onStateChange func()) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
@@ -106,6 +106,10 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	}()
 
 	task := engine.NewTaskFromAgent(at)
+	// Event-driven uplink: stream tasks transition outside the Manager (which
+	// wires this for downloads), so set it here too — resolving/downloading/
+	// completed/failed get pushed to the server immediately.
+	task.SetOnChange(onStateChange)
 	task.ResolvedMethod = engine.MethodTorrent
 	reporter.Track(task)
 	defer reporter.ReportFinal(context.Background(), task)

@@ -444,6 +444,10 @@ func runDaemonStart() error {
 
 	// Trigger immediate sync when a download slot frees up
 	manager.OnTaskDone = func() { d.TriggerSync() }
+	// Event-driven uplink: every status transition (resolving/downloading/
+	// verifying/organizing/…) pushes to the server right away instead of waiting
+	// for the next adaptive tick. Coalesced by TriggerSync's buffered-1 channel.
+	manager.OnStateChange = func() { d.TriggerSync() }
 
 	// Wire: sync receives new tasks → submit to manager or handle stream
 	d.OnTasksClaimed = func(tasks []agent.Task) {
@@ -458,7 +462,7 @@ func runDaemonStart() error {
 				streamRegistry.mu.Lock()
 				streamRegistry.cancels[t.ID] = streamCancel
 				streamRegistry.mu.Unlock()
-				go handleStreamTask(streamCtx, t, reporter, cfg, agentClient, streamSrv)
+				go handleStreamTask(streamCtx, t, reporter, cfg, agentClient, streamSrv, func() { d.TriggerSync() })
 			} else {
 				manager.Submit(ctx, t)
 			}

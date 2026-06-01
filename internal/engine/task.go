@@ -78,6 +78,12 @@ type Task struct {
 	ClaimedAt   time.Time
 	StartedAt   time.Time
 	CompletedAt time.Time
+
+	// onChange, when set, is called after every successful status Transition so
+	// the daemon can push the new state to the server immediately (event-driven
+	// uplink) instead of waiting for the next sync tick. Must be non-blocking —
+	// it's a coalescing TriggerSync. Set by the Manager at submit time.
+	onChange func()
 }
 
 // NewTaskFromAgent creates a Task from a server-claimed agent.Task.
@@ -111,13 +117,15 @@ func NewTaskFromAgent(at agent.Task) *Task {
 	}
 }
 
-// Transition validates and performs a state transition.
+// Transition validates and performs a state transition. On success it invokes
+// the onChange hook (outside the lock) so the daemon can push the new state to
+// the server immediately rather than waiting for the next sync tick.
 func (t *Task) Transition(to TaskStatus) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	allowed, ok := validTransitions[t.Status]
 	if !ok {
+		t.mu.Unlock()
 		return fmt.Errorf("no transitions from %s", t.Status)
 	}
 	for _, a := range allowed {
@@ -129,10 +137,26 @@ func (t *Task) Transition(to TaskStatus) error {
 			if to == StatusCompleted || to == StatusFailed {
 				t.CompletedAt = time.Now()
 			}
+			cb := t.onChange
+			t.mu.Unlock()
+			// Fire the event-driven uplink AFTER releasing the lock so a future
+			// heavier hook can't deadlock on the task mutex.
+			if cb != nil {
+				cb()
+			}
 			return nil
 		}
 	}
+	t.mu.Unlock()
 	return fmt.Errorf("invalid transition: %s -> %s", t.Status, to)
+}
+
+// SetOnChange wires the post-transition hook. Call before the task starts
+// transitioning (the Manager sets it at submit time).
+func (t *Task) SetOnChange(fn func()) {
+	t.mu.Lock()
+	t.onChange = fn
+	t.mu.Unlock()
 }
 
 // GetStatus returns current status thread-safely.
