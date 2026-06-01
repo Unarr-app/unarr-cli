@@ -1,6 +1,7 @@
 package postprocess
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -16,6 +17,12 @@ type Result struct {
 	Files     []string // all final files
 	Repaired  bool     // whether par2 repair was needed
 	Extracted bool     // whether archive extraction was performed
+	// VerifyNote is non-empty when par2 verification was DEGRADED — parity shipped
+	// but could not be confirmed (par2 missing, repair failed, verify error). The
+	// download is still delivered, but the caller surfaces this so the user knows
+	// the file is unverified rather than silently assuming it's good. Empty means
+	// either "verified OK" or "no parity shipped" — both are non-degraded.
+	VerifyNote string
 }
 
 // Options configures post-processing behavior.
@@ -29,21 +36,37 @@ type Options struct {
 func Process(dir string, downloadedFiles map[string]string, opts Options) (*Result, error) {
 	result := &Result{}
 
-	// Step 1: Par2 verification and repair
+	// Step 1: Par2 verification and repair. Parity is optional, so a missing
+	// binary or a failed repair does NOT abort the download — but it MUST be
+	// surfaced (result.VerifyNote + a WARNING) instead of silently delivering an
+	// unverified file as if it had passed.
 	par2File := findPar2File(downloadedFiles)
 	if par2File != "" {
+		var repairable *Par2RepairableError
 		err := Par2Verify(par2File)
-		if err != nil {
-			if _, ok := err.(*Par2RepairableError); ok {
-				log.Printf("[usenet] attempting par2 repair...")
-				if repairErr := Par2Repair(par2File); repairErr != nil {
-					log.Printf("[usenet] par2 repair failed: %v", repairErr)
-				} else {
-					result.Repaired = true
-				}
-			} else {
-				log.Printf("[usenet] par2 verification error: %v", err)
+		switch {
+		case err == nil:
+			// Verified OK — nothing to surface.
+		case errors.Is(err, ErrPar2NotInstalled):
+			result.VerifyNote = "par2 parity present but `par2` is not installed — delivered UNVERIFIED (install par2cmdline to enable verification/repair)"
+			log.Printf("[usenet] WARNING: %s", result.VerifyNote)
+		case errors.As(err, &repairable):
+			log.Printf("[usenet] par2: corruption detected, attempting repair...")
+			repairErr := Par2Repair(par2File)
+			switch {
+			case repairErr == nil:
+				result.Repaired = true
+				log.Printf("[usenet] par2: repair successful")
+			case errors.Is(repairErr, ErrPar2NotInstalled):
+				result.VerifyNote = "par2 corruption detected but `par2` is not installed — cannot repair, delivered POSSIBLY CORRUPT"
+				log.Printf("[usenet] WARNING: %s", result.VerifyNote)
+			default:
+				result.VerifyNote = fmt.Sprintf("par2 repair failed — file may be corrupt: %v", repairErr)
+				log.Printf("[usenet] WARNING: %s", result.VerifyNote)
 			}
+		default:
+			result.VerifyNote = fmt.Sprintf("par2 verification error — file may be corrupt: %v", err)
+			log.Printf("[usenet] WARNING: %s", result.VerifyNote)
 		}
 	}
 

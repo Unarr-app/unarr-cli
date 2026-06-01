@@ -276,6 +276,11 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	if ppResult.Extracted {
 		log.Printf("[%s] extracted archive", shortID)
 	}
+	if ppResult.VerifyNote != "" {
+		// Degraded verification (par2 missing / repair failed): surface it loudly
+		// so the delivered file isn't silently assumed good.
+		log.Printf("[%s] WARNING: %s", shortID, ppResult.VerifyNote)
+	}
 
 	finalPath := ppResult.FinalPath
 	if finalPath == "" {

@@ -1,24 +1,36 @@
 package postprocess
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
 	"strings"
 )
 
-// Par2Available checks if par2cmdline is installed.
-func Par2Available() bool {
+// ErrPar2NotInstalled is returned by Par2Verify/Par2Repair when parity data is
+// present but the `par2` binary is missing. The caller MUST surface this rather
+// than treat it as "verified OK" — a download that shipped parity but could not
+// be checked is delivered UNVERIFIED, not verified.
+var ErrPar2NotInstalled = errors.New("par2 not installed")
+
+// par2Lookup probes whether the par2 binary is on PATH. It's a package var so
+// tests can simulate a missing binary without touching the real PATH.
+var par2Lookup = func() bool {
 	_, err := exec.LookPath("par2")
 	return err == nil
 }
 
-// Par2Verify verifies files using a par2 file.
-// Returns nil if verification passes, error otherwise.
+// Par2Available checks if par2cmdline is installed.
+func Par2Available() bool { return par2Lookup() }
+
+// Par2Verify verifies files using a par2 file. Returns nil on success,
+// ErrPar2NotInstalled when the binary is missing (parity present but unchecked —
+// the caller must surface it, NOT treat it as verified), a *Par2RepairableError
+// when repair is possible, or another error on failure.
 func Par2Verify(par2File string) error {
 	if !Par2Available() {
-		log.Printf("[usenet] par2 not installed, skipping verification")
-		return nil
+		return ErrPar2NotInstalled
 	}
 
 	cmd := exec.Command("par2", "verify", par2File)
@@ -42,7 +54,7 @@ func Par2Verify(par2File string) error {
 // Par2Repair attempts to repair files using par2 parity data.
 func Par2Repair(par2File string) error {
 	if !Par2Available() {
-		return fmt.Errorf("par2 not installed")
+		return ErrPar2NotInstalled
 	}
 
 	cmd := exec.Command("par2", "repair", par2File)

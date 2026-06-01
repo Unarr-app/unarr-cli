@@ -612,9 +612,10 @@ func (d *TorrentDownloader) seedAndDrop(taskID string, t *torrent.Torrent, total
 
 // makeReadable relaxes permissions on a completed download so it can be
 // re-opened by streaming/ffprobe/organize. anacrolix mmap storage creates
-// files with mode 0000; we set files to 0644 and directories to 0755. Errors
-// are logged but non-fatal (e.g. NFS root_squash) — the file may still be
-// readable depending on the export.
+// files with mode 0000; we set files to 0644 and directories to 0755. Best
+// effort + non-fatal — but a chmod that fails (typically NFS root_squash / SMB
+// uid mapping) is surfaced with a clear, actionable WARNING instead of leaving
+// the file 0000 to produce a cryptic "permission denied" later in the pipeline.
 func makeReadable(path string) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -625,8 +626,14 @@ func makeReadable(path string) {
 		if err := os.Chmod(path, 0o644); err != nil {
 			log.Printf("[organize] makeReadable chmod %q: %v", path, err)
 		}
+		// Verify the file is actually openable now — on NFS/SMB the chmod may
+		// "succeed" yet leave it unreadable to this uid. Catch it here with a
+		// pointed message rather than as an opaque error at stream/probe time.
+		warnIfUnreadable(path)
 		return
 	}
+	var chmodFails int
+	var firstFile string
 	err = filepath.WalkDir(path, func(p string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil // skip unreadable entries, keep going
@@ -634,8 +641,11 @@ func makeReadable(path string) {
 		mode := os.FileMode(0o644)
 		if d.IsDir() {
 			mode = 0o755
+		} else if firstFile == "" {
+			firstFile = p
 		}
 		if err := os.Chmod(p, mode); err != nil {
+			chmodFails++
 			log.Printf("[organize] makeReadable chmod %q: %v", p, err)
 		}
 		return nil
@@ -643,6 +653,27 @@ func makeReadable(path string) {
 	if err != nil {
 		log.Printf("[organize] makeReadable walk %q: %v", path, err)
 	}
+	if chmodFails > 0 {
+		log.Printf("[organize] WARNING: %d file(s) under %q could not be made readable (chmod failed) — likely NFS root_squash or an SMB uid mapping. Streaming, ffprobe and organize will fail to open them. Run the agent as the user that owns the share, or mount it so that user can chmod.", chmodFails, path)
+	}
+	// Same silent-unreadable check the single-file path does: on NFS/SMB a chmod
+	// can "succeed" yet leave the file unopenable. Probe one representative file
+	// so the directory path catches that case too, not only outright chmod errors.
+	if firstFile != "" {
+		warnIfUnreadable(firstFile)
+	}
+}
+
+// warnIfUnreadable logs a clear, actionable warning when a file we just chmod'd
+// still can't be opened for reading — the anacrolix-mmap-0000 + NFS/SMB failure
+// mode. Best effort: it neither fails the download nor blocks delivery.
+func warnIfUnreadable(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		log.Printf("[organize] WARNING: %q is not readable after chmod (%v) — likely NFS root_squash or an SMB uid mapping (anacrolix mmap creates files mode 0000). Streaming/ffprobe/organize will fail. Run the agent as the user that owns the share, or mount it so that user can chmod.", path, err)
+		return
+	}
+	_ = f.Close()
 }
 
 // Pause drops the torrent handle but keeps partial files on disk for resume.

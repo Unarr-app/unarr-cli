@@ -75,18 +75,23 @@ desde la web. Diseño + set de opciones en el estado abajo.
 - ~~Sin thumbnails~~ ✅ **Fotogramas bajo demanda (2026-05-31)** — `GET /thumbnail` (ffmpeg 1 frame, `-ss` antes de `-i`, MJPEG) + panel "Características del fichero" (ruta + mediainfo completa + tira de ~5 frames). Ver estado abajo.
 - ~~Sin trickplay (preview en la barra)~~ ✅ **Trickplay bajo demanda (2026-06-01)** — pista WebVTT `thumbnails` con 1 cue/10s; cada cue es una URL `/thumbnail?pos=…#xywh=0,0,W,H` (frame completo), así media-chrome solo descarga el frame que se sobrevuela. Toggle on/off por navegador (`localStorage`, default ON) + doc (web `docs/architecture/trickplay.md`). Alcance "on-demand" decidido con el usuario. Sin pregenerar sprite/BIF (sigue siendo opción futura con cacheo en disco). Ver estado abajo.
 - ~~Subtítulos bitmap (PGS/DVB) sin burn-in~~ ✅ **Burn-in PGS/DVB bajo demanda (2026-06-01)** — el usuario elige una pista bitmap en el reproductor → la sesión fuerza HLS y el agente re-codifica con `[0:v:0]<vchain>[base];[0:s:N][base]scale2ref[sub][base2];[base2][sub]overlay[vout]` (overlay tras el tonemap = brillo SDR correcto; scale2ref = encaje a cualquier resolución del PGS). En la cache key. Selector web alimentado de file-details (funciona también en direct-play). Caveat: PGS + seek pierde el subtítulo. Verificado en Sonic BDremux (ES quemado). Ver estado abajo.
-- Audio siempre downmix estéreo AAC (sin passthrough 5.1).
-- Mediaserver solo DETECTA Plex/Jellyfin/Emby — no biblioteca navegable propia.
-- TLS solo vía funnel; LAN/Tailscale/UPnP = HTTP plano (mixed-content desde web HTTPS).
+- ~~Audio siempre downmix estéreo AAC (sin passthrough 5.1)~~ ✅ **Verificado/descartado (2026-06-01)** — el 5.1 in-browser NO es viable (el navegador decodifica+mezcla al dispositivo, no hace bitstream-passthrough; AC3/EAC3/DTS ni se decodifican en Chrome/FF). El downmix solo ocurre en el path HLS. El handoff a player nativo (VLC/mpv/IINA/MPC/Infuse + .m3u/.strm) ya usa `/stream` **crudo** (`http.ServeContent` + `NewFileReader`, sin transcode) → el 5.1/Atmos/DTS original llega intacto al reproductor nativo. Sin trabajo necesario.
+- Mediaserver solo DETECTA Plex/Jellyfin/Emby — no biblioteca navegable propia. **(diferido al final por decisión del operador)**
+- TLS solo vía funnel; LAN/Tailscale/UPnP = HTTP plano (mixed-content desde web HTTPS). ⏸️ **Cimiento construido + DIFERIDO (2026-06-01)** — listener HTTPS por-agente con cert hot-reload (commit `27bee8c`, inerte sin cert). Decisión: MVP CF-only (single-SAN por agente, DNS-01 vía CF API, sin DNS propio); fase broker+DNS diferida. Doc: web `docs/plans/agent-tls-direct.md`.
 - Funnel = SPOF CloudFlare (rota ~6h), sin relay propio.
 - "Tailscale Funnel" mal nombrado (no usa tsnet/Funnel real).
 - Dos clientes HTTP divergentes (go-client vs agent client).
 - Long-poll en vez de WS/SSE.
 
 ### Deuda puntual
-`makeReadable` parchea mmap 0000 (frágil NFS) · par2/unrar degradan en silencio si
-falta binario · VAAPI workarounds por host · cloudflared sin verificación de firma ·
-WireGuard endpoint sin pin · sesión única (1 viewer).
+VAAPI workarounds por host · sesión única (1 viewer).
+
+**Cerrada (2026-06-01):**
+- ~~`makeReadable` parchea mmap 0000 (frágil NFS)~~ ✅ tras el chmod ahora **verifica** que el fichero abre; si no (NFS root_squash / mapeo uid SMB) emite un WARNING claro y accionable + cuenta de fallos en el walk, en vez de dejar un "permission denied" críptico aguas abajo.
+- ~~par2/unrar degradan en silencio si falta binario~~ ✅ `Par2Verify`/`Par2Repair` devuelven `ErrPar2NotInstalled` (antes `nil`=verificado); el pipeline lo surfacea (`Result.VerifyNote` + WARNING) → la descarga se entrega marcada UNVERIFIED, no como verificada. (El lado extract ya fallaba claro.)
+- ~~cloudflared sin verificación de firma~~ ✅ el auto-download ahora fija la versión (`pinnedCloudflaredVersion`) y **verifica SHA-256** contra hashes horneados (no `latest`); un release upstream malicioso/roto ya no se trae en silencio.
+- ~~WireGuard endpoint sin pin~~ ✅ **descartado**: el reseller de VPN (VPNResellers) usa configuración WireGuard directa sin pin de endpoint; no aplica.
+- ~~Dos clientes HTTP divergentes (go-client vs agent)~~ ✅ el go-client (API público: search/popular/etc.) ahora recibe **mirror-failover** vía un `MirrorRoundTripper` que reusa el mismo `MirrorPool` + política `IsTransient` del agent client (inyectado con `tc.WithHTTPClient`) → ambos sobreviven una caída del dominio primario igual; antes el público se quedaba clavado en el primario.
 
 ## Mejoras detectadas durante el trabajo (backlog)
 

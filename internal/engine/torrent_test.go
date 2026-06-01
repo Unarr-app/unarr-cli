@@ -2,9 +2,58 @@ package engine
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+// TestMakeReadable_FixesZeroMode verifies makeReadable turns an unreadable
+// mode-0000 file (the anacrolix mmap default) into a readable 0644 one.
+func TestMakeReadable_FixesZeroMode(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "movie.mkv")
+	if err := os.WriteFile(p, []byte("x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := os.Open(p); err == nil {
+		f.Close()
+		t.Skip("running as root — 0000 files are readable; can't exercise the fix")
+	}
+	makeReadable(p)
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatalf("file still unreadable after makeReadable: %v", err)
+	}
+	f.Close()
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o644 {
+		t.Errorf("mode = %o, want 0644", fi.Mode().Perm())
+	}
+}
+
+// TestMakeReadable_DirWalk verifies the directory branch relaxes a 0000 file
+// nested inside the download dir.
+func TestMakeReadable_DirWalk(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "Release")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(sub, "movie.mkv")
+	if err := os.WriteFile(p, []byte("x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := os.Open(p); err == nil {
+		f.Close()
+		t.Skip("running as root — 0000 files are readable")
+	}
+	makeReadable(sub)
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatalf("nested file unreadable after makeReadable: %v", err)
+	}
+	f.Close()
+}
 
 // TestNewTorrentDownloader_ValidConfig verifica que se puede crear un downloader
 // con una configuración válida sin errores.

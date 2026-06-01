@@ -2,6 +2,8 @@ package funnel
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,10 +12,33 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/torrentclaw/unarr/internal/config"
 )
+
+// pinnedCloudflaredVersion is the exact cloudflared release the auto-downloader
+// fetches. We deliberately do NOT track `latest`: pinning a version we vetted +
+// verifying its SHA-256 is what bounds the supply-chain risk (a future malicious
+// or breaking upstream release can't be pulled silently). Operator-installed
+// cloudflared on $PATH always wins, so this only affects the headless
+// auto-download fallback.
+//
+// To bump: pick a newer tag, copy its per-asset SHA-256 from the release body
+// (https://github.com/cloudflare/cloudflared/releases/tag/<version>) into the
+// map below, and update this constant. All four arch entries MUST be present.
+const pinnedCloudflaredVersion = "2026.5.2"
+
+// pinnedCloudflaredSHA256 maps each linux asset to its SHA-256 for
+// pinnedCloudflaredVersion (from the release body — Cloudflare publishes the
+// hashes inline there, not as a separate file or signature).
+var pinnedCloudflaredSHA256 = map[string]string{
+	"cloudflared-linux-amd64": "5286698547f03df745adb2355f04c12dde52ef425491e81f433642d695521886",
+	"cloudflared-linux-arm64": "5a4e8ce2701105271412059f44b6a0bf1ae4542b4d98ff3180c0c019443a5815",
+	"cloudflared-linux-armhf": "190152c373f608080eb6aa9e2aad395f88398dfb9efd0f9b064e2652cffcefdd",
+	"cloudflared-linux-386":   "ad82d1dbed8bbb9d702807cbd97df932cc774d29e9da5c109b7a3c7f7aee2065",
+}
 
 // ResolveBinary returns the path to a usable cloudflared executable, downloading
 // one into the unarr data dir if neither $PATH nor the cached location has it.
@@ -45,19 +70,19 @@ func cachedBinaryPath() string {
 	return filepath.Join(config.DataDir(), "bin", name)
 }
 
-// downloadCloudflared fetches the latest cloudflared release asset matching
-// the current GOOS/GOARCH into `dest`. Linux only — macOS/Windows return a
-// pointer at the OS package manager.
+// downloadCloudflared fetches the PINNED cloudflared release asset matching the
+// current GOOS/GOARCH into `dest`. Linux only — macOS/Windows return a pointer
+// at the OS package manager.
 //
-// Supply-chain caveat: we trust GitHub-over-TLS + cloudflare/cloudflared
-// repo integrity. The fetch is over HTTPS to api.github.com's release-asset
-// redirector, so a network MITM is bounded by Let's Encrypt + GitHub's cert
-// chain. We additionally verify the file is an ELF binary (Linux magic
-// bytes) so a generic 404 HTML page or a wrong-arch tarball is rejected at
-// rest. We do NOT verify a signature because Cloudflare doesn't sign release
-// assets at the moment — if you need stricter integrity, install cloudflared
-// from your distro's package manager (apt/brew/winget) and unarr will use
-// the PATH copy.
+// Integrity: the fetch is HTTPS (bounded by Let's Encrypt + GitHub's cert
+// chain) AND the downloaded bytes are verified against a baked-in SHA-256 for
+// the pinned version (pinnedCloudflaredSHA256). A mismatch — corruption, MITM
+// past TLS, a swapped asset — is rejected before the binary is promoted or run.
+// Because the version is pinned (not `latest`), a future malicious/breaking
+// upstream release is never pulled silently. The cheap ELF/size check still
+// runs first to reject a 404 HTML page before hashing 50 MB. For stricter
+// control, install cloudflared via your distro package manager — the PATH copy
+// always takes precedence.
 func downloadCloudflared(dest string) (string, error) {
 	if runtime.GOOS != "linux" {
 		return "", fmt.Errorf("funnel: auto-download not supported on %s — install cloudflared manually or drop a binary at %s", runtime.GOOS, dest)
@@ -77,7 +102,12 @@ func downloadCloudflared(dest string) (string, error) {
 		return "", fmt.Errorf("funnel: unsupported linux arch %q — install cloudflared manually", runtime.GOARCH)
 	}
 
-	url := "https://github.com/cloudflare/cloudflared/releases/latest/download/" + asset
+	expectedSHA, ok := pinnedCloudflaredSHA256[asset]
+	if !ok {
+		return "", fmt.Errorf("funnel: no pinned SHA-256 for asset %q (bug: keep pinnedCloudflaredSHA256 in sync with the arch switch)", asset)
+	}
+
+	url := "https://github.com/cloudflare/cloudflared/releases/download/" + pinnedCloudflaredVersion + "/" + asset
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return "", fmt.Errorf("funnel: create bin dir: %w", err)
 	}
@@ -125,12 +155,20 @@ func downloadCloudflared(dest string) (string, error) {
 		return "", fmt.Errorf("funnel: close dest: %w", err)
 	}
 
-	// Sanity check before promoting <partial> to <dest>: must be a Linux
-	// ELF executable (rejects 404 HTML pages or wrong-arch payloads) and at
-	// least 1 MB (real cloudflared is ~50 MB; anything smaller is corrupt).
+	// Cheap reject first: must be a Linux ELF executable (rejects 404 HTML pages
+	// or wrong-arch payloads) and at least 1 MB, so we don't hash 50 MB of an
+	// obviously-wrong file.
 	if err := verifyLinuxElf(tmp); err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("funnel: downloaded file failed sanity check: %w", err)
+	}
+
+	// Authoritative integrity gate: the bytes must match the SHA-256 we baked in
+	// for the pinned version. Rejects corruption, a MITM past TLS, or a swapped
+	// asset before the binary is ever promoted or executed.
+	if err := verifySHA256(tmp, expectedSHA); err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("funnel: cloudflared %s integrity check failed: %w", pinnedCloudflaredVersion, err)
 	}
 
 	if err := os.Rename(tmp, dest); err != nil {
@@ -162,6 +200,25 @@ func verifyLinuxElf(path string) error {
 	}
 	if !bytes.Equal(head, []byte{0x7f, 'E', 'L', 'F'}) {
 		return errors.New("not an ELF binary")
+	}
+	return nil
+}
+
+// verifySHA256 returns nil when the file at `path` hashes to expectedHex
+// (case-insensitive), else an error reporting both digests.
+func verifySHA256(path, expectedHex string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("hashing: %w", err)
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(got, expectedHex) {
+		return fmt.Errorf("sha256 mismatch: got %s, want %s", got, expectedHex)
 	}
 	return nil
 }

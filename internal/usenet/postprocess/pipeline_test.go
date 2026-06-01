@@ -6,6 +6,38 @@ import (
 	"testing"
 )
 
+// TestProcess_Par2MissingSurfaced verifies that when parity is present but the
+// par2 binary is missing, Process does NOT silently report success: it surfaces
+// the degraded state via VerifyNote and leaves Verified false (while still
+// delivering the file).
+func TestProcess_Par2MissingSurfaced(t *testing.T) {
+	orig := par2Lookup
+	par2Lookup = func() bool { return false }
+	defer func() { par2Lookup = orig }()
+
+	dir := t.TempDir()
+	par2Path := filepath.Join(dir, "release.par2")
+	if err := os.WriteFile(par2Path, []byte("fake parity"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vid := filepath.Join(dir, "movie.mkv")
+	if err := os.WriteFile(vid, []byte("video data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{"release.par2": par2Path, "movie.mkv": vid}
+
+	res, err := Process(dir, files, Options{})
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if res.VerifyNote == "" {
+		t.Error("VerifyNote must be set (not silent) when par2 is missing")
+	}
+	if res.FinalPath != vid {
+		t.Errorf("FinalPath = %q, want %q (file still delivered)", res.FinalPath, vid)
+	}
+}
+
 func TestFindPar2File(t *testing.T) {
 	dir := t.TempDir()
 
