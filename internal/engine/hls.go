@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1184,11 +1185,14 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		// per session start, polluting logs even though encode succeeds.
 		args = append(args, "-vaapi_device", "/dev/dri/renderD128")
 	}
-	// Derive H.264 level from the actual output height. A fixed "4.0" caps the
-	// encoder at 1080p — anything taller (1440p, 4K source on quality=original)
-	// fails libx264 with "frame MB size > level limit" and emits unplayable
-	// segments. The output height matches qcap.MaxHeight when the source is
-	// downscaled, otherwise probe.Height (already populated by ffprobe).
+	// Derive H.264 level from the actual output FRAME (width × height), not just
+	// height. A fixed "4.0" caps the encoder at 1080p; deriving by height alone
+	// still under-levels anamorphic content — a 2.39:1 source scaled to 1080
+	// height is ~2586×1080 = 11016 MBs, busting level 4.1's 8192-MB cap, which
+	// fails the encode ("Invalid Level" on nvenc, "frame MB size > level limit"
+	// on libx264) and stalls the session. The output height matches qcap.MaxHeight
+	// when the source is downscaled, otherwise probe.Height; the output width is
+	// the source width scaled by the same factor (the filter chain preserves AR).
 	qcap := resolveQualityCap(cfg.Quality)
 	outputHeight := qcap.MaxHeight
 	if outputHeight == 0 {
@@ -1197,7 +1201,11 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	if outputHeight == 0 || (probe.Height > 0 && probe.Height < outputHeight) {
 		outputHeight = probe.Height
 	}
-	args = append(args, "-profile:v", "main", "-level:v", H264LevelForHeight(outputHeight))
+	outputWidth := probe.Width
+	if probe.Height > 0 && outputHeight != probe.Height {
+		outputWidth = int(math.Round(float64(probe.Width) * float64(outputHeight) / float64(probe.Height)))
+	}
+	args = append(args, "-profile:v", "main", "-level:v", H264LevelForFrame(outputWidth, outputHeight))
 
 	// Bitrate must match the level libx264 actually picks for outputHeight,
 	// not the qcap target for the user's requested label. If a user asks for
