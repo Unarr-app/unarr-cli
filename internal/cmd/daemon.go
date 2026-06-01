@@ -362,6 +362,21 @@ func runDaemonStart() error {
 	corsExtras := append([]string(nil), cfg.Download.CORSExtraOrigins...)
 	corsExtras = append(corsExtras, mirrorCORSOrigins(ctx, cfg, userAgent)...)
 	streamSrv.SetCORSAllowedOrigins(corsExtras)
+
+	// HTTPS stream listener (agent-TLS feature): only armed when a certificate is
+	// present on disk — without a valid cert there is nothing to serve over TLS,
+	// and the HTTP listener + funnel keep working. The future ACME broker writes
+	// the cert pair to certs/agent.{crt,key} under the agent state dir.
+	if cfg.Download.HTTPSStreamPort > 0 {
+		certPath := filepath.Join(config.DataDir(), "certs", "agent.crt")
+		keyPath := filepath.Join(config.DataDir(), "certs", "agent.key")
+		if err := streamSrv.LoadTLSCertificateFromFiles(certPath, keyPath); err != nil {
+			log.Printf("[stream] HTTPS disabled — no usable certificate at %s (%v)", certPath, err)
+		} else {
+			streamSrv.EnableTLS(cfg.Download.HTTPSStreamPort)
+			log.Printf("[stream] HTTPS armed on port %d with certificate %s", cfg.Download.HTTPSStreamPort, certPath)
+		}
+	}
 	// Reap HLS tmpdirs left over from a previous daemon run before we start
 	// accepting new sessions. The in-memory registry doesn't survive a
 	// restart, so without this disk usage grows unbounded across restarts.

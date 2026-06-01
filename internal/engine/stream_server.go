@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -69,6 +70,15 @@ type StreamServer struct {
 	url         string     // best single URL (backward compat)
 	urls        StreamURLs // all available URLs by network type
 	upnpMapping *UPnPMapping
+
+	// TLS — optional HTTPS listener for direct, valid-cert browser playback
+	// (agent-TLS feature). httpsPort 0 = disabled. tlsCert holds the current
+	// server certificate, swapped atomically on renewal; the TLS config reads it
+	// via GetCertificate so a renewed cert applies without dropping the listener.
+	// HTTP (port) keeps serving regardless — loopback players + the funnel use it.
+	httpsPort   int
+	httpsServer *http.Server
+	tlsCert     atomic.Pointer[tls.Certificate]
 	// enableUPnP gates whether Listen() asks the gateway to publish the
 	// stream port to the WAN. UPnP is opt-in (false by default) because
 	// /stream and /hls have no auth — exposing them on the public internet
@@ -151,6 +161,41 @@ func (ss *StreamServer) checkStreamToken(scope, token string) bool {
 func (ss *StreamServer) SetUPnPEnabled(enabled bool) {
 	ss.enableUPnP = enabled
 }
+
+// EnableTLS arms the HTTPS listener on httpsPort. Call before Listen(). The
+// listener starts even without a certificate installed yet — handshakes fail
+// until one is set via SetTLSCertificate, so a cert issued asynchronously (the
+// future ACME broker) applies live without a restart. httpsPort <= 0 is a no-op.
+func (ss *StreamServer) EnableTLS(httpsPort int) {
+	if httpsPort > 0 {
+		ss.httpsPort = httpsPort
+	}
+}
+
+// SetTLSCertificate atomically installs or replaces the server certificate used
+// by the HTTPS listener. Safe to call at any time (startup or on renewal); the
+// new cert applies to the next TLS handshake without dropping the listener.
+func (ss *StreamServer) SetTLSCertificate(cert *tls.Certificate) {
+	ss.tlsCert.Store(cert)
+}
+
+// LoadTLSCertificateFromFiles reads a PEM cert+key pair from disk and installs
+// it. Returns an error if the pair is missing or invalid — the caller decides
+// whether that's fatal (the daemon treats it as "TLS off, HTTP keeps serving").
+func (ss *StreamServer) LoadTLSCertificateFromFiles(certPath, keyPath string) error {
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return fmt.Errorf("load TLS keypair: %w", err)
+	}
+	ss.SetTLSCertificate(&cert)
+	return nil
+}
+
+// HasTLSCertificate reports whether a server certificate is currently installed.
+func (ss *StreamServer) HasTLSCertificate() bool { return ss.tlsCert.Load() != nil }
+
+// HTTPSPort returns the active HTTPS port, or 0 when TLS is disabled.
+func (ss *StreamServer) HTTPSPort() int { return ss.httpsPort }
 
 // SetFFmpegPath sets the ffmpeg binary used by /thumbnail to extract single
 // frames on demand. Call before Listen(); empty leaves thumbnails disabled
@@ -295,6 +340,71 @@ func (ss *StreamServer) Listen(ctx context.Context) error {
 	}()
 
 	log.Printf("[stream] server listening on port %d", ss.port)
+
+	// Optional HTTPS listener (agent-TLS feature). Non-fatal: if it can't bind,
+	// HTTP keeps serving so the funnel + LAN HTTP path are unaffected.
+	if ss.httpsPort > 0 {
+		if err := ss.listenTLS(ctx, mux); err != nil {
+			log.Printf("[stream] HTTPS listener disabled: %v", err)
+			ss.httpsPort = 0
+		}
+	}
+	return nil
+}
+
+// listenTLS starts the HTTPS listener on ss.httpsPort serving the same mux as
+// the HTTP server. The certificate is read per-handshake from the atomic holder
+// (tlsCert) so a renewed cert applies without restarting the listener; until a
+// cert is installed, handshakes fail cleanly (the HTTP path is unaffected).
+func (ss *StreamServer) listenTLS(ctx context.Context, mux http.Handler) error {
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) { _ = setReuseAddr(fd) })
+		},
+	}
+
+	var listener net.Listener
+	var err error
+	basePort := ss.httpsPort
+	for attempt := 0; attempt < 10; attempt++ {
+		listener, err = lc.Listen(ctx, "tcp", fmt.Sprintf("0.0.0.0:%d", ss.httpsPort))
+		if err == nil {
+			break
+		}
+		if !strings.Contains(err.Error(), "address already in use") {
+			return fmt.Errorf("https listen on %d: %w", ss.httpsPort, err)
+		}
+		ss.httpsPort++
+	}
+	if err != nil {
+		return fmt.Errorf("https: all ports busy (%d-%d): %w", basePort, ss.httpsPort, err)
+	}
+	ss.httpsPort = listener.Addr().(*net.TCPAddr).Port
+
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"h2", "http/1.1"},
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if cert := ss.tlsCert.Load(); cert != nil {
+				return cert, nil
+			}
+			return nil, fmt.Errorf("no TLS certificate installed")
+		},
+	}
+	ss.httpsServer = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig:         tlsCfg,
+	}
+
+	go func() {
+		// Empty cert/key paths → ServeTLS uses TLSConfig.GetCertificate.
+		if err := ss.httpsServer.ServeTLS(listener, "", ""); err != nil && err != http.ErrServerClosed {
+			log.Printf("[stream] HTTPS server error: %v", err)
+		}
+	}()
+
+	log.Printf("[stream] HTTPS listening on port %d (certificate installed: %v)", ss.httpsPort, ss.HasTLSCertificate())
 	return nil
 }
 
@@ -446,6 +556,11 @@ func (ss *StreamServer) Shutdown(ctx context.Context) error {
 	ss.upnpMapping.Remove()
 	if ss.hls != nil {
 		ss.hls.CloseAll()
+	}
+	if ss.httpsServer != nil {
+		if err := ss.httpsServer.Shutdown(ctx); err != nil {
+			log.Printf("[stream] HTTPS shutdown: %v", err)
+		}
 	}
 	if ss.server != nil {
 		return ss.server.Shutdown(ctx)

@@ -49,14 +49,15 @@ type DownloadConfig struct {
 	// Seeding lifecycle (BitTorrent only). Off by default — the daemon leeches
 	// then drops the torrent. Enable to keep uploading after a download finishes;
 	// seeding stops at whichever target is hit first, or never if both are unset.
-	SeedEnabled     bool    `toml:"seed_enabled"`     // keep uploading after completion (default: false)
-	SeedRatio       float64 `toml:"seed_ratio"`       // stop once uploaded/size reaches this ratio (0 = no ratio target)
-	SeedTime        string  `toml:"seed_time"`        // stop after this long since completion, e.g. "24h" (0/"" = no time target)
-	MetadataTimeout string  `toml:"metadata_timeout"` // e.g. "1h", "30m", "0" = unlimited (default: "0")
-	StallTimeout    string  `toml:"stall_timeout"`    // e.g. "30m", "1h", "0" = unlimited (default: "30m")
-	ListenPort      int     `toml:"listen_port"`      // fixed port for incoming peer connections (default: 42069, 0 = random)
-	StreamPort      int     `toml:"stream_port"`      // fixed port for streaming HTTP server (default: 11818)
-	EnableUPnP      bool    `toml:"enable_upnp"`      // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in)
+	SeedEnabled     bool    `toml:"seed_enabled"`      // keep uploading after completion (default: false)
+	SeedRatio       float64 `toml:"seed_ratio"`        // stop once uploaded/size reaches this ratio (0 = no ratio target)
+	SeedTime        string  `toml:"seed_time"`         // stop after this long since completion, e.g. "24h" (0/"" = no time target)
+	MetadataTimeout string  `toml:"metadata_timeout"`  // e.g. "1h", "30m", "0" = unlimited (default: "0")
+	StallTimeout    string  `toml:"stall_timeout"`     // e.g. "30m", "1h", "0" = unlimited (default: "30m")
+	ListenPort      int     `toml:"listen_port"`       // fixed port for incoming peer connections (default: 42069, 0 = random)
+	StreamPort      int     `toml:"stream_port"`       // fixed port for streaming HTTP server (default: 11818)
+	HTTPSStreamPort int     `toml:"https_stream_port"` // HTTPS stream listener for direct valid-cert playback (default: 11819, 0 = disabled). Only serves once a certificate is present (agent-TLS feature).
+	EnableUPnP      bool    `toml:"enable_upnp"`       // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in)
 	// RequireStreamToken gates remote (non-loopback) /stream + /hls requests on a
 	// signed, short-lived token embedded in the URLs the agent reports. Default
 	// true (secure by default); loopback callers (local mpv/vlc) are always exempt.
@@ -204,6 +205,7 @@ func Default() Config {
 			MaxConcurrent:      3,
 			MinFreeDiskMB:      2048, // 2 GiB reserve
 			StreamPort:         11818,
+			HTTPSStreamPort:    11819,
 			RequireStreamToken: true, // secure by default; loopback exempt
 			Transcode: TranscodeConfig{
 				Enabled: true,
@@ -306,6 +308,9 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	}
 	if !meta.IsDefined("downloads", "stream_port") {
 		cfg.Download.StreamPort = 11818
+	}
+	if !meta.IsDefined("downloads", "https_stream_port") {
+		cfg.Download.HTTPSStreamPort = 11819
 	}
 	if !meta.IsDefined("general", "country") {
 		cfg.General.Country = "US"
