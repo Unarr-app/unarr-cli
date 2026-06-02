@@ -189,6 +189,14 @@ type LibraryConfig struct {
 	AutoScan     bool   `toml:"auto_scan"`     // enable daily auto-scan in daemon (default true)
 	ScanInterval string `toml:"scan_interval"` // e.g. "24h", "12h", "6h" (default "24h")
 	AllowDelete  bool   `toml:"allow_delete"`  // allow web UI to request file deletion from disk
+
+	// Sidecar caching: extract text subtitles (WebVTT) and thumbnail frames once
+	// during the library scan and store them in a hidden ".unarr" dir next to the
+	// media file, so the stream handlers serve them instantly instead of running
+	// ffmpeg per request (and so huge remuxes don't hit the on-demand HTTP
+	// timeout). Both default true; disable to save the disk/CPU of pre-extraction.
+	CacheSubtitles  bool `toml:"cache_subtitles"`  // default true
+	CacheThumbnails bool `toml:"cache_thumbnails"` // default true
 }
 
 // Default returns a Config with sensible defaults. Used both for fresh
@@ -255,9 +263,11 @@ func Default() Config {
 			Locale:  "en",
 		},
 		Library: LibraryConfig{
-			AutoScan:     true,
-			ScanInterval: "24h",
-			Workers:      8,
+			AutoScan:        true,
+			ScanInterval:    "24h",
+			Workers:         8,
+			CacheSubtitles:  true,
+			CacheThumbnails: true,
 		},
 	}
 }
@@ -319,6 +329,16 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	}
 	if !meta.IsDefined("general", "country") {
 		cfg.General.Country = "US"
+	}
+
+	// Sidecar caching defaults ON for existing configs that predate these keys —
+	// it only adds small hidden files next to media and makes subs/thumbnails
+	// instant. Power users can set them false explicitly to opt out.
+	if !meta.IsDefined("library", "cache_subtitles") {
+		cfg.Library.CacheSubtitles = true
+	}
+	if !meta.IsDefined("library", "cache_thumbnails") {
+		cfg.Library.CacheThumbnails = true
 	}
 
 	if !meta.IsDefined("downloads", "transcode", "enabled") {

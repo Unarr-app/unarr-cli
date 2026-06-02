@@ -346,6 +346,10 @@ func runDaemonStart() error {
 	// Wire ffmpeg so /thumbnail can extract single frames for the web's "file
 	// characteristics" panel (frames on demand). Empty = thumbnails 503.
 	streamSrv.SetFFmpegPath(ffmpegResolved)
+	// Write-through cache extracted WebVTT into the hidden ".unarr" sidecar dir so
+	// /sub serves instantly (and giant remuxes that exceed the on-demand timeout
+	// work once the scan prewarm has filled the cache). Default true.
+	streamSrv.SetCacheSubtitles(cfg.Library.CacheSubtitles)
 	streamSrv.SetRequireStreamToken(cfg.Download.RequireStreamToken)
 	// Report the stream-token signing key ONLY when enforcing, so the web's
 	// "secret present → mint HLS token" signal accurately means "this agent
@@ -995,6 +999,18 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 			Incremental: existing != nil,
 		}
 
+		// Resolve ffmpeg once for the subtitle-sidecar prewarm (extracts text subs
+		// to the hidden ".unarr" cache so /sub is instant + huge remuxes work).
+		// Empty/err = prewarm is skipped silently (on-demand extraction still runs).
+		prewarmFFmpeg := ""
+		if cfg.Library.CacheSubtitles {
+			if ff, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err == nil {
+				prewarmFFmpeg = ff
+			} else {
+				log.Printf("[auto-scan] subtitle prewarm disabled: ffmpeg unavailable: %v", err)
+			}
+		}
+
 		// Scan each path independently and sync per path so the server can
 		// scope stale-item deletion to the correct directory prefix.
 		const batchSize = 100
@@ -1008,6 +1024,14 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 				continue
 			}
 			mergedItems = append(mergedItems, cache.Items...)
+
+			if prewarmFFmpeg != "" {
+				library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
+					FFmpegPath:     prewarmFFmpeg,
+					CacheSubtitles: true,
+					Workers:        2,
+				})
+			}
 
 			items := library.BuildSyncItems(cache)
 			if len(items) == 0 {

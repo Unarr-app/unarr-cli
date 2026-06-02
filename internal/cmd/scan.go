@@ -16,6 +16,7 @@ import (
 	"github.com/torrentclaw/unarr/internal/agent"
 	"github.com/torrentclaw/unarr/internal/config"
 	"github.com/torrentclaw/unarr/internal/library"
+	"github.com/torrentclaw/unarr/internal/library/mediainfo"
 )
 
 func newScanCmd() *cobra.Command {
@@ -137,6 +138,20 @@ func runScan(dirPath string, workers int, ffprobePath string, noSync bool) error
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(cache)
+	}
+
+	// Pre-extract subtitle sidecars (text subs → WebVTT in a hidden ".unarr" dir)
+	// so playback gets instant subtitles and huge remuxes never hit the on-demand
+	// timeout. Best-effort + Ctrl-C interruptible (the scan itself is already saved).
+	if cfg.Library.CacheSubtitles {
+		if ff, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err == nil {
+			fmt.Fprintf(os.Stderr, "  Pre-extracting subtitles to cache… (Ctrl-C to skip)\n")
+			library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
+				FFmpegPath:     ff,
+				CacheSubtitles: true,
+				Workers:        2,
+			})
+		}
 	}
 
 	// Sync to server

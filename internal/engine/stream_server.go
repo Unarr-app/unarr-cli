@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent"
+	"github.com/torrentclaw/unarr/internal/library/mediainfo"
 )
 
 // StreamURLs holds all available stream URLs keyed by network type.
@@ -104,6 +105,12 @@ type StreamServer struct {
 	// single frame on demand. Empty = thumbnails disabled (503). Set once before
 	// Listen() via SetFFmpegPath; read-only thereafter so the handler needs no lock.
 	ffmpegPath string
+
+	// cacheSubtitles enables write-through caching of extracted WebVTT to the
+	// hidden ".unarr" sidecar dir next to the media (mirrors the scan-time
+	// prewarm). Set once before Listen() via SetCacheSubtitles; default false here,
+	// flipped on from config (default true) by the daemon. read-only thereafter.
+	cacheSubtitles bool
 
 	lastActivity  atomic.Int64
 	maxByteOffset atomic.Int64 // highest sequential read position (main playback connection)
@@ -202,6 +209,13 @@ func (ss *StreamServer) HTTPSPort() int { return ss.httpsPort }
 // (the handler returns 503). Read-only after Listen() — no locking in the handler.
 func (ss *StreamServer) SetFFmpegPath(path string) {
 	ss.ffmpegPath = path
+}
+
+// SetCacheSubtitles toggles write-through caching of extracted WebVTT into the
+// hidden ".unarr" sidecar dir next to the media file (library.cache_subtitles,
+// default true). Call before Listen(); read-only thereafter.
+func (ss *StreamServer) SetCacheSubtitles(on bool) {
+	ss.cacheSubtitles = on
 }
 
 // SetCORSAllowedOrigins replaces the operator-supplied extra origins. The
@@ -1003,45 +1017,51 @@ func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// A full subtitle track is small (KBs–low MBs); 60s is ample even for a
-	// long movie's text track and bounds a hung/corrupt ffmpeg.
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-
-	// -map 0:s:<index> selects the Nth subtitle stream (same ordering as the
-	// library scan / probe.json / burn-in si=N). `-c:s webvtt -f webvtt` converts
-	// srt/ass/mov_text/etc. to WebVTT on stdout. `?` makes the map non-fatal if
-	// the stream is absent (yields empty output rather than a hard error).
-	args := []string{
-		"-nostdin",
-		"-loglevel", "error",
-		"-i", rawPath,
-		"-map", fmt.Sprintf("0:s:%d?", index),
-		"-c:s", "webvtt",
-		"-f", "webvtt",
-		"-",
-	}
-	cmd := exec.CommandContext(ctx, ss.ffmpegPath, args...)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil || len(out) == 0 {
-		log.Printf("[sub] extract failed (i=%d path=%q): err=%v %s",
-			index, rawPath, err, strings.TrimSpace(stderr.String()))
-		http.Error(w, "subtitle extract failed", http.StatusInternalServerError)
+	// Cache hit: serve a fresh sidecar (written by the scan-time prewarm or a
+	// prior request) instantly, skipping ffmpeg. This is also what makes huge
+	// remuxes work — the prewarm extracts without the on-demand HTTP timeout
+	// below, so by play time the hit avoids the 60s ceiling that was returning
+	// 500s on 50GB+ files.
+	if vtt, ok := mediainfo.ReadCachedSubtitle(rawPath, index); ok {
+		ss.writeVTT(w, vtt)
 		return
 	}
 
+	// A full subtitle track is small (KBs–low MBs); 60s is ample for a normal
+	// movie's text track and bounds a hung/corrupt ffmpeg. Giant remuxes can
+	// exceed this on first play — the prewarm pre-fills the cache so this
+	// on-demand path is the fallback, not the steady state.
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	out, err := mediainfo.ExtractSubtitleVTT(ctx, ss.ffmpegPath, rawPath, index)
+	if err != nil {
+		log.Printf("[sub] extract failed (i=%d path=%q): %v", index, rawPath, err)
+		http.Error(w, "subtitle extract failed", http.StatusInternalServerError)
+		return
+	}
+	// Write-through so the next request is a cache hit. Best-effort: a read-only
+	// media mount just logs and serves the in-memory bytes.
+	if ss.cacheSubtitles {
+		if werr := mediainfo.WriteCachedSubtitle(rawPath, index, out); werr != nil {
+			log.Printf("[sub] cache write skipped (i=%d path=%q): %v", index, rawPath, werr)
+		}
+	}
+	ss.writeVTT(w, out)
+}
+
+// writeVTT writes the standard WebVTT response headers + body for both the
+// cache-hit and freshly-extracted paths of subtitleHandler.
+func (ss *StreamServer) writeVTT(w http.ResponseWriter, vtt []byte) {
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
 	// path+index is stable content for the daemon's lifetime; let the browser
-	// cache so re-selecting a track doesn't re-run ffmpeg. private — the user's
-	// own file.
+	// cache so re-selecting a track doesn't re-fetch. private — the user's file.
 	w.Header().Set("Cache-Control", "private, max-age=3600")
-	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
+	w.Header().Set("Content-Length", strconv.Itoa(len(vtt)))
 	//nolint:gosec // G705: WebVTT served as text/vtt to a <track> element — not
 	// HTML, so cue text can't execute; the path is token-scoped + stat'd as a
 	// regular file, and ffmpeg only emits well-formed WebVTT.
-	if _, err := w.Write(out); err != nil {
+	if _, err := w.Write(vtt); err != nil {
 		log.Printf("[sub] write failed: %v", err)
 	}
 }
