@@ -6,6 +6,19 @@ type MediaInfo struct {
 	Audio     []AudioTrack    `json:"audio"`
 	Subtitles []SubtitleTrack `json:"subtitles"`
 	Languages []string        `json:"languages"` // derived from audio tracks
+	// Integrity is non-nil only when the scan found signs of corruption / an
+	// incomplete download. Surfaced in the web library as a "damaged" warning
+	// so the user re-downloads instead of hitting a file that won't play.
+	Integrity *IntegrityInfo `json:"integrity,omitempty"`
+}
+
+// IntegrityInfo flags a file whose metadata probed OK enough to land in the
+// library but that shows structural damage (ffprobe emitted EBML / "invalid
+// data" errors, a truncated moov atom, or no usable video/duration) — the
+// hallmark of an incomplete or corrupt download.
+type IntegrityInfo struct {
+	Damaged bool   `json:"damaged"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // VideoInfo represents the primary video stream metadata.

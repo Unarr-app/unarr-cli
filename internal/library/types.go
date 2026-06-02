@@ -26,4 +26,8 @@ type LibraryCache struct {
 	Items     []LibraryItem `json:"items"`
 }
 
-const cacheVersion = 1
+// Bump whenever the scan logic changes in a way that should re-probe an
+// existing library on next scan (incremental reuse keys off mtime+size, so a
+// pure logic change is invisible without this). v2: file-integrity detection
+// (ffprobe corruption / incomplete-download flag).
+const cacheVersion = 2

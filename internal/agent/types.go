@@ -338,6 +338,11 @@ type LibrarySyncItem struct {
 	AudioTracks       any      `json:"audioTracks,omitempty"`
 	SubtitleTracks    any      `json:"subtitleTracks,omitempty"`
 	VideoInfo         any      `json:"videoInfo,omitempty"`
+	// Integrity flags a damaged / incompletely-downloaded file ("damaged" or
+	// empty). IntegrityReason is a stable code (ebml_corrupt, moov_missing,
+	// no_duration, …) the web maps to a localized "re-download" message.
+	Integrity         string   `json:"integrity,omitempty"`
+	IntegrityReason   string   `json:"integrityReason,omitempty"`
 }
 
 // LibrarySyncResponse is returned after syncing library items.

@@ -84,7 +84,55 @@ func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*Media
 		return nil, fmt.Errorf("ffprobe JSON parse failed: %w", err)
 	}
 
-	return parseFFprobeOutput(data)
+	mi, perr := parseFFprobeOutput(data)
+	if perr != nil {
+		return nil, perr
+	}
+	// A corrupt-but-parseable file (e.g. a half-downloaded MKV) returns valid
+	// stream JSON and a zero exit, yet ffprobe still logs structural errors to
+	// stderr (captured above). Flag it so the library can warn instead of
+	// silently shipping a file that won't play.
+	if integ := assessIntegrity(stderr.String(), mi); integ != nil {
+		mi.Integrity = integ
+	}
+	return mi, nil
+}
+
+// corruptionMarkers are high-confidence ffprobe stderr substrings (lowercased)
+// that indicate a structurally damaged / incompletely-downloaded file, paired
+// with a STABLE code the web maps to localized copy. Kept conservative so
+// healthy files are never flagged — each appears only on real container/
+// bitstream damage, not benign warnings (ffprobe runs at -v error).
+var corruptionMarkers = []struct{ sub, code string }{
+	{"invalid data found when processing input", "invalid_data"},
+	{"as first byte of an ebml number", "ebml_corrupt"}, // truncated/corrupt MKV
+	{"moov atom not found", "moov_missing"},             // truncated MP4
+	{"invalid nal unit size", "bitstream_corrupt"},
+	{"non-existing pps", "bitstream_corrupt"},
+	// NOTE: deliberately NOT matching "error reading header" (ffprobe emits it
+	// on transient NFS/network read hiccups — a genuinely unreadable header
+	// also exits non-zero → ScanError → item skipped) nor "truncating packet"
+	// (printed for healthy MKV/TS with oversized subtitle/PGS packets). Both
+	// false-positive on good files; the markers above are structural.
+}
+
+// assessIntegrity inspects ffprobe's stderr plus the parsed result and returns
+// a damaged verdict on a high-confidence corruption signal, else nil. The
+// Reason is a stable code (see corruptionMarkers) the web localizes.
+func assessIntegrity(stderr string, mi *MediaInfo) *IntegrityInfo {
+	low := strings.ToLower(stderr)
+	for _, m := range corruptionMarkers {
+		if strings.Contains(low, m.sub) {
+			return &IntegrityInfo{Damaged: true, Reason: m.code}
+		}
+	}
+	// A file that carries a video stream but no determinable duration is almost
+	// always truncated (the moov/cues holding duration sit at the end of the
+	// file). Audio-only items legitimately omit it, so gate on having video.
+	if mi != nil && mi.Video != nil && mi.Video.Duration <= 0 {
+		return &IntegrityInfo{Damaged: true, Reason: "no_duration"}
+	}
+	return nil
 }
 
 // parseFFprobeOutput converts parsed ffprobe JSON into MediaInfo.

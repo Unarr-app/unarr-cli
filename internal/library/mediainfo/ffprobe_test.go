@@ -428,3 +428,42 @@ func TestParseFFprobeOutput_FrameRateNoSlash(t *testing.T) {
 		t.Errorf("frameRate = %v, want 0 (no slash)", mi.Video.FrameRate)
 	}
 }
+
+func TestAssessIntegrity(t *testing.T) {
+	healthy := &MediaInfo{Video: &VideoInfo{Codec: "h264", Width: 1920, Height: 1080, Duration: 5477}}
+
+	// Healthy file with no stderr → nil (not damaged).
+	if got := assessIntegrity("", healthy); got != nil {
+		t.Errorf("healthy file flagged damaged: %+v", got)
+	}
+
+	// MKV EBML corruption (the real "In the Grey" case): ffprobe exits 0 but
+	// logs EBML errors → damaged with the ebml_corrupt code.
+	ebml := "[matroska,webm @ 0x60e7] 0x00 at pos 2144995 invalid as first byte of an EBML number\n"
+	got := assessIntegrity(ebml, healthy)
+	if got == nil || !got.Damaged || got.Reason != "ebml_corrupt" {
+		t.Errorf("EBML corruption not flagged correctly: %+v", got)
+	}
+
+	// Truncated MP4.
+	if got := assessIntegrity("moov atom not found\n", healthy); got == nil || got.Reason != "moov_missing" {
+		t.Errorf("moov-missing not flagged: %+v", got)
+	}
+
+	// Invalid data.
+	if got := assessIntegrity("Invalid data found when processing input\n", healthy); got == nil || got.Reason != "invalid_data" {
+		t.Errorf("invalid-data not flagged: %+v", got)
+	}
+
+	// No duration on a video stream → truncated.
+	noDur := &MediaInfo{Video: &VideoInfo{Codec: "h264", Width: 1920, Height: 1080, Duration: 0}}
+	if got := assessIntegrity("", noDur); got == nil || got.Reason != "no_duration" {
+		t.Errorf("no-duration not flagged: %+v", got)
+	}
+
+	// Audio-only file with no duration is NOT flagged (legitimately omits it).
+	audioOnly := &MediaInfo{Audio: []AudioTrack{{Lang: "en", Codec: "aac"}}}
+	if got := assessIntegrity("", audioOnly); got != nil {
+		t.Errorf("audio-only file wrongly flagged: %+v", got)
+	}
+}

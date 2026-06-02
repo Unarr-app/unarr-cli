@@ -36,6 +36,10 @@ func BuildSyncItems(cache *LibraryCache) []agent.LibrarySyncItem {
 			si.AudioTracks = item.MediaInfo.Audio
 			si.SubtitleTracks = item.MediaInfo.Subtitles
 			si.VideoInfo = item.MediaInfo.Video
+			if integ := item.MediaInfo.Integrity; integ != nil && integ.Damaged {
+				si.Integrity = "damaged"
+				si.IntegrityReason = integ.Reason
+			}
 		}
 
 		items = append(items, si)

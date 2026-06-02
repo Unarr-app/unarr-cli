@@ -145,11 +145,16 @@ func scanSingleFile(ctx context.Context, ffprobePath, filePath string, cacheIdx 
 	// Parse season/episode
 	item.Season, item.Episode = ParseSeasonEpisode(item.FileName)
 
-	// Incremental: skip if file hasn't changed
+	// Incremental: skip if file hasn't changed. EXCEPT a previously-damaged
+	// file is always re-probed — a re-download to the same path can land with
+	// an identical size+mtime (some torrent clients preserve the torrent's
+	// mtime), so trusting the cached "damaged" verdict would pin a now-healthy
+	// file as broken forever. Re-probing damaged items is cheap (they're few).
 	if incremental && existing != nil {
 		if idx, ok := cacheIdx[filePath]; ok {
 			cached := existing.Items[idx]
-			if cached.FileSize == item.FileSize && cached.ModTime == item.ModTime && cached.MediaInfo != nil {
+			if cached.FileSize == item.FileSize && cached.ModTime == item.ModTime &&
+				cached.MediaInfo != nil && cached.MediaInfo.Integrity == nil {
 				item.MediaInfo = cached.MediaInfo
 				return item
 			}
