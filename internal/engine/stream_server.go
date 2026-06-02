@@ -945,19 +945,21 @@ func (ss *StreamServer) thumbnailHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if ss.ffmpegPath == "" {
-		http.Error(w, "thumbnails unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
 	pos := parseThumbPos(q.Get("pos"))
 	width := parseThumbWidth(q.Get("w"))
 
 	// Cache hit: serve a fresh sidecar (written by the scan-time prewarm — which
 	// pre-extracts the 10/30/50/70/90% panel frames — or a prior request),
-	// skipping ffmpeg.
+	// skipping ffmpeg. Checked BEFORE the ffmpeg guard so a pre-warmed frame is
+	// still serveable even if ffmpeg was removed after the cache was filled.
 	if jpeg, ok := mediainfo.ReadCachedThumbnail(rawPath, pos, width); ok {
 		ss.writeJPEG(w, jpeg)
+		return
+	}
+
+	// Beyond here we must extract on demand, which needs ffmpeg.
+	if ss.ffmpegPath == "" {
+		http.Error(w, "thumbnails unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -1039,18 +1041,21 @@ func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if ss.ffmpegPath == "" {
-		http.Error(w, "subtitles unavailable", http.StatusServiceUnavailable)
-		return
-	}
 
 	// Cache hit: serve a fresh sidecar (written by the scan-time prewarm or a
 	// prior request) instantly, skipping ffmpeg. This is also what makes huge
 	// remuxes work — the prewarm extracts without the on-demand HTTP timeout
 	// below, so by play time the hit avoids the 60s ceiling that was returning
-	// 500s on 50GB+ files.
+	// 500s on 50GB+ files. Checked BEFORE the ffmpeg guard so a pre-warmed track
+	// is still serveable even if ffmpeg was removed after the cache was filled.
 	if vtt, ok := mediainfo.ReadCachedSubtitle(rawPath, index); ok {
 		ss.writeVTT(w, vtt)
+		return
+	}
+
+	// Beyond here we must extract on demand, which needs ffmpeg.
+	if ss.ffmpegPath == "" {
+		http.Error(w, "subtitles unavailable", http.StatusServiceUnavailable)
 		return
 	}
 

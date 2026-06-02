@@ -153,6 +153,8 @@ func runScan(dirPath string, workers int, ffprobePath string, noSync bool) error
 				CacheThumbnails: cfg.Library.CacheThumbnails,
 				Workers:         2,
 			})
+		} else {
+			fmt.Fprintf(os.Stderr, "  Skipping sidecar prewarm: ffmpeg unavailable: %v\n", err)
 		}
 	}
 

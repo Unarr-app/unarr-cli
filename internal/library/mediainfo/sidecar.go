@@ -41,26 +41,26 @@ func IsTextSubtitleCodec(codec string) bool {
 	}
 }
 
-// SidecarDir returns the hidden per-folder cache directory for a media file.
-func SidecarDir(mediaPath string) string {
+// sidecarDir returns the hidden per-folder cache directory for a media file.
+func sidecarDir(mediaPath string) string {
 	return filepath.Join(filepath.Dir(mediaPath), sidecarDirName)
 }
 
-// SubtitleCachePath is the cached WebVTT path for subtitle stream `index`
+// subtitleCachePath is the cached WebVTT path for subtitle stream `index`
 // (0-based, matching ffmpeg's 0:s:N ordering) of mediaPath.
-func SubtitleCachePath(mediaPath string, index int) string {
-	return filepath.Join(SidecarDir(mediaPath), fmt.Sprintf("%s.s%d.vtt", filepath.Base(mediaPath), index))
+func subtitleCachePath(mediaPath string, index int) string {
+	return filepath.Join(sidecarDir(mediaPath), fmt.Sprintf("%s.s%d.vtt", filepath.Base(mediaPath), index))
 }
 
-// ThumbnailCachePath is the cached JPEG path for a single frame at posSec
+// thumbnailCachePath is the cached JPEG path for a single frame at posSec
 // (rounded to whole seconds) and the given width. The handler and the scan
 // prewarm round identically so the same logical frame maps to one cache file.
-func ThumbnailCachePath(mediaPath string, posSec float64, width int) string {
+func thumbnailCachePath(mediaPath string, posSec float64, width int) string {
 	sec := int(math.Round(posSec))
 	if sec < 0 {
 		sec = 0
 	}
-	return filepath.Join(SidecarDir(mediaPath), fmt.Sprintf("%s.t%dw%d.jpg", filepath.Base(mediaPath), sec, width))
+	return filepath.Join(sidecarDir(mediaPath), fmt.Sprintf("%s.t%dw%d.jpg", filepath.Base(mediaPath), sec, width))
 }
 
 // sidecarFresh reports whether a cache file exists and is at least as new as the
@@ -102,7 +102,7 @@ func writeSidecar(path string, data []byte) error {
 // ReadCachedSubtitle returns the cached WebVTT for (mediaPath, index) when a
 // fresh sidecar exists. ok=false means the caller should extract on demand.
 func ReadCachedSubtitle(mediaPath string, index int) ([]byte, bool) {
-	p := SubtitleCachePath(mediaPath, index)
+	p := subtitleCachePath(mediaPath, index)
 	if !sidecarFresh(p, mediaPath) {
 		return nil, false
 	}
@@ -115,7 +115,7 @@ func ReadCachedSubtitle(mediaPath string, index int) ([]byte, bool) {
 
 // WriteCachedSubtitle stores extracted WebVTT next to the media. Best-effort.
 func WriteCachedSubtitle(mediaPath string, index int, vtt []byte) error {
-	return writeSidecar(SubtitleCachePath(mediaPath, index), vtt)
+	return writeSidecar(subtitleCachePath(mediaPath, index), vtt)
 }
 
 // ExtractSubtitleVTT runs ffmpeg to convert subtitle stream `index` of mediaPath
@@ -180,24 +180,31 @@ func ExtractSubtitlesVTTMulti(ctx context.Context, ffmpegPath, mediaPath string,
 	cmd.Stderr = &stderr
 	// Run it at IDLE I/O priority: this single ~14 min sequential read of a huge
 	// remux must not starve live streaming off the same disk/NFS.
-	var runErr error
-	if startErr := cmd.Start(); startErr != nil {
-		runErr = startErr
-	} else {
-		setIdleIOPriority(cmd.Process.Pid)
-		// A non-zero exit can still leave good per-track files (e.g. one corrupt
-		// stream), so don't bail on err — read whatever landed and judge by that.
-		runErr = cmd.Wait()
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("ffmpeg multi-subtitle start: %w", err)
 	}
+	setIdleIOPriority(cmd.Process.Pid)
+	runErr := cmd.Wait()
+
+	// If ffmpeg was KILLED (ctx deadline/cancel on a file too big to finish in
+	// time), any temp file it left is a truncated WebVTT — a valid header plus
+	// partial cues, so it passes the len>0 check and would be cached as a
+	// silently-incomplete track until the media's mtime changes. Distrust all
+	// output in that case. A clean non-zero exit (e.g. one empty/corrupt stream)
+	// still leaves good complete files for the other tracks, so we keep those.
+	var exitErr *exec.ExitError
+	killed := runErr != nil && errors.As(runErr, &exitErr) && !exitErr.ProcessState.Exited()
 
 	out := make(map[int][]byte, len(indices))
-	for idx, f := range tmp {
-		if b, rerr := os.ReadFile(f); rerr == nil && len(b) > 0 {
-			out[idx] = b
+	if !killed {
+		for idx, f := range tmp {
+			if b, rerr := os.ReadFile(f); rerr == nil && len(b) > 0 {
+				out[idx] = b
+			}
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("ffmpeg multi-subtitle extract: no output (err=%v): %s", runErr, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("ffmpeg multi-subtitle extract: no usable output (err=%v): %s", runErr, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
 }
@@ -205,7 +212,7 @@ func ExtractSubtitlesVTTMulti(ctx context.Context, ffmpegPath, mediaPath string,
 // ReadCachedThumbnail returns the cached JPEG for (mediaPath, posSec, width) when
 // a fresh sidecar exists. ok=false means extract on demand.
 func ReadCachedThumbnail(mediaPath string, posSec float64, width int) ([]byte, bool) {
-	p := ThumbnailCachePath(mediaPath, posSec, width)
+	p := thumbnailCachePath(mediaPath, posSec, width)
 	if !sidecarFresh(p, mediaPath) {
 		return nil, false
 	}
@@ -218,7 +225,7 @@ func ReadCachedThumbnail(mediaPath string, posSec float64, width int) ([]byte, b
 
 // WriteCachedThumbnail stores an extracted JPEG frame next to the media. Best-effort.
 func WriteCachedThumbnail(mediaPath string, posSec float64, width int, jpeg []byte) error {
-	return writeSidecar(ThumbnailCachePath(mediaPath, posSec, width), jpeg)
+	return writeSidecar(thumbnailCachePath(mediaPath, posSec, width), jpeg)
 }
 
 // ExtractThumbnailJPEG decodes ONE frame at posSec, scaled to `width`, as JPEG

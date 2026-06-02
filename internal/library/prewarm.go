@@ -60,6 +60,8 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	subCached, thumbCached, failed := 0, 0, 0
+	var sampleErr string // first extraction error, surfaced in the summary so a
+	// systemic ffmpeg failure (vs one corrupt file) is diagnosable from "N failed".
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -77,9 +79,12 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 					jctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 					img, err := mediainfo.ExtractThumbnailJPEG(jctx, opts.FFmpegPath, j.path, j.posSec, j.width)
 					cancel()
-					if err != nil { // seek past EOF / corrupt → skip silently
+					if err != nil { // seek past EOF / corrupt → skip
 						mu.Lock()
 						failed++
+						if sampleErr == "" {
+							sampleErr = err.Error()
+						}
 						mu.Unlock()
 						continue
 					}
@@ -120,6 +125,9 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 				if err != nil {
 					mu.Lock()
 					failed += len(todo)
+					if sampleErr == "" {
+						sampleErr = err.Error()
+					}
 					mu.Unlock()
 					continue
 				}
@@ -174,7 +182,11 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 
 	wg.Wait()
 	if subCached > 0 || thumbCached > 0 || failed > 0 {
-		log.Printf("[prewarm] %d subtitles, %d thumbnails cached, %d failed", subCached, thumbCached, failed)
+		if failed > 0 && sampleErr != "" {
+			log.Printf("[prewarm] %d subtitles, %d thumbnails cached, %d failed (e.g. %s)", subCached, thumbCached, failed, sampleErr)
+		} else {
+			log.Printf("[prewarm] %d subtitles, %d thumbnails cached, %d failed", subCached, thumbCached, failed)
+		}
 	}
 }
 
