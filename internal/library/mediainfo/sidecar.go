@@ -147,6 +147,52 @@ func ExtractSubtitleVTT(ctx context.Context, ffmpegPath, mediaPath string, index
 	return out, nil
 }
 
+// ExtractSubtitlesVTTMulti extracts several text subtitle streams in a SINGLE
+// ffmpeg pass. The expensive part of subtitle extraction is demuxing the whole
+// container (subtitle packets are interleaved across the runtime), so a 60GB
+// remux with N text tracks costs N full reads when done one index at a time —
+// here it's one read for all of them. Returns index→WebVTT for the streams that
+// produced output (an empty stream is simply absent, not an error). ffmpeg can't
+// multiplex several outputs onto stdout, so it writes per-track temp files which
+// are read back; callers cache them via WriteCachedSubtitle.
+func ExtractSubtitlesVTTMulti(ctx context.Context, ffmpegPath, mediaPath string, indices []int) (map[int][]byte, error) {
+	if len(indices) == 0 {
+		return nil, nil
+	}
+	tmpDir, err := os.MkdirTemp("", "unarr-subs-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	args := []string{"-nostdin", "-loglevel", "error", "-i", mediaPath}
+	tmp := make(map[int]string, len(indices))
+	for _, idx := range indices {
+		f := filepath.Join(tmpDir, fmt.Sprintf("s%d.vtt", idx))
+		tmp[idx] = f
+		// One output file per stream; output options precede each output path.
+		args = append(args, "-map", fmt.Sprintf("0:s:%d?", idx), "-c:s", "webvtt", "-f", "webvtt", "-y", f)
+	}
+
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	// A non-zero exit can still leave good per-track files (e.g. one corrupt
+	// stream), so don't bail on err — read whatever landed and judge by that.
+	runErr := cmd.Run()
+
+	out := make(map[int][]byte, len(indices))
+	for idx, f := range tmp {
+		if b, rerr := os.ReadFile(f); rerr == nil && len(b) > 0 {
+			out[idx] = b
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("ffmpeg multi-subtitle extract: no output (err=%v): %s", runErr, strings.TrimSpace(stderr.String()))
+	}
+	return out, nil
+}
+
 // ReadCachedThumbnail returns the cached JPEG for (mediaPath, posSec, width) when
 // a fresh sidecar exists. ok=false means extract on demand.
 func ReadCachedThumbnail(mediaPath string, posSec float64, width int) ([]byte, bool) {

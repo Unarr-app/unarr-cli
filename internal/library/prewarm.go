@@ -28,12 +28,12 @@ type PrewarmOptions struct {
 	Workers         int    // concurrent ffmpeg jobs (each is heavy); default 2
 }
 
-// prewarmJob is one extraction unit: a text subtitle (thumb=false) or a single
-// thumbnail frame (thumb=true).
+// prewarmJob is one extraction unit: all text subtitles of a file in one ffmpeg
+// pass (thumb=false) or a single thumbnail frame (thumb=true).
 type prewarmJob struct {
 	path   string
 	thumb  bool
-	index  int     // subtitle stream index (subtitle job)
+	subIdx []int   // subtitle stream indices to extract in ONE pass (subtitle job)
 	posSec float64 // frame position in seconds (thumbnail job)
 	width  int     // frame width (thumbnail job)
 }
@@ -96,31 +96,45 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 					continue
 				}
 
-				if _, ok := mediainfo.ReadCachedSubtitle(j.path, j.index); ok {
-					continue // already fresh
+				// Extract only the indices not already fresh, and do them in ONE
+				// ffmpeg pass — a multi-GB remux is demuxed once for all its text
+				// tracks instead of once per track.
+				todo := make([]int, 0, len(j.subIdx))
+				for _, idx := range j.subIdx {
+					if _, ok := mediainfo.ReadCachedSubtitle(j.path, idx); !ok {
+						todo = append(todo, idx)
+					}
 				}
-				// Generous per-file deadline: a full text track on a multi-GB
-				// remux can take minutes to demux. Bounded so one corrupt file
-				// can't wedge a worker forever.
-				jctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-				vtt, err := mediainfo.ExtractSubtitleVTT(jctx, opts.FFmpegPath, j.path, j.index)
+				if len(todo) == 0 {
+					continue
+				}
+				// Generous per-file deadline. Subtitle packets are interleaved across
+				// the whole container, so extraction is I/O-bound: it must read the
+				// entire file once (all text tracks share that single pass). A 60GB
+				// remux over ~75 MB/s NFS is ~14 min, so 45 min covers files up to
+				// ~200GB; bounded so one corrupt/stalled file can't wedge a worker.
+				// This is background + idempotent — it only runs until the cache fills.
+				jctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+				res, err := mediainfo.ExtractSubtitlesVTTMulti(jctx, opts.FFmpegPath, j.path, todo)
 				cancel()
 				if err != nil {
 					mu.Lock()
-					failed++
+					failed += len(todo)
 					mu.Unlock()
 					continue
 				}
-				if werr := mediainfo.WriteCachedSubtitle(j.path, j.index, vtt); werr != nil {
-					log.Printf("[prewarm] sidecar write skipped (i=%d path=%q): %v", j.index, j.path, werr)
+				for idx, vtt := range res {
+					if werr := mediainfo.WriteCachedSubtitle(j.path, idx, vtt); werr != nil {
+						log.Printf("[prewarm] sidecar write skipped (i=%d path=%q): %v", idx, j.path, werr)
+						mu.Lock()
+						failed++
+						mu.Unlock()
+						continue
+					}
 					mu.Lock()
-					failed++
+					subCached++
 					mu.Unlock()
-					continue
 				}
-				mu.Lock()
-				subCached++
-				mu.Unlock()
 			}
 		}()
 	}
@@ -132,12 +146,15 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 				continue
 			}
 			if opts.CacheSubtitles {
+				var subIdx []int
 				for idx, sub := range item.MediaInfo.Subtitles {
-					if !mediainfo.IsTextSubtitleCodec(sub.Codec) {
-						continue // bitmap → burned in, not extractable to WebVTT
+					if mediainfo.IsTextSubtitleCodec(sub.Codec) {
+						subIdx = append(subIdx, idx) // bitmap → burned in, skipped
 					}
+				}
+				if len(subIdx) > 0 {
 					select {
-					case jobs <- prewarmJob{path: item.FilePath, index: idx}:
+					case jobs <- prewarmJob{path: item.FilePath, subIdx: subIdx}:
 					case <-ctx.Done():
 						return
 					}
