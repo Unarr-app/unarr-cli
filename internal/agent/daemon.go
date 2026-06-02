@@ -246,8 +246,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 	d.sync.OnStreamRequest = func(req StreamRequest) {
+		// Off the sync loop: the handler does blocking I/O (os.Stat retries on
+		// NFS, then ffprobe in SetFile) — running it inline would stall task
+		// dispatch + status reporting for other items. The single-stream model
+		// (atomic SetFile swap, last-wins) tolerates concurrent requests.
 		if d.OnStreamRequested != nil {
-			d.OnStreamRequested(req)
+			go d.OnStreamRequested(req)
 		}
 	}
 	d.sync.OnStreamSession = func(sess StreamSession) {

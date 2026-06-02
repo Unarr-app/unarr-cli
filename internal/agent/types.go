@@ -134,6 +134,11 @@ type StatusUpdate struct {
 	StreamURL       string `json:"streamUrl,omitempty"`
 	StreamReady     bool   `json:"streamReady,omitempty"`
 	ErrorMessage    string `json:"errorMessage,omitempty"`
+	// StreamError reports a failed /stream attempt (path rejected, transient
+	// FS error, etc.) WITHOUT marking the download itself failed — the web
+	// clears streamRequested + surfaces this so the player fails fast with the
+	// real reason instead of a 20s "agent didn't respond" timeout.
+	StreamError string `json:"streamError,omitempty"`
 	// mode=seed_file: agent computes the info_hash from the local file
 	// and reports it back so the web player can target /stream/<hash>.
 	InfoHash string `json:"infoHash,omitempty"`
