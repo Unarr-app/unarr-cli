@@ -790,6 +790,21 @@ func (ss *StreamServer) playlistHandler(w http.ResponseWriter, r *http.Request) 
 	resumeSec := sanitize(q.Get("resumeSec"))
 	title := sanitize(q.Get("title"))
 	streamURL := q.Get("streamUrl")
+	// VLC network buffer (ms). The web sends a network-aware value (small on
+	// LAN/Tailscale, larger on the CF funnel); clamp to a sane range. Older web
+	// clients that don't pass it get a modest default — the old flat 30000 made
+	// VLC pre-buffer ~30 s before playback even on a fast, range-served source.
+	networkCaching := 3000
+	if v := sanitize(q.Get("networkCaching")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n < 500 {
+				n = 500
+			} else if n > 60000 {
+				n = 60000
+			}
+			networkCaching = n
+		}
+	}
 	// Only accept http(s) URLs to prevent file:// or other URI schemes in the playlist.
 	if streamURL != "" && !strings.HasPrefix(streamURL, "http://") && !strings.HasPrefix(streamURL, "https://") {
 		streamURL = ""
@@ -819,7 +834,7 @@ func (ss *StreamServer) playlistHandler(w http.ResponseWriter, r *http.Request) 
 	if resumeSec != "" && resumeSec != "0" {
 		b.WriteString(fmt.Sprintf("#EXTVLCOPT:start-time=%s\n", resumeSec))
 	}
-	b.WriteString("#EXTVLCOPT:network-caching=30000\n")
+	b.WriteString(fmt.Sprintf("#EXTVLCOPT:network-caching=%d\n", networkCaching))
 	b.WriteString(streamURL + "\n")
 
 	w.Header().Set("Content-Type", "audio/x-mpegurl")
