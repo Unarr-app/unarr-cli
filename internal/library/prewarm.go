@@ -3,30 +3,52 @@ package library
 import (
 	"context"
 	"log"
+	"math"
 	"sync"
 	"time"
 
 	"github.com/torrentclaw/unarr/internal/library/mediainfo"
 )
 
+// Thumbnail sampling — kept in lockstep with the web's src/lib/stream/thumbnails.ts
+// (THUMB_FRACTIONS / THUMB_FALLBACK_SECS / THUMB_WIDTH) so the frames the scan
+// pre-extracts are the exact ones the "file characteristics" panel requests.
+var (
+	thumbFractions   = []float64{0.1, 0.3, 0.5, 0.7, 0.9}
+	thumbFallbackSec = []float64{30, 120, 300, 600, 1200}
+)
+
+const thumbWidth = 320
+
 // PrewarmOptions controls scan-time sidecar extraction.
 type PrewarmOptions struct {
-	FFmpegPath     string // resolved ffmpeg binary; empty disables prewarm
-	CacheSubtitles bool   // library.cache_subtitles
-	Workers        int    // concurrent ffmpeg jobs (each is heavy); default 2
+	FFmpegPath      string // resolved ffmpeg binary; empty disables prewarm
+	CacheSubtitles  bool   // library.cache_subtitles
+	CacheThumbnails bool   // library.cache_thumbnails
+	Workers         int    // concurrent ffmpeg jobs (each is heavy); default 2
 }
 
-// PrewarmSidecars extracts every text subtitle of every scanned item into the
-// hidden ".unarr" sidecar dir next to the media file, so the /sub handler serves
-// it instantly at play time (instead of re-running ffmpeg, which on a 50GB+
-// remux exceeds the on-demand HTTP timeout). Without the per-request 60s ceiling
-// here, even huge files complete (generous per-file timeout).
+// prewarmJob is one extraction unit: a text subtitle (thumb=false) or a single
+// thumbnail frame (thumb=true).
+type prewarmJob struct {
+	path   string
+	thumb  bool
+	index  int     // subtitle stream index (subtitle job)
+	posSec float64 // frame position in seconds (thumbnail job)
+	width  int     // frame width (thumbnail job)
+}
+
+// PrewarmSidecars extracts text subtitles (→ WebVTT) and the panel's sample
+// thumbnail frames (→ JPEG) for every scanned item into the hidden ".unarr"
+// sidecar dir next to the media file, so the /sub and /thumbnail handlers serve
+// them instantly. Subtitle extraction without the per-request HTTP timeout is
+// what makes huge remuxes work.
 //
-// Best-effort and idempotent: an already-fresh sidecar is skipped, errors are
-// logged and the item moves on, and ctx cancellation (Ctrl-C / daemon shutdown)
-// stops cleanly. Safe to call after every scan — only missing/stale caches do work.
+// Best-effort and idempotent: fresh sidecars are skipped, errors are logged and
+// the item moves on, and ctx cancellation (Ctrl-C / daemon shutdown) stops
+// cleanly. Safe to call after every scan — only missing/stale caches do work.
 func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptions) {
-	if cache == nil || opts.FFmpegPath == "" || !opts.CacheSubtitles {
+	if cache == nil || opts.FFmpegPath == "" || (!opts.CacheSubtitles && !opts.CacheThumbnails) {
 		return
 	}
 	workers := opts.Workers
@@ -34,14 +56,10 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 		workers = 2
 	}
 
-	type job struct {
-		path  string
-		index int
-	}
-	jobs := make(chan job)
+	jobs := make(chan prewarmJob)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	cached, failed := 0, 0
+	subCached, thumbCached, failed := 0, 0, 0
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -51,6 +69,33 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 				if ctx.Err() != nil {
 					return
 				}
+				if j.thumb {
+					if _, ok := mediainfo.ReadCachedThumbnail(j.path, j.posSec, j.width); ok {
+						continue
+					}
+					// A single keyframe decode is fast; 60s bounds a corrupt file.
+					jctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+					img, err := mediainfo.ExtractThumbnailJPEG(jctx, opts.FFmpegPath, j.path, j.posSec, j.width)
+					cancel()
+					if err != nil { // seek past EOF / corrupt → skip silently
+						mu.Lock()
+						failed++
+						mu.Unlock()
+						continue
+					}
+					if werr := mediainfo.WriteCachedThumbnail(j.path, j.posSec, j.width, img); werr != nil {
+						log.Printf("[prewarm] thumbnail write skipped (pos=%.0f path=%q): %v", j.posSec, j.path, werr)
+						mu.Lock()
+						failed++
+						mu.Unlock()
+						continue
+					}
+					mu.Lock()
+					thumbCached++
+					mu.Unlock()
+					continue
+				}
+
 				if _, ok := mediainfo.ReadCachedSubtitle(j.path, j.index); ok {
 					continue // already fresh
 				}
@@ -74,7 +119,7 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 					continue
 				}
 				mu.Lock()
-				cached++
+				subCached++
 				mu.Unlock()
 			}
 		}()
@@ -86,21 +131,59 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 			if item.MediaInfo == nil || item.FilePath == "" {
 				continue
 			}
-			for idx, sub := range item.MediaInfo.Subtitles {
-				if !mediainfo.IsTextSubtitleCodec(sub.Codec) {
-					continue // bitmap → burned in, not extractable to WebVTT
+			if opts.CacheSubtitles {
+				for idx, sub := range item.MediaInfo.Subtitles {
+					if !mediainfo.IsTextSubtitleCodec(sub.Codec) {
+						continue // bitmap → burned in, not extractable to WebVTT
+					}
+					select {
+					case jobs <- prewarmJob{path: item.FilePath, index: idx}:
+					case <-ctx.Done():
+						return
+					}
 				}
-				select {
-				case jobs <- job{path: item.FilePath, index: idx}:
-				case <-ctx.Done():
-					return
+			}
+			if opts.CacheThumbnails {
+				for _, pos := range thumbPositions(item) {
+					select {
+					case jobs <- prewarmJob{path: item.FilePath, thumb: true, posSec: pos, width: thumbWidth}:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
 	}()
 
 	wg.Wait()
-	if cached > 0 || failed > 0 {
-		log.Printf("[prewarm] subtitles: %d cached, %d failed", cached, failed)
+	if subCached > 0 || thumbCached > 0 || failed > 0 {
+		log.Printf("[prewarm] %d subtitles, %d thumbnails cached, %d failed", subCached, thumbCached, failed)
 	}
+}
+
+// thumbPositions returns the sample frame offsets (whole seconds) for an item,
+// matching the web panel: fractions of a known runtime, else fixed fallbacks.
+func thumbPositions(item LibraryItem) []float64 {
+	var dur float64
+	if item.MediaInfo != nil && item.MediaInfo.Video != nil {
+		dur = item.MediaInfo.Video.Duration
+	}
+	src := thumbFallbackSec
+	if dur > 0 {
+		src = make([]float64, len(thumbFractions))
+		for i, f := range thumbFractions {
+			src[i] = math.Round(dur * f)
+		}
+	}
+	// Dedup (short clips can round multiple fractions to the same second).
+	seen := make(map[float64]struct{}, len(src))
+	out := make([]float64, 0, len(src))
+	for _, p := range src {
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
 }

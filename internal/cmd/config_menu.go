@@ -322,6 +322,14 @@ func configLibrary(cfg *config.Config) error {
 				Title("Allow file deletion from web UI?").
 				Description("When enabled, the web library's Delete button can permanently remove files from disk.\nOnly activate this if you understand that deleted files cannot be recovered.").
 				Value(&cfg.Library.AllowDelete),
+			huh.NewConfirm().
+				Title("Cache subtitles during scan?").
+				Description("Extract embedded text subtitles to WebVTT once during the scan and store them\nbeside the media (hidden .unarr dir) so playback subtitles are instant — and huge\nremuxes don't time out extracting on demand. Local only; nothing is uploaded.").
+				Value(&cfg.Library.CacheSubtitles),
+			huh.NewConfirm().
+				Title("Cache thumbnails during scan?").
+				Description("Pre-extract a few preview frames per file (hidden .unarr dir) so the file panel\nand seekbar previews load instantly. Small optimized JPEGs; local only.").
+				Value(&cfg.Library.CacheThumbnails),
 		),
 	).Run()
 }

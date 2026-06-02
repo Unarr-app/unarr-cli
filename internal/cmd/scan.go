@@ -140,16 +140,18 @@ func runScan(dirPath string, workers int, ffprobePath string, noSync bool) error
 		return enc.Encode(cache)
 	}
 
-	// Pre-extract subtitle sidecars (text subs → WebVTT in a hidden ".unarr" dir)
-	// so playback gets instant subtitles and huge remuxes never hit the on-demand
-	// timeout. Best-effort + Ctrl-C interruptible (the scan itself is already saved).
-	if cfg.Library.CacheSubtitles {
+	// Pre-extract sidecars (text subs → WebVTT, panel frames → JPEG) into a hidden
+	// ".unarr" dir so playback gets instant subtitles/thumbnails and huge remuxes
+	// never hit the on-demand timeout. Best-effort + Ctrl-C interruptible (the scan
+	// itself is already saved).
+	if cfg.Library.CacheSubtitles || cfg.Library.CacheThumbnails {
 		if ff, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err == nil {
-			fmt.Fprintf(os.Stderr, "  Pre-extracting subtitles to cache… (Ctrl-C to skip)\n")
+			fmt.Fprintf(os.Stderr, "  Pre-extracting subtitles + thumbnails to cache… (Ctrl-C to skip)\n")
 			library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
-				FFmpegPath:     ff,
-				CacheSubtitles: true,
-				Workers:        2,
+				FFmpegPath:      ff,
+				CacheSubtitles:  cfg.Library.CacheSubtitles,
+				CacheThumbnails: cfg.Library.CacheThumbnails,
+				Workers:         2,
 			})
 		}
 	}

@@ -106,11 +106,12 @@ type StreamServer struct {
 	// Listen() via SetFFmpegPath; read-only thereafter so the handler needs no lock.
 	ffmpegPath string
 
-	// cacheSubtitles enables write-through caching of extracted WebVTT to the
-	// hidden ".unarr" sidecar dir next to the media (mirrors the scan-time
-	// prewarm). Set once before Listen() via SetCacheSubtitles; default false here,
-	// flipped on from config (default true) by the daemon. read-only thereafter.
-	cacheSubtitles bool
+	// cacheSubtitles / cacheThumbnails enable write-through caching of extracted
+	// WebVTT / JPEG frames into the hidden ".unarr" sidecar dir next to the media
+	// (mirrors the scan-time prewarm). Set once before Listen() via the setters;
+	// default false here, flipped on from config (default true) by the daemon.
+	cacheSubtitles  bool
+	cacheThumbnails bool
 
 	lastActivity  atomic.Int64
 	maxByteOffset atomic.Int64 // highest sequential read position (main playback connection)
@@ -216,6 +217,13 @@ func (ss *StreamServer) SetFFmpegPath(path string) {
 // default true). Call before Listen(); read-only thereafter.
 func (ss *StreamServer) SetCacheSubtitles(on bool) {
 	ss.cacheSubtitles = on
+}
+
+// SetCacheThumbnails toggles write-through caching of extracted JPEG frames into
+// the hidden ".unarr" sidecar dir next to the media file (library.cache_thumbnails,
+// default true). Call before Listen(); read-only thereafter.
+func (ss *StreamServer) SetCacheThumbnails(on bool) {
+	ss.cacheThumbnails = on
 }
 
 // SetCORSAllowedOrigins replaces the operator-supplied extra origins. The
@@ -945,6 +953,14 @@ func (ss *StreamServer) thumbnailHandler(w http.ResponseWriter, r *http.Request)
 	pos := parseThumbPos(q.Get("pos"))
 	width := parseThumbWidth(q.Get("w"))
 
+	// Cache hit: serve a fresh sidecar (written by the scan-time prewarm — which
+	// pre-extracts the 10/30/50/70/90% panel frames — or a prior request),
+	// skipping ffmpeg.
+	if jpeg, ok := mediainfo.ReadCachedThumbnail(rawPath, pos, width); ok {
+		ss.writeJPEG(w, jpeg)
+		return
+	}
+
 	// Cap the work: a single keyframe decode is fast, but a corrupt/huge file or
 	// a seek past EOF could hang ffmpeg. 20s is generous for a keyframe seek.
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
@@ -962,13 +978,24 @@ func (ss *StreamServer) thumbnailHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "thumbnail failed", http.StatusInternalServerError)
 		return
 	}
+	// Write-through so the next request (and trickplay re-hover) is a cache hit.
+	if ss.cacheThumbnails {
+		if werr := mediainfo.WriteCachedThumbnail(rawPath, pos, width, out); werr != nil {
+			log.Printf("[thumbnail] cache write skipped (pos=%.1f w=%d path=%q): %v", pos, width, rawPath, werr)
+		}
+	}
+	ss.writeJPEG(w, out)
+}
 
+// writeJPEG writes the standard single-frame response headers + body for both
+// the cache-hit and freshly-extracted paths of thumbnailHandler.
+func (ss *StreamServer) writeJPEG(w http.ResponseWriter, jpeg []byte) {
 	w.Header().Set("Content-Type", "image/jpeg")
 	// path+pos is stable content; let the browser cache so re-opening the panel
-	// doesn't re-run ffmpeg. private — it's a frame of the user's own file.
+	// doesn't re-fetch. private — it's a frame of the user's own file.
 	w.Header().Set("Cache-Control", "private, max-age=3600")
-	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
-	if _, err := w.Write(out); err != nil {
+	w.Header().Set("Content-Length", strconv.Itoa(len(jpeg)))
+	if _, err := w.Write(jpeg); err != nil {
 		log.Printf("[thumbnail] write failed: %v", err)
 	}
 }

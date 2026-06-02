@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -47,6 +49,17 @@ func SidecarDir(mediaPath string) string {
 // (0-based, matching ffmpeg's 0:s:N ordering) of mediaPath.
 func SubtitleCachePath(mediaPath string, index int) string {
 	return filepath.Join(SidecarDir(mediaPath), fmt.Sprintf("%s.s%d.vtt", filepath.Base(mediaPath), index))
+}
+
+// ThumbnailCachePath is the cached JPEG path for a single frame at posSec
+// (rounded to whole seconds) and the given width. The handler and the scan
+// prewarm round identically so the same logical frame maps to one cache file.
+func ThumbnailCachePath(mediaPath string, posSec float64, width int) string {
+	sec := int(math.Round(posSec))
+	if sec < 0 {
+		sec = 0
+	}
+	return filepath.Join(SidecarDir(mediaPath), fmt.Sprintf("%s.t%dw%d.jpg", filepath.Base(mediaPath), sec, width))
 }
 
 // sidecarFresh reports whether a cache file exists and is at least as new as the
@@ -130,6 +143,55 @@ func ExtractSubtitleVTT(ctx context.Context, ffmpegPath, mediaPath string, index
 	}
 	if len(out) == 0 {
 		return nil, errors.New("ffmpeg produced no subtitle output")
+	}
+	return out, nil
+}
+
+// ReadCachedThumbnail returns the cached JPEG for (mediaPath, posSec, width) when
+// a fresh sidecar exists. ok=false means extract on demand.
+func ReadCachedThumbnail(mediaPath string, posSec float64, width int) ([]byte, bool) {
+	p := ThumbnailCachePath(mediaPath, posSec, width)
+	if !sidecarFresh(p, mediaPath) {
+		return nil, false
+	}
+	b, err := os.ReadFile(p)
+	if err != nil || len(b) == 0 {
+		return nil, false
+	}
+	return b, true
+}
+
+// WriteCachedThumbnail stores an extracted JPEG frame next to the media. Best-effort.
+func WriteCachedThumbnail(mediaPath string, posSec float64, width int, jpeg []byte) error {
+	return writeSidecar(ThumbnailCachePath(mediaPath, posSec, width), jpeg)
+}
+
+// ExtractThumbnailJPEG decodes ONE frame at posSec, scaled to `width`, as JPEG
+// bytes. Mirrors engine.buildThumbnailArgs so the scan-time prewarm produces
+// frames byte-identical to the on-demand handler (`-ss` before `-i` = fast
+// input/keyframe seek). Shared by the prewarm; the handler keeps its own inline
+// extraction (covered by thumbnail_test.go) and only reuses the cache helpers.
+func ExtractThumbnailJPEG(ctx context.Context, ffmpegPath, mediaPath string, posSec float64, width int) ([]byte, error) {
+	args := []string{
+		"-nostdin",
+		"-loglevel", "error",
+		"-ss", strconv.FormatFloat(posSec, 'f', 3, 64),
+		"-i", mediaPath,
+		"-frames:v", "1",
+		"-vf", fmt.Sprintf("scale=%d:-2", width),
+		"-an", "-sn",
+		"-f", "mjpeg",
+		"pipe:1",
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg thumbnail extract: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if len(out) == 0 {
+		return nil, errors.New("ffmpeg produced no thumbnail (seek past EOF?)")
 	}
 	return out, nil
 }

@@ -350,6 +350,7 @@ func runDaemonStart() error {
 	// /sub serves instantly (and giant remuxes that exceed the on-demand timeout
 	// work once the scan prewarm has filled the cache). Default true.
 	streamSrv.SetCacheSubtitles(cfg.Library.CacheSubtitles)
+	streamSrv.SetCacheThumbnails(cfg.Library.CacheThumbnails)
 	streamSrv.SetRequireStreamToken(cfg.Download.RequireStreamToken)
 	// Report the stream-token signing key ONLY when enforcing, so the web's
 	// "secret present → mint HLS token" signal accurately means "this agent
@@ -999,15 +1000,16 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 			Incremental: existing != nil,
 		}
 
-		// Resolve ffmpeg once for the subtitle-sidecar prewarm (extracts text subs
-		// to the hidden ".unarr" cache so /sub is instant + huge remuxes work).
-		// Empty/err = prewarm is skipped silently (on-demand extraction still runs).
+		// Resolve ffmpeg once for the sidecar prewarm (extracts text subs → WebVTT
+		// and panel thumbnail frames → JPEG into the hidden ".unarr" cache so /sub
+		// and /thumbnail are instant + huge remuxes work). Empty/err = prewarm is
+		// skipped silently (on-demand extraction still runs).
 		prewarmFFmpeg := ""
-		if cfg.Library.CacheSubtitles {
+		if cfg.Library.CacheSubtitles || cfg.Library.CacheThumbnails {
 			if ff, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err == nil {
 				prewarmFFmpeg = ff
 			} else {
-				log.Printf("[auto-scan] subtitle prewarm disabled: ffmpeg unavailable: %v", err)
+				log.Printf("[auto-scan] sidecar prewarm disabled: ffmpeg unavailable: %v", err)
 			}
 		}
 
@@ -1027,9 +1029,10 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 
 			if prewarmFFmpeg != "" {
 				library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
-					FFmpegPath:     prewarmFFmpeg,
-					CacheSubtitles: true,
-					Workers:        2,
+					FFmpegPath:      prewarmFFmpeg,
+					CacheSubtitles:  cfg.Library.CacheSubtitles,
+					CacheThumbnails: cfg.Library.CacheThumbnails,
+					Workers:         2,
 				})
 			}
 
