@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta] - 2026-06-02
+
+First beta of the 1.0 line — the full unarr streaming agent.
+
+### Added
+
+- **stream**: in-browser streaming for the whole library — per-agent HTTPS listener
+  with hot-reloadable cert, HLS transcode (NVENC/QSV/VAAPI/VideoToolbox), and
+  direct-play/remux for browser-native files.
+- **stream**: on-demand embedded text subtitles served as WebVTT (`/sub`), plus
+  bitmap (PGS/DVB) subtitles burned into the video via overlay.
+- **stream**: scan-time sidecar cache (hidden `.unarr/`) for extracted subtitles +
+  thumbnail frames, so playback is instant and huge remuxes don't re-extract per
+  request; single-pass multi-track extraction at idle I/O priority. Toggles
+  `library.cache_subtitles` / `library.cache_thumbnails` (default on).
+- **stream**: debrid sources played + transcoded straight from an HTTPS link, with
+  mid-stream link refresh; bitrate-sized readahead for play-while-download.
+- **agent**: hybrid SSE downlink with long-poll HTTPS fallback + event-driven
+  uplink (sync on every state transition); public-API mirror failover.
+- **downloads**: auto-resume interrupted downloads after a daemon restart;
+  pre-flight free-disk guard; seeding ratio/time lifecycle.
+- **transcode**: tonemap HDR sources to SDR (zscale-gated).
+
 ## [0.9.19] - 2026-05-30
 
 
