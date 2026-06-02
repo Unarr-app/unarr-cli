@@ -1,6 +1,7 @@
 package mediainfo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -177,9 +178,17 @@ func ExtractSubtitlesVTTMulti(ctx context.Context, ffmpegPath, mediaPath string,
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	// A non-zero exit can still leave good per-track files (e.g. one corrupt
-	// stream), so don't bail on err — read whatever landed and judge by that.
-	runErr := cmd.Run()
+	// Run it at IDLE I/O priority: this single ~14 min sequential read of a huge
+	// remux must not starve live streaming off the same disk/NFS.
+	var runErr error
+	if startErr := cmd.Start(); startErr != nil {
+		runErr = startErr
+	} else {
+		setIdleIOPriority(cmd.Process.Pid)
+		// A non-zero exit can still leave good per-track files (e.g. one corrupt
+		// stream), so don't bail on err — read whatever landed and judge by that.
+		runErr = cmd.Wait()
+	}
 
 	out := make(map[int][]byte, len(indices))
 	for idx, f := range tmp {
@@ -230,9 +239,15 @@ func ExtractThumbnailJPEG(ctx context.Context, ffmpegPath, mediaPath string, pos
 		"pipe:1",
 	}
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-	var stderr strings.Builder
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("ffmpeg thumbnail start: %w", err)
+	}
+	setIdleIOPriority(cmd.Process.Pid) // background prewarm yields I/O to live playback
+	err := cmd.Wait()
+	out := stdout.Bytes()
 	if err != nil {
 		return nil, fmt.Errorf("ffmpeg thumbnail extract: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
