@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1-beta] - 2026-06-03
+
+
+### Added
+
+- **agent**: report isDocker so the web shows a docker pull command
+- **release**: sign release checksums (ed25519), enforce + bake pubkey
+
+### Fixed
+
+- **stream**: retry thumbnail extraction with output-seek on seek-index failure
+- **stream**: clamp out-of-range audio-track index to 0:a:0
 ## [1.0.0-beta] - 2026-06-03
 
 
@@ -71,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- **release**: 1.0.0-beta
 - **release**: 1.0.0-beta
 - bump version to 0.10.0 (direct-play floor; local build only, no publish)
 
@@ -653,6 +666,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.0.1-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.0-beta...v1.0.1-beta
 [1.0.0-beta]: https://github.com/torrentclaw/unarr/compare/v0.9.19...v1.0.0-beta
 [0.9.19]: https://github.com/torrentclaw/unarr/compare/v0.9.18...v0.9.19
 [0.9.18]: https://github.com/torrentclaw/unarr/compare/v0.9.17...v0.9.18
