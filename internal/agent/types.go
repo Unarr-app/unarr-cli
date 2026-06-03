@@ -51,6 +51,11 @@ type RegisterRequest struct {
 	// CloudFlare Quick Tunnel hostname when enabled; the web prefers it over
 	// Tailscale/LAN for in-browser playback because it works on any network.
 	FunnelURL string `json:"funnelUrl,omitempty"`
+	// IsDocker tells the web the agent runs inside a container, so it shows a
+	// `docker pull` command instead of the in-app update button (the binary
+	// self-update refuses to run in Docker). No omitempty: false (a binary
+	// install) is a meaningful state the server must see to keep the button.
+	IsDocker bool `json:"isDocker"`
 }
 
 // RegisterResponse is returned by the server after registration.
@@ -395,6 +400,9 @@ type SyncRequest struct {
 	VPNServer string `json:"vpnServer,omitempty"`
 	// CloudFlare Quick Tunnel hostname when enabled, else empty.
 	FunnelURL string `json:"funnelUrl,omitempty"`
+	// IsDocker — see RegisterRequest.IsDocker. Sent every sync so the web keeps
+	// the flag fresh even if the agent migrated binary↔docker between restarts.
+	IsDocker bool `json:"isDocker"`
 }
 
 // ControlAction represents a server-side control signal for a task.

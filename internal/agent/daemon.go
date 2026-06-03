@@ -148,6 +148,7 @@ func (d *Daemon) Register(ctx context.Context) error {
 		VPNMode:            d.vpnMode,
 		VPNServer:          d.vpnServer,
 		FunnelURL:          d.funnelURL,
+		IsDocker:           RunningInDocker(),
 	}
 	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {
 		req.DiskFreeBytes = free

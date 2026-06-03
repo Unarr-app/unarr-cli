@@ -93,6 +93,12 @@ ENV UNARR_CONFIG_DIR=/config
 ENV UNARR_DOWNLOAD_DIR=/downloads
 ENV XDG_DATA_HOME=/data
 
+# Mark this as a container install so the agent reports isDocker=true to the web
+# (which then shows a `docker pull` command instead of the in-app update button —
+# the binary self-update refuses to run in Docker). Covers podman/containerd too,
+# which don't create /.dockerenv. See internal/agent/RunningInDocker.
+ENV UNARR_DOCKER=1
+
 # NVIDIA passthrough defaults. `--gpus all` alone only grants the "utility" +
 # "compute" capabilities; nvenc needs "video", and "graphics" makes the runtime
 # mount the NVIDIA Vulkan ICD (nvidia_icd.json — the load-bearing piece — plus

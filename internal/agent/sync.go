@@ -175,6 +175,7 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 		LanIP:       sc.cfg.LanIP,
 		TailscaleIP: sc.cfg.TailscaleIP,
 		CanDelete:   sc.cfg.CanDelete,
+		IsDocker:    RunningInDocker(),
 	}
 	if sc.GetTaskStates != nil {
 		req.Tasks = sc.GetTaskStates()
