@@ -205,6 +205,7 @@ func syncToServer(ctx context.Context, cfg config.Config, cache *library.Library
 		resp, err := ac.SyncLibrary(ctx, agent.LibrarySyncRequest{
 			Items:         batch,
 			ScanPath:      cache.Path,
+			AgentID:       cfg.Agent.ID,
 			IsLastBatch:   isLast,
 			SyncStartedAt: syncStartedAt,
 		})

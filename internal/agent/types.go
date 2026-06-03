@@ -318,6 +318,7 @@ type DebridAccount struct {
 type LibrarySyncRequest struct {
 	Items         []LibrarySyncItem `json:"items"`
 	ScanPath      string            `json:"scanPath"`
+	AgentID       string            `json:"agentId,omitempty"` // lets the server scope stale-cleanup per agent
 	IsLastBatch   bool              `json:"isLastBatch"`
 	SyncStartedAt string            `json:"syncStartedAt,omitempty"` // ISO-8601; same for all batches in a session
 }
@@ -346,8 +347,14 @@ type LibrarySyncItem struct {
 	// Integrity flags a damaged / incompletely-downloaded file ("damaged" or
 	// empty). IntegrityReason is a stable code (ebml_corrupt, moov_missing,
 	// no_duration, …) the web maps to a localized "re-download" message.
-	Integrity         string   `json:"integrity,omitempty"`
-	IntegrityReason   string   `json:"integrityReason,omitempty"`
+	Integrity       string `json:"integrity,omitempty"`
+	IntegrityReason string `json:"integrityReason,omitempty"`
+	// Path resilience: a stable content identity + the file's location relative
+	// to its library root, so the server can move a row in place on a rename /
+	// base-path change instead of duplicating it.
+	Fingerprint    string `json:"fingerprint,omitempty"`
+	RelPath        string `json:"relPath,omitempty"`
+	LibraryRootKey string `json:"libraryRootKey,omitempty"`
 }
 
 // LibrarySyncResponse is returned after syncing library items.

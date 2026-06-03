@@ -130,6 +130,26 @@ func scanSingleFile(ctx context.Context, ffprobePath, filePath string, cacheIdx 
 		ModTime:  info.ModTime().UTC().Format(time.RFC3339),
 	}
 
+	// Look up the cached entry once — reused for both fingerprint reuse and the
+	// incremental ffprobe skip below.
+	var cached *LibraryItem
+	if existing != nil {
+		if idx, ok := cacheIdx[filePath]; ok {
+			cached = &existing.Items[idx]
+		}
+	}
+	unchanged := cached != nil &&
+		cached.FileSize == item.FileSize && cached.ModTime == item.ModTime
+
+	// Fingerprint: reuse the cached value when the file is unchanged and already
+	// has one; otherwise compute it (cheap, two bounded reads). Computed even on
+	// the incremental path so every synced item carries a stable identity.
+	if unchanged && cached.Fingerprint != "" {
+		item.Fingerprint = cached.Fingerprint
+	} else if fp, fpErr := ComputeFingerprint(filePath, item.FileSize); fpErr == nil {
+		item.Fingerprint = fp
+	}
+
 	// Parse filename for title, year, quality, codec
 	parsed := parser.Parse(item.FileName)
 	item.Quality = parsed.Quality
@@ -150,15 +170,10 @@ func scanSingleFile(ctx context.Context, ffprobePath, filePath string, cacheIdx 
 	// an identical size+mtime (some torrent clients preserve the torrent's
 	// mtime), so trusting the cached "damaged" verdict would pin a now-healthy
 	// file as broken forever. Re-probing damaged items is cheap (they're few).
-	if incremental && existing != nil {
-		if idx, ok := cacheIdx[filePath]; ok {
-			cached := existing.Items[idx]
-			if cached.FileSize == item.FileSize && cached.ModTime == item.ModTime &&
-				cached.MediaInfo != nil && cached.MediaInfo.Integrity == nil {
-				item.MediaInfo = cached.MediaInfo
-				return item
-			}
-		}
+	if incremental && unchanged &&
+		cached.MediaInfo != nil && cached.MediaInfo.Integrity == nil {
+		item.MediaInfo = cached.MediaInfo
+		return item
 	}
 
 	// Run ffprobe

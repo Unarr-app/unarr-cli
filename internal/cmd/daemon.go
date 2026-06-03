@@ -598,12 +598,25 @@ func runDaemonStart() error {
 			}()
 		}
 
+		allowedRoots := []string{cfg.Download.Dir, cfg.Library.ScanPath,
+			cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir}
+
 		filePath := filepath.Clean(sr.FilePath)
-		if !isAllowedStreamPath(filePath, cfg.Download.Dir, cfg.Library.ScanPath,
-			cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir) {
-			log.Printf("[%s] stream request rejected: path outside allowed dirs: %s", agent.ShortID(sr.TaskID), filePath)
-			reportStreamError(fmt.Sprintf("path outside allowed dirs: %s", filePath))
-			return
+		// Self-heal a base-path mismatch: the web may hand us a path under an old
+		// root (e.g. /mnt/nas/peliculas/… from before a binary→docker move) that
+		// is now outside our allowed dirs but whose file still exists under a
+		// current root (/downloads/…). Remap the path's tail onto an allowed root
+		// so playback works immediately; the next re-scan persists the fix to the
+		// DB. See docs/plans/unarr-path-resilience.md.
+		if !isAllowedStreamPath(filePath, allowedRoots...) {
+			if remapped := relocateUnreachable(filePath, allowedRoots); remapped != "" {
+				log.Printf("[%s] stream self-heal: remapped %s → %s", agent.ShortID(sr.TaskID), filePath, remapped)
+				filePath = remapped
+			} else {
+				log.Printf("[%s] stream request rejected: path outside allowed dirs: %s", agent.ShortID(sr.TaskID), filePath)
+				reportStreamError(fmt.Sprintf("path outside allowed dirs: %s", filePath))
+				return
+			}
 		}
 		// os.Stat over NFS can transiently fail (ESTALE/EAGAIN/timeout) right
 		// after a remount or under load. Retry a few times before giving up so
@@ -617,6 +630,15 @@ func runDaemonStart() error {
 			}
 			if attempt < 2 {
 				time.Sleep(300 * time.Millisecond)
+			}
+		}
+		if statErr != nil {
+			// Last resort before failing: the file may simply have moved within
+			// an allowed root — try to relocate it by path tail.
+			if remapped := relocateUnreachable(filePath, allowedRoots); remapped != "" {
+				log.Printf("[%s] stream self-heal: relocated missing %s → %s", agent.ShortID(sr.TaskID), filePath, remapped)
+				filePath = remapped
+				info, statErr = os.Stat(filePath)
 			}
 		}
 		if statErr != nil {
@@ -977,6 +999,53 @@ func isAllowedStreamPath(filePath string, allowedDirs ...string) bool {
 	return false
 }
 
+// relocateUnreachable tries to find a file the web asked us to stream under a
+// path we can't serve (e.g. an old base path) by joining the longest suffix of
+// that path onto each current allowed root and checking it exists. Returns the
+// found absolute path or "".
+//
+// Conservative by design — it must never serve the WRONG file:
+//   - Requires a tail of at least three segments (collection/season/file), so a
+//     generic "Season 01/Episode.mkv" can't match a different show by accident.
+//     Flat single-file-at-root layouts simply aren't self-healed here; the next
+//     re-scan re-maps them instead.
+//   - Re-checks containment AFTER resolving symlinks, so a symlink inside a root
+//     pointing outside it can't be used to escape the allowed dirs (isAllowed‑
+//     StreamPath alone is a lexical check that os.Stat would happily follow out).
+func relocateUnreachable(filePath string, allowedRoots []string) string {
+	segs := strings.Split(filepath.ToSlash(filePath), "/")
+	// Longest tail first (most specific match wins). Stop before 3-segment tails
+	// so a short, ambiguous suffix can't match the wrong file.
+	for start := 0; start <= len(segs)-3; start++ {
+		tail := filepath.Join(segs[start:]...)
+		if tail == "" {
+			continue
+		}
+		for _, root := range allowedRoots {
+			if root == "" {
+				continue
+			}
+			cand := filepath.Join(root, tail)
+			if !isAllowedStreamPath(cand, root) {
+				continue
+			}
+			fi, err := os.Stat(cand)
+			if err != nil || fi.IsDir() {
+				continue
+			}
+			// Re-validate containment against the symlink-resolved real paths so
+			// a symlink under the root can't point the stream outside it.
+			realCand, e1 := filepath.EvalSymlinks(cand)
+			realRoot, e2 := filepath.EvalSymlinks(root)
+			if e1 != nil || e2 != nil || !isAllowedStreamPath(realCand, realRoot) {
+				continue
+			}
+			return cand
+		}
+	}
+	return ""
+}
+
 func formatSpeedLog(bps int64) string {
 	switch {
 	case bps >= 1024*1024*1024:
@@ -993,6 +1062,23 @@ func formatSpeedLog(bps int64) string {
 // runAutoScan runs a library scan + sync on a timer or on-demand via scanNow channel.
 // It scans all provided paths and syncs each independently so stale-item cleanup
 // is scoped to the correct directory prefix on the server.
+// basePathChanged reports whether the library's scan root moved since the last
+// saved cache — i.e. the previously-scanned root is no longer one of the current
+// scan paths. Used to force a full (non-incremental) re-scan so the server can
+// re-map paths by fingerprint and reap the old prefix.
+func basePathChanged(existing *library.LibraryCache, scanPaths []string) bool {
+	if existing == nil || len(existing.Items) == 0 || existing.Path == "" {
+		return false
+	}
+	prev := filepath.Clean(existing.Path)
+	for _, p := range scanPaths {
+		if filepath.Clean(p) == prev {
+			return false
+		}
+	}
+	return true
+}
+
 func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration, ac *agent.Client, scanNow <-chan struct{}, scanPaths []string) {
 	log.Printf("[auto-scan] enabled: every %s, paths: %v", interval, scanPaths)
 
@@ -1018,10 +1104,23 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 			workers = 8
 		}
 
+		// If the library base path changed (e.g. the agent moved from the host
+		// binary to docker, remapping /mnt/nas/peliculas → /downloads, or the
+		// user moved their media folder), force a FULL re-scan instead of an
+		// incremental one. The fingerprint merge on the server then relocates
+		// existing rows in place rather than duplicating, and per-agent cleanup
+		// reaps the old prefix. See docs/plans/unarr-path-resilience.md.
+		forceFull := basePathChanged(existing, scanPaths)
+		if forceFull {
+			log.Printf("[auto-scan] WARNING: library base path changed (was %q, now %v) — "+
+				"running a FULL re-scan. This can take a while on large libraries; "+
+				"playback and matches are preserved.", existing.Path, scanPaths)
+		}
+
 		scanOpts := library.ScanOptions{
 			Workers:     workers,
 			FFprobePath: cfg.Library.FFprobePath,
-			Incremental: existing != nil,
+			Incremental: existing != nil && !forceFull,
 		}
 
 		// Resolve ffmpeg once for the sidecar prewarm (extracts text subs → WebVTT
@@ -1077,6 +1176,7 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 				_, err := ac.SyncLibrary(ctx, agent.LibrarySyncRequest{
 					Items:         items[i:end],
 					ScanPath:      scanPath,
+					AgentID:       cfg.Agent.ID,
 					IsLastBatch:   isLast,
 					SyncStartedAt: syncStartedAt,
 				})

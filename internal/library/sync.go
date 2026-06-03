@@ -1,6 +1,25 @@
 package library
 
-import "github.com/torrentclaw/unarr/internal/agent"
+import (
+	"path/filepath"
+	"strings"
+
+	"github.com/torrentclaw/unarr/internal/agent"
+)
+
+// relToRoot returns the file's path relative to the scan root (forward-slashed),
+// or "" when it doesn't live under root. The server stores this so streaming can
+// later reconstruct the absolute path from the agent's *current* root.
+func relToRoot(root, full string) string {
+	if root == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(root, full)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
 
 // BuildSyncItems converts cached library items to sync request items.
 // Shared between unarr scan (cmd/scan.go) and auto-scan (cmd/daemon.go).
@@ -11,14 +30,17 @@ func BuildSyncItems(cache *LibraryCache) []agent.LibrarySyncItem {
 			continue
 		}
 		si := agent.LibrarySyncItem{
-			FilePath:    item.FilePath,
-			FileName:    item.FileName,
-			FileSize:    item.FileSize,
-			Title:       item.Title,
-			Year:        item.Year,
-			ContentType: DeriveContentType(item),
-			Season:      item.Season,
-			Episode:     item.Episode,
+			FilePath:       item.FilePath,
+			FileName:       item.FileName,
+			FileSize:       item.FileSize,
+			Title:          item.Title,
+			Year:           item.Year,
+			ContentType:    DeriveContentType(item),
+			Season:         item.Season,
+			Episode:        item.Episode,
+			Fingerprint:    item.Fingerprint,
+			RelPath:        relToRoot(cache.Path, item.FilePath),
+			LibraryRootKey: "library",
 		}
 
 		if item.MediaInfo != nil {
