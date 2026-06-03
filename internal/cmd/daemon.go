@@ -156,10 +156,15 @@ func runDaemonStart() error {
 	hwDiag := engine.DetectHWAccelDiagnostic(probeCtx, ffmpegResolved)
 	log.Println(hwDiag.LogLine())
 	hwAccelPick := hwDiag.Pick
-	maxTranscodeHeight := 1080
-	if hwAccelPick != engine.HWAccelNone {
-		maxTranscodeHeight = 2160
-	}
+	// Measure the real transcode ceiling instead of guessing from the backend.
+	// HW encoders return 2160 instantly; a software-only host runs a bounded
+	// encode benchmark so a weak NAS/CPU reports the rung it can actually
+	// sustain (720/480) and the web side routes oversized sources to an
+	// external player instead of a stuttering transcode. Own timeout — the 10 s
+	// probeCtx above is sized for the quick diagnostic, not three encode rungs.
+	benchCtx, benchCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	maxTranscodeHeight := engine.BenchmarkMaxTranscodeHeight(benchCtx, ffmpegResolved, hwAccelPick)
+	benchCancel()
 
 	// Create daemon config
 	daemonCfg := agent.DaemonConfig{
