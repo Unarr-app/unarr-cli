@@ -73,6 +73,35 @@ func TestBuildThumbnailArgs(t *testing.T) {
 	}
 }
 
+// buildThumbnailArgsAccurate is the robust fallback used when the fast input
+// seek fails on a file with a corrupt/imprecise seek index (2026-06-03
+// broken-thumbnail bug on anime MKVs). It must use OUTPUT seek (-ss AFTER -i)
+// so it decodes from the start, plus -err_detect ignore_err to tolerate minor
+// stream corruption — the opposite of the fast buildThumbnailArgs.
+func TestBuildThumbnailArgsAccurate(t *testing.T) {
+	args := buildThumbnailArgsAccurate("/x/movie.mkv", 123.5, 320)
+	joined := strings.Join(args, " ")
+
+	ssIdx, iIdx := indexOfArg(args, "-ss"), indexOfArg(args, "-i")
+	if ssIdx < 0 || iIdx < 0 || ssIdx <= iIdx {
+		t.Errorf("-ss must come AFTER -i (output seek, robust fallback): %v", args)
+	}
+	if !strings.Contains(joined, "-err_detect ignore_err") {
+		t.Errorf("accurate args must tolerate stream errors (-err_detect ignore_err): %v", args)
+	}
+	if args[ssIdx+1] != "123.500" {
+		t.Errorf("pos arg = %q, want 123.500", args[ssIdx+1])
+	}
+	if args[iIdx+1] != "/x/movie.mkv" {
+		t.Errorf("input arg = %q, want the path", args[iIdx+1])
+	}
+	for _, want := range []string{"-frames:v 1", "scale=320:-2", "-f mjpeg", "pipe:1", "-an", "-sn"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args missing %q: %v", want, args)
+		}
+	}
+}
+
 func TestParseThumbPos(t *testing.T) {
 	cases := map[string]float64{"": 0, "abc": 0, "-5": 0, "0": 0, "12.5": 12.5, "600": 600}
 	for in, want := range cases {

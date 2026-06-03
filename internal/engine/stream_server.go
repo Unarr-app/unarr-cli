@@ -1050,12 +1050,23 @@ func (ss *StreamServer) thumbnailHandler(w http.ResponseWriter, r *http.Request)
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil || len(out) == 0 {
-		// A seek past EOF yields no frame — a benign empty output, not an error
-		// worth alarming on. Log at most a short line for diagnosis.
-		log.Printf("[thumbnail] no frame (pos=%.1f w=%d path=%q): err=%v %s",
+		// Fast input-seek (-ss before -i) can fail on files whose seek index is
+		// imprecise or mildly corrupt: the demuxer lands mid-EBML element
+		// ("invalid as first byte of an EBML number") and no frame decodes.
+		// Retry once with the slow but robust output-seek path before giving up
+		// (2026-06-03: anime MKVs returned a broken image in the web scrubber).
+		log.Printf("[thumbnail] input-seek failed (pos=%.1f w=%d path=%q): err=%v %s — retrying output-seek",
 			pos, width, rawPath, err, strings.TrimSpace(stderr.String()))
-		http.Error(w, "thumbnail failed", http.StatusInternalServerError)
-		return
+		var stderr2 strings.Builder
+		cmd2 := exec.CommandContext(ctx, ss.ffmpegPath, buildThumbnailArgsAccurate(rawPath, pos, width)...)
+		cmd2.Stderr = &stderr2
+		out, err = cmd2.Output()
+		if err != nil || len(out) == 0 {
+			log.Printf("[thumbnail] no frame after output-seek fallback (pos=%.1f w=%d path=%q): err=%v %s",
+				pos, width, rawPath, err, strings.TrimSpace(stderr2.String()))
+			http.Error(w, "thumbnail failed", http.StatusInternalServerError)
+			return
+		}
 	}
 	// Write-through so the next request (and trickplay re-hover) is a cache hit.
 	if ss.cacheThumbnails {
@@ -1186,6 +1197,28 @@ func buildThumbnailArgs(path string, posSec float64, width int) []string {
 		"-loglevel", "error",
 		"-ss", strconv.FormatFloat(posSec, 'f', 3, 64),
 		"-i", path,
+		"-frames:v", "1",
+		"-vf", fmt.Sprintf("scale=%d:-2", width),
+		"-an", "-sn",
+		"-f", "mjpeg",
+		"pipe:1",
+	}
+}
+
+// buildThumbnailArgsAccurate is the robust fallback for files whose seek index
+// is imprecise or mildly corrupt, where the fast input seek (-ss before -i)
+// lands mid-EBML element and decodes no frame. `-ss` AFTER `-i` is an output
+// (decode) seek — slower (decodes from the start) but reliable — and
+// `-err_detect ignore_err` tolerates minor stream corruption encountered along
+// the way. Only used after buildThumbnailArgs fails, so its extra cost is paid
+// solely for files the fast path can't handle.
+func buildThumbnailArgsAccurate(path string, posSec float64, width int) []string {
+	return []string{
+		"-nostdin",
+		"-loglevel", "error",
+		"-err_detect", "ignore_err",
+		"-i", path,
+		"-ss", strconv.FormatFloat(posSec, 'f', 3, 64),
 		"-frames:v", "1",
 		"-vf", fmt.Sprintf("scale=%d:-2", width),
 		"-an", "-sn",

@@ -229,12 +229,35 @@ func WriteCachedThumbnail(mediaPath string, posSec float64, width int, jpeg []by
 }
 
 // ExtractThumbnailJPEG decodes ONE frame at posSec, scaled to `width`, as JPEG
-// bytes. Mirrors engine.buildThumbnailArgs so the scan-time prewarm produces
-// frames byte-identical to the on-demand handler (`-ss` before `-i` = fast
-// input/keyframe seek). Shared by the prewarm; the handler keeps its own inline
-// extraction (covered by thumbnail_test.go) and only reuses the cache helpers.
+// bytes. The fast path mirrors engine.buildThumbnailArgs (`-ss` before `-i` =
+// fast input/keyframe seek); on a seek-index failure both this prewarm path and
+// the on-demand handler fall back to the identical output-seek argv
+// (thumbnailArgsAccurate / engine.buildThumbnailArgsAccurate), so the two stay
+// equivalent in both paths. Shared by the prewarm; the handler keeps its own
+// inline extraction (engine package) and only reuses the cache helpers here.
 func ExtractThumbnailJPEG(ctx context.Context, ffmpegPath, mediaPath string, posSec float64, width int) ([]byte, error) {
-	args := []string{
+	// Fast path: input seek (-ss before -i) — near-constant time, the common case.
+	out, err := runThumbnailFFmpeg(ctx, ffmpegPath, thumbnailArgsFast(mediaPath, posSec, width))
+	if err == nil {
+		return out, nil
+	}
+	// Fallback: output seek (-ss after -i) + error tolerance. Slower (decodes
+	// from the start) but robust on files whose seek index is imprecise or
+	// mildly corrupt, where the fast input seek lands mid-EBML element
+	// ("invalid as first byte of an EBML number") and yields no frame
+	// (2026-06-03: anime MKVs failed every prewarm thumbnail). Paid only when
+	// the fast path fails, so healthy files keep the cheap path.
+	out, err2 := runThumbnailFFmpeg(ctx, ffmpegPath, thumbnailArgsAccurate(mediaPath, posSec, width))
+	if err2 == nil {
+		return out, nil
+	}
+	return nil, fmt.Errorf("ffmpeg thumbnail extract: %w (output-seek fallback: %v)", err, err2)
+}
+
+// thumbnailArgsFast is the input-seek (fast keyframe) thumbnail argv. Mirrors
+// engine.buildThumbnailArgs so prewarm frames match the on-demand handler.
+func thumbnailArgsFast(mediaPath string, posSec float64, width int) []string {
+	return []string{
 		"-nostdin",
 		"-loglevel", "error",
 		"-ss", strconv.FormatFloat(posSec, 'f', 3, 64),
@@ -245,6 +268,30 @@ func ExtractThumbnailJPEG(ctx context.Context, ffmpegPath, mediaPath string, pos
 		"-f", "mjpeg",
 		"pipe:1",
 	}
+}
+
+// thumbnailArgsAccurate is the output-seek (decode-from-start) fallback with
+// error tolerance. Mirrors engine.buildThumbnailArgsAccurate.
+func thumbnailArgsAccurate(mediaPath string, posSec float64, width int) []string {
+	return []string{
+		"-nostdin",
+		"-loglevel", "error",
+		"-err_detect", "ignore_err",
+		"-i", mediaPath,
+		"-ss", strconv.FormatFloat(posSec, 'f', 3, 64),
+		"-frames:v", "1",
+		"-vf", fmt.Sprintf("scale=%d:-2", width),
+		"-an", "-sn",
+		"-f", "mjpeg",
+		"pipe:1",
+	}
+}
+
+// runThumbnailFFmpeg runs one ffmpeg thumbnail extraction and returns the JPEG
+// bytes. setIdleIOPriority keeps the background prewarm from starving live
+// playback I/O. An empty output (e.g. seek past EOF) is treated as an error so
+// the caller can fall back.
+func runThumbnailFFmpeg(ctx context.Context, ffmpegPath string, args []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -256,7 +303,7 @@ func ExtractThumbnailJPEG(ctx context.Context, ffmpegPath, mediaPath string, pos
 	err := cmd.Wait()
 	out := stdout.Bytes()
 	if err != nil {
-		return nil, fmt.Errorf("ffmpeg thumbnail extract: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	if len(out) == 0 {
 		return nil, errors.New("ffmpeg produced no thumbnail (seek past EOF?)")
