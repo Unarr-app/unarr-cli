@@ -57,11 +57,12 @@ var (
 // tonemapped fine via zscale.
 //
 // So we run the real filter on one synthetic frame and require a clean exit:
-// that forces Vulkan device creation + filtergraph negotiation (the implicit
-// hwupload/hwdownload around the GPU filter). Pass → libplacebo works here;
-// fail → fall back to the zscale chain. Cached per path; a probe failure is
-// treated as "no". The probe is bounded so a wedged ffmpeg can't stall the
-// first session.
+// that forces Vulkan device creation + filtergraph negotiation (libplacebo
+// auto-inserts the hwupload/hwdownload around itself). Pass → libplacebo works
+// here; fail → fall back to the zscale chain. Cached per path — EXCEPT a
+// context timeout, which is transient (a busy box during the startup warm) and
+// must not pin HDR to zscale for the whole process. The probe is bounded so a
+// wedged ffmpeg can't stall the first session.
 func FFmpegSupportsLibplacebo(ffmpegPath string) bool {
 	if ffmpegPath == "" {
 		return false
@@ -87,13 +88,27 @@ func FFmpegSupportsLibplacebo(ffmpegPath string) bool {
 	).CombinedOutput()
 	supported := err == nil
 
-	libplaceboCacheMu.Lock()
-	libplaceboCache[ffmpegPath] = supported
-	libplaceboCacheMu.Unlock()
+	// Cache the result — but NOT a timeout. A clean non-zero exit (filter
+	// absent, no Vulkan ICD) is a stable "no" worth remembering; a deadline is
+	// transient (the box was busy, e.g. the startup warm racing the encode
+	// benchmark) and caching it would force HDR onto the zscale CPU chain until
+	// restart. Worst case a perpetually-loaded box re-probes per session — rare,
+	// and it fails closed to zscale each time.
+	if supported || ctx.Err() != context.DeadlineExceeded {
+		libplaceboCacheMu.Lock()
+		libplaceboCache[ffmpegPath] = supported
+		libplaceboCacheMu.Unlock()
+	}
 	if supported {
 		log.Printf("[tonemap] ffmpeg libplacebo works (Vulkan OK) — HDR sources tonemapped on the GPU (preferred)")
 	} else {
-		log.Printf("[tonemap] ffmpeg libplacebo unavailable (no Vulkan runtime or filter absent) — HDR falls back to zscale/none: %v", strings.TrimSpace(lastLine(out)))
+		// On an exec/timeout failure the stderr tail is empty — surface err
+		// itself so the log distinguishes "no Vulkan" from "ffmpeg never ran".
+		detail := strings.TrimSpace(lastLine(out))
+		if detail == "" {
+			detail = err.Error()
+		}
+		log.Printf("[tonemap] ffmpeg libplacebo unavailable (no Vulkan runtime or filter absent) — HDR falls back to zscale/none: %v", detail)
 	}
 	return supported
 }

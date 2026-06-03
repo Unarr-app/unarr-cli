@@ -95,9 +95,10 @@ ENV XDG_DATA_HOME=/data
 
 # NVIDIA passthrough defaults. `--gpus all` alone only grants the "utility" +
 # "compute" capabilities; nvenc needs "video", and "graphics" makes the runtime
-# mount the NVIDIA Vulkan ICD (nvidia_icd.json + GLX libs) so ffmpeg's libplacebo
-# filter (GPU HDR tonemap, paired with libvulkan1 above) can create a Vulkan
-# device. Baking these here means a plain `docker run --gpus all` (or the compose
+# mount the NVIDIA Vulkan ICD (nvidia_icd.json — the load-bearing piece — plus
+# GLX/EGL libs) so ffmpeg's libplacebo filter (GPU HDR tonemap, paired with
+# libvulkan1 above) can create a Vulkan device. "compute" alone does NOT mount
+# the ICD. Baking these here means a plain `docker run --gpus all` (or the compose
 # device reservation) lights up HW transcode + GPU tonemap with zero extra flags.
 # Harmless when no GPU is attached.
 ENV NVIDIA_VISIBLE_DEVICES=all
