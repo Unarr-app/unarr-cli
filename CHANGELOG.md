@@ -5,35 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0-beta] - 2026-06-02
+## [1.0.0-beta] - 2026-06-03
 
-First beta of the 1.0 line — the full unarr streaming agent.
 
 ### Added
 
-- **stream**: in-browser streaming for the whole library — per-agent HTTPS listener
-  with hot-reloadable cert, HLS transcode (NVENC/QSV/VAAPI/VideoToolbox), and
-  direct-play/remux for browser-native files.
-- **stream**: on-demand embedded text subtitles served as WebVTT (`/sub`), plus
-  bitmap (PGS/DVB) subtitles burned into the video via overlay.
-- **stream**: scan-time sidecar cache (hidden `.unarr/`) for extracted subtitles +
-  thumbnail frames, so playback is instant and huge remuxes don't re-extract per
-  request; single-pass multi-track extraction at idle I/O priority. Toggles
-  `library.cache_subtitles` / `library.cache_thumbnails` (default on).
-- **stream**: debrid sources played + transcoded straight from an HTTPS link, with
-  mid-stream link refresh; bitrate-sized readahead for play-while-download.
-- **agent**: hybrid SSE downlink with long-poll HTTPS fallback + event-driven
-  uplink (sync on every state transition); public-API mirror failover.
-- **downloads**: auto-resume interrupted downloads after a daemon restart;
-  pre-flight free-disk guard; seeding ratio/time lifecycle.
-- **transcode**: tonemap HDR sources to SDR (zscale-gated).
+- **agent**: event-driven uplink — sync on every state transition
+- **agent**: hybrid SSE downlink with long-poll fallback
+- **agent**: give the public API client mirror failover
+- **agent**: auto-resume interrupted downloads after a daemon restart
+- **docker**: glibc base with nvenc ffmpeg + par2/7z extractors
+- **downloads**: pre-flight free-disk guard before each download (hueco medio)
+- **library**: content fingerprint + path-resilient sync + stream self-heal
+- **library**: detect corrupt/incomplete files during scan
+- **seeding**: wire seed ratio/time lifecycle into the torrent daemon
+- **stream**: enable GPU libplacebo in prod image + gate to real GPU
+- **stream**: benchmark software encode ceiling at startup
+- **stream**: GPU HDR tonemap via libplacebo
+- **stream**: /speedtest endpoint for agent-path bandwidth probing
+- **stream**: cache scan-time thumbnail frames to the .unarr sidecar
+- **stream**: cache extracted subtitles to a hidden .unarr sidecar
+- **stream**: serve embedded text subtitles as on-demand WebVTT
+- **stream**: optional per-agent HTTPS listener with hot-reloadable cert
+- **stream**: burn bitmap (PGS/DVB) subtitles into the video via overlay
+- **stream**: bitrate-sized readahead for play-while-download
+- **stream**: on-demand frame thumbnails via /thumbnail (hueco medio)
+- **stream**: refresh expired debrid links mid-stream (hueco #2/2c)
+- **stream**: transcode debrid sources to HLS from a URL (hueco #2/2b)
+- **stream**: serve /stream from a debrid HTTPS link (hueco #2/2a)
+- **stream**: device-aware remux (HEVC/AV1 + non-aac audio) + TTFF timers
+- **stream**: progressive fMP4 remux source for /stream (hueco #3 / 3b-i)
+- **stream**: direct-play passthrough for browser-native files
+- **stream**: authenticate /stream and /hls with signed tokens
+- **transcode**: tonemap HDR sources to SDR (zscale-gated)
 
+### Documentation
+
+- **docker**: add docker-compose.yml for one-command setup
+- **roadmap**: close the realtime hueco + mark Tailscale-Funnel note stale
+- **roadmap**: mark unarr localized-route 404 fixed
+- **roadmap**: mark hueco #2 closed (2a+2b+2c)
+- **roadmap**: mark hueco #2/2b (HLS-from-URL) closed
+- **roadmap**: hueco #3 fully closed — 3d resolved as 3d-lite auto-downshift
+- **roadmap**: hueco #3 3c closed (capability negotiation) + TTFF diagnosis
+- **roadmap**: hueco #3 phase 3b closed (progressive fMP4 remux) + smoke
+- **roadmap**: 3b approach = progressive fMP4 remux via /stream
+- **roadmap**: hueco #3 3a smoke e2e passed + brand-isolation fix noted
+- **roadmap**: add hueco #4 (pre-transcode on download) design
+- **roadmap**: hueco #3 phase 3a closed (direct-play)
+- **roadmap**: design hueco #3 (device-profile + direct-play + ABR)
+- **roadmap**: design hueco #2 (debrid in the streaming path)
+
+### Fixed
+
+- **agent**: surface par2/install/NFS failures instead of degrading silently
+- **stream**: don't cache transient libplacebo probe timeouts
+- **stream**: functional libplacebo probe + benchmark hardening
+- **stream**: clean HLS segments — no B-frames, no scene-cut, CFR
+- **stream**: report stream failures via StreamError + retry transient stat
+- **stream**: honor client network-caching in the M3U playlist
+- **stream**: /critico review fixes for the sidecar cache
+- **stream**: derive H.264 level from frame macroblocks, not height
+- **stream**: derive H.264 level from frame macroblocks, not height
+- **stream**: allow unarr.app origins for /stream + /hls CORS
+
+### Other
+
+- **release**: 1.0.0-beta
+- bump version to 0.10.0 (direct-play floor; local build only, no publish)
+
+### Performance
+
+- **stream**: run the subtitle/thumbnail prewarm at idle I/O priority
+- **stream**: extract all text subtitles of a file in one ffmpeg pass
 ## [0.9.19] - 2026-05-30
 
 
 ### Fixed
 
 - **docker**: three streaming/reliability bugs found in live docker test
+
+### Other
+
+- **release**: 0.9.19
 ## [0.9.18] - 2026-05-29
 
 
@@ -599,6 +653,7 @@ First beta of the 1.0 line — the full unarr streaming agent.
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.0.0-beta]: https://github.com/torrentclaw/unarr/compare/v0.9.19...v1.0.0-beta
 [0.9.19]: https://github.com/torrentclaw/unarr/compare/v0.9.18...v0.9.19
 [0.9.18]: https://github.com/torrentclaw/unarr/compare/v0.9.17...v0.9.18
 [0.9.17]: https://github.com/torrentclaw/unarr/compare/v0.9.15...v0.9.17
