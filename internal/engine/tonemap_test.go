@@ -2,6 +2,7 @@ package engine
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -109,6 +110,22 @@ func TestTonemap_VAAPIInsertsBeforeHwupload(t *testing.T) {
 		if strings.Index(vf, "zscale=t=linear") > up {
 			t.Errorf("tonemap must precede hwupload: %q", vf)
 		}
+	}
+}
+
+func TestFFmpegSupportsLibplacebo_FunctionalProbe(t *testing.T) {
+	if FFmpegSupportsLibplacebo("") {
+		t.Error("empty path must be false")
+	}
+	// A bogus path can't run → false (no panic, no hang).
+	if FFmpegSupportsLibplacebo("/nonexistent/ffmpeg") {
+		t.Error("nonexistent ffmpeg must be false")
+	}
+	// With a real ffmpeg the result is environment-dependent (true only when a
+	// Vulkan runtime is present), so we only assert the probe completes and
+	// returns a bool — its whole purpose is to be honest about THIS host.
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		_ = FFmpegSupportsLibplacebo("ffmpeg") // must not hang or panic
 	}
 }
 

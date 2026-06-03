@@ -5,6 +5,7 @@ import (
 	"context"
 	"log"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,10 +47,21 @@ var (
 	libplaceboCache   = map[string]bool{}
 )
 
-// FFmpegSupportsLibplacebo reports whether the ffmpeg binary has the libplacebo
-// filter (Vulkan GPU HDR tonemap + colorspace). Preferred over zscale when both
-// exist. Cached per path; a probe failure is treated as "no". Mirrors
-// FFmpegSupportsZscale.
+// FFmpegSupportsLibplacebo reports whether this host can ACTUALLY run the
+// libplacebo filter — not merely whether it is compiled in. libplacebo is a
+// Vulkan filter, so it needs a working Vulkan device + ICD at runtime, which a
+// presence check (`ffmpeg -filters`) does NOT prove: the prod agent image
+// ships a BtbN GPL ffmpeg with libplacebo built in but no Vulkan runtime
+// (debian-slim, no libvulkan1 / mesa-vulkan-drivers / nvidia ICD), so a
+// presence check would flip this on and break HDR playback that previously
+// tonemapped fine via zscale.
+//
+// So we run the real filter on one synthetic frame and require a clean exit:
+// that forces Vulkan device creation + filtergraph negotiation (the implicit
+// hwupload/hwdownload around the GPU filter). Pass → libplacebo works here;
+// fail → fall back to the zscale chain. Cached per path; a probe failure is
+// treated as "no". The probe is bounded so a wedged ffmpeg can't stall the
+// first session.
 func FFmpegSupportsLibplacebo(ffmpegPath string) bool {
 	if ffmpegPath == "" {
 		return false
@@ -61,18 +73,41 @@ func FFmpegSupportsLibplacebo(ffmpegPath string) bool {
 	}
 	libplaceboCacheMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// 10 s: first-run Vulkan device creation alone can take ~1 s ("Spent
+	// ~1150ms creating vulkan device"), plus codec/filter init.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-filters").Output()
-	supported := err == nil && bytes.Contains(out, []byte("libplacebo"))
+	// Run the EXACT filter we'd use, on a 1-frame synthetic source, discarding
+	// output. testsrc2 is SDR so the tonemap is near-passthrough — the point is
+	// to exercise Vulkan device init + the filter, not the mapping quality.
+	out, err := exec.CommandContext(ctx, ffmpegPath,
+		"-hide_banner", "-loglevel", "error", "-nostats",
+		"-f", "lavfi", "-i", "testsrc2=size=128x128:rate=1:duration=1",
+		"-vf", libplaceboTonemapFilter, "-frames:v", "1", "-f", "null", "-",
+	).CombinedOutput()
+	supported := err == nil
 
 	libplaceboCacheMu.Lock()
 	libplaceboCache[ffmpegPath] = supported
 	libplaceboCacheMu.Unlock()
 	if supported {
-		log.Printf("[tonemap] ffmpeg has libplacebo — HDR sources tonemapped on the GPU (preferred)")
+		log.Printf("[tonemap] ffmpeg libplacebo works (Vulkan OK) — HDR sources tonemapped on the GPU (preferred)")
+	} else {
+		log.Printf("[tonemap] ffmpeg libplacebo unavailable (no Vulkan runtime or filter absent) — HDR falls back to zscale/none: %v", strings.TrimSpace(lastLine(out)))
 	}
 	return supported
+}
+
+// lastLine returns the last non-empty line of ffmpeg output — the actual error
+// (e.g. "No VK_ICD..." / "Device creation failed") rather than the whole log.
+func lastLine(b []byte) string {
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			return lines[i]
+		}
+	}
+	return ""
 }
 
 // FFmpegSupportsZscale reports whether the ffmpeg binary at path was built with

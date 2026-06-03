@@ -160,11 +160,26 @@ func runDaemonStart() error {
 	// HW encoders return 2160 instantly; a software-only host runs a bounded
 	// encode benchmark so a weak NAS/CPU reports the rung it can actually
 	// sustain (720/480) and the web side routes oversized sources to an
-	// external player instead of a stuttering transcode. Own timeout — the 10 s
-	// probeCtx above is sized for the quick diagnostic, not three encode rungs.
-	benchCtx, benchCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	// external player instead of a stuttering transcode. This blocks
+	// registration on a software host, so it's bounded tight (3 rungs × 6 s =
+	// 18 s worst case; <1 s on a capable box that passes the first rung). Own
+	// timeout — the 10 s probeCtx above is sized for the quick diagnostic.
+	benchCtx, benchCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	maxTranscodeHeight := engine.BenchmarkMaxTranscodeHeight(benchCtx, ffmpegResolved, hwAccelPick)
 	benchCancel()
+
+	// Warm the tonemap capability caches off the hot path. The libplacebo probe
+	// actually RUNS the filter (Vulkan device init ~1.7 s), so doing it lazily
+	// in buildTranscodeRuntime would tax the FIRST stream session and risk its
+	// setup timeout. A real session arrives seconds-to-minutes after startup, so
+	// a background warm has finished by then; if one races in first, the cache's
+	// own mutex makes the concurrent cold call safe (both compute the same bool).
+	if cfg.Download.Transcode.Enabled && ffmpegResolved != "" {
+		go func() {
+			engine.FFmpegSupportsLibplacebo(ffmpegResolved)
+			engine.FFmpegSupportsZscale(ffmpegResolved)
+		}()
+	}
 
 	// Create daemon config
 	daemonCfg := agent.DaemonConfig{

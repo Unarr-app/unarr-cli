@@ -25,12 +25,15 @@ var softwareBenchmarkRungs = []benchmarkRung{
 }
 
 // realtimeMarginSoftware is how much faster than realtime a synthetic encode
-// must run before we call a rung "sustainable". 1.5× leaves headroom for two
-// things the benchmark does NOT measure: (a) decoding the real source —
-// software HEVC / 10-bit decode is heavier than encoding the synthetic clip —
-// and (b) real content being busier than testsrc2 (which x264 compresses
-// faster than film grain or motion).
-const realtimeMarginSoftware = 1.5
+// must run before we call a rung "sustainable". 2.0× (not 1.5×) because the
+// benchmark measures ONLY the encode of a low-entropy synthetic source and
+// must cover two costs it never sees: (a) decoding the real source — software
+// HEVC / 10-bit decode can rival the encode cost on its own — and (b) real
+// content (film grain, motion) being far busier than testsrc2 for x264's
+// rate-control + motion estimation. Erring high routes a borderline box's
+// oversized sources to an external player (which works) instead of a
+// stuttering transcode (which is the failure we're preventing).
+const realtimeMarginSoftware = 2.0
 
 // benchmarkClipSeconds is the synthetic clip length. Short enough that a
 // capable host finishes the 1080p rung in well under a second, long enough to
@@ -56,6 +59,7 @@ func BenchmarkMaxTranscodeHeight(ctx context.Context, ffmpegPath string, hw HWAc
 	if ffmpegPath == "" {
 		return 1080 // no benchmark possible; keep the historical default
 	}
+	measuredAny := false
 	for _, rung := range softwareBenchmarkRungs {
 		factor, ok := measureEncodeRealtimeFactor(ctx, ffmpegPath, rung)
 		if !ok {
@@ -64,11 +68,20 @@ func BenchmarkMaxTranscodeHeight(ctx context.Context, ffmpegPath string, hw HWAc
 			log.Printf("[transcode] encode benchmark: %dp probe failed — trying lower", rung.height)
 			continue
 		}
+		measuredAny = true
 		if factor >= realtimeMarginSoftware {
 			log.Printf("[transcode] encode benchmark: software ceiling %dp (%.1f× realtime)", rung.height, factor)
 			return rung.height
 		}
 		log.Printf("[transcode] encode benchmark: %dp only %.1f× realtime (<%.1f×) — trying lower", rung.height, factor, realtimeMarginSoftware)
+	}
+	if !measuredAny {
+		// No rung produced a measurement at all — the benchmark infrastructure
+		// failed (missing lavfi/testsrc2, ffmpeg wedged), NOT a slow host. Don't
+		// punish a possibly-capable box by flooring at 480; keep the historical
+		// default so behaviour is no worse than before the benchmark existed.
+		log.Printf("[transcode] encode benchmark: no rung could be measured (lavfi/ffmpeg issue) — keeping default 1080 ceiling")
+		return 1080
 	}
 	log.Printf("[transcode] encode benchmark: host can't sustain 480p software encode — flooring ceiling at 480 (oversized sources route to external)")
 	return 480
@@ -81,10 +94,11 @@ func BenchmarkMaxTranscodeHeight(ctx context.Context, ffmpegPath string, hw HWAc
 // rather than treating the failure as a fast result. Each probe is bounded so
 // a wedged ffmpeg can't stall daemon startup.
 func measureEncodeRealtimeFactor(ctx context.Context, ffmpegPath string, rung benchmarkRung) (float64, bool) {
-	// A 3 s superfast encode that takes longer than 12 s is <0.25× realtime —
-	// already far below the 1.5× bar — so capping here only kills genuinely
-	// hopeless rungs early and keeps worst-case startup bounded.
-	bctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	// A 3 s superfast encode that takes longer than 6 s is <0.5× realtime —
+	// already far below the 2.0× bar — so capping here only kills genuinely
+	// hopeless rungs early and bounds worst-case startup blocking (3 rungs ×
+	// 6 s = 18 s) since this runs synchronously before the agent registers.
+	bctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
 
 	size := strconv.Itoa(rung.width) + "x" + strconv.Itoa(rung.height)
