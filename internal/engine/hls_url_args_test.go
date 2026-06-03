@@ -188,3 +188,43 @@ func TestBuildHLSFFmpegArgsBurnSubtitle(t *testing.T) {
 		}
 	})
 }
+
+// Audio clamp (2026-06-03 no-sound regression): the web persists audioIndex
+// globally, so a stale value from a multi-track file can arrive for a file with
+// fewer tracks. buildHLSFFmpegArgsAt must clamp an out-of-range index to 0:a:0
+// rather than emit `-map 0:a:N?` for a track that doesn't exist — the optional
+// `?` would otherwise silently drop audio and yield a video-only stream.
+func TestBuildHLSFFmpegArgsAudioClamp(t *testing.T) {
+	cfg := func(audioIdx int) HLSSessionConfig {
+		return HLSSessionConfig{
+			SessionID:  "audio",
+			SourcePath: "/tmp/movie.mkv",
+			Quality:    "1080p",
+			AudioIndex: audioIdx,
+			Transcode: TranscodeRuntime{
+				FFmpegPath:  "/usr/bin/ffmpeg",
+				FFprobePath: "/usr/bin/ffprobe",
+				HWAccel:     HWAccelNone,
+			},
+		}
+	}
+	oneTrack := &StreamProbe{Width: 1920, Height: 1080, DurationSec: 100, AudioTracks: []ProbeAudioTrack{{}}}
+
+	t.Run("out-of-range index clamps to 0:a:0", func(t *testing.T) {
+		got := strings.Join(buildHLSFFmpegArgsAt(cfg(2), oneTrack, "/tmp/d", 0, 0), " ")
+		if !strings.Contains(got, "-map 0:a:0?") {
+			t.Errorf("out-of-range audioIndex must clamp to 0:a:0?: %s", got)
+		}
+		if strings.Contains(got, "0:a:2?") {
+			t.Errorf("must not map the non-existent 0:a:2: %s", got)
+		}
+	})
+
+	t.Run("in-range index is preserved", func(t *testing.T) {
+		twoTracks := &StreamProbe{Width: 1920, Height: 1080, DurationSec: 100, AudioTracks: []ProbeAudioTrack{{}, {}}}
+		got := strings.Join(buildHLSFFmpegArgsAt(cfg(1), twoTracks, "/tmp/d", 0, 0), " ")
+		if !strings.Contains(got, "-map 0:a:1?") {
+			t.Errorf("in-range audioIndex 1 must be preserved: %s", got)
+		}
+	})
+}

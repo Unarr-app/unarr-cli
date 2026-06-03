@@ -1217,6 +1217,17 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 			}
 		}
 	}
+	// Clamp to an audio track that actually exists. The web persists the chosen
+	// audioIndex globally, so a value from a multi-track file can arrive for a
+	// file with fewer tracks; `-map 0:a:N?` would then match nothing and the
+	// optional `?` silently yields a VIDEO-ONLY stream (no sound — 2026-06-03,
+	// Wistoria S02E08 had one audio track but the session carried audioIndex=2).
+	// Fall back to the first track so audio is never silently dropped.
+	if n := len(probe.AudioTracks); n > 0 && audioIdx >= n {
+		log.Printf("[hls %s] audioIndex %d out of range (%d audio track(s)) — using 0:a:0",
+			shortHLSID(cfg.SessionID), audioIdx, n)
+		audioIdx = 0
+	}
 	args = append(args, "-map", fmt.Sprintf("0:a:%d?", audioIdx))
 
 	// Video encode. Codec + preset come from the EncoderProfile resolved at
