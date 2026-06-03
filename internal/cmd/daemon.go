@@ -371,6 +371,15 @@ func runDaemonStart() error {
 	// work once the scan prewarm has filled the cache). Default true.
 	streamSrv.SetCacheSubtitles(cfg.Library.CacheSubtitles)
 	streamSrv.SetCacheThumbnails(cfg.Library.CacheThumbnails)
+	// Tell /trickplay which tile width the scan prewarm built the sprite at (the
+	// agent owns the width; the web requests by path only). 0 = disabled → 404.
+	trickW := 0
+	if cfg.Library.Trickplay.Enabled {
+		if trickW = cfg.Library.Trickplay.Width; trickW <= 0 {
+			trickW = 240
+		}
+	}
+	streamSrv.SetTrickplayWidth(trickW)
 	streamSrv.SetRequireStreamToken(cfg.Download.RequireStreamToken)
 	// Report the stream-token signing key ONLY when enforcing, so the web's
 	// "secret present → mint HLS token" signal accurately means "this agent
@@ -1128,7 +1137,7 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 		// and /thumbnail are instant + huge remuxes work). Empty/err = prewarm is
 		// skipped silently (on-demand extraction still runs).
 		prewarmFFmpeg := ""
-		if cfg.Library.CacheSubtitles || cfg.Library.CacheThumbnails {
+		if cfg.Library.CacheSubtitles || cfg.Library.CacheThumbnails || cfg.Library.Trickplay.Enabled {
 			if ff, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err == nil {
 				prewarmFFmpeg = ff
 			} else {
@@ -1152,10 +1161,13 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 
 			if prewarmFFmpeg != "" {
 				library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
-					FFmpegPath:      prewarmFFmpeg,
-					CacheSubtitles:  cfg.Library.CacheSubtitles,
-					CacheThumbnails: cfg.Library.CacheThumbnails,
-					Workers:         2,
+					FFmpegPath:           prewarmFFmpeg,
+					CacheSubtitles:       cfg.Library.CacheSubtitles,
+					CacheThumbnails:      cfg.Library.CacheThumbnails,
+					Workers:              2,
+					Trickplay:            cfg.Library.Trickplay.Enabled,
+					TrickplayIntervalSec: cfg.Library.Trickplay.IntervalSeconds(),
+					TrickplayWidth:       cfg.Library.Trickplay.Width,
 				})
 			}
 

@@ -26,16 +26,26 @@ type PrewarmOptions struct {
 	CacheSubtitles  bool   // library.cache_subtitles
 	CacheThumbnails bool   // library.cache_thumbnails
 	Workers         int    // concurrent ffmpeg jobs (each is heavy); default 2
+
+	// Trickplay (library.trickplay): generate ONE montage sprite per file sampled
+	// every TrickplayIntervalSec at TrickplayWidth. Replaces live scrubber
+	// extraction during playback (no contention with the active stream).
+	Trickplay            bool
+	TrickplayIntervalSec float64
+	TrickplayWidth       int
 }
 
 // prewarmJob is one extraction unit: all text subtitles of a file in one ffmpeg
-// pass (thumb=false) or a single thumbnail frame (thumb=true).
+// pass (subtitle job), a single thumbnail frame (thumb=true), or the trickplay
+// montage sprite for a file (trick=true).
 type prewarmJob struct {
-	path   string
-	thumb  bool
-	subIdx []int   // subtitle stream indices to extract in ONE pass (subtitle job)
-	posSec float64 // frame position in seconds (thumbnail job)
-	width  int     // frame width (thumbnail job)
+	path     string
+	thumb    bool
+	trick    bool    // trickplay sprite job
+	subIdx   []int   // subtitle stream indices to extract in ONE pass (subtitle job)
+	posSec   float64 // frame position in seconds (thumbnail job)
+	width    int     // frame/tile width (thumbnail + trickplay jobs)
+	duration float64 // runtime seconds (trickplay job)
 }
 
 // PrewarmSidecars extracts text subtitles (→ WebVTT) and the panel's sample
@@ -48,7 +58,7 @@ type prewarmJob struct {
 // the item moves on, and ctx cancellation (Ctrl-C / daemon shutdown) stops
 // cleanly. Safe to call after every scan — only missing/stale caches do work.
 func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptions) {
-	if cache == nil || opts.FFmpegPath == "" || (!opts.CacheSubtitles && !opts.CacheThumbnails) {
+	if cache == nil || opts.FFmpegPath == "" || (!opts.CacheSubtitles && !opts.CacheThumbnails && !opts.Trickplay) {
 		return
 	}
 	workers := opts.Workers
@@ -59,7 +69,7 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 	jobs := make(chan prewarmJob)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	subCached, thumbCached, failed := 0, 0, 0
+	subCached, thumbCached, trickCached, failed := 0, 0, 0, 0
 	var sampleErr string // first extraction error, surfaced in the summary so a
 	// systemic ffmpeg failure (vs one corrupt file) is diagnosable from "N failed".
 
@@ -97,6 +107,28 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 					}
 					mu.Lock()
 					thumbCached++
+					mu.Unlock()
+					continue
+				}
+
+				if j.trick {
+					if _, ok := mediainfo.ReadCachedTrickplay(j.path, j.width); ok {
+						continue
+					}
+					// Full-decode pass (samples 1 frame per interval over the whole
+					// file) — generous deadline like subtitles; idempotent + cached.
+					jctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+					_, err := mediainfo.GenerateTrickplay(jctx, opts.FFmpegPath, j.path, opts.TrickplayIntervalSec, j.width, j.duration)
+					cancel()
+					mu.Lock()
+					if err != nil {
+						failed++
+						if sampleErr == "" {
+							sampleErr = err.Error()
+						}
+					} else {
+						trickCached++
+					}
 					mu.Unlock()
 					continue
 				}
@@ -177,15 +209,32 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 					}
 				}
 			}
+			if opts.Trickplay && opts.TrickplayIntervalSec > 0 {
+				dur := 0.0
+				if item.MediaInfo.Video != nil {
+					dur = item.MediaInfo.Video.Duration
+				}
+				if dur > 0 {
+					w := opts.TrickplayWidth
+					if w <= 0 {
+						w = 240
+					}
+					select {
+					case jobs <- prewarmJob{path: item.FilePath, trick: true, width: w, duration: dur}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
 		}
 	}()
 
 	wg.Wait()
-	if subCached > 0 || thumbCached > 0 || failed > 0 {
+	if subCached > 0 || thumbCached > 0 || trickCached > 0 || failed > 0 {
 		if failed > 0 && sampleErr != "" {
-			log.Printf("[prewarm] %d subtitles, %d thumbnails cached, %d failed (e.g. %s)", subCached, thumbCached, failed, sampleErr)
+			log.Printf("[prewarm] %d subtitles, %d thumbnails, %d trickplay cached, %d failed (e.g. %s)", subCached, thumbCached, trickCached, failed, sampleErr)
 		} else {
-			log.Printf("[prewarm] %d subtitles, %d thumbnails cached, %d failed", subCached, thumbCached, failed)
+			log.Printf("[prewarm] %d subtitles, %d thumbnails, %d trickplay cached, %d failed", subCached, thumbCached, trickCached, failed)
 		}
 	}
 }

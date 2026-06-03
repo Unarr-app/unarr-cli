@@ -144,14 +144,17 @@ func runScan(dirPath string, workers int, ffprobePath string, noSync bool) error
 	// ".unarr" dir so playback gets instant subtitles/thumbnails and huge remuxes
 	// never hit the on-demand timeout. Best-effort + Ctrl-C interruptible (the scan
 	// itself is already saved).
-	if cfg.Library.CacheSubtitles || cfg.Library.CacheThumbnails {
+	if cfg.Library.CacheSubtitles || cfg.Library.CacheThumbnails || cfg.Library.Trickplay.Enabled {
 		if ff, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err == nil {
 			fmt.Fprintf(os.Stderr, "  Pre-extracting subtitles + thumbnails to cache… (Ctrl-C to skip)\n")
 			library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
-				FFmpegPath:      ff,
-				CacheSubtitles:  cfg.Library.CacheSubtitles,
-				CacheThumbnails: cfg.Library.CacheThumbnails,
-				Workers:         2,
+				FFmpegPath:           ff,
+				CacheSubtitles:       cfg.Library.CacheSubtitles,
+				CacheThumbnails:      cfg.Library.CacheThumbnails,
+				Workers:              2,
+				Trickplay:            cfg.Library.Trickplay.Enabled,
+				TrickplayIntervalSec: cfg.Library.Trickplay.IntervalSeconds(),
+				TrickplayWidth:       cfg.Library.Trickplay.Width,
 			})
 		} else {
 			fmt.Fprintf(os.Stderr, "  Skipping sidecar prewarm: ffmpeg unavailable: %v\n", err)

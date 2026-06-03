@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -197,6 +198,29 @@ type LibraryConfig struct {
 	// timeout). Both default true; disable to save the disk/CPU of pre-extraction.
 	CacheSubtitles  bool `toml:"cache_subtitles"`  // default true
 	CacheThumbnails bool `toml:"cache_thumbnails"` // default true
+
+	// Trickplay: at scan time, build ONE montage JPEG of frames sampled every
+	// Interval seconds (+ a JSON manifest), cached in .unarr next to the media.
+	// The web scrubber shows tiles from it — no live ffmpeg during playback, so
+	// no contention with the active stream (the cause of broken seekbar previews)
+	// — and the file panel picks a few positions from the same grid.
+	Trickplay TrickplayConfig `toml:"trickplay"`
+}
+
+// TrickplayConfig controls scan-time trickplay sprite generation.
+type TrickplayConfig struct {
+	Enabled  bool   `toml:"enabled"`  // generate the sprite during scan (default true)
+	Interval string `toml:"interval"` // one frame per Interval, e.g. "10s" (default)
+	Width    int    `toml:"width"`    // tile width px; height keeps aspect (default 240)
+}
+
+// IntervalSeconds parses Interval ("10s") to seconds, falling back to 10 on an
+// empty/invalid value so a typo can't silently disable the sprite.
+func (t TrickplayConfig) IntervalSeconds() float64 {
+	if d, err := time.ParseDuration(strings.TrimSpace(t.Interval)); err == nil && d > 0 {
+		return d.Seconds()
+	}
+	return 10
 }
 
 // Default returns a Config with sensible defaults. Used both for fresh
@@ -268,6 +292,11 @@ func Default() Config {
 			Workers:         8,
 			CacheSubtitles:  true,
 			CacheThumbnails: true,
+			Trickplay: TrickplayConfig{
+				Enabled:  true,
+				Interval: "10s",
+				Width:    240,
+			},
 		},
 	}
 }
@@ -339,6 +368,18 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	}
 	if !meta.IsDefined("library", "cache_thumbnails") {
 		cfg.Library.CacheThumbnails = true
+	}
+	// Trickplay defaults ON for configs predating these keys (small sidecar JPEG;
+	// makes the scrubber instant + contention-free). Explicit `enabled = false`
+	// is respected via meta.IsDefined.
+	if !meta.IsDefined("library", "trickplay", "enabled") {
+		cfg.Library.Trickplay.Enabled = true
+	}
+	if !meta.IsDefined("library", "trickplay", "interval") {
+		cfg.Library.Trickplay.Interval = "10s"
+	}
+	if !meta.IsDefined("library", "trickplay", "width") {
+		cfg.Library.Trickplay.Width = 240
 	}
 
 	if !meta.IsDefined("downloads", "transcode", "enabled") {
