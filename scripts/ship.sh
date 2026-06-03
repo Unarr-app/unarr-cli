@@ -179,7 +179,9 @@ if [ "$SKIP_SMOKE" != "1" ]; then
   fi
 
   if [ "$SKIP_DOCKER" != "1" ]; then
-    DOCKER_VERSION="$(docker run --rm "$DOCKER_IMAGE:$VERSION" version 2>/dev/null | grep -oE 'v[0-9.]+' | head -1)"
+    # Keep any prerelease/build suffix (e.g. -beta) — `v[0-9.]+` alone would
+    # truncate "v1.0.1-beta" to "v1.0.1" and false-warn on a correct image.
+    DOCKER_VERSION="$(docker run --rm "$DOCKER_IMAGE:$VERSION" version 2>/dev/null | grep -oE 'v[0-9][0-9A-Za-z.+-]*' | head -1)"
     if [ "$DOCKER_VERSION" = "$TAG" ]; then
       ok "docker image $DOCKER_IMAGE:$VERSION reports $DOCKER_VERSION"
     else
