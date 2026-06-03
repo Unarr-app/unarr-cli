@@ -14,17 +14,18 @@ import (
 // releasePubKeyBase64 is the base64-encoded ed25519 public key used to verify
 // `checksums.txt.sig` against `checksums.txt` during self-update.
 //
-// It is overridable at link time via ldflags so the same source compiles for
-// users who do not yet have a release-signing keypair in their CI:
+// It is the canonical release-signing public key, compiled in so every build
+// (local ship.sh and CI alike) verifies updates consistently — it is public, so
+// committing it is safe and removes any "forgot to set the env var → shipped an
+// unsigned/unverifying binary" failure mode. The matching PRIVATE key signs
+// checksums.txt during release (scripts/sign-checksums, driven by the
+// goreleaser `signs:` block); releases are signed unconditionally now.
 //
-//	-X github.com/torrentclaw/unarr/internal/upgrade.releasePubKeyBase64=<base64-pubkey>
-//
-// When the variable is empty, signature verification is skipped and a warning
-// is logged — checksum-only verification remains in force. This is the
-// transitional default until the keypair is provisioned; flip to a non-empty
-// value (and enable the corresponding CI signing step) to make signature
-// verification mandatory.
-var releasePubKeyBase64 = ""
+// When this is empty, signature verification is skipped (a warning is logged).
+// Do NOT clear it — every release from v1.0.1-beta on ships a checksums.txt.sig
+// and clients built with this key require it. Rotating the key is a coordinated
+// change: clients on the old key must update before the signing key flips.
+var releasePubKeyBase64 = "X7EJVwAiIILs4EGaqp+YBsa4Q6HnKBB2J5FI4MIt+w0="
 
 // ErrMissingSignature indicates the release does not ship a `.sig` file even
 // though signature verification is required by an embedded public key.

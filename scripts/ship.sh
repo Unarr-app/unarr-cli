@@ -117,16 +117,34 @@ if [ "$DRY_RUN" = false ]; then
   fi
 fi
 
+# Release signing key — releases MUST be signed (the goreleaser `signs:` block
+# consumes RELEASE_SIGNING_KEY to produce checksums.txt.sig, verified by the
+# compiled-in public key). Prefer an explicit env var, else the local keyfile.
+SIGNING_KEY_FILE="${RELEASE_SIGNING_KEY_FILE:-$HOME/.config/unarr-release/signing.key}"
+if [ -z "${RELEASE_SIGNING_KEY:-}" ] && [ -f "$SIGNING_KEY_FILE" ]; then
+  RELEASE_SIGNING_KEY="$(tr -d '\r\n' < "$SIGNING_KEY_FILE")"
+fi
+if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
+  if [ "$DRY_RUN" = true ]; then
+    warn "no signing key (RELEASE_SIGNING_KEY env or $SIGNING_KEY_FILE) — a real ship would FAIL: releases must be signed"
+  else
+    die "no release signing key: export RELEASE_SIGNING_KEY or create $SIGNING_KEY_FILE — releases MUST be signed"
+  fi
+fi
+export RELEASE_SIGNING_KEY
+
 if [ "$DRY_RUN" = true ]; then
   ok "Dry run complete — no changes made"
   exit 0
 fi
 
-# 1. Build
-info "goreleaser build ($TAG)"
-SENTRY_DSN="${SENTRY_DSN:-}" RELEASE_SIGNING_PUBKEY="${RELEASE_SIGNING_PUBKEY:-}" \
+# 1. Build (+ sign checksums via the goreleaser `signs:` block, which consumes
+# RELEASE_SIGNING_KEY — exported above; missing key already aborted the run).
+info "goreleaser build + sign ($TAG)"
+SENTRY_DSN="${SENTRY_DSN:-}" RELEASE_SIGNING_KEY="$RELEASE_SIGNING_KEY" \
   goreleaser release --clean --skip=publish
-ok "dist/ ready"
+[ -f dist/checksums.txt.sig ] || die "checksums.txt.sig not produced — signing step did not run"
+ok "dist/ ready (checksums.txt + checksums.txt.sig)"
 
 # 2. Hetzner
 if [ "$SKIP_HETZNER" != "1" ]; then

@@ -26,10 +26,10 @@ builds:
       - -s -w
       - -X github.com/torrentclaw/unarr/internal/cmd.Version={{.Version}}
       - -X github.com/torrentclaw/unarr/internal/sentry.dsn={{ .Env.SENTRY_DSN }}
-      # Release-signing public key — verified by the self-updater against
-      # checksums.txt.sig. Empty when not configured; in that case
-      # signature verification is skipped and a warning is logged.
-      - -X github.com/torrentclaw/unarr/internal/upgrade.releasePubKeyBase64={{ .Env.RELEASE_SIGNING_PUBKEY }}
+      # The release-signing PUBLIC key is compiled in as the canonical default
+      # in internal/upgrade/signature.go (it's public — committing it removes
+      # the "empty env var → unsigned binary" footgun). No ldflag override:
+      # every build bakes the same key and verifies checksums.txt.sig.
 
 archives:
   - formats: [tar.gz]
@@ -50,6 +50,28 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+
+# Sign checksums.txt with the release ed25519 private key → checksums.txt.sig,
+# verified by the self-updater against the compiled-in public key. Releases are
+# signed UNCONDITIONALLY: sign-checksums requires -key, so an unset/empty
+# RELEASE_SIGNING_KEY makes this step (and the whole `goreleaser release`) fail
+# rather than silently shipping an unsigned release. ship.sh sources the key
+# from ~/.config/unarr-release/signing.key (or the RELEASE_SIGNING_KEY env).
+signs:
+  - id: checksums
+    cmd: go
+    args:
+      - run
+      - ./scripts/sign-checksums
+      - -key
+      - "{{ .Env.RELEASE_SIGNING_KEY }}"
+      - -in
+      - "${artifact}"
+      - -out
+      - "${signature}"
+    signature: "${artifact}.sig"
+    artifacts: checksum
+    output: true
 
 changelog:
   sort: asc
