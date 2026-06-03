@@ -68,13 +68,15 @@ func TestTonemap_AppliedInNoDownscaleBranch(t *testing.T) {
 }
 
 func TestTonemap_LibplaceboPreferredOverZscale(t *testing.T) {
-	// HDR source + an ffmpeg with libplacebo → the single GPU filter replaces
-	// the whole CPU zscale chain (and the trailing format=/setparams it folds in).
+	// HDR source + an ffmpeg with libplacebo on a REAL HW encoder (NVENC) → the
+	// single GPU filter replaces the whole CPU zscale chain (and the trailing
+	// format=/setparams it folds in). NVENC (not None) because libplacebo is
+	// gated on a real GPU — a software encoder stays on zscale.
 	cfg := HLSSessionConfig{
 		SessionID:  "test",
 		SourcePath: "/movies/x.mkv",
 		Quality:    "720p",
-		Transcode:  TranscodeRuntime{FFmpegPath: "/usr/bin/ffmpeg", HWAccel: HWAccelNone, TonemapHDR: true, HasLibplacebo: true},
+		Transcode:  TranscodeRuntime{FFmpegPath: "/usr/bin/ffmpeg", HWAccel: HWAccelNVENC, TonemapHDR: true, HasLibplacebo: true},
 	}
 	probe := &StreamProbe{Width: 3840, Height: 2160, BitDepth: 10, HDR: "HDR10", DurationSec: 100}
 	vf := vfChain(strings.Join(buildHLSFFmpegArgsAt(cfg, probe, "/tmp/t", 0, 0), " "))
@@ -83,6 +85,26 @@ func TestTonemap_LibplaceboPreferredOverZscale(t *testing.T) {
 	}
 	if strings.Contains(vf, "zscale=t=linear") || strings.Contains(vf, "tonemap=tonemap=hable") {
 		t.Errorf("libplacebo must replace the zscale chain, not run alongside it: %q", vf)
+	}
+}
+
+func TestTonemap_LibplaceboSkippedOnSoftwareEncoder(t *testing.T) {
+	// libplacebo present but no HW encoder (software libx264) → must NOT use
+	// libplacebo: a software host's only Vulkan would be lavapipe (CPU), slower
+	// than zscale. Falls back to the zscale chain.
+	cfg := HLSSessionConfig{
+		SessionID:  "test",
+		SourcePath: "/movies/x.mkv",
+		Quality:    "720p",
+		Transcode:  TranscodeRuntime{FFmpegPath: "/usr/bin/ffmpeg", HWAccel: HWAccelNone, TonemapHDR: true, HasLibplacebo: true},
+	}
+	probe := &StreamProbe{Width: 3840, Height: 2160, BitDepth: 10, HDR: "HDR10", DurationSec: 100}
+	vf := vfChain(strings.Join(buildHLSFFmpegArgsAt(cfg, probe, "/tmp/t", 0, 0), " "))
+	if strings.Contains(vf, "libplacebo") {
+		t.Errorf("software encoder must not use libplacebo (lavapipe trap), got %q", vf)
+	}
+	if !strings.Contains(vf, "zscale=t=linear") {
+		t.Errorf("software encoder with HDR + zscale should fall back to the zscale chain, got %q", vf)
 	}
 }
 

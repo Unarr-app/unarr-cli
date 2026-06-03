@@ -35,9 +35,15 @@ FROM debian:bookworm-slim
 # 7z    → archive extractor for RAR/7z-packed downloads (p7zip-full also reads
 #         RAR5, so unrar — unavailable as a free Debian package — isn't needed).
 # tzdata/ca-certificates → TLS + correct local time for schedules/logs.
+# libvulkan1 → the Vulkan loader (libvulkan.so.1). ffmpeg's libplacebo filter
+#         (GPU HDR→SDR tonemap) loads Vulkan dynamically through it; without the
+#         loader the filter can't reach a GPU even when the NVIDIA driver mounts
+#         its ICD. ~150 KB. The agent only USES libplacebo after a functional
+#         probe (FFmpegSupportsLibplacebo) succeeds AND a real HW encoder is
+#         present, so this is inert on hosts without a working Vulkan GPU.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ca-certificates tzdata wget xz-utils par2 p7zip-full && \
+      ca-certificates tzdata wget xz-utils par2 p7zip-full libvulkan1 && \
     rm -rf /var/lib/apt/lists/*
 
 # TARGETARCH is set automatically by Docker buildx during cross-builds.
@@ -88,11 +94,14 @@ ENV UNARR_DOWNLOAD_DIR=/downloads
 ENV XDG_DATA_HOME=/data
 
 # NVIDIA passthrough defaults. `--gpus all` alone only grants the "utility" +
-# "compute" capabilities; nvenc needs "video". Baking these here means a plain
-# `docker run --gpus all` (or the compose device reservation) lights up HW
-# transcode with zero extra flags. Harmless when no GPU is attached.
+# "compute" capabilities; nvenc needs "video", and "graphics" makes the runtime
+# mount the NVIDIA Vulkan ICD (nvidia_icd.json + GLX libs) so ffmpeg's libplacebo
+# filter (GPU HDR tonemap, paired with libvulkan1 above) can create a Vulkan
+# device. Baking these here means a plain `docker run --gpus all` (or the compose
+# device reservation) lights up HW transcode + GPU tonemap with zero extra flags.
+# Harmless when no GPU is attached.
 ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility,graphics
 
 VOLUME ["/config", "/downloads", "/data"]
 

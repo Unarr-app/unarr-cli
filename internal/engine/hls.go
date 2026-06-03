@@ -1359,7 +1359,14 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	// CPU chain; else play untonemapped (desaturated, last resort). Skip
 	// libplacebo on VAAPI: its Vulkan surface flow doesn't compose with our
 	// nv12+hwupload path, so VAAPI keeps the zscale-or-none behaviour.
-	useLibplacebo := probe.HDR != "" && cfg.Transcode.HasLibplacebo && codec != "h264_vaapi"
+	//
+	// Gate on a real HW encoder (HWAccel != none): only then is the Vulkan
+	// device a genuine GPU. A software-only host with mesa would expose lavapipe
+	// (CPU Vulkan), which the functional probe accepts but whose tonemap is
+	// SLOWER than the zscale CPU chain — so on those hosts libplacebo would be a
+	// regression. No HW encoder ⇒ stay on zscale.
+	useLibplacebo := probe.HDR != "" && cfg.Transcode.HasLibplacebo &&
+		codec != "h264_vaapi" && cfg.Transcode.HWAccel != HWAccelNone
 	tonemap := ""
 	if probe.HDR != "" && cfg.Transcode.TonemapHDR && !useLibplacebo {
 		tonemap = hdrTonemapChain
