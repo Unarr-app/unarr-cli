@@ -1236,7 +1236,13 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		// this is the difference between ~3 s and ~2.5 s per segment on a
 		// recent x86 CPU. `-threads 0` is libx264's default but explicit
 		// helps when the user has set GOMAXPROCS.
-		args = append(args, "-preset", profile.Preset, "-threads", "0")
+		// -bf 0 (no B-frames) + -sc_threshold 0 (no scene-cut keyframes): both
+		// remove the timestamp irregularities that make ffmpeg's HLS muxer emit
+		// "Packet duration is out of range" on slightly-VFR / B-frame sources and
+		// produce uneven segment lengths the player stutters on. Keyframe cadence
+		// is driven by -force_key_frames below, so disabling scene-cut keeps every
+		// segment exactly hls_time long.
+		args = append(args, "-preset", profile.Preset, "-threads", "0", "-bf", "0", "-sc_threshold", "0")
 	case "h264_nvenc":
 		// p3 + vbr keeps NVENC fast (~1.5 s seg-0) without the segmentation
 		// breakage `-tune ll` introduced in 0.9.9: with -tune=ll the NVENC
@@ -1245,7 +1251,11 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		// "preparando sesión" until the 60 s mark-ready timeout. Verified on
 		// ffmpeg 6.1.1 + driver 580 / RTX-class GPUs: dropping -tune ll
 		// restores per-segment cuts at 27x real-time vs 28x with -tune ll.
-		args = append(args, "-preset", profile.Preset, "-rc", "vbr")
+		// -bf 0 + -no-scenecut: same rationale as libx264 (NVENC's own flag for
+		// scene-cut). No B-frame reorder → monotonic DTS → uniform segments, no
+		// "Packet duration is out of range" flood. Safe with -force_key_frames
+		// (unlike -tune ll, which broke per-segment cuts — see note above).
+		args = append(args, "-preset", profile.Preset, "-rc", "vbr", "-bf", "0", "-no-scenecut", "1")
 	case "h264_qsv":
 		// veryfast is the fastest realistic QSV preset; medium was too
 		// conservative for first-start. look_ahead=0 keeps the encoder
@@ -1393,6 +1403,13 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		"-ar", "48000",
 		"-ac", "2",
 	)
+
+	// Force constant frame rate. Many MKV rips are slightly variable-frame-rate
+	// (or carry irregular PTS); muxed to fMP4 that produces non-monotonic packet
+	// durations ("Packet duration is out of range") and uneven segment lengths
+	// the player stutters on. CFR resamples to a steady cadence → uniform
+	// segments. Near-CFR sources (23.976/24/25) are essentially untouched.
+	args = append(args, "-fps_mode", "cfr")
 
 	// HLS muxer — fmp4 segments with pre-computed segment count.
 	// `-start_number` slots seg-N.m4s where N matches the segment index in
