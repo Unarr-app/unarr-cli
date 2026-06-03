@@ -18,6 +18,10 @@ type TranscodeRuntime struct {
 	// Set only when the ffmpeg build has zscale (FFmpegSupportsZscale); without
 	// it the tonemap filter would error and break playback, so it stays off.
 	TonemapHDR bool
+	// HasLibplacebo: the ffmpeg build has the libplacebo filter (GPU HDR tonemap).
+	// Preferred over the zscale chain for HDR sources — one GPU pass, higher
+	// quality, and present where zscale is missing.
+	HasLibplacebo bool
 }
 
 // qualityCap maps a session's Quality label to a (MaxHeight, VideoBitrate)

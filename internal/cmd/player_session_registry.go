@@ -95,5 +95,8 @@ func buildTranscodeRuntime(ctx context.Context, cfg config.Config) engine.Transc
 		// Tonemap HDR→SDR only when this ffmpeg build has zscale; otherwise the
 		// filter would error and break playback, so HDR plays untonemapped.
 		TonemapHDR: engine.FFmpegSupportsZscale(ffmpegPath),
+		// libplacebo (GPU) is preferred over zscale when present — checked here so
+		// the per-session arg builder can pick it for HDR sources.
+		HasLibplacebo: engine.FFmpegSupportsLibplacebo(ffmpegPath),
 	}
 }

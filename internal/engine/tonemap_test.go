@@ -66,6 +66,25 @@ func TestTonemap_AppliedInNoDownscaleBranch(t *testing.T) {
 	}
 }
 
+func TestTonemap_LibplaceboPreferredOverZscale(t *testing.T) {
+	// HDR source + an ffmpeg with libplacebo → the single GPU filter replaces
+	// the whole CPU zscale chain (and the trailing format=/setparams it folds in).
+	cfg := HLSSessionConfig{
+		SessionID:  "test",
+		SourcePath: "/movies/x.mkv",
+		Quality:    "720p",
+		Transcode:  TranscodeRuntime{FFmpegPath: "/usr/bin/ffmpeg", HWAccel: HWAccelNone, TonemapHDR: true, HasLibplacebo: true},
+	}
+	probe := &StreamProbe{Width: 3840, Height: 2160, BitDepth: 10, HDR: "HDR10", DurationSec: 100}
+	vf := vfChain(strings.Join(buildHLSFFmpegArgsAt(cfg, probe, "/tmp/t", 0, 0), " "))
+	if !strings.Contains(vf, "libplacebo") {
+		t.Fatalf("libplacebo-capable ffmpeg: expected libplacebo filter, got %q", vf)
+	}
+	if strings.Contains(vf, "zscale=t=linear") || strings.Contains(vf, "tonemap=tonemap=hable") {
+		t.Errorf("libplacebo must replace the zscale chain, not run alongside it: %q", vf)
+	}
+}
+
 func TestTonemap_SkippedWhenFFmpegLacksZscale(t *testing.T) {
 	vf := vfChain(hlsArgsFor("HDR10", false, HWAccelNone))
 	if strings.Contains(vf, "zscale") || strings.Contains(vf, "tonemap") {

@@ -1353,26 +1353,37 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		hwUploadTail = ",hwupload"
 		colorTail = ""
 	}
-	// HDR→SDR tonemap, inserted after the scale (downscale-first = fewer pixels
-	// to tonemap) and before format=. Only for an HDR source on a zscale-capable
-	// ffmpeg; the trailing comma in hdrTonemapChain slots it in front of format=.
+	// HDR→SDR tonemap, after the scale (downscale-first = fewer pixels to map).
+	// Prefer libplacebo (GPU, ONE pass — it also emits the BT.709 colorspace +
+	// 8-bit format, so it REPLACES the format/setparams tail); else the zscale
+	// CPU chain; else play untonemapped (desaturated, last resort). Skip
+	// libplacebo on VAAPI: its Vulkan surface flow doesn't compose with our
+	// nv12+hwupload path, so VAAPI keeps the zscale-or-none behaviour.
+	useLibplacebo := probe.HDR != "" && cfg.Transcode.HasLibplacebo && codec != "h264_vaapi"
 	tonemap := ""
-	if probe.HDR != "" && cfg.Transcode.TonemapHDR {
+	if probe.HDR != "" && cfg.Transcode.TonemapHDR && !useLibplacebo {
 		tonemap = hdrTonemapChain
 	}
-	// Core video chain (scale + optional tonemap + pixel format + color metadata),
-	// WITHOUT the optional hwUploadTail — that has to run last, after any subtitle
-	// overlay, so it's appended separately below.
+	// videoTail = everything after the scale: either libplacebo (tonemap +
+	// colorspace + format in one) or the (optional zscale) tonemap then the
+	// format + color-metadata tail. No leading comma — the scale chain ends in one.
+	videoTail := tonemap + "format=" + pixFormat + colorTail
+	if useLibplacebo {
+		videoTail = libplaceboTonemapFilter
+	}
+	// Core video chain (scale + tonemap/format tail), WITHOUT the optional
+	// hwUploadTail — that has to run last, after any subtitle overlay, so it's
+	// appended separately below.
 	var vchain string
 	if maxH > 0 && probe.Height > maxH {
 		vchain = fmt.Sprintf(
-			"scale=-2:%d:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,%sformat=%s%s",
-			maxH, tonemap, pixFormat, colorTail,
+			"scale=-2:%d:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,%s",
+			maxH, videoTail,
 		)
 	} else {
 		vchain = fmt.Sprintf(
-			"scale=trunc(iw/2)*2:trunc(ih/2)*2,%sformat=%s%s",
-			tonemap, pixFormat, colorTail,
+			"scale=trunc(iw/2)*2:trunc(ih/2)*2,%s",
+			videoTail,
 		)
 	}
 	if burnIdx >= 0 {
