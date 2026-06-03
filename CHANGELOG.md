@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2-beta] - 2026-06-03
+
+
+### Added
+
+- **stream**: serve a `mode=stream` task from a debrid HTTPS link when the torrent is cached (debrid passthrough for external players / VLC), falling back to P2P stream-while-download when it isn't
+
+### Changed
+
+- **stream**: widen the debrid HEAD size-probe timeout to 15s to match the TLS handshake budget — a slow CDN no longer trips the old 10s and falls back to a guessed size
+
 ## [1.0.1-beta] - 2026-06-03
 
 

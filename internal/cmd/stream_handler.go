@@ -91,6 +91,13 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
+	// NOTE: we deliberately do NOT cancel prior stream goroutines here. The
+	// persistent StreamServer is last-writer-wins (SetFile replaces the file;
+	// the deferred ClearFile is guarded by CurrentTaskID), so a displaced prior
+	// goroutine simply parks on its own ctx until the 30m idle guard reaps it —
+	// cheap. Cancelling them at entry would abort an in-flight debrid HEAD of a
+	// concurrently-starting task (size resolution), failing that stream.
+
 	// Register for web-initiated cancellation
 	streamRegistry.mu.Lock()
 	streamRegistry.cancels[at.ID] = cancel
@@ -113,6 +120,47 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	task.ResolvedMethod = engine.MethodTorrent
 	reporter.Track(task)
 	defer reporter.ReportFinal(context.Background(), task)
+
+	// Debrid passthrough: when the web resolved a direct HTTPS link (the torrent
+	// is cached on the user's debrid + preferredMethod=debrid), stream FROM that
+	// link instead of joining the P2P swarm — served over the SAME /stream
+	// endpoint, so VLC / external players consume it identically (and far
+	// faster). No HLS transcode here: external players handle any container.
+	// Falls through to the P2P StreamEngine below when there is no direct URL.
+	if at.DirectURL != "" {
+		task.ResolvedMethod = engine.MethodDebrid
+		task.Transition(engine.StatusResolving)
+		bctx, bcancel := context.WithTimeout(ctx, 15*time.Second)
+		// fallbackSize 0 → provider derives size from a HEAD; refresh nil → no
+		// task-level link-refresh endpoint exists (the web re-resolves stale
+		// debrid URLs at the next claim). A mid-stream expiry just ends the
+		// stream and the user re-opens it.
+		provider, perr := engine.NewDebridFileProvider(bctx, at.DirectURL, at.DirectFileName, 0, nil)
+		bcancel()
+		if perr != nil {
+			task.ErrorMessage = "debrid stream provider: " + perr.Error()
+			task.Transition(engine.StatusFailed)
+			return
+		}
+		srv.SetFile(provider, at.ID)
+		task.FileName = provider.FileName()
+		task.TotalBytes = provider.FileSize()
+		task.SetStreamURL(srv.URLsJSON()) // mutex-safe: the reporter reads it via GetStreamURL
+		log.Printf("[%s] stream (debrid): %s (%s) url: %s", at.ID[:8], provider.FileName(), ui.FormatBytes(provider.FileSize()), srv.URL())
+
+		if agentClient != nil {
+			watchReporter := engine.NewWatchReporter(agentClient, srv, at.ID)
+			go watchReporter.Run(ctx)
+		}
+
+		// Debrid serves a complete remote file — there is no download to track,
+		// so mark it complete immediately (the UI shows "ready"). The persistent
+		// server keeps serving until the idle guard reaps it (30m), same as P2P.
+		task.Transition(engine.StatusCompleted)
+		<-ctx.Done()
+		log.Printf("[%s] stream (debrid) stopped", at.ID[:8])
+		return
+	}
 
 	// 1. Create StreamEngine
 	eng, err := engine.NewStreamEngine(engine.StreamConfig{

@@ -304,7 +304,10 @@ func (r *debridRangeReader) reopen() error {
 // size the web reported. A short timeout keeps a slow/HEAD-hostile CDN from
 // stalling session setup — the fallback size is good enough to start.
 func debridHeadSize(ctx context.Context, url string) (int64, bool) {
-	hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// 15s (not 10s): the transport's TLS handshake budget alone is 15s, so a
+	// slow debrid CDN could trip the old 10s timeout before headers arrived,
+	// needlessly falling back to a guessed size.
+	hctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(hctx, http.MethodHead, url, nil)
 	if err != nil {
