@@ -3,14 +3,55 @@ package mediainfo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// ErrTrickplayInProgress means another worker — possibly an agent on another host
+// sharing the same library (e.g. the dev binary on /mnt/nas and the docker agent
+// on /downloads, the SAME files) — already holds this sprite's lock and is
+// generating it. The caller must SKIP, not count it as a failure.
+var ErrTrickplayInProgress = errors.New("trickplay: generation already in progress")
+
+// trickplayLockTTL bounds a stale lock: longer than the caller's 45-min generation
+// deadline so a live job is never stolen, short enough that a crashed/killed
+// worker's lock is reclaimed on a later scan.
+const trickplayLockTTL = 90 * time.Minute
+
+// acquireTrickplayLock takes an exclusive, cross-process lock for one sprite by
+// O_CREATE|O_EXCL on a ".lock" file in the shared sidecar dir, so two agents that
+// watch the same library never decode the same 4K file at once (the cause of the
+// 5×-per-file ffmpeg pile-up). A lock older than trickplayLockTTL is assumed
+// abandoned (owner crashed) and reclaimed. Returns ErrTrickplayInProgress when a
+// fresh lock is held by someone else.
+func acquireTrickplayLock(lockPath string) (func(), error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			host, _ := os.Hostname()
+			fmt.Fprintf(f, "%s pid=%d t=%d\n", host, os.Getpid(), time.Now().Unix())
+			_ = f.Close()
+			return func() { _ = os.Remove(lockPath) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("trickplay lock: %w", err)
+		}
+		if fi, statErr := os.Stat(lockPath); statErr == nil && time.Since(fi.ModTime()) > trickplayLockTTL {
+			_ = os.Remove(lockPath) // stale → reclaim and retry
+			continue
+		}
+		return nil, ErrTrickplayInProgress
+	}
+	return nil, ErrTrickplayInProgress
+}
 
 // TrickplayManifest describes the montage sprite layout so a client can map a
 // playback time to one tile: tileIndex = floor(timeSec / IntervalSec), then
@@ -126,6 +167,15 @@ func GenerateTrickplay(ctx context.Context, ffmpegPath, mediaPath string, interv
 	if err := os.MkdirAll(filepath.Dir(spritePath), 0o755); err != nil {
 		return TrickplayManifest{}, err
 	}
+
+	// Single-flight across processes/agents: only one worker decodes this file at
+	// a time. Returns ErrTrickplayInProgress (skip, not fail) if another holds it.
+	release, err := acquireTrickplayLock(spritePath + ".lock")
+	if err != nil {
+		return TrickplayManifest{}, err
+	}
+	defer release()
+
 	tmpSprite := spritePath + ".tmp"
 
 	// fps filter wants a rational; format 1/effInterval with enough precision.
@@ -144,17 +194,31 @@ func GenerateTrickplay(ctx context.Context, ffmpegPath, mediaPath string, interv
 		"-f", "mjpeg",
 		tmpSprite,
 	}
+	// Pin this goroutine to its OS thread for the whole child lifetime. hardenCmd's
+	// Pdeathsig is delivered when the THREAD that forked dies, not the process
+	// (golang/go#27505); without the lock Go could recycle that thread mid-decode
+	// and the kernel would SIGKILL a perfectly healthy ffmpeg. Locked here (before
+	// the fork in Start) and released after Wait, the thread lives exactly as long
+	// as ffmpeg: it dies only when the agent process itself dies → SIGKILL fires
+	// only then, which is precisely the orphan we want to prevent.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	// Start + idle I/O priority + Wait (matches the subtitle/thumbnail extractors):
-	// this full-decode pass is the heaviest sidecar job and runs in the background
-	// alongside live streaming on the same disk/NFS, so it must yield I/O.
+	// Die-with-parent BEFORE Start so an agent crash can't orphan this decode.
+	hardenCmd(cmd)
+	// Start + idle I/O + lowest CPU niceness + Wait (matches the subtitle/thumbnail
+	// extractors): this full-decode pass is the heaviest sidecar job and runs in the
+	// background alongside live streaming on the same box/NFS, so it must yield both
+	// disk AND CPU. The prewarm also gates it on system load before getting here.
 	if err := cmd.Start(); err != nil {
 		_ = os.Remove(tmpSprite)
 		return TrickplayManifest{}, fmt.Errorf("ffmpeg tile start: %w", err)
 	}
 	setIdleIOPriority(cmd.Process.Pid)
+	setLowCPUPriority(cmd.Process.Pid)
 	if err := cmd.Wait(); err != nil {
 		_ = os.Remove(tmpSprite)
 		return TrickplayManifest{}, fmt.Errorf("ffmpeg tile: %w: %s", err, strings.TrimSpace(stderr.String()))

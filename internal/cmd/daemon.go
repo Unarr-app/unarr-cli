@@ -1168,6 +1168,7 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 					Trickplay:            cfg.Library.Trickplay.Enabled,
 					TrickplayIntervalSec: cfg.Library.Trickplay.IntervalSeconds(),
 					TrickplayWidth:       cfg.Library.Trickplay.Width,
+					MaxLoadRatio:         cfg.Library.PrewarmMaxLoadRatio,
 				})
 			}
 

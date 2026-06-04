@@ -2,8 +2,10 @@ package library
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math"
+	"runtime"
 	"sync"
 	"time"
 
@@ -33,6 +35,12 @@ type PrewarmOptions struct {
 	Trickplay            bool
 	TrickplayIntervalSec float64
 	TrickplayWidth       int
+
+	// MaxLoadRatio gates the heavy trickplay decode on system load: a job only
+	// starts while the 1-min load average is ≤ MaxLoadRatio×NumCPU, so sprite
+	// generation never saturates the machine or the NAS. ≤0 → default 0.7. Has no
+	// effect on platforms without a load reading (proceeds unthrottled).
+	MaxLoadRatio float64
 }
 
 // prewarmJob is one extraction unit: all text subtitles of a file in one ffmpeg
@@ -65,6 +73,15 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 	if workers < 1 {
 		workers = 2
 	}
+	maxLoadRatio := opts.MaxLoadRatio
+	if maxLoadRatio <= 0 {
+		maxLoadRatio = 0.7
+	}
+	// Trickplay is the heaviest job (full 4K decode). Cap it to ONE concurrent
+	// decode across this agent's workers — the thumbnail/subtitle jobs (light /
+	// I/O-bound) keep their `workers` parallelism. Cross-agent dup work is stopped
+	// by the per-file lock inside GenerateTrickplay.
+	trickSem := make(chan struct{}, 1)
 
 	jobs := make(chan prewarmJob)
 	var wg sync.WaitGroup
@@ -115,19 +132,39 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 					if _, ok := mediainfo.ReadCachedTrickplay(j.path, j.width); ok {
 						continue
 					}
+					// Serialize the heavy decode (1 at a time) and wait for the box to
+					// be idle enough before starting — sprite generation must never
+					// saturate the CPU or the NAS.
+					select {
+					case trickSem <- struct{}{}:
+					case <-ctx.Done():
+						return
+					}
+					waitForLowLoad(ctx, maxLoadRatio)
+					if ctx.Err() != nil {
+						<-trickSem
+						return
+					}
 					// Full-decode pass (samples 1 frame per interval over the whole
 					// file) — generous deadline like subtitles; idempotent + cached.
+					// INVARIANT: this deadline MUST stay below mediainfo.trickplayLockTTL,
+					// or another agent could reclaim a still-running job's lock and double
+					// the decode. If you raise this, raise trickplayLockTTL too.
 					jctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
 					_, err := mediainfo.GenerateTrickplay(jctx, opts.FFmpegPath, j.path, opts.TrickplayIntervalSec, j.width, j.duration)
 					cancel()
+					<-trickSem
 					mu.Lock()
-					if err != nil {
+					switch {
+					case err == nil:
+						trickCached++
+					case errors.Is(err, mediainfo.ErrTrickplayInProgress):
+						// another worker/agent owns this file — skip, not a failure.
+					default:
 						failed++
 						if sampleErr == "" {
 							sampleErr = err.Error()
 						}
-					} else {
-						trickCached++
 					}
 					mu.Unlock()
 					continue
@@ -235,6 +272,47 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 			log.Printf("[prewarm] %d subtitles, %d thumbnails, %d trickplay cached, %d failed (e.g. %s)", subCached, thumbCached, trickCached, failed, sampleErr)
 		} else {
 			log.Printf("[prewarm] %d subtitles, %d thumbnails, %d trickplay cached, %d failed", subCached, thumbCached, trickCached, failed)
+		}
+	}
+}
+
+// prewarmLoadWaitCap bounds how long the load gate DEFERS a trickplay job. It's a
+// throttle, not an off-switch: on a host whose baseline load is permanently above
+// the threshold (a shared prod box, or any 1–2 core machine), an unbounded wait
+// would mean sprites NEVER generate. After the cap we proceed anyway — the other
+// safeguards (single-flight lock, trickSem=1, nice 19 + idle I/O, Pdeathsig) keep
+// one throttled decode from saturating the box.
+const prewarmLoadWaitCap = 15 * time.Minute
+
+// waitForLowLoad defers until the 1-minute system load is at or below
+// max(maxRatio×NumCPU, 1.5), or ctx is cancelled, or prewarmLoadWaitCap elapses —
+// so the heavy trickplay decode prefers an idle machine but never stalls forever.
+// The 1.5 floor reserves ~one core so the gate can still open on 1–2 core hosts
+// (without it, threshold 0.7–1.4 is below almost any active machine's load and the
+// feature would be permanently off). No load reading (non-Linux) → returns at once.
+func waitForLowLoad(ctx context.Context, maxRatio float64) {
+	threshold := maxRatio * float64(runtime.NumCPU())
+	if threshold < 1.5 {
+		threshold = 1.5
+	}
+	deadline := time.After(prewarmLoadWaitCap)
+	logged := false
+	for {
+		load, ok := mediainfo.LoadAverage1()
+		if !ok || load <= threshold {
+			return
+		}
+		if !logged {
+			log.Printf("[prewarm] system load %.1f > %.1f — deferring trickplay (≤ %s)", load, threshold, prewarmLoadWaitCap)
+			logged = true
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline:
+			log.Printf("[prewarm] load still high after %s — proceeding with throttled trickplay (nice + idle I/O + single-flight still apply)", prewarmLoadWaitCap)
+			return
+		case <-time.After(15 * time.Second):
 		}
 	}
 }

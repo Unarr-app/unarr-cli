@@ -205,6 +205,12 @@ type LibraryConfig struct {
 	// no contention with the active stream (the cause of broken seekbar previews)
 	// — and the file panel picks a few positions from the same grid.
 	Trickplay TrickplayConfig `toml:"trickplay"`
+
+	// PrewarmMaxLoadRatio gates the heavy trickplay decode on system load: a sprite
+	// job only starts while the 1-min load average is ≤ this × NumCPU, so scan-time
+	// generation never saturates the machine or the NAS. Default 0.7; 0 falls back
+	// to the default. Linux-only (no load reading elsewhere → unthrottled).
+	PrewarmMaxLoadRatio float64 `toml:"prewarm_max_load_ratio"`
 }
 
 // TrickplayConfig controls scan-time trickplay sprite generation.
@@ -297,6 +303,7 @@ func Default() Config {
 				Interval: "10s",
 				Width:    240,
 			},
+			PrewarmMaxLoadRatio: 0.7,
 		},
 	}
 }
@@ -380,6 +387,11 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	}
 	if !meta.IsDefined("library", "trickplay", "width") {
 		cfg.Library.Trickplay.Width = 240
+	}
+	// Load-gate defaults ON for configs predating the key, so an old install can't
+	// saturate the box with scan-time sprite generation.
+	if !meta.IsDefined("library", "prewarm_max_load_ratio") {
+		cfg.Library.PrewarmMaxLoadRatio = 0.7
 	}
 
 	if !meta.IsDefined("downloads", "transcode", "enabled") {

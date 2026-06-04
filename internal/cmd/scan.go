@@ -155,6 +155,7 @@ func runScan(dirPath string, workers int, ffprobePath string, noSync bool) error
 				Trickplay:            cfg.Library.Trickplay.Enabled,
 				TrickplayIntervalSec: cfg.Library.Trickplay.IntervalSeconds(),
 				TrickplayWidth:       cfg.Library.Trickplay.Width,
+				MaxLoadRatio:         cfg.Library.PrewarmMaxLoadRatio,
 			})
 		} else {
 			fmt.Fprintf(os.Stderr, "  Skipping sidecar prewarm: ffmpeg unavailable: %v\n", err)
