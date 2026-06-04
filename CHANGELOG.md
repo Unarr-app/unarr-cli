@@ -5,17 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3-beta] - 2026-06-04
+
+
+### Fixed
+
+- **trickplay**: stop scan-time sprite generation from saturating the host
 ## [1.0.2-beta] - 2026-06-03
 
 
 ### Added
 
-- **stream**: serve a `mode=stream` task from a debrid HTTPS link when the torrent is cached (debrid passthrough for external players / VLC), falling back to P2P stream-while-download when it isn't
+- **stream**: debrid passthrough for mode=stream tasks (external players)
+- **trickplay**: scan-time montage sprite for the web scrubber
 
-### Changed
+### Fixed
 
-- **stream**: widen the debrid HEAD size-probe timeout to 15s to match the TLS handshake budget — a slow CDN no longer trips the old 10s and falls back to a guessed size
-
+- **release**: keep prerelease suffix in docker smoke-check version compare
 ## [1.0.1-beta] - 2026-06-03
 
 
@@ -28,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **stream**: retry thumbnail extraction with output-seek on seek-index failure
 - **stream**: clamp out-of-range audio-track index to 0:a:0
+
+### Other
+
+- **release**: 1.0.1-beta
 ## [1.0.0-beta] - 2026-06-03
 
 
@@ -677,6 +687,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.0.3-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.2-beta...v1.0.3-beta
+[1.0.2-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.1-beta...v1.0.2-beta
 [1.0.1-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.0-beta...v1.0.1-beta
 [1.0.0-beta]: https://github.com/torrentclaw/unarr/compare/v0.9.19...v1.0.0-beta
 [0.9.19]: https://github.com/torrentclaw/unarr/compare/v0.9.18...v0.9.19
