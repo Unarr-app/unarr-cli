@@ -4,7 +4,10 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -673,22 +676,35 @@ func TestDownloadWithHTTPTest(t *testing.T) {
 	})
 }
 
+// signedChecksumsHandler serves checksums.txt (body) AND a matching
+// checksums.txt.sig (base64 ed25519 signature over the exact body) so a test can
+// drive verifyChecksum's real signature+checksum path with a controlled key.
+func signedChecksumsHandler(body []byte, priv ed25519.PrivateKey) http.HandlerFunc {
+	sig := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, body))
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "checksums.txt.sig") {
+			fmt.Fprintln(w, sig)
+			return
+		}
+		_, _ = w.Write(body)
+	}
+}
+
 func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("tar.gz test only on unix")
 	}
 
-	// This test predates release signing and exercises the checksum-MATCHING
-	// logic only. With the baked release pubkey set, verifyChecksum now requires a
-	// valid checksums.txt.sig and fails at signature decode before reaching the
-	// SHA256 comparison these cases assert. Disable signature verification here
-	// (empty pubkey → loadReleasePubKey returns nil → step skipped); the signature
-	// path has dedicated coverage in signature_test.go. Pattern mirrors that file.
-	prevPubKey := releasePubKeyBase64
-	releasePubKeyBase64 = ""
-	t.Cleanup(func() { releasePubKeyBase64 = prevPubKey })
+	// Drive verifyChecksum's REAL flow: signature verification ENABLED with a test
+	// keypair, then the SHA256 match. Each server serves a valid checksums.txt.sig
+	// over the exact checksums body so the signature step passes and the
+	// checksum-matching assertions are actually reached.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	withReleasePubKey(t, base64.StdEncoding.EncodeToString(pub))
 
-	// Create a fake archive file
 	dir := t.TempDir()
 	archiveContent := []byte("archive-content-for-checksum-test")
 	archivePath := filepath.Join(dir, "test-archive.tar.gz")
@@ -696,43 +712,31 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 
 	h := sha256.Sum256(archiveContent)
 	correctHash := hex.EncodeToString(h[:])
-
-	// The function builds the archive name using archiveName(), which uses runtime.GOOS/GOARCH.
+	// archiveName() uses runtime.GOOS/GOARCH.
 	expectedArchiveName := archiveName("1.0.0")
 
-	t.Run("matching checksum", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, "0000000000000000000000000000000000000000000000000000000000000000  other_file.tar.gz\n")
-			fmt.Fprintf(w, "%s  %s\n", correctHash, expectedArchiveName)
-		}))
-		defer srv.Close()
+	serve := func(t *testing.T, h http.Handler) {
+		srv := httptest.NewServer(h)
+		t.Cleanup(srv.Close)
+		restore := swapHTTPClient(&http.Client{Transport: &rewriteTransport{url: srv.URL}})
+		t.Cleanup(restore)
+	}
 
-		restore := swapHTTPClient(&http.Client{
-			Transport: &rewriteTransport{url: srv.URL},
-		})
-		defer restore()
-
-		err := verifyChecksum(context.Background(), "1.0.0", archivePath)
-		if err != nil {
+	t.Run("matching checksum (valid signature)", func(t *testing.T) {
+		body := []byte(fmt.Sprintf("0000000000000000000000000000000000000000000000000000000000000000  other_file.tar.gz\n%s  %s\n", correctHash, expectedArchiveName))
+		serve(t, signedChecksumsHandler(body, priv))
+		if err := verifyChecksum(context.Background(), "1.0.0", archivePath); err != nil {
 			t.Errorf("verifyChecksum() = %v, want nil", err)
 		}
 	})
 
 	t.Run("mismatched checksum", func(t *testing.T) {
 		wrongHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, "%s  %s\n", wrongHash, expectedArchiveName)
-		}))
-		defer srv.Close()
-
-		restore := swapHTTPClient(&http.Client{
-			Transport: &rewriteTransport{url: srv.URL},
-		})
-		defer restore()
-
+		body := []byte(fmt.Sprintf("%s  %s\n", wrongHash, expectedArchiveName))
+		serve(t, signedChecksumsHandler(body, priv))
 		err := verifyChecksum(context.Background(), "1.0.0", archivePath)
 		if err == nil {
-			t.Error("verifyChecksum() with wrong hash should return error")
+			t.Fatal("verifyChecksum() with wrong hash should return error")
 		}
 		if !strings.Contains(err.Error(), "SHA256 mismatch") {
 			t.Errorf("verifyChecksum() error = %q, want to contain 'SHA256 mismatch'", err)
@@ -740,39 +744,74 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 	})
 
 	t.Run("archive not in checksums", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890  some_other_file.tar.gz\n")
-		}))
-		defer srv.Close()
-
-		restore := swapHTTPClient(&http.Client{
-			Transport: &rewriteTransport{url: srv.URL},
-		})
-		defer restore()
-
+		body := []byte("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890  some_other_file.tar.gz\n")
+		serve(t, signedChecksumsHandler(body, priv))
 		err := verifyChecksum(context.Background(), "1.0.0", archivePath)
 		if err == nil {
-			t.Error("verifyChecksum() with missing entry should return error")
+			t.Fatal("verifyChecksum() with missing entry should return error")
 		}
 		if !strings.Contains(err.Error(), "no checksum found") {
 			t.Errorf("verifyChecksum() error = %q, want to contain 'no checksum found'", err)
 		}
 	})
 
-	t.Run("checksums server error", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(500)
-		}))
-		defer srv.Close()
-
-		restore := swapHTTPClient(&http.Client{
-			Transport: &rewriteTransport{url: srv.URL},
-		})
-		defer restore()
-
+	t.Run("bad signature rejected", func(t *testing.T) {
+		_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
+		body := []byte(fmt.Sprintf("%s  %s\n", correctHash, expectedArchiveName))
+		// Correct checksums, but signed by the WRONG key → must be rejected BEFORE
+		// any hash is trusted (the whole point of signing the checksums file).
+		serve(t, signedChecksumsHandler(body, otherPriv))
 		err := verifyChecksum(context.Background(), "1.0.0", archivePath)
 		if err == nil {
-			t.Error("verifyChecksum() with server error should return error")
+			t.Fatal("verifyChecksum() with bad signature should return error")
+		}
+		if !strings.Contains(err.Error(), "verify signature") {
+			t.Errorf("verifyChecksum() error = %q, want to contain 'verify signature'", err)
+		}
+	})
+
+	t.Run("missing signature rejected", func(t *testing.T) {
+		body := []byte(fmt.Sprintf("%s  %s\n", correctHash, expectedArchiveName))
+		// 404 on .sig while a pubkey is configured → can't verify → hard fail.
+		serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "checksums.txt.sig") {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(body)
+		}))
+		err := verifyChecksum(context.Background(), "1.0.0", archivePath)
+		if err == nil {
+			t.Fatal("verifyChecksum() with missing signature should return error")
+		}
+		if !strings.Contains(err.Error(), "verify signature") {
+			t.Errorf("verifyChecksum() error = %q, want to contain 'verify signature'", err)
+		}
+	})
+
+	t.Run("allow-unsigned skips signature", func(t *testing.T) {
+		body := []byte(fmt.Sprintf("%s  %s\n", correctHash, expectedArchiveName))
+		// No .sig served — verifyChecksumOnly (the --allow-unsigned path) must still
+		// succeed on the checksum alone.
+		serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "checksums.txt.sig") {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(body)
+		}))
+		if err := verifyChecksumOnly(context.Background(), "1.0.0", archivePath); err != nil {
+			t.Errorf("verifyChecksumOnly() = %v, want nil (signature skipped)", err)
+		}
+	})
+
+	t.Run("checksums server error", func(t *testing.T) {
+		serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(500)
+		}))
+		err := verifyChecksum(context.Background(), "1.0.0", archivePath)
+		if err == nil {
+			t.Fatal("verifyChecksum() with server error should return error")
 		}
 		if !strings.Contains(err.Error(), "HTTP 500") {
 			t.Errorf("verifyChecksum() error = %q, want to contain 'HTTP 500'", err)
@@ -780,18 +819,9 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 	})
 
 	t.Run("nonexistent archive file", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, "%s  %s\n", correctHash, expectedArchiveName)
-		}))
-		defer srv.Close()
-
-		restore := swapHTTPClient(&http.Client{
-			Transport: &rewriteTransport{url: srv.URL},
-		})
-		defer restore()
-
-		err := verifyChecksum(context.Background(), "1.0.0", "/nonexistent-archive-path")
-		if err == nil {
+		body := []byte(fmt.Sprintf("%s  %s\n", correctHash, expectedArchiveName))
+		serve(t, signedChecksumsHandler(body, priv))
+		if err := verifyChecksum(context.Background(), "1.0.0", "/nonexistent-archive-path"); err == nil {
 			t.Error("verifyChecksum() with nonexistent archive should return error")
 		}
 	})
@@ -802,12 +832,12 @@ func TestVerifyChecksumCaseInsensitive(t *testing.T) {
 		t.Skip("tar.gz test only on unix")
 	}
 
-	// Predates release signing; tests checksum matching only. Disable signature
-	// verification (see TestVerifyChecksumWithHTTPTest) so it reaches the SHA256
-	// comparison instead of failing on the absent .sig.
-	prevPubKey := releasePubKeyBase64
-	releasePubKeyBase64 = ""
-	t.Cleanup(func() { releasePubKeyBase64 = prevPubKey })
+	// Real flow: signature ENABLED with a test key + a valid .sig over the body.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	withReleasePubKey(t, base64.StdEncoding.EncodeToString(pub))
 
 	dir := t.TempDir()
 	archiveContent := []byte("case-insensitive-hash-test")
@@ -818,10 +848,9 @@ func TestVerifyChecksumCaseInsensitive(t *testing.T) {
 	// Use uppercase hash in checksums.txt — verifyChecksum uses EqualFold
 	upperHash := strings.ToUpper(hex.EncodeToString(h[:]))
 	expectedArchiveName := archiveName("1.0.0")
+	body := []byte(fmt.Sprintf("%s  %s\n", upperHash, expectedArchiveName))
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "%s  %s\n", upperHash, expectedArchiveName)
-	}))
+	srv := httptest.NewServer(signedChecksumsHandler(body, priv))
 	defer srv.Close()
 
 	restore := swapHTTPClient(&http.Client{
@@ -829,8 +858,7 @@ func TestVerifyChecksumCaseInsensitive(t *testing.T) {
 	})
 	defer restore()
 
-	err := verifyChecksum(context.Background(), "1.0.0", archivePath)
-	if err != nil {
+	if err := verifyChecksum(context.Background(), "1.0.0", archivePath); err != nil {
 		t.Errorf("verifyChecksum() with uppercase hash = %v, want nil", err)
 	}
 }
