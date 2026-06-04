@@ -678,6 +678,16 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 		t.Skip("tar.gz test only on unix")
 	}
 
+	// This test predates release signing and exercises the checksum-MATCHING
+	// logic only. With the baked release pubkey set, verifyChecksum now requires a
+	// valid checksums.txt.sig and fails at signature decode before reaching the
+	// SHA256 comparison these cases assert. Disable signature verification here
+	// (empty pubkey → loadReleasePubKey returns nil → step skipped); the signature
+	// path has dedicated coverage in signature_test.go. Pattern mirrors that file.
+	prevPubKey := releasePubKeyBase64
+	releasePubKeyBase64 = ""
+	t.Cleanup(func() { releasePubKeyBase64 = prevPubKey })
+
 	// Create a fake archive file
 	dir := t.TempDir()
 	archiveContent := []byte("archive-content-for-checksum-test")
@@ -791,6 +801,13 @@ func TestVerifyChecksumCaseInsensitive(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("tar.gz test only on unix")
 	}
+
+	// Predates release signing; tests checksum matching only. Disable signature
+	// verification (see TestVerifyChecksumWithHTTPTest) so it reaches the SHA256
+	// comparison instead of failing on the absent .sig.
+	prevPubKey := releasePubKeyBase64
+	releasePubKeyBase64 = ""
+	t.Cleanup(func() { releasePubKeyBase64 = prevPubKey })
 
 	dir := t.TempDir()
 	archiveContent := []byte("case-insensitive-hash-test")
