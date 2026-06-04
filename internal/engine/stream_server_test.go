@@ -35,6 +35,33 @@ func (f *fakeFileProviderSeekable) NewFileReader(_ context.Context) io.ReadSeekC
 	return &readSeekNopCloser{strings.NewReader(string(f.content))}
 }
 
+// TestStreamServer_healMediaPath covers the host→container base-path self-heal
+// used by the path-scoped handlers (/thumbnail, /trickplay, /sub).
+func TestStreamServer_healMediaPath(t *testing.T) {
+	srv := NewStreamServer(0)
+
+	// No resolver installed → identity (preserves the pre-fix 404 behaviour).
+	if got := srv.healMediaPath("/mnt/nas/peliculas/a/b/c.mkv"); got != "/mnt/nas/peliculas/a/b/c.mkv" {
+		t.Errorf("nil resolver should be identity, got %q", got)
+	}
+
+	// Resolver locates the file under a current root → use the healed path.
+	srv.SetPathResolver(func(p string) string {
+		if p == "/mnt/nas/peliculas/a/b/c.mkv" {
+			return "/downloads/a/b/c.mkv"
+		}
+		return ""
+	})
+	if got := srv.healMediaPath("/mnt/nas/peliculas/a/b/c.mkv"); got != "/downloads/a/b/c.mkv" {
+		t.Errorf("resolver remap: got %q want /downloads/a/b/c.mkv", got)
+	}
+
+	// Resolver can't locate it ("") → keep the original so os.Stat 404s as before.
+	if got := srv.healMediaPath("/elsewhere/x.mkv"); got != "/elsewhere/x.mkv" {
+		t.Errorf("unlocatable path should stay unchanged, got %q", got)
+	}
+}
+
 // TestStreamServer_Listen_BindsPort verifica que Listen() enlaza a un puerto
 // y URL() devuelve una URL accesible.
 func TestStreamServer_Listen_BindsPort(t *testing.T) {

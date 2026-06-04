@@ -380,6 +380,23 @@ func runDaemonStart() error {
 		}
 	}
 	streamSrv.SetTrickplayWidth(trickW)
+	// Self-heal a host→container base-path skew for the path-scoped handlers
+	// (/thumbnail, /trickplay, /sub), mirroring the /stream + /hls remap. Without
+	// it, a docker agent whose web DB holds host paths (/mnt/nas/peliculas/…) but
+	// mounts that media at /downloads returns 404 for every scrubber frame /
+	// trickplay sprite / external subtitle. Same allowed roots + relocate logic.
+	// NOTE: relocateUnreachable needs a ≥3-segment path tail, so a FLAT media
+	// layout (file directly under the root) is not self-healed here — those
+	// sidecars 404 on a docker agent with a host→container skew until a re-scan
+	// rewrites the DB path. Same limitation as the /stream self-heal.
+	streamSrv.SetPathResolver(func(p string) string {
+		p = filepath.Clean(p)
+		roots := streamAllowedRoots(cfg)
+		if isAllowedStreamPath(p, roots...) {
+			return p
+		}
+		return relocateUnreachable(p, roots) // "" when not locatable → caller 404s
+	})
 	streamSrv.SetRequireStreamToken(cfg.Download.RequireStreamToken)
 	// Report the stream-token signing key ONLY when enforcing, so the web's
 	// "secret present → mint HLS token" signal accurately means "this agent
@@ -607,8 +624,7 @@ func runDaemonStart() error {
 			}()
 		}
 
-		allowedRoots := []string{cfg.Download.Dir, cfg.Library.ScanPath,
-			cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir}
+		allowedRoots := streamAllowedRoots(cfg)
 
 		filePath := filepath.Clean(sr.FilePath)
 		// Self-heal a base-path mismatch: the web may hand us a path under an old
@@ -792,11 +808,27 @@ func runDaemonStart() error {
 			return
 		}
 		filePath = filepath.Clean(filePath)
-		if !isAllowedStreamPath(filePath, cfg.Download.Dir, cfg.Library.ScanPath,
-			cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir) {
-			log.Printf("[hls %s] rejected: path outside allowed dirs: %s",
-				agent.ShortID(sess.SessionID), filePath)
-			return
+		// Apply the SAME base-path self-heal remap as the raw /stream handler
+		// (OnStreamRequest above). Without it, a path under an old/host base
+		// (e.g. /mnt/nas/peliculas/… handed by the web while this docker agent
+		// mounts that media at /downloads) is rejected here even though the raw
+		// path self-heals it — so the web silently falls back to the raw stream
+		// and HLS/remux never runs (no transcode, slow funnel start). NOTE: this
+		// replicates only the lexical-remap; the raw handler additionally retries
+		// os.Stat for transient NFS errors. The HLS dir-check below proceeds (not
+		// rejects) on a stat error, so it tolerates an NFS blip differently.
+		// See docs/plans/unarr-path-resilience.md.
+		hlsAllowedRoots := streamAllowedRoots(cfg)
+		if !isAllowedStreamPath(filePath, hlsAllowedRoots...) {
+			if remapped := relocateUnreachable(filePath, hlsAllowedRoots); remapped != "" {
+				log.Printf("[hls %s] self-heal: remapped %s → %s",
+					agent.ShortID(sess.SessionID), filePath, remapped)
+				filePath = remapped
+			} else {
+				log.Printf("[hls %s] rejected: path outside allowed dirs: %s",
+					agent.ShortID(sess.SessionID), filePath)
+				return
+			}
 		}
 		// Resolve directory → first video file (matches StreamRequest behavior).
 		if info, err := os.Stat(filePath); err == nil && info.IsDir() {
@@ -993,6 +1025,16 @@ func runDaemonStart() error {
 // the daemon is configured to manage. This defends against a compromised API
 // server sending a path traversal payload (e.g. /etc/passwd) in StreamRequest.
 // isAllowedStreamPath reports whether filePath is contained within one of the
+// streamAllowedRoots returns the directory roots a stream / sidecar path is
+// permitted under. Single source of truth so the raw /stream, HLS, and
+// path-scoped (/thumbnail, /trickplay, /sub) handlers never disagree about what
+// is reachable — a root added to one place but not the others would otherwise
+// produce confusing partial failures (stream plays, scrubber frames 404).
+func streamAllowedRoots(cfg config.Config) []string {
+	return []string{cfg.Download.Dir, cfg.Library.ScanPath,
+		cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir}
+}
+
 // allowedDirs. filePath must already be cleaned (filepath.Clean) by the caller.
 // This defends against a compromised API server sending a path traversal payload.
 func isAllowedStreamPath(filePath string, allowedDirs ...string) bool {

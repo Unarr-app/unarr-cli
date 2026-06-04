@@ -120,6 +120,15 @@ type StreamServer struct {
 	// on-demand /thumbnail). Set once before Listen() via SetTrickplayWidth.
 	trickplayWidth int
 
+	// resolveMediaPath remaps a web-supplied media path that's unreachable as-is
+	// (e.g. a host path /mnt/nas/peliculas/… while this docker agent mounts that
+	// media at /downloads) onto the real on-disk path, mirroring the /stream and
+	// /hls self-heal. Set by the daemon (which owns the allowed roots + relocate
+	// logic); nil = identity. Applied AFTER token verification in the path-scoped
+	// handlers (/thumbnail, /trickplay, /sub) so the token still binds the
+	// original web path. Read-only after Listen().
+	resolveMediaPath func(string) string
+
 	lastActivity    atomic.Int64
 	maxByteOffset   atomic.Int64 // highest sequential read position (main playback connection)
 	totalFileSize   atomic.Int64
@@ -238,6 +247,27 @@ func (ss *StreamServer) SetCacheThumbnails(on bool) {
 // (library.trickplay.width). 0 leaves trickplay disabled. Call before Listen().
 func (ss *StreamServer) SetTrickplayWidth(width int) {
 	ss.trickplayWidth = width
+}
+
+// SetPathResolver installs the media-path self-heal used by the path-scoped
+// handlers (/thumbnail, /trickplay, /sub). fn receives the web-supplied path
+// and returns the real on-disk path, or "" when it can't be located under an
+// allowed root. nil leaves paths untouched. Call before Listen().
+func (ss *StreamServer) SetPathResolver(fn func(string) string) {
+	ss.resolveMediaPath = fn
+}
+
+// healMediaPath applies the resolver (if set) to a web-supplied path. Returns
+// the path unchanged when no resolver is installed or it found no better path —
+// the caller's os.Stat then fails as before, preserving the 404 behaviour.
+func (ss *StreamServer) healMediaPath(rawPath string) string {
+	if ss.resolveMediaPath == nil {
+		return rawPath
+	}
+	if healed := ss.resolveMediaPath(rawPath); healed != "" {
+		return healed
+	}
+	return rawPath
 }
 
 // SetCORSAllowedOrigins replaces the operator-supplied extra origins. The
@@ -1032,6 +1062,10 @@ func (ss *StreamServer) thumbnailHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	// Self-heal a host→container base-path skew AFTER the token bound the original
+	// web path (mirrors /stream + /hls). On a docker agent the prewarm wrote its
+	// sidecars next to the real file, so cache lookups must key on the healed path.
+	rawPath = ss.healMediaPath(rawPath)
 	if fi, err := os.Stat(rawPath); err != nil || !fi.Mode().IsRegular() {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -1133,6 +1167,7 @@ func (ss *StreamServer) trickplayHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "trickplay disabled", http.StatusNotFound)
 		return
 	}
+	rawPath = ss.healMediaPath(rawPath) // host→container base-path skew (see /thumbnail)
 	if fi, err := os.Stat(rawPath); err != nil || !fi.Mode().IsRegular() {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -1200,6 +1235,7 @@ func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	rawPath = ss.healMediaPath(rawPath) // host→container base-path skew (see /thumbnail)
 	if fi, statErr := os.Stat(rawPath); statErr != nil || !fi.Mode().IsRegular() {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
