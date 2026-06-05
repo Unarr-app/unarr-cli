@@ -41,6 +41,19 @@ FROM debian:bookworm-slim
 #         its ICD. ~150 KB. The agent only USES libplacebo after a functional
 #         probe (FFmpegSupportsLibplacebo) succeeds AND a real HW encoder is
 #         present, so this is inert on hosts without a working Vulkan GPU.
+#
+#         NOTE: in this container libplacebo's Vulkan probe ALWAYS fails and the
+#         agent falls back to the CPU zscale tonemap chain — by design, not a
+#         bug. The nvidia Vulkan ICD is libGLX_nvidia.so.0, whose GL backend
+#         (libnvidia-glcore) references glibc malloc hooks removed in glibc 2.34
+#         (__malloc_hook/__free_hook/...) and the Xorg symbol ErrorF; on a
+#         headless modern-glibc base (debian or ubuntu) those go unresolved so
+#         vkCreateInstance returns VK_ERROR_INCOMPATIBLE_DRIVER. We deliberately
+#         do NOT chase it (would need `graphics` cap + X11 libs + a 1.4 loader
+#         AND a desktop-class glibc/Xorg — fragile, distro+driver coupled). The
+#         loader stays so that on the RARE host where Vulkan does come up the
+#         probe can use it. nvenc/nvdec (CUDA, not Vulkan) work regardless.
+#         GPU HDR tonemap is a bare-metal-binary feature, not a container one.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates tzdata wget xz-utils par2 p7zip-full libvulkan1 && \
