@@ -763,7 +763,7 @@ func runDaemonStart() error {
 					agent.ShortID(sess.SessionID), provider.FileName(), provider.FileSize())
 				rctx, rcancel := context.WithTimeout(ctx, 10*time.Second)
 				defer rcancel()
-				if err := agentClient.MarkSessionReady(rctx, sess.SessionID); err != nil {
+				if err := agentClient.MarkSessionReady(rctx, sess.SessionID, nil); err != nil {
 					log.Printf("[stream %s] mark-ready failed: %v", agent.ShortID(sess.SessionID), err)
 				}
 			}()
@@ -858,7 +858,7 @@ func runDaemonStart() error {
 			go func() {
 				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
-				if err := agentClient.MarkSessionReady(rctx, sess.SessionID); err != nil {
+				if err := agentClient.MarkSessionReady(rctx, sess.SessionID, nil); err != nil {
 					log.Printf("[stream %s] mark-ready failed: %v", agent.ShortID(sess.SessionID), err)
 				}
 			}()
@@ -906,7 +906,7 @@ func runDaemonStart() error {
 			go func() {
 				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
-				if err := agentClient.MarkSessionReady(rctx, sess.SessionID); err != nil {
+				if err := agentClient.MarkSessionReady(rctx, sess.SessionID, nil); err != nil {
 					log.Printf("[stream %s] mark-ready failed: %v", agent.ShortID(sess.SessionID), err)
 				}
 			}()
@@ -1386,6 +1386,17 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 	deadline := time.Now().Add(60 * time.Second)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+	readyPosted := false
+	postReady := func(health *agent.SessionHealth) {
+		// Parent ctx so a session cancel mid-POST (user closed tab, daemon
+		// shutdown) tears down the in-flight webhook instead of blocking the
+		// goroutine for up to 10 s on a now-orphan call.
+		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := client.MarkSessionReady(rctx, sessionID, health); err != nil {
+			log.Printf("[hls %s] mark-ready failed: %v", agent.ShortID(sessionID), err)
+		}
+		cancel()
+	}
 	for {
 		// Session torn down through a path that didn't cancel ctx (registry
 		// replace, idle sweep, internal kill). Bail before polling further —
@@ -1394,17 +1405,24 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 		if hsess.IsClosed() {
 			return
 		}
-		// Cache HIT or seg-0 ready → notify + done.
-		if hsess.FromCache() || hsess.ReadyCount() >= 1 {
-			// Parent ctx so a session cancel mid-POST (user closed tab,
-			// daemon shutdown) tears down the in-flight webhook instead of
-			// blocking the goroutine for up to 10 s on a now-orphan call.
-			rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			if err := client.MarkSessionReady(rctx, sessionID); err != nil {
-				log.Printf("[hls %s] mark-ready failed: %v", agent.ShortID(sessionID), err)
+		// Phase 1: cache HIT or seg-0 ready → flip the "Preparando…" UI now.
+		if !readyPosted && (hsess.FromCache() || hsess.ReadyCount() >= 1) {
+			postReady(nil)
+			readyPosted = true
+			// Cache replay has no live encode → no telemetry to report, done.
+			if hsess.FromCache() {
+				return
 			}
-			cancel()
-			return
+		}
+		// Phase 2 (F3): once enough -stats samples accumulated (encoder past
+		// its cold ramp), report ONE live-health snapshot so the player can
+		// name a too-slow transcode in ~4s instead of inferring it from stalls.
+		// >=4 samples ≈ 2s of encoding past seg-0; the EWMA has settled by then.
+		if readyPosted {
+			if st := hsess.GetTranscodeStats(); st.Samples >= 4 {
+				postReady(classifyAgentHealth(st))
+				return
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -1412,8 +1430,49 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 		case <-ticker.C:
 		}
 		if time.Now().After(deadline) {
-			log.Printf("[hls %s] mark-ready: timeout waiting for seg-0", agent.ShortID(sessionID))
+			if !readyPosted {
+				log.Printf("[hls %s] mark-ready: timeout waiting for seg-0", agent.ShortID(sessionID))
+				return
+			}
+			// Ready but never got stable telemetry — report whatever we have so
+			// the player isn't left without a verdict (better partial than none).
+			if st := hsess.GetTranscodeStats(); st.Samples > 0 {
+				postReady(classifyAgentHealth(st))
+			}
 			return
 		}
 	}
+}
+
+// Realtime-ratio cutoffs for classifyAgentHealth. This is a cross-repo contract
+// with the web bottleneck classifier (src/lib/stream/bottleneck-classifier.ts):
+//   - ≥ realtimeFloor      → "ok" (encoder keeps up)
+//   - [strugglingFloor,..) → "marginal" (barely)
+//   - < strugglingFloor    → "struggling" (can't) — the web fast-path commits
+//     the honest overlay + pauses on this WITHOUT waiting for a stall, so the
+//     floor is intentionally conservative (the web uses a looser 0.85 only once
+//     a stall has already corroborated the slowdown).
+const (
+	agentRealtimeFloor   = 0.95
+	agentStrugglingFloor = 0.75
+)
+
+// classifyAgentHealth turns a live ffmpeg telemetry snapshot into the health
+// report the web side consumes (F3). The ×realtime speed is the load-bearing
+// signal: < 1.0 means the encode can't keep up with playback. An input-bound
+// hint (source read error) reclassifies the cause as the link, not the encoder.
+func classifyAgentHealth(st engine.TranscodeStats) *agent.SessionHealth {
+	ratio := st.SpeedX
+	var health, reason string
+	switch {
+	case st.InputBound && ratio < agentRealtimeFloor:
+		health, reason = "struggling", "input_bound"
+	case ratio >= agentRealtimeFloor:
+		health, reason = "ok", "realtime"
+	case ratio >= agentStrugglingFloor:
+		health, reason = "marginal", "transcode"
+	default:
+		health, reason = "struggling", "transcode"
+	}
+	return &agent.SessionHealth{Health: health, RealtimeRatio: ratio, Reason: reason}
 }

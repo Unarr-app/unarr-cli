@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -254,6 +255,21 @@ type HLSSession struct {
 	cacheKey       string
 	fromCache      bool
 	writerLockHeld bool
+
+	// Live transcode telemetry (F3). ffmpeg's -stats progress line is parsed
+	// in hlsStderrCapture.Write into an EWMA of speed= (×realtime) + fps=, plus
+	// an input-bound hint set when the SOURCE read errors (slow/broken pull vs a
+	// too-slow encode). GetTranscodeStats() snapshots this so the ready-watcher
+	// can report a real measurement to the web side — letting the player name a
+	// too-slow transcode honestly in ~4s instead of inferring it from stall
+	// shape over 15-30s. Guarded by statsMu (the stderr goroutine writes; the
+	// watcher goroutine reads).
+	statsMu      sync.Mutex
+	speedEWMA    float64
+	fpsEWMA      float64
+	speedSamples int
+	warmupSeen   int // cold-start frames discarded before the EWMA is trusted
+	inputBound   bool
 }
 
 // hlsSeekAhead is how many segments past the writer's current position the
@@ -594,6 +610,68 @@ func (s *HLSSession) ReadyCount() int {
 // (no ffmpeg subprocess spawned). Used by ready-watcher logic to short-
 // circuit polling — a cache HIT is ready the moment we return.
 func (s *HLSSession) FromCache() bool { return s.fromCache }
+
+// TranscodeStats is a point-in-time snapshot of live ffmpeg progress for one
+// HLS session (F3). SpeedX < 1.0 means the encode runs slower than realtime —
+// the player can't sustain playback without buffering. Samples==0 means no
+// -stats line has been parsed yet (the watcher keeps waiting before reporting).
+type TranscodeStats struct {
+	SpeedX     float64 // EWMA of ffmpeg speed= (×realtime; 1.0 = exactly realtime)
+	Fps        float64 // EWMA of ffmpeg fps=
+	Samples    int     // progress lines parsed so far (0 = no telemetry yet)
+	InputBound bool    // source read hit I/O errors (slow/broken pull, not encode)
+	FromCache  bool    // replayed from cache → no live encode, stats meaningless
+}
+
+// GetTranscodeStats returns a snapshot of the parsed ffmpeg progress EWMAs.
+func (s *HLSSession) GetTranscodeStats() TranscodeStats {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	return TranscodeStats{
+		SpeedX:     s.speedEWMA,
+		Fps:        s.fpsEWMA,
+		Samples:    s.speedSamples,
+		InputBound: s.inputBound,
+		FromCache:  s.fromCache,
+	}
+}
+
+// hlsStatsWarmupSkip is how many leading -stats frames to discard before
+// trusting the EWMA. ffmpeg's first readings reflect the pipeline filling
+// (often speed=0.0x) and would otherwise drag a healthy encoder into a false
+// "struggling" verdict that pauses a stream which plays fine once warmed up.
+const hlsStatsWarmupSkip = 2
+
+// recordProgress folds one parsed ffmpeg -stats sample into the session EWMAs.
+// alpha=0.3 smooths the noisy per-line numbers while still tracking a sustained
+// slowdown within a few samples (~2s of encoding).
+func (s *HLSSession) recordProgress(speedX, fps float64) {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	// Drop the cold-start frames so a steady-state slowdown — not the encoder
+	// spin-up — is what the watcher reports.
+	if s.warmupSeen < hlsStatsWarmupSkip {
+		s.warmupSeen++
+		return
+	}
+	const alpha = 0.3
+	if s.speedSamples == 0 {
+		s.speedEWMA = speedX
+		s.fpsEWMA = fps
+	} else {
+		s.speedEWMA = alpha*speedX + (1-alpha)*s.speedEWMA
+		s.fpsEWMA = alpha*fps + (1-alpha)*s.fpsEWMA
+	}
+	s.speedSamples++
+}
+
+// markInputBound flags that ffmpeg reported a source-read error — the wall is
+// the input pull (slow debrid link / dropped torrent peer), not the encoder.
+func (s *HLSSession) markInputBound() {
+	s.statsMu.Lock()
+	s.inputBound = true
+	s.statsMu.Unlock()
+}
 
 // IsClosed reports whether Close() has been invoked. Exposed (vs the
 // internal isClosed) so external watchers — the ready-webhook
@@ -1140,7 +1218,10 @@ func ResolveEncoderProfile(hw HWAccel, configuredPreset string) EncoderProfile {
 // `-output_ts_offset` keeps the segment PTS aligned with manifest timeline.
 func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string, startIdx int, startSec float64) []string {
 	profile := ResolveEncoderProfile(cfg.Transcode.HWAccel, cfg.Transcode.Preset)
-	args := []string{"-y", "-hide_banner", "-loglevel", "warning"}
+	// -stats forces ffmpeg to emit the frame=/fps=/speed= progress line to
+	// stderr even at -loglevel warning; hlsStderrCapture parses it for live
+	// transcode telemetry (F3) without logging it.
+	args := []string{"-y", "-hide_banner", "-loglevel", "warning", "-stats"}
 
 	// Demuxer-side HW-decode hint. Sourced from the profile so a future
 	// codec/hint mismatch is impossible — the encoder + decode hint are
@@ -1581,6 +1662,46 @@ type hlsStderrCapture struct {
 
 const maxStderrBuf = 64 * 1024
 
+// ffmpeg -stats progress lines look like:
+//
+//	frame=  123 fps= 30 q=28.0 size=  456kB time=00:00:08.00 speed=1.05x
+//
+// emitted with a trailing \r (overwrite-in-place), once per ~0.5s. We parse
+// speed=/fps= out of them for live transcode telemetry (F3) and DON'T log them
+// (one per 0.5s would drown the daemon log) — only \n-terminated warning/error
+// lines reach log.Printf below.
+var (
+	reFFmpegSpeed = regexp.MustCompile(`speed=\s*([0-9.]+)x`)
+	reFFmpegFps   = regexp.MustCompile(`fps=\s*([0-9.]+)`)
+)
+
+func parseFFmpegProgress(line string) (speedX, fps float64, ok bool) {
+	m := reFFmpegSpeed.FindStringSubmatch(line)
+	if m == nil {
+		return 0, 0, false
+	}
+	v, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	if fm := reFFmpegFps.FindStringSubmatch(line); fm != nil {
+		fps, _ = strconv.ParseFloat(fm[1], 64)
+	}
+	return v, fps, true
+}
+
+// isInputBoundLine spots ffmpeg stderr that means the SOURCE read failed (slow
+// debrid link, dropped torrent peer, network timeout) rather than the encoder
+// being too slow — so the player names the bottleneck as the link, not the GPU.
+func isInputBoundLine(line string) bool {
+	l := strings.ToLower(line)
+	return strings.Contains(l, "i/o error") ||
+		strings.Contains(l, "connection reset") ||
+		strings.Contains(l, "rw_timeout") ||
+		strings.Contains(l, "error in the pull function") ||
+		strings.Contains(l, "connection timed out")
+}
+
 func (c *hlsStderrCapture) Write(p []byte) (int, error) {
 	// If the incoming chunk alone exceeds the cap (very long unterminated
 	// line), drop the buffered prefix AND truncate p so a single multi-MB
@@ -1589,20 +1710,33 @@ func (c *hlsStderrCapture) Write(p []byte) (int, error) {
 		c.buf.Reset()
 		p = p[len(p)-maxStderrBuf:]
 	} else if c.buf.Len()+len(p) > maxStderrBuf {
-		// Drop the unterminated partial line; we'll resync on the next \n.
+		// Drop the unterminated partial line; we'll resync on the next \r/\n.
 		c.buf.Reset()
 	}
 	c.buf.Write(p)
+	// Frame on \r OR \n: ffmpeg's progress line is \r-terminated, warnings are
+	// \n-terminated. Parsing progress per-frame keeps the EWMA fresh; logging
+	// only the \n lines keeps the log readable.
 	for {
-		line, rest, ok := strings.Cut(c.buf.String(), "\n")
-		if !ok {
+		s := c.buf.String()
+		idx := strings.IndexAny(s, "\r\n")
+		if idx < 0 {
 			break
 		}
+		line := strings.TrimSpace(s[:idx])
 		c.buf.Reset()
-		c.buf.WriteString(rest)
-		if line = strings.TrimSpace(line); line != "" {
-			log.Printf("[hls %s] ffmpeg: %s", shortHLSID(c.owner.cfg.SessionID), line)
+		c.buf.WriteString(s[idx+1:])
+		if line == "" {
+			continue
 		}
+		if speedX, fps, ok := parseFFmpegProgress(line); ok {
+			c.owner.recordProgress(speedX, fps)
+			continue // progress line — telemetry only, never logged
+		}
+		if isInputBoundLine(line) {
+			c.owner.markInputBound()
+		}
+		log.Printf("[hls %s] ffmpeg: %s", shortHLSID(c.owner.cfg.SessionID), line)
 	}
 	return len(p), nil
 }

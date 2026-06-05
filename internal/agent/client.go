@@ -119,15 +119,30 @@ func (c *Client) ReportUpgradeResult(ctx context.Context, agentID string, succes
 // will reach the same conclusion via HEAD probes anyway if this call
 // fails. We log the error in the caller but don't retry — by the time
 // a retry would land the user is likely already playing.
-func (c *Client) MarkSessionReady(ctx context.Context, sessionID string) error {
+func (c *Client) MarkSessionReady(ctx context.Context, sessionID string, health *SessionHealth) error {
 	req := struct {
-		SessionID string `json:"sessionId"`
-	}{SessionID: sessionID}
+		SessionID string         `json:"sessionId"`
+		Health    *SessionHealth `json:"health,omitempty"`
+	}{SessionID: sessionID, Health: health}
 	var resp StatusResponse
 	if err := c.doPost(ctx, "/api/internal/agent/session-ready", req, &resp); err != nil {
 		return fmt.Errorf("mark session ready: %w", err)
 	}
 	return nil
+}
+
+// SessionHealth is an OPTIONAL live-transcode health snapshot attached to a
+// session-ready report (F3). A nil *SessionHealth means the agent has no
+// telemetry to share (cache hit, direct-play, or progress not yet stable) and
+// the web side keeps its stall-shape heuristic. Old web replicas ignore the
+// extra field; old agents simply never send it.
+type SessionHealth struct {
+	// "ok" (≥ realtime) | "marginal" (keeps up barely) | "struggling" (can't).
+	Health string `json:"health"`
+	// ffmpeg speed= EWMA: 1.0 = exactly realtime, < 1.0 = slower than playback.
+	RealtimeRatio float64 `json:"realtimeRatio"`
+	// "realtime" | "transcode" (encoder is the wall) | "input_bound" (source read).
+	Reason string `json:"reason"`
 }
 
 // RefreshStreamURL re-resolves a fresh debrid direct URL for a live streaming
