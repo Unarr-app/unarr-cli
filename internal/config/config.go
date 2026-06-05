@@ -37,6 +37,11 @@ type AuthConfig struct {
 type AgentConfig struct {
 	ID   string `toml:"id"`
 	Name string `toml:"name"`
+	// Hash is a stable high-entropy label (hex) for the per-agent direct-TLS
+	// feature. Distinct from ID (a UUID that could be guessed/enumerated): the
+	// cert broker issues *.<hash>.agent.unarr.app and the web encodes the agent's
+	// IP into a hostname under that wildcard. Generated + persisted on first run.
+	Hash string `toml:"agent_hash,omitempty"`
 }
 
 type DownloadConfig struct {

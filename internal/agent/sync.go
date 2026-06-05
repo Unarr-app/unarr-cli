@@ -165,17 +165,19 @@ func (sc *SyncClient) doSync(ctx context.Context) {
 
 func (sc *SyncClient) buildRequest() SyncRequest {
 	req := SyncRequest{
-		AgentID:     sc.cfg.AgentID,
-		Name:        sc.cfg.AgentName,
-		Version:     sc.cfg.Version,
-		OS:          runtime.GOOS,
-		Arch:        runtime.GOARCH,
-		DownloadDir: sc.cfg.DownloadDir,
-		StreamPort:  sc.cfg.StreamPort,
-		LanIP:       sc.cfg.LanIP,
-		TailscaleIP: sc.cfg.TailscaleIP,
-		CanDelete:   sc.cfg.CanDelete,
-		IsDocker:    RunningInDocker(),
+		AgentID:         sc.cfg.AgentID,
+		Name:            sc.cfg.AgentName,
+		Version:         sc.cfg.Version,
+		OS:              runtime.GOOS,
+		Arch:            runtime.GOARCH,
+		DownloadDir:     sc.cfg.DownloadDir,
+		StreamPort:      sc.cfg.StreamPort,
+		HTTPSStreamPort: sc.cfg.HTTPSStreamPort,
+		AgentHash:       sc.cfg.AgentHash,
+		LanIP:           sc.cfg.LanIP,
+		TailscaleIP:     sc.cfg.TailscaleIP,
+		CanDelete:       sc.cfg.CanDelete,
+		IsDocker:        RunningInDocker(),
 	}
 	if sc.GetTaskStates != nil {
 		req.Tasks = sc.GetTaskStates()

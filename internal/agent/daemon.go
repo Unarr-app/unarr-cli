@@ -22,6 +22,8 @@ type DaemonConfig struct {
 	Version            string
 	DownloadDir        string
 	StreamPort         int      // port for the HTTP stream server
+	HTTPSStreamPort    int      // TLS stream listener port (per-agent direct-TLS); 0 when off
+	AgentHash          string   // stable high-entropy hash for *.<hash>.agent.unarr.app
 	StreamSecret       string   // hex HMAC key for stream tokens (reported so the web can mint HLS tokens)
 	LanIP              string   // LAN IP (reported in sync for stream URL resolution)
 	TailscaleIP        string   // Tailscale IP (reported in sync for stream URL resolution)
@@ -135,6 +137,8 @@ func (d *Daemon) Register(ctx context.Context) error {
 		Version:            d.cfg.Version,
 		DownloadDir:        d.cfg.DownloadDir,
 		StreamPort:         d.cfg.StreamPort,
+		HTTPSStreamPort:    d.cfg.HTTPSStreamPort,
+		AgentHash:          d.cfg.AgentHash,
 		StreamSecret:       d.cfg.StreamSecret,
 		LanIP:              d.cfg.LanIP,
 		TailscaleIP:        d.cfg.TailscaleIP,

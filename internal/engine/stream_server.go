@@ -300,6 +300,16 @@ func (ss *StreamServer) writeCORSHeaders(w http.ResponseWriter, r *http.Request,
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Range")
+	// Private Network Access: an https:// page (public) fetching this agent on a
+	// loopback/LAN address (private) triggers a PNA preflight carrying
+	// `Access-Control-Request-Private-Network: true`. Without echoing
+	// `Allow-Private-Network: true` Chrome blocks the request — so the
+	// loopback (127.0.0.1) + LAN-IP direct-play candidates would never connect
+	// from the production https player. Only emitted for already-allowlisted
+	// origins (above), so it widens nothing beyond the existing CORS trust.
+	if r.Header.Get("Access-Control-Request-Private-Network") == "true" {
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+	}
 	if expose != "" {
 		w.Header().Set("Access-Control-Expose-Headers", expose)
 	}

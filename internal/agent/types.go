@@ -16,8 +16,13 @@ type RegisterRequest struct {
 	DiskFreeBytes  int64  `json:"diskFreeBytes,omitempty"`
 	DiskTotalBytes int64  `json:"diskTotalBytes,omitempty"`
 	StreamPort     int    `json:"streamPort,omitempty"`
-	LanIP          string `json:"lanIp,omitempty"`
-	TailscaleIP    string `json:"tailscaleIp,omitempty"`
+	// HTTPSStreamPort + AgentHash drive the per-agent direct-TLS feature: the web
+	// builds https://<ip-dashed>.<hash>.agent.unarr.app:<httpsPort>/... once the
+	// agent has an issued cert. Zero/empty when the feature is off or pre-cert.
+	HTTPSStreamPort int    `json:"httpsStreamPort,omitempty"`
+	AgentHash       string `json:"agentHash,omitempty"`
+	LanIP           string `json:"lanIp,omitempty"`
+	TailscaleIP     string `json:"tailscaleIp,omitempty"`
 	// StreamSecret is the daemon's per-run HMAC key (hex) for stream tokens. The
 	// web mints the HLS path token with it (the agent mints /stream tokens on its
 	// own URLs); the agent verifies both. In memory, regenerated each start, so a
@@ -385,6 +390,8 @@ type SyncRequest struct {
 	DiskFreeBytes   int64       `json:"diskFreeBytes,omitempty"`
 	DiskTotalBytes  int64       `json:"diskTotalBytes,omitempty"`
 	StreamPort      int         `json:"streamPort,omitempty"`
+	HTTPSStreamPort int         `json:"httpsStreamPort,omitempty"`
+	AgentHash       string      `json:"agentHash,omitempty"`
 	LanIP           string      `json:"lanIp,omitempty"`
 	TailscaleIP     string      `json:"tailscaleIp,omitempty"`
 	FreeSlots       int         `json:"freeSlots"`

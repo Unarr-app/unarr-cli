@@ -79,6 +79,26 @@ func (c *Client) Register(ctx context.Context, req RegisterRequest) (*RegisterRe
 	return &resp, nil
 }
 
+// IssueCert sends a CSR to the web-side ACME broker and returns the signed
+// certificate chain (PEM). The agent's private key never leaves the machine —
+// only the CSR is sent. Used by the per-agent direct-TLS feature.
+func (c *Client) IssueCert(ctx context.Context, csrPEM string) (string, error) {
+	req := struct {
+		CSRPem string `json:"csrPem"`
+	}{CSRPem: csrPEM}
+	var resp struct {
+		Certificate string `json:"certificate"`
+		Error       string `json:"error,omitempty"`
+	}
+	if err := c.doPost(ctx, "/api/internal/agent/issue-cert", req, &resp); err != nil {
+		return "", fmt.Errorf("issue cert: %w", err)
+	}
+	if resp.Certificate == "" {
+		return "", fmt.Errorf("issue cert: empty certificate (%s)", resp.Error)
+	}
+	return resp.Certificate, nil
+}
+
 // Deregister notifies the server that the agent is shutting down.
 func (c *Client) Deregister(ctx context.Context, agentID string) error {
 	req := struct {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"github.com/torrentclaw/unarr/internal/acme"
 	"github.com/torrentclaw/unarr/internal/agent"
 	"github.com/torrentclaw/unarr/internal/config"
 	"github.com/torrentclaw/unarr/internal/engine"
@@ -127,6 +128,23 @@ func runDaemonStart() error {
 		return fmt.Errorf("create download dir: %w", err)
 	}
 
+	// Per-agent direct-TLS: ensure a stable high-entropy hash exists, generated
+	// + persisted once. Distinct from the (enumerable) agent UUID; the cert
+	// broker issues *.<hash>.agent.unarr.app for it.
+	if cfg.Download.HTTPSStreamPort > 0 && cfg.Agent.Hash == "" {
+		if h, err := acme.GenerateHash(); err != nil {
+			log.Printf("[acme] could not generate agent hash (%v) — direct-TLS disabled", err)
+		} else {
+			cfg.Agent.Hash = h
+			if err := config.Save(cfg, config.FilePath()); err != nil {
+				log.Printf("[acme] could not persist agent hash (%v) — direct-TLS disabled until persisted", err)
+				cfg.Agent.Hash = ""
+			} else {
+				log.Printf("[acme] generated agent hash %s", h)
+			}
+		}
+	}
+
 	// Clean up stale resume files (>7 days old)
 	resumeDir := filepath.Join(config.DataDir(), "resume")
 	if removed := download.CleanStaleFiles(resumeDir, 7*24*time.Hour); removed > 0 {
@@ -188,6 +206,8 @@ func runDaemonStart() error {
 		Version:            Version,
 		DownloadDir:        cfg.Download.Dir,
 		StreamPort:         cfg.Download.StreamPort,
+		HTTPSStreamPort:    cfg.Download.HTTPSStreamPort,
+		AgentHash:          cfg.Agent.Hash,
 		LanIP:              engine.LanIP(),
 		TailscaleIP:        engine.TailscaleIP(),
 		CanDelete:          cfg.Library.AllowDelete,
@@ -415,13 +435,24 @@ func runDaemonStart() error {
 	corsExtras = append(corsExtras, mirrorCORSOrigins(ctx, cfg, userAgent)...)
 	streamSrv.SetCORSAllowedOrigins(corsExtras)
 
-	// HTTPS stream listener (agent-TLS feature): only armed when a certificate is
-	// present on disk — without a valid cert there is nothing to serve over TLS,
-	// and the HTTP listener + funnel keep working. The future ACME broker writes
-	// the cert pair to certs/agent.{crt,key} under the agent state dir.
+	// HTTPS stream listener (per-agent direct-TLS): obtain/renew the cert from the
+	// broker FIRST (broker runs ACME DNS-01 with our CSR; the private key never
+	// leaves us), then arm the listener if a usable cert is on disk. Without a
+	// valid cert there is nothing to serve over TLS, and the HTTP listener +
+	// funnel keep working regardless.
 	if cfg.Download.HTTPSStreamPort > 0 {
-		certPath := filepath.Join(config.DataDir(), "certs", "agent.crt")
-		keyPath := filepath.Join(config.DataDir(), "certs", "agent.key")
+		if cfg.Agent.Hash != "" {
+			// The broker's ownership check requires the agent to be registered
+			// first (the agent_hash must live on THIS user's agent_registration
+			// row). Register now — best-effort — so a fresh agent can get its cert
+			// on the first boot; d.Run() registers again later (idempotent upsert).
+			if err := d.Register(ctx); err != nil {
+				log.Printf("[acme] pre-cert registration failed (%v) — cert will arrive on a later renewal tick", err)
+			} else {
+				fetchAgentCert(ctx, agentClient, cfg.Agent.Hash)
+			}
+		}
+		keyPath, certPath := acme.Paths(config.DataDir())
 		if err := streamSrv.LoadTLSCertificateFromFiles(certPath, keyPath); err != nil {
 			log.Printf("[stream] HTTPS disabled — no usable certificate at %s (%v)", certPath, err)
 		} else {
@@ -465,6 +496,34 @@ func runDaemonStart() error {
 		return fmt.Errorf("start stream server: %w", err)
 	}
 	d.UpdateStreamPort(streamSrv.Port())
+
+	// Per-agent direct-TLS renewal: re-fetch the cert ahead of expiry and
+	// hot-swap it into the live listener (no restart). Only meaningful once the
+	// listener was armed at startup (a first-issuance that failed then needs a
+	// daemon restart to arm). Cheap 6 h poll; NeedsIssue gates the actual fetch.
+	if cfg.Download.HTTPSStreamPort > 0 && cfg.Agent.Hash != "" {
+		go func() {
+			t := time.NewTicker(6 * time.Hour)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					if !acme.NeedsIssue(config.DataDir()) {
+						continue
+					}
+					fetchAgentCert(ctx, agentClient, cfg.Agent.Hash)
+					keyPath, certPath := acme.Paths(config.DataDir())
+					if err := streamSrv.LoadTLSCertificateFromFiles(certPath, keyPath); err != nil {
+						log.Printf("[acme] hot-swap after renewal failed: %v", err)
+					} else {
+						log.Printf("[acme] renewed cert hot-swapped into live listener")
+					}
+				}
+			}
+		}()
+	}
 
 	// CloudFlare Quick Tunnel — needs the ACTUAL listening port (the
 	// configured port may have been busy and bumped). Spawning here ensures
@@ -1416,4 +1475,42 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 			return
 		}
 	}
+}
+
+// agentTLSBaseDomain is the zone the cert broker issues per-agent wildcards
+// under. Overridable for staging via UNARR_AGENT_TLS_BASE.
+func agentTLSBaseDomain() string {
+	if v := os.Getenv("UNARR_AGENT_TLS_BASE"); v != "" {
+		return v
+	}
+	return "agent.unarr.app"
+}
+
+// fetchAgentCert obtains (or renews) the per-agent TLS cert from the web broker
+// and writes it to the agent state dir. The agent's private key never leaves the
+// machine — only a CSR is sent. Failure is non-fatal: HTTPS stays off and the
+// HTTP listener + CloudFlare funnel keep serving.
+func fetchAgentCert(ctx context.Context, client *agent.Client, hash string) {
+	dataDir := config.DataDir()
+	if !acme.NeedsIssue(dataDir) {
+		return
+	}
+	base := agentTLSBaseDomain()
+	csr, err := acme.BuildCSR(dataDir, hash, base)
+	if err != nil {
+		log.Printf("[acme] build CSR failed: %v", err)
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	cert, err := client.IssueCert(cctx, csr)
+	if err != nil {
+		log.Printf("[acme] cert issuance failed (HTTPS stays off, funnel still works): %v", err)
+		return
+	}
+	if err := acme.WriteCert(dataDir, cert); err != nil {
+		log.Printf("[acme] write cert failed: %v", err)
+		return
+	}
+	log.Printf("[acme] installed cert for *.%s.%s", hash, base)
 }
