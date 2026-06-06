@@ -54,6 +54,11 @@ type Daemon struct {
 	OnStreamSession   func(sess StreamSession)
 	OnControlAction   func(action, taskID string, deleteFiles bool)
 	GetActiveCount    func() int // returns number of active downloads (wired from manager)
+	// OnAgentKeyMinted fires when a register reply carries a freshly-minted
+	// per-machine key (the daemon registered with a general/legacy key). cmd
+	// persists it so the next start authenticates with the bound agent key —
+	// migrating legacy agents and stopping the per-restart re-mint.
+	OnAgentKeyMinted func(newKey string)
 
 	// State
 	User                UserInfo
@@ -180,6 +185,12 @@ func (d *Daemon) Register(ctx context.Context) error {
 	}
 	if err != nil {
 		return fmt.Errorf("register: %w (after %d retries)", err, maxRetries)
+	}
+
+	// Registered with a general/legacy key → the server minted a per-machine key.
+	// Persist it (cmd wires the callback) so the next start uses the bound key.
+	if resp.AgentKey != "" && d.OnAgentKeyMinted != nil {
+		d.OnAgentKeyMinted(resp.AgentKey)
 	}
 
 	d.User = resp.User

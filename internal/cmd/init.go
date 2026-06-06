@@ -75,12 +75,19 @@ func runInit(apiURLOverride string) error {
 
 	apiKey := cfg.Auth.APIKey
 
+	// Resolve the agentId up front so browser-authorize can bind the minted
+	// per-machine key to it.
+	agentID := cfg.Agent.ID
+	if agentID == "" {
+		agentID = uuid.New().String()
+	}
+
 	if apiKey == "" {
 		// Try browser-based auth first (like Claude Code / GitHub CLI)
 		fmt.Println("  Opening browser to connect your account...")
 		fmt.Println()
 
-		browserKey, browserErr := browserAuth(apiURL)
+		browserKey, browserErr := browserAuth(apiURL, agentID)
 		if browserErr == nil && strings.HasPrefix(browserKey, "tc_") {
 			apiKey = browserKey
 			green.Println("  ✓ Connected via browser")
@@ -127,11 +134,6 @@ func runInit(apiURLOverride string) error {
 	// Validate API key by registering with the server
 	fmt.Print("  Verifying API key... ")
 
-	agentID := cfg.Agent.ID
-	if agentID == "" {
-		agentID = uuid.New().String()
-	}
-
 	hostname, _ := os.Hostname()
 	agentName := cfg.Agent.Name
 	if agentName == "" {
@@ -150,7 +152,19 @@ func runInit(apiURLOverride string) error {
 	if err != nil {
 		color.Red("FAILED")
 		fmt.Println()
+		// Stored credential was revoked (machine deleted from the dashboard) —
+		// drop it so a re-run mints a fresh identity.
+		if agent.IsRevoked(err) {
+			clearRevokedIdentity(cfg, "init")
+			return nil
+		}
 		return fmt.Errorf("API key validation failed: %w", err)
+	}
+
+	// Manual-paste bootstrap: swap to the minted per-machine key, discard the
+	// general key the user pasted.
+	if resp.AgentKey != "" {
+		apiKey = resp.AgentKey
 	}
 
 	green.Println("OK")

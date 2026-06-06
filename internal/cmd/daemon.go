@@ -978,6 +978,26 @@ func runDaemonStart() error {
 	// Start reporter only for stream task handling
 	go reporter.Run(ctx)
 
+	// Credential revoked mid-run (agent deleted from the dashboard): wipe the
+	// stored key + agentId so a supervisor restart can't loop on a rejected
+	// identity, then stop the daemon. Reconnecting needs a fresh `unarr login`.
+	d.SyncClient().OnRevoked = func(err error) {
+		reportAgentRevoked(cfg, err)
+		cancel()
+	}
+
+	// Legacy bootstrap: if register hands back a per-machine key, persist it so
+	// the next start authenticates with the bound agent key (one-time migration;
+	// also stops the server re-minting on every restart).
+	d.OnAgentKeyMinted = func(newKey string) {
+		cfg.Auth.APIKey = newKey
+		if serr := config.Save(cfg, config.FilePath()); serr != nil {
+			log.Printf("[agent] could not persist per-machine key: %v", serr)
+		} else {
+			log.Printf("[agent] migrated to a per-machine agent key")
+		}
+	}
+
 	// Start daemon (blocks — runs sync loop)
 	errCh := make(chan error, 1)
 	go func() {
@@ -1017,8 +1037,32 @@ func runDaemonStart() error {
 		cancelAllPlayerSessions()
 		streamSrv.Shutdown(context.Background())
 		cancel()
+		// Registration was rejected because this agent's credential is revoked
+		// (deleted from the dashboard). Wipe it and exit cleanly so the service
+		// supervisor doesn't restart-loop against a 410; user must re-login.
+		if agent.IsRevoked(err) {
+			reportAgentRevoked(cfg, err)
+			return nil
+		}
 		return err
 	}
+}
+
+// reportAgentRevoked tells the user their agent was removed and wipes the
+// stored credential (api key + agentId) so the next start requires a fresh
+// `unarr login` (which mints a new per-machine key bound to a new agentId)
+// instead of looping against a server that keeps rejecting the old identity.
+func reportAgentRevoked(cfg config.Config, err error) {
+	log.Printf("[agent] credential revoked by server (%v) — this machine was removed from your account", err)
+	cfg.Auth.APIKey = ""
+	cfg.Agent.ID = ""
+	if serr := config.Save(cfg, config.FilePath()); serr != nil {
+		log.Printf("[agent] could not clear stored credential: %v", serr)
+	}
+	fmt.Println()
+	fmt.Println("  This agent was removed from your account.")
+	fmt.Println("  Run `unarr login` on this machine to reconnect it.")
+	fmt.Println()
 }
 
 // isAllowedStreamPath checks that filePath is within one of the directories
