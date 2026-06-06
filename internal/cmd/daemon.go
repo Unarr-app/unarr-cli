@@ -991,7 +991,7 @@ func runDaemonStart() error {
 	// also stops the server re-minting on every restart).
 	d.OnAgentKeyMinted = func(newKey string) {
 		cfg.Auth.APIKey = newKey
-		if serr := config.Save(cfg, config.FilePath()); serr != nil {
+		if serr := config.Save(cfg, resolvedConfigPath()); serr != nil {
 			log.Printf("[agent] could not persist per-machine key: %v", serr)
 		} else {
 			log.Printf("[agent] migrated to a per-machine agent key")
@@ -1056,7 +1056,7 @@ func reportAgentRevoked(cfg config.Config, err error) {
 	log.Printf("[agent] credential revoked by server (%v) — this machine was removed from your account", err)
 	cfg.Auth.APIKey = ""
 	cfg.Agent.ID = ""
-	if serr := config.Save(cfg, config.FilePath()); serr != nil {
+	if serr := config.Save(cfg, resolvedConfigPath()); serr != nil {
 		log.Printf("[agent] could not clear stored credential: %v", serr)
 	}
 	fmt.Println()

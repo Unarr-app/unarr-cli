@@ -202,17 +202,23 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
 }
 
-// IsRevoked reports whether an error means this agent's credential is no longer
-// valid — the user deleted the agent from the dashboard (410 agent_revoked /
-// agent_key_mismatch) or the key was otherwise rejected (401). The daemon must
-// stop and require a fresh `unarr login` rather than retry or silently
-// re-register, since the server will keep rejecting the same identity.
+// IsRevoked reports whether an error is an EXPLICIT server revocation signal —
+// the user deleted this agent from the dashboard. The server sends 410
+// agent_revoked (the registration is tombstoned OR the per-machine key was
+// revoked — the auth layer maps a revoked agent key to 410, not 401) or 403
+// agent_key_mismatch (the key belongs to another machine). On these the daemon
+// wipes its credential and requires a fresh `unarr login`.
+//
+// A BARE 401 is deliberately NOT treated as revoked: it's ambiguous (a deploy
+// blip, a load-balancer hiccup, a transient auth error) and must never wipe a
+// working agent's credential. The retry/log paths handle a transient 401; a
+// genuine revocation always arrives as 410.
 func IsRevoked(err error) bool {
 	var he *HTTPError
 	if !errors.As(err, &he) {
 		return false
 	}
-	if he.StatusCode == http.StatusUnauthorized || he.StatusCode == http.StatusGone {
+	if he.StatusCode == http.StatusGone {
 		return true
 	}
 	if he.StatusCode == http.StatusForbidden &&

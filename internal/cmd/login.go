@@ -23,7 +23,7 @@ import (
 func clearRevokedIdentity(cfg config.Config, retryCmd string) {
 	cfg.Auth.APIKey = ""
 	cfg.Agent.ID = ""
-	if err := config.Save(cfg, config.FilePath()); err != nil {
+	if err := config.Save(cfg, resolvedConfigPath()); err != nil {
 		log.Printf("could not clear revoked credential: %v", err)
 	}
 	fmt.Println("  This machine's previous registration was removed from your account.")
