@@ -59,8 +59,14 @@ RUN apt-get update && \
       ca-certificates tzdata wget xz-utils par2 p7zip-full libvulkan1 && \
     rm -rf /var/lib/apt/lists/*
 
-# TARGETARCH is set automatically by Docker buildx during cross-builds.
-ARG TARGETARCH=amd64
+# Arch for the bundled deps below is taken from `dpkg --print-architecture` (the
+# real arch of THIS runtime stage), NOT the TARGETARCH build-arg. A baked
+# `ARG TARGETARCH=amd64` default used to shadow buildx's per-leg value in this
+# stage, so even the published arm64 image bundled an amd64 cloudflared/ffmpeg
+# while the unarr binary was native arm64 → "exec format error" when the daemon
+# spawned cloudflared → funnel never came up → TV/Stremio connect failed
+# ("Failed to get add-on manifest"). dpkg reads the emulated base image's arch,
+# so it is correct under buildx cross-builds AND a plain `docker build`.
 
 # Static GPL ffmpeg + ffprobe with nvenc compiled in (BtbN builds). nvenc is
 # linked but the actual libnvidia-encode.so is dlopen'd at runtime from the
@@ -68,10 +74,11 @@ ARG TARGETARCH=amd64
 # when a GPU is present and falls back to libx264 when it isn't. Placed in
 # /usr/local/bin so ResolveFFmpeg picks them up off PATH ahead of any distro
 # ffmpeg. arm64 has no nvenc but the build still serves software transcode.
-RUN case "$TARGETARCH" in \
+RUN ARCH="$(dpkg --print-architecture)" && \
+    case "$ARCH" in \
       amd64) FF_ARCH=linux64 ;; \
       arm64) FF_ARCH=linuxarm64 ;; \
-      *)     echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+      *)     echo "unsupported arch=$ARCH" >&2; exit 1 ;; \
     esac && \
     wget -4 --tries=3 --timeout=30 -qO /tmp/ffmpeg.tar.xz "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-${FF_ARCH}-gpl.tar.xz" && \
     mkdir -p /tmp/ff && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1 && \
@@ -81,11 +88,12 @@ RUN case "$TARGETARCH" in \
 
 # Bundle cloudflared so `unarr funnel on` (default: on, see config defaults)
 # Just Works on a headless container with no first-run network round-trip.
-RUN case "$TARGETARCH" in \
-      amd64) CF_ARCH=amd64 ;; \
-      arm64) CF_ARCH=arm64 ;; \
-      arm)   CF_ARCH=armhf ;; \
-      *)     echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+RUN ARCH="$(dpkg --print-architecture)" && \
+    case "$ARCH" in \
+      amd64)  CF_ARCH=amd64 ;; \
+      arm64)  CF_ARCH=arm64 ;; \
+      armhf)  CF_ARCH=armhf ;; \
+      *)      echo "unsupported arch=$ARCH" >&2; exit 1 ;; \
     esac && \
     wget -4 --tries=3 --timeout=30 -qO /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH" && \
     chmod +x /usr/local/bin/cloudflared
