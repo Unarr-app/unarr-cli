@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 )
 
@@ -60,7 +63,13 @@ type RegisterRequest struct {
 
 // RegisterResponse is returned by the server after registration.
 type RegisterResponse struct {
-	Success  bool         `json:"success"`
+	Success bool `json:"success"`
+	// AgentKey is a freshly-minted per-machine API key, present only when the
+	// CLI registered with the user's general key (manual-paste bootstrap). The
+	// CLI must persist it and authenticate with it from then on, discarding the
+	// general key. Empty in the browser-authorize path (the token already IS the
+	// agent key) and on every later register.
+	AgentKey string       `json:"agentKey,omitempty"`
 	User     UserInfo     `json:"user"`
 	Features FeatureFlags `json:"features"`
 }
@@ -191,6 +200,32 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
+}
+
+// IsRevoked reports whether an error is an EXPLICIT server revocation signal —
+// the user deleted this agent from the dashboard. The server sends 410
+// agent_revoked (the registration is tombstoned OR the per-machine key was
+// revoked — the auth layer maps a revoked agent key to 410, not 401) or 403
+// agent_key_mismatch (the key belongs to another machine). On these the daemon
+// wipes its credential and requires a fresh `unarr login`.
+//
+// A BARE 401 is deliberately NOT treated as revoked: it's ambiguous (a deploy
+// blip, a load-balancer hiccup, a transient auth error) and must never wipe a
+// working agent's credential. The retry/log paths handle a transient 401; a
+// genuine revocation always arrives as 410.
+func IsRevoked(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	if he.StatusCode == http.StatusGone {
+		return true
+	}
+	if he.StatusCode == http.StatusForbidden &&
+		strings.Contains(he.Message, "agent_key_mismatch") {
+		return true
+	}
+	return false
 }
 
 // AgentInfo holds metadata about the running agent for display.

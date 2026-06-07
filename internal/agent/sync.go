@@ -66,6 +66,12 @@ type SyncClient struct {
 	// It should delete the files and return the IDs of successfully deleted items.
 	OnDeleteFiles func(items []LibraryDeleteRequest) []int
 
+	// OnRevoked is called when a sync is rejected because this agent's credential
+	// was revoked (the user deleted the agent from the dashboard). The daemon
+	// wires this to wipe the stored key + stop — it must NOT keep retrying or the
+	// server will reject every sync forever.
+	OnRevoked func(err error)
+
 	// SyncNow triggers an immediate sync (e.g., on task completion).
 	SyncNow chan struct{}
 
@@ -152,6 +158,12 @@ func (sc *SyncClient) doSync(ctx context.Context) {
 	resp, err := sc.client.Sync(ctx, req)
 	if err != nil {
 		if ctx.Err() == nil {
+			// Credential revoked (agent deleted from the dashboard) → stop; don't
+			// spam a sync the server will reject forever.
+			if IsRevoked(err) && sc.OnRevoked != nil {
+				sc.OnRevoked(err)
+				return
+			}
 			log.Printf("sync failed: %v", err)
 		}
 		return

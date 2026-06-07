@@ -192,6 +192,17 @@ func Execute() {
 }
 
 // loadConfig loads config once (lazy initialization).
+// resolvedConfigPath returns the config file the CLI actually reads/writes,
+// honouring the global --config flag. Use this for every Save so a revocation
+// wipe or key migration lands in the right file (e.g. the dev-local agent's
+// ~/.config/unarr-dev/config.toml), not always the default path.
+func resolvedConfigPath() string {
+	if cfgFile != "" {
+		return cfgFile
+	}
+	return config.FilePath()
+}
+
 func loadConfig() config.Config {
 	if cfgLoaded {
 		return appCfg
