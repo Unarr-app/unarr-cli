@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7-beta] - 2026-06-08
+
+
+### Added
+
+- **subs**: resilient subtitle extraction — sidecars, charset, torrent/debrid
 ## [1.0.6-beta] - 2026-06-07
 
 
@@ -734,6 +740,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.0.7-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.6-beta...v1.0.7-beta
 [1.0.6-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.5-beta...v1.0.6-beta
 [1.0.5-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.4-beta...v1.0.5-beta
 [1.0.4-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.3-beta...v1.0.4-beta
