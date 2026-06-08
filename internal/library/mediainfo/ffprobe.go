@@ -95,6 +95,16 @@ func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*Media
 	if integ := assessIntegrity(stderr.String(), mi); integ != nil {
 		mi.Integrity = integ
 	}
+	// Append external sidecar subtitles (a .srt/.ass next to the video, or a
+	// Subs/ bundle) AFTER the embedded streams, so embedded keep slice positions
+	// == their 0:s:N index. Local files only — a remote URL has no directory to
+	// scan (debrid streams rely on embedded subs from the URL). Best-effort:
+	// DiscoverSidecarSubtitles returns nil on an unreadable dir.
+	if !strings.Contains(filePath, "://") {
+		if ext := DiscoverSidecarSubtitles(filePath); len(ext) > 0 {
+			mi.Subtitles = append(mi.Subtitles, ext...)
+		}
+	}
 	return mi, nil
 }
 

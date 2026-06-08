@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -733,7 +734,9 @@ func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 	case resource == "probe.json":
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-cache")
-		_ = json.NewEncoder(w).Encode(session.ProbeInfo())
+		info := session.ProbeInfo()
+		ss.attachSubtitleVTTURLs(info, session.cfg.sourceRef())
+		_ = json.NewEncoder(w).Encode(info)
 	case resource == "video/index.m3u8":
 		session.ServeVideoPlaylist(w, r)
 	case resource == "video/init.mp4":
@@ -1224,8 +1227,11 @@ func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "missing path", http.StatusBadRequest)
 		return
 	}
+	// index >= 0 → EMBEDDED stream index (-map 0:s:N) of the media at `p`.
+	// index <  0 → EXTERNAL sidecar: `p` IS the subtitle file; the whole file is
+	// the track. Both bind the token to (path, index) so a tampered p/i fails.
 	index, err := strconv.Atoi(q.Get("i"))
-	if err != nil || index < 0 {
+	if err != nil {
 		http.Error(w, "bad index", http.StatusBadRequest)
 		return
 	}
@@ -1235,21 +1241,30 @@ func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	rawPath = ss.healMediaPath(rawPath) // host→container base-path skew (see /thumbnail)
-	if fi, statErr := os.Stat(rawPath); statErr != nil || !fi.Mode().IsRegular() {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
 
-	// Cache hit: serve a fresh sidecar (written by the scan-time prewarm or a
-	// prior request) instantly, skipping ffmpeg. This is also what makes huge
-	// remuxes work — the prewarm extracts without the on-demand HTTP timeout
-	// below, so by play time the hit avoids the 60s ceiling that was returning
-	// 500s on 50GB+ files. Checked BEFORE the ffmpeg guard so a pre-warmed track
-	// is still serveable even if ffmpeg was removed after the cache was filled.
-	if vtt, ok := mediainfo.ReadCachedSubtitle(rawPath, index); ok {
-		ss.writeVTT(w, vtt)
-		return
+	external := index < 0
+	// A debrid/HLS-from-URL source has no local file — ffmpeg reads the URL
+	// directly. Skip the path heal + regular-file stat + on-disk cache for those;
+	// only local files get the sidecar cache.
+	isURL := strings.Contains(rawPath, "://")
+	langHint := q.Get("l") // ISO 639-1 charset hint for external sidecar decoding
+
+	if !isURL {
+		rawPath = ss.healMediaPath(rawPath) // host→container base-path skew (see /thumbnail)
+		if fi, statErr := os.Stat(rawPath); statErr != nil || !fi.Mode().IsRegular() {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// Cache hit: serve a fresh sidecar (written by the scan-time prewarm or a
+		// prior request) instantly, skipping ffmpeg. This is also what makes huge
+		// remuxes work — the prewarm extracts without the on-demand HTTP timeout
+		// below, so by play time the hit avoids the 60s ceiling that was returning
+		// 500s on 50GB+ files. Checked BEFORE the ffmpeg guard so a pre-warmed track
+		// is still serveable even if ffmpeg was removed after the cache was filled.
+		if vtt, ok := mediainfo.ReadCachedSubtitle(rawPath, index); ok {
+			ss.writeVTT(w, vtt)
+			return
+		}
 	}
 
 	// Beyond here we must extract on demand, which needs ffmpeg.
@@ -1265,20 +1280,82 @@ func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	out, err := mediainfo.ExtractSubtitleVTT(ctx, ss.ffmpegPath, rawPath, index)
+	var out []byte
+	if external {
+		// Standalone sidecar file: transcode charset → UTF-8 (langHint guides the
+		// code-page guess) then ffmpeg → WebVTT.
+		out, err = mediainfo.ExtractExternalSubtitleVTT(ctx, ss.ffmpegPath, rawPath, langHint)
+	} else {
+		out, err = mediainfo.ExtractSubtitleVTT(ctx, ss.ffmpegPath, rawPath, index)
+	}
 	if err != nil {
-		log.Printf("[sub] extract failed (i=%d path=%q): %v", index, rawPath, err)
+		log.Printf("[sub] extract failed (i=%d path=%q external=%v url=%v): %v", index, rawPath, external, isURL, err)
 		http.Error(w, "subtitle extract failed", http.StatusInternalServerError)
 		return
 	}
 	// Write-through so the next request is a cache hit. Best-effort: a read-only
-	// media mount just logs and serves the in-memory bytes.
-	if ss.cacheSubtitles {
+	// media mount just logs and serves the in-memory bytes. URL sources have no
+	// stable on-disk anchor for the sidecar cache → skip.
+	if ss.cacheSubtitles && !isURL {
 		if werr := mediainfo.WriteCachedSubtitle(rawPath, index, out); werr != nil {
 			log.Printf("[sub] cache write skipped (i=%d path=%q): %v", index, rawPath, werr)
 		}
 	}
 	ss.writeVTT(w, out)
+}
+
+// attachSubtitleVTTURLs enriches a ProbeInfo map's "subtitles" entries with a
+// ready-to-use, tokened `vttUrl` for every TEXT track, so the web player can
+// attach <track>s for ANY play method (torrent/debrid HLS included) without the
+// server needing the source path — it's the single subtitle wiring path that
+// makes embedded subs work on streams that were never library-scanned.
+//
+//   - embedded (external=false): /sub?p=<srcRef>&i=<index>&t=<tok>
+//   - external (external=true) : /sub?p=<sidecar path>&i=-1&t=<tok>&l=<lang>
+//
+// The token uses the SAME streamScopeSub(path,index) the web mints with, so a
+// library-scanned track and a probe-derived one address identically. The raw
+// "path" key is removed after the URL is built (it's encoded in the URL already).
+// URLs are root-relative; the player resolves them against the funnel origin it
+// fetched probe.json from. Bitmap tracks get no vttUrl (burn-in only).
+func (ss *StreamServer) attachSubtitleVTTURLs(info map[string]any, srcRef string) {
+	subsAny, ok := info["subtitles"].([]map[string]any)
+	if !ok {
+		return
+	}
+	now := time.Now()
+	for _, sb := range subsAny {
+		isText, _ := sb["text"].(bool)
+		if !isText {
+			delete(sb, "path")
+			continue
+		}
+		external, _ := sb["external"].(bool)
+		var p string
+		var idx int
+		if external {
+			p, _ = sb["path"].(string)
+			idx = -1
+		} else {
+			p = srcRef
+			if iv, ok := sb["index"].(int); ok {
+				idx = iv
+			}
+		}
+		if p == "" {
+			delete(sb, "path")
+			continue
+		}
+		tok := mintStreamToken(ss.streamSecret, streamScopeSub(p, idx), now)
+		u := "/sub?p=" + url.QueryEscape(p) + "&i=" + strconv.Itoa(idx) + "&t=" + tok
+		if external {
+			if lang, _ := sb["lang"].(string); lang != "" && lang != "und" {
+				u += "&l=" + url.QueryEscape(lang)
+			}
+		}
+		sb["vttUrl"] = u
+		delete(sb, "path")
+	}
 }
 
 // writeVTT writes the standard WebVTT response headers + body for both the

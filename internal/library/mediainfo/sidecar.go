@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -141,6 +142,66 @@ func ExtractSubtitleVTT(ctx context.Context, ffmpegPath, mediaPath string, index
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("ffmpeg subtitle extract: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if len(out) == 0 {
+		return nil, errors.New("ffmpeg produced no subtitle output")
+	}
+	return out, nil
+}
+
+// ExtractExternalSubtitleVTT converts a STANDALONE sidecar subtitle file (a
+// .srt/.ass/.ssa/.vtt sitting next to the media) to WebVTT. Unlike the embedded
+// path it has no stream index — the whole file is the track. It first transcodes
+// the bytes to UTF-8 (legacy code pages → mojibake otherwise; see charset.go)
+// using the track's language as the detection hint, then runs ffmpeg to emit
+// WebVTT. The UTF-8 bytes go through a temp file with the ORIGINAL extension so
+// ffmpeg selects the right demuxer (.srt→subrip, .ass→ass, .vtt→webvtt), and
+// `-sub_charenc UTF-8` stops ffmpeg from re-guessing what we already decoded.
+func ExtractExternalSubtitleVTT(ctx context.Context, ffmpegPath, subPath, langHint string) ([]byte, error) {
+	raw, err := os.ReadFile(subPath)
+	if err != nil {
+		return nil, fmt.Errorf("read sidecar subtitle: %w", err)
+	}
+	if len(raw) == 0 {
+		return nil, errors.New("sidecar subtitle is empty")
+	}
+	utf8Bytes, encName := DecodeSubtitleToUTF8(raw, langHint)
+	// A "(raw)" suffix means the legacy transcode failed and we're passing the
+	// original bytes through — the likeliest cause of user-visible mojibake, so
+	// leave a trail to diagnose it in the field.
+	if strings.HasSuffix(encName, "(raw)") {
+		log.Printf("[sub] external charset transcode fell back to raw bytes (%s, lang=%q): possible mojibake", filepath.Base(subPath), langHint)
+	}
+
+	ext := strings.ToLower(filepath.Ext(subPath))
+	if ext == "" {
+		ext = ".srt"
+	}
+	tmpDir, err := os.MkdirTemp("", "unarr-extsub-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	tmpIn := filepath.Join(tmpDir, "in"+ext)
+	if werr := os.WriteFile(tmpIn, utf8Bytes, 0o600); werr != nil {
+		return nil, werr
+	}
+
+	args := []string{
+		"-nostdin",
+		"-loglevel", "error",
+		"-sub_charenc", "UTF-8",
+		"-i", tmpIn,
+		"-c:s", "webvtt",
+		"-f", "webvtt",
+		"-",
+	}
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg external subtitle extract: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	if len(out) == 0 {
 		return nil, errors.New("ffmpeg produced no subtitle output")

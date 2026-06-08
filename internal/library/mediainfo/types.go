@@ -42,10 +42,23 @@ type AudioTrack struct {
 	Default  bool   `json:"default"`
 }
 
-// SubtitleTrack represents a single subtitle stream.
+// SubtitleTrack represents a single subtitle source — either an EMBEDDED stream
+// (the common case, identified by its ffmpeg `0:s:N` order in the slice) or an
+// EXTERNAL sidecar file sitting next to the media (Path set, External true).
+//
+// External sidecars (a `.srt`/`.ass`/`.vtt` named after the video, or one in a
+// `Subs/` subfolder) are appended AFTER all embedded tracks so the embedded
+// tracks keep slice positions equal to their `0:s:N` index — the web's
+// resolveSubtitleTracks relies on that for embedded, and switches to Path-based
+// addressing for external (served via /sub?p=<file>&i=-1).
 type SubtitleTrack struct {
 	Lang   string `json:"lang"`
 	Codec  string `json:"codec"`
 	Title  string `json:"title"`
 	Forced bool   `json:"forced"`
+	// External is true for a sidecar file; false (omitted) for an embedded stream.
+	External bool `json:"external,omitempty"`
+	// Path is the absolute filesystem path of the sidecar file (External only).
+	// Empty for embedded streams (those live inside the media container).
+	Path string `json:"path,omitempty"`
 }

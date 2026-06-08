@@ -574,13 +574,18 @@ func (s *HLSSession) ProbeInfo() map[string]any {
 	}
 	subs := make([]map[string]any, 0, len(s.probe.SubtitleTracks))
 	for _, sb := range s.probe.SubtitleTracks {
+		// `external`/`path` let the stream server attach a tokened /sub vttUrl
+		// (path-addressed for sidecars, index-addressed for embedded). `path` is
+		// stripped after the URL is built so the raw path isn't doubled in JSON.
 		subs = append(subs, map[string]any{
-			"index":  sb.Index,
-			"lang":   sb.Lang,
-			"codec":  sb.Codec,
-			"title":  sb.Title,
-			"forced": sb.Forced,
-			"text":   sb.IsTextSubtitle(),
+			"index":    sb.Index,
+			"lang":     sb.Lang,
+			"codec":    sb.Codec,
+			"title":    sb.Title,
+			"forced":   sb.Forced,
+			"text":     sb.IsTextSubtitle(),
+			"external": sb.External,
+			"path":     sb.Path,
 		})
 	}
 	return map[string]any{

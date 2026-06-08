@@ -50,11 +50,15 @@ type ProbeAudioTrack struct {
 // Codec discriminates text (srt/ass/webvtt → extract to WebVTT) vs bitmap
 // (pgs/dvbsub → require burn-in).
 type ProbeSubtitleTrack struct {
-	Index  int    // 0-based subtitle stream index (ffmpeg -map 0:s:Index)
+	Index  int    // 0-based EMBEDDED subtitle stream index (ffmpeg -map 0:s:Index). Unused when External.
 	Lang   string // ISO 639-1
 	Codec  string // lowercased — "subrip", "ass", "webvtt", "hdmv_pgs_subtitle", ...
 	Title  string
 	Forced bool
+	// External marks a sidecar file (served via /sub?p=<Path>&i=-1) rather than
+	// an embedded stream. Path is its absolute filesystem path (External only).
+	External bool
+	Path     string
 }
 
 // IsTextSubtitle reports whether a subtitle codec can be extracted to WebVTT
@@ -134,14 +138,27 @@ func ProbeFile(ctx context.Context, ffprobePath, filePath string) (*StreamProbe,
 	}
 	if len(mi.Subtitles) > 0 {
 		probe.SubtitleTracks = make([]ProbeSubtitleTrack, 0, len(mi.Subtitles))
-		for i, s := range mi.Subtitles {
-			probe.SubtitleTracks = append(probe.SubtitleTracks, ProbeSubtitleTrack{
-				Index:  i,
-				Lang:   s.Lang,
-				Codec:  strings.ToLower(s.Codec),
-				Title:  s.Title,
-				Forced: s.Forced,
-			})
+		// Embedded streams come first (ffprobe order); external sidecars are
+		// appended after. Count embedded separately so each embedded track's
+		// Index is its true `0:s:N` value regardless of how many externals trail
+		// it; externals get Index=-1 and address by Path instead.
+		embeddedIdx := 0
+		for _, s := range mi.Subtitles {
+			t := ProbeSubtitleTrack{
+				Lang:     s.Lang,
+				Codec:    strings.ToLower(s.Codec),
+				Title:    s.Title,
+				Forced:   s.Forced,
+				External: s.External,
+				Path:     s.Path,
+			}
+			if s.External {
+				t.Index = -1
+			} else {
+				t.Index = embeddedIdx
+				embeddedIdx++
+			}
+			probe.SubtitleTracks = append(probe.SubtitleTracks, t)
 		}
 	}
 	storeProbeCache(filePath, probe)
