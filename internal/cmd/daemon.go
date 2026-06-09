@@ -716,15 +716,63 @@ func runDaemonStart() error {
 		// wires it into the StreamServer. Shared by the local-file HLS path and
 		// the debrid HLS-from-URL path (hueco #2 / 2b) so both register, probe
 		// off the sync loop, and report readiness identically.
+		//
+		// Prewarm sessions (background cache-fill: next-episode, hover) take a
+		// deferential path: wait until no live encode is running (never steal
+		// the encoder from the viewer), then register WITHOUT displacing other
+		// sessions. Before this, a prewarm claimed mid-playback went through
+		// Register() and KILLED the stream the user was watching (verified
+		// 2026-06-10: prewarm started → live session "closed (cache
+		// discarded)" → player 404).
 		startHLSPlayback := func(hlsCfg engine.HLSSessionConfig, hlsCtx context.Context, hlsCancel context.CancelFunc) {
 			playerSessionRegistry.add(hlsCfg.SessionID, hlsCancel)
+			prewarm := sess.Prewarm
 			go func() {
+				if prewarm {
+					// Defer until the encoder is free. Poll is cheap (10 s);
+					// cap the wait at 30 min — a prewarm that can't start
+					// within an episode's runtime has lost its purpose.
+					deadline := time.Now().Add(30 * time.Minute)
+					for streamSrv.HLS().HasLiveEncode() {
+						if time.Now().After(deadline) || hlsCtx.Err() != nil {
+							playerSessionRegistry.remove(hlsCfg.SessionID)
+							hlsCancel()
+							log.Printf("[hls %s] prewarm abandoned (encoder busy %s)",
+								agent.ShortID(hlsCfg.SessionID), "30m")
+							return
+						}
+						select {
+						case <-hlsCtx.Done():
+							playerSessionRegistry.remove(hlsCfg.SessionID)
+							return
+						case <-time.After(10 * time.Second):
+						}
+					}
+				} else {
+					// REAL session: reap in-flight prewarm encodes BEFORE
+					// StartHLSSession so the per-key cache writer-lock is
+					// free and the viewer's encode lands in the persistent
+					// cache (not an uncached tmpdir). A SEALED prewarm is
+					// unaffected — this session simply cache-HITs it.
+					if n := streamSrv.HLS().CloseWhere(func(s *engine.HLSSession) bool { return s.IsPrewarm() }); n > 0 {
+						log.Printf("[hls %s] reaped %d in-flight prewarm(s) for the viewer session",
+							agent.ShortID(hlsCfg.SessionID), n)
+					}
+				}
 				hsess, err := engine.StartHLSSession(hlsCtx, hlsCfg)
 				if err != nil {
 					playerSessionRegistry.remove(hlsCfg.SessionID)
 					hlsCancel()
 					log.Printf("[hls %s] start failed: %v", agent.ShortID(hlsCfg.SessionID), err)
 					return
+				}
+				if prewarm {
+					// Side-by-side: never evict the viewer's session. A later
+					// REAL session still evicts this one via Register — by
+					// then the encode is usually sealed in the segment cache.
+					streamSrv.HLS().RegisterKeep(hsess)
+					log.Printf("[hls %s] prewarm encoding: %s", agent.ShortID(hlsCfg.SessionID), hlsCfg.FileName)
+					return // no viewer waiting → no ready-watcher
 				}
 				streamSrv.HLS().Register(hsess)
 				go watchSessionReady(hlsCtx, agentClient, hsess, hlsCfg.SessionID)
@@ -791,6 +839,7 @@ func runDaemonStart() error {
 				AudioIndex:        sess.AudioIndex,
 				BurnSubtitleIndex: sess.BurnSubtitleIndex,
 				StartSec:          sess.StartSec,
+				Prewarm:           sess.Prewarm,
 				Transcode:         tcRuntime,
 				Cache:             hlsCache,
 				// 2c: refresh the debrid link if it expires mid-transcode; the
@@ -927,6 +976,7 @@ func runDaemonStart() error {
 			AudioIndex:        sess.AudioIndex,
 			BurnSubtitleIndex: sess.BurnSubtitleIndex,
 			StartSec:          sess.StartSec,
+			Prewarm:           sess.Prewarm,
 			Transcode:         tcRuntime,
 			Cache:             hlsCache,
 		}, hlsCtx, hlsCancel)

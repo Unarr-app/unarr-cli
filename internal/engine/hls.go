@@ -179,7 +179,12 @@ type HLSSessionConfig struct {
 	// killed by an immediate seek-restart when the player asks for the resume
 	// segment (double spawn, slow resume). 0 = start at the beginning.
 	// Ignored on a cache HIT (every segment is already on disk).
-	StartSec  float64
+	StartSec float64
+	// Prewarm marks a background cache-fill session. The daemon defers its
+	// encode until no live encode runs and registers it via RegisterKeep
+	// (never evicting the viewer). It also lets a REAL session close stale
+	// prewarms up front so the cache writer-lock is free for the viewer.
+	Prewarm   bool
 	Transcode TranscodeRuntime
 	// Cache is an optional persistent segment cache keyed by (source, quality,
 	// audio). When set, completed encodes are kept across sessions so re-plays
@@ -339,6 +344,63 @@ func (r *HLSSessionRegistry) Register(s *HLSSession) {
 	for _, prev := range stale {
 		_ = prev.Close()
 	}
+}
+
+// CloseWhere closes + removes every registered session matching pred. Used
+// by the REAL-session path to reap stale prewarm encodes BEFORE its own
+// StartHLSSession runs — that frees the per-key cache writer-lock, so the
+// viewer's encode lands in the persistent cache instead of falling back to
+// an uncached per-session tmpdir (and a SEALED prewarm survives as a cache
+// HIT: closing a from-cache reader never invalidates the entry).
+func (r *HLSSessionRegistry) CloseWhere(pred func(*HLSSession) bool) int {
+	r.mu.Lock()
+	victims := make([]*HLSSession, 0, len(r.sessions))
+	for id, s := range r.sessions {
+		if pred(s) {
+			victims = append(victims, s)
+			delete(r.sessions, id)
+		}
+	}
+	r.mu.Unlock()
+	for _, s := range victims {
+		_ = s.Close()
+	}
+	return len(victims)
+}
+
+// IsPrewarm reports whether this session was started as a background
+// cache-fill (HLSSessionConfig.Prewarm). cfg is immutable after construction.
+func (s *HLSSession) IsPrewarm() bool { return s.cfg.Prewarm }
+
+// RegisterKeep adds a session WITHOUT displacing the others — the prewarm
+// path: a background cache-fill encode must not evict the viewer's live
+// session (Register's eviction killed the stream being watched when the
+// next-episode prewarm got claimed mid-playback). It still replaces (and
+// closes) a previous session with the SAME ID. A later Register() of a real
+// viewer session evicts prewarms like any other session — a completed
+// (sealed) prewarm survives in the segment cache either way.
+func (r *HLSSessionRegistry) RegisterKeep(s *HLSSession) {
+	r.mu.Lock()
+	prev := r.sessions[s.cfg.SessionID]
+	r.sessions[s.cfg.SessionID] = s
+	r.mu.Unlock()
+	if prev != nil && prev != s {
+		_ = prev.Close()
+	}
+}
+
+// HasLiveEncode reports whether any registered session still has a RUNNING
+// ffmpeg (encode not finished). Used to defer prewarm encodes so they never
+// compete with the viewer's live transcode for the encoder.
+func (r *HLSSessionRegistry) HasLiveEncode() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, s := range r.sessions {
+		if !s.EncodeExited() {
+			return true
+		}
+	}
+	return false
 }
 
 // Remove drops a session from the registry without closing it.
@@ -664,6 +726,15 @@ func (s *HLSSession) ReadyCount() int {
 	s.readyMu.Lock()
 	defer s.readyMu.Unlock()
 	return s.readyMax
+}
+
+// EncodeExited reports whether this session's ffmpeg has finished (clean or
+// crashed) or never ran (cache HIT). False while an encode is producing
+// segments. Used by HasLiveEncode to defer prewarm work.
+func (s *HLSSession) EncodeExited() bool {
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
+	return s.exited
 }
 
 // WriterStartIdx returns the segment index the CURRENT ffmpeg writer started

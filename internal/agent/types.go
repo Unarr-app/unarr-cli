@@ -485,6 +485,13 @@ type StreamSession struct {
 	// slow resume). 0/omitted = start at the beginning. Older daemons simply
 	// don't decode the field and keep the old start-at-0 behaviour.
 	StartSec float64 `json:"startSec,omitempty"`
+	// Prewarm marks a background cache-fill session (next-episode prewarm,
+	// hover prewarm): the daemon must encode it WITHOUT displacing the
+	// viewer's live session — it waits until the active encode finishes and
+	// registers alongside instead of evicting (Register kills every other
+	// session; a prewarm claimed mid-playback used to kill the stream the
+	// user was watching). False/omitted = a real viewer session.
+	Prewarm bool `json:"prewarm,omitempty"`
 	// PlayMethod is how the daemon should serve this session:
 	//   ""       — default (HLS transcode); also what legacy servers send.
 	//   "direct" — the source is already browser-native (the web decided this
