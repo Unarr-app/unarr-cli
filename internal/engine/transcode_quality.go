@@ -1,5 +1,10 @@
 package engine
 
+import (
+	"math"
+	"strconv"
+)
+
 // TranscodeRuntime carries the resolved ffmpeg/ffprobe paths + tunables so
 // each session can decide whether to passthrough or pipe through ffmpeg.
 type TranscodeRuntime struct {
@@ -46,6 +51,35 @@ func resolveQualityCap(label string) qualityCap {
 		// "original", "auto", "" → defer to config.
 		return qualityCap{}
 	}
+}
+
+// doubleBitrate returns an ffmpeg bitrate string with twice the value of the
+// input ("6000k" → "12000k", "1.5M" → "3M", "5M" → "10M"). Used to size
+// `-bufsize` at the standard 2× of `-maxrate` for capped-CRF/CQ rate control.
+// An unparseable string falls back to the input unchanged (1× bufsize — the
+// pre-CRF behaviour, safe just suboptimal). The doubled CPB stays far below
+// every H.264 level's limit for the (level, maxrate) pairs this package emits
+// (worst case: 1080p level 4.1 → 12000k bufsize vs 62500k allowed).
+func doubleBitrate(b string) string {
+	if b == "" {
+		return b
+	}
+	num := b
+	suffix := ""
+	switch b[len(b)-1] {
+	case 'k', 'K', 'm', 'M':
+		num = b[:len(b)-1]
+		suffix = string(b[len(b)-1])
+	}
+	v, err := strconv.ParseFloat(num, 64)
+	if err != nil || v <= 0 {
+		return b
+	}
+	d := v * 2
+	if d == math.Trunc(d) {
+		return strconv.FormatFloat(d, 'f', 0, 64) + suffix
+	}
+	return strconv.FormatFloat(d, 'f', -1, 64) + suffix
 }
 
 // capForHeight returns the bitrate-cap pair appropriate for an effective

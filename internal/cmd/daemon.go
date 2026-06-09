@@ -790,6 +790,7 @@ func runDaemonStart() error {
 				Quality:           sess.Quality,
 				AudioIndex:        sess.AudioIndex,
 				BurnSubtitleIndex: sess.BurnSubtitleIndex,
+				StartSec:          sess.StartSec,
 				Transcode:         tcRuntime,
 				Cache:             hlsCache,
 				// 2c: refresh the debrid link if it expires mid-transcode; the
@@ -925,6 +926,7 @@ func runDaemonStart() error {
 			Quality:           sess.Quality,
 			AudioIndex:        sess.AudioIndex,
 			BurnSubtitleIndex: sess.BurnSubtitleIndex,
+			StartSec:          sess.StartSec,
 			Transcode:         tcRuntime,
 			Cache:             hlsCache,
 		}, hlsCtx, hlsCancel)
@@ -1449,8 +1451,13 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 		if hsess.IsClosed() {
 			return
 		}
-		// Phase 1: cache HIT or seg-0 ready → flip the "Preparando…" UI now.
-		if !readyPosted && (hsess.FromCache() || hsess.ReadyCount() >= 1) {
+		// Phase 1: cache HIT or first segment ready → flip the "Preparando…"
+		// UI now. Compare against WriterStartIdx, not `>= 1`: a resume
+		// session (StartSec) pre-seeds readyMax to the start index, so
+		// ReadyCount() is ≥ 1 before ffmpeg has written a single byte —
+		// `>= 1` would fire "ready" instantly and freeze the player waiting
+		// on a segment that doesn't exist yet.
+		if !readyPosted && (hsess.FromCache() || hsess.ReadyCount() > hsess.WriterStartIdx()) {
 			postReady(nil)
 			readyPosted = true
 			// Cache replay has no live encode → no telemetry to report, done.

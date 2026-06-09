@@ -66,6 +66,17 @@ func segmentStartSec(idx int) float64 {
 	return float64(idx * hlsSegmentDuration)
 }
 
+// segmentIdxForTime returns the index of the segment containing second `sec`
+// of the timeline — the inverse of segmentStartSec. Used to translate a
+// session's StartSec (resume position) into the segment the FIRST ffmpeg
+// should start writing from.
+func segmentIdxForTime(sec float64) int {
+	if sec <= 0 {
+		return 0
+	}
+	return int(sec / float64(hlsSegmentDuration))
+}
+
 // segmentCountForDuration returns how many segments cover a source of the
 // given duration. Always returns at least 1.
 func segmentCountForDuration(dur float64) int {
@@ -160,7 +171,16 @@ type HLSSessionConfig struct {
 	// with the clean one. Forces the video re-encode the HLS path already does
 	// to also composite the subtitle overlay.
 	BurnSubtitleIndex *int
-	Transcode         TranscodeRuntime
+	// StartSec is the playback position (seconds) the viewer will start at —
+	// the saved resume point, or the current position on a quality/audio
+	// switch. When > 0 the FIRST ffmpeg spawns already seeked there
+	// (`-ss` + `-output_ts_offset` + `-start_number`, the same flags as a
+	// seek-restart), instead of encoding from segment 0 only to be
+	// killed by an immediate seek-restart when the player asks for the resume
+	// segment (double spawn, slow resume). 0 = start at the beginning.
+	// Ignored on a cache HIT (every segment is already on disk).
+	StartSec  float64
+	Transcode TranscodeRuntime
 	// Cache is an optional persistent segment cache keyed by (source, quality,
 	// audio). When set, completed encodes are kept across sessions so re-plays
 	// of the same file at the same quality skip ffmpeg entirely. nil disables
@@ -503,11 +523,38 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		return s, nil
 	}
 
+	// Resume-aware first spawn: when the session carries a StartSec (resume
+	// point / position on a quality switch), launch ffmpeg already seeked at
+	// the segment containing it. The web player opens playback at the same
+	// position (hls.js startPosition), so segment 0 would never be requested —
+	// encoding from 0 just to seek-restart milliseconds later wasted a full
+	// ffmpeg spawn and doubled the resume latency. Earlier segments simply
+	// don't exist on disk; ServeSegment's `idx < segStart` branch restarts the
+	// encoder if the user later scrubs back before the resume point. A partial
+	// encode never seals the cache (allSegmentsPresent checks 0..N), matching
+	// today's post-seek behaviour.
+	startIdx := 0
+	if cfg.StartSec > 0 && cfg.StartSec < probe.DurationSec {
+		startIdx = segmentIdxForTime(cfg.StartSec)
+		if startIdx > segCount-1 {
+			startIdx = segCount - 1
+		}
+	} else if cfg.StartSec >= probe.DurationSec && cfg.StartSec > 0 {
+		// Stale resume beyond this source's duration (the file was replaced by
+		// a shorter cut, or progress was saved against another release). Start
+		// from the beginning instead of encoding only the final segment, which
+		// would "end" the video seconds after it starts.
+		log.Printf("[hls %s] startSec %.0f ≥ duration %.0f — starting from 0",
+			shortHLSID(cfg.SessionID), cfg.StartSec, probe.DurationSec)
+	}
+	s.ffmpegSegStart = startIdx
+	s.readyMax = startIdx
+
 	// Spawn ffmpeg under a dedicated context so Close() can kill it without
 	// touching the parent ctx.
 	ffCtx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
-	args := buildHLSFFmpegArgs(cfg, probe, tmpDir)
+	args := buildHLSFFmpegArgsAt(cfg, probe, tmpDir, startIdx, segmentStartSec(startIdx))
 	cmd := exec.CommandContext(ffCtx, cfg.Transcode.FFmpegPath, args...)
 	cmd.Stderr = &hlsStderrCapture{owner: s}
 	if err := cmd.Start(); err != nil {
@@ -540,10 +587,14 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	if profile.Preset != "" {
 		presetNote = " preset=" + profile.Preset
 	}
-	log.Printf("[hls %s] started: %s, %.1fs, %d segs (quality=%s, encoder=%s accel=%s%s)%s",
+	startNote := ""
+	if startIdx > 0 {
+		startNote = fmt.Sprintf(" start=seg-%d@%.0fs", startIdx, segmentStartSec(startIdx))
+	}
+	log.Printf("[hls %s] started: %s, %.1fs, %d segs (quality=%s, encoder=%s accel=%s%s)%s%s",
 		shortHLSID(cfg.SessionID), cfg.logName(),
 		probe.DurationSec, segCount, coalesce(cfg.Quality, "auto"),
-		profile.Codec, string(cfg.Transcode.HWAccel), presetNote, cachedNote)
+		profile.Codec, string(cfg.Transcode.HWAccel), presetNote, cachedNote, startNote)
 	return s, nil
 }
 
@@ -601,14 +652,28 @@ func (s *HLSSession) ProbeInfo() map[string]any {
 	}
 }
 
-// ReadyCount returns how many segments are currently fully on disk.
-// Caller can `>= 1` it to check whether seg-0 has landed (and so the
-// player can be told to attach). For cache-HIT sessions this is always
-// `segmentCount` from the moment StartHLSSession returns.
+// ReadyCount returns the session's readyMax watermark: segment idx is on disk
+// iff idx < ReadyCount() AND idx >= WriterStartIdx(). For a from-zero encode
+// this is simply "how many segments are on disk"; for a resume session
+// (StartSec > 0) readyMax is pre-seeded to the start index, so the FIRST real
+// segment has landed only once ReadyCount() > WriterStartIdx() — use that
+// comparison, not `>= 1`, to flip the player's "Preparando…" UI. For
+// cache-HIT sessions this is always `segmentCount` from the moment
+// StartHLSSession returns.
 func (s *HLSSession) ReadyCount() int {
 	s.readyMu.Lock()
 	defer s.readyMu.Unlock()
 	return s.readyMax
+}
+
+// WriterStartIdx returns the segment index the CURRENT ffmpeg writer started
+// at: 0 for a from-the-beginning encode, the resume segment for a StartSec
+// session, the seek target after a seek-restart. See ReadyCount for the
+// "first segment landed" comparison.
+func (s *HLSSession) WriterStartIdx() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ffmpegSegStart
 }
 
 // FromCache reports whether this session was served from the HLS cache
@@ -1159,11 +1224,6 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 
 // ---- ffmpeg argument builders ----
 
-// buildHLSFFmpegArgs returns the argv for the initial HLS encode (start at 0).
-func buildHLSFFmpegArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string) []string {
-	return buildHLSFFmpegArgsAt(cfg, probe, tmpDir, 0, 0)
-}
-
 // EncoderProfile names the codec + preset + decoder hint combination the HLS
 // pipeline picks for the given hardware backend + transcode config. Exposed
 // so callers can log the chosen encoder before ffmpeg launches and so both
@@ -1418,7 +1478,31 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	if bitrate == "" {
 		bitrate = "5M"
 	}
-	args = append(args, "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate)
+	// Rate control: capped constant-quality where the encoder supports it well
+	// (libx264 CRF, NVENC CQ), plain CBR-ish elsewhere. Constant quality is the
+	// on-the-fly analogue of per-title encoding: easy scenes (dialogue, anime
+	// flats) emit FAR fewer bits than the fixed target — which is what keeps a
+	// funnel/LTE link from stalling — while complex scenes can still use up to
+	// `-maxrate` (the same ceiling as before, so worst-case quality and the
+	// level-derived VBV pair are unchanged). `-bufsize 2×maxrate` gives the VBV
+	// a standard one-segment window to absorb spikes; the old 1× window forced
+	// the encoder to flatline at the cap. CPB stays far below every H.264
+	// level's limit (level 3.1 allows 14 Mbps CPB vs our 3M at 480p).
+	switch codec {
+	case "libx264":
+		// Capped CRF: no -b:v (CRF drives quality), -maxrate/-bufsize cap it.
+		args = append(args, "-crf", "23", "-maxrate", bitrate, "-bufsize", doubleBitrate(bitrate))
+	case "h264_nvenc":
+		// NVENC constant-quality VBR: -cq targets quality, -b:v 0 disables the
+		// default 2M average-bitrate target that would otherwise fight it.
+		args = append(args, "-cq", "23", "-b:v", "0", "-maxrate", bitrate, "-bufsize", doubleBitrate(bitrate))
+	default:
+		// QSV / VideoToolbox / VAAPI: keep the proven fixed-bitrate triple —
+		// their constant-quality knobs (ICQ, -q:v) have vendor-specific gotchas
+		// (VideoToolbox ignores -q:v when -b:v is set; QSV ICQ conflicts with
+		// look_ahead=0) and we can't regression-test them here.
+		args = append(args, "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate)
+	}
 
 	// Force keyframe alignment with segment boundaries.
 	args = append(args, "-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", hlsSegmentDuration))

@@ -478,6 +478,13 @@ type StreamSession struct {
 	// omitted. Forces a full video re-encode (the overlay can't ride a copy
 	// path), so the web only sends it when the user picks a bitmap sub.
 	BurnSubtitleIndex *int `json:"burnSubtitleIndex,omitempty"`
+	// StartSec is the playback position (seconds) the viewer opens at — the
+	// saved resume point, or the current position on a quality/audio switch.
+	// HLS sessions spawn the FIRST ffmpeg already seeked there instead of
+	// encoding from segment 0 and immediately seek-restarting (double spawn,
+	// slow resume). 0/omitted = start at the beginning. Older daemons simply
+	// don't decode the field and keep the old start-at-0 behaviour.
+	StartSec float64 `json:"startSec,omitempty"`
 	// PlayMethod is how the daemon should serve this session:
 	//   ""       — default (HLS transcode); also what legacy servers send.
 	//   "direct" — the source is already browser-native (the web decided this
