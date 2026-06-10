@@ -183,6 +183,12 @@ func TestHLSCopy_H264Ac3TranscodesAudio(t *testing.T) {
 	if !containsSeq(args, "-c:a", "aac") {
 		t.Errorf("expected -c:a aac for AC3 source, args: %v", args)
 	}
+	// MUST downmix to stereo: 6-channel ffmpeg-native AAC is rejected by
+	// WebKit/Apple HLS at the first media segment (every 5.1 movie failed on
+	// iPhone while stereo-AAC sources played — confirmed via Safari access log).
+	if !containsSeq(args, "-ac", "2") {
+		t.Errorf("expected -ac 2 (stereo downmix) for re-encoded audio, args: %v", args)
+	}
 }
 
 func TestHLSCopy_Hevc10Eac3_IncidentShape(t *testing.T) {

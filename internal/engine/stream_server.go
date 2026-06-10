@@ -690,6 +690,14 @@ func (ss *StreamServer) HLSURLsJSON(sessionID string) string {
 func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 	ss.lastActivity.Store(time.Now().UnixNano())
 
+	// Debug access log (UNARR_HLS_DEBUG=1): which client fetches which HLS
+	// resource. Off by default — a player polls the playlist every few
+	// seconds and segments stream constantly, far too chatty for normal logs.
+	if os.Getenv("UNARR_HLS_DEBUG") == "1" {
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		log.Printf("[hls-debug] %s %s from %s UA=%q", r.Method, r.URL.Path, host, r.Header.Get("User-Agent"))
+	}
+
 	if ss.writeCORSHeaders(w, r, "Content-Length, Content-Range, Accept-Ranges") {
 		return
 	}

@@ -1968,7 +1968,12 @@ func buildHLSCopyArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string) [
 	if strings.EqualFold(audioCodec, "aac") {
 		args = append(args, "-c:a", "copy")
 	} else {
-		args = append(args, "-c:a", "aac", "-b:a", "192k")
+		// Mirror the encode path exactly: AAC stereo 48k. WITHOUT -ac 2 a 5.1
+		// source produces 6-channel ffmpeg-native AAC, which WebKit/Apple HLS
+		// rejects at the first media segment (observed via Safari access log:
+		// master → index → init → seg-0 fetched twice, then silence — every
+		// 5.1 movie failed on iPhone while stereo-AAC episodes played).
+		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2")
 	}
 
 	args = append(args,
