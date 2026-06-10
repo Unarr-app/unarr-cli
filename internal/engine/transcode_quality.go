@@ -27,6 +27,11 @@ type TranscodeRuntime struct {
 	// Preferred over the zscale chain for HDR sources — one GPU pass, higher
 	// quality, and present where zscale is missing.
 	HasLibplacebo bool
+	// HasScaleCuda: this host can run scale_cuda (CUDA device + filter). Lets an
+	// NVENC downscale of an SDR source stay fully on the GPU (decode → scale_cuda
+	// → h264_nvenc) instead of round-tripping each frame to the CPU for `scale=`.
+	// Probed functionally (FFmpegSupportsScaleCuda); false ⇒ keep the CPU scale.
+	HasScaleCuda bool
 }
 
 // qualityCap maps a session's Quality label to a (MaxHeight, VideoBitrate)

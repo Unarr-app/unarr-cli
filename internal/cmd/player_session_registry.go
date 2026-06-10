@@ -98,5 +98,9 @@ func buildTranscodeRuntime(ctx context.Context, cfg config.Config) engine.Transc
 		// libplacebo (GPU) is preferred over zscale when present — checked here so
 		// the per-session arg builder can pick it for HDR sources.
 		HasLibplacebo: engine.FFmpegSupportsLibplacebo(ffmpegPath),
+		// scale_cuda lets an NVENC SDR downscale stay fully on the GPU. Probed
+		// unconditionally (like libplacebo); fails closed to false on non-CUDA
+		// hosts, where the arg builder keeps the CPU scale path anyway.
+		HasScaleCuda: engine.FFmpegSupportsScaleCuda(ffmpegPath),
 	}
 }

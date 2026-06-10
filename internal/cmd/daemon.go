@@ -196,6 +196,7 @@ func runDaemonStart() error {
 		go func() {
 			engine.FFmpegSupportsLibplacebo(ffmpegResolved)
 			engine.FFmpegSupportsZscale(ffmpegResolved)
+			engine.FFmpegSupportsScaleCuda(ffmpegResolved)
 		}()
 	}
 

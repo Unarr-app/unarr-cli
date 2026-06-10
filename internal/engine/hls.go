@@ -1359,6 +1359,31 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	// transcode telemetry (F3) without logging it.
 	args := []string{"-y", "-hide_banner", "-loglevel", "warning", "-stats"}
 
+	// F4 — full-GPU NVENC downscale. When we're downscaling an SDR source with
+	// NVENC on a host whose ffmpeg can run scale_cuda, and NO subtitle is burned
+	// in, keep the decoded frame on the GPU through scale + encode (scale_cuda →
+	// h264_nvenc) instead of copying every frame to the CPU for `scale=`. That
+	// CPU round-trip is the wall on modest GPUs (a strong box still gains ~37%).
+	// Strictly gated — the cases that need CPU frames stay on the CPU path:
+	//   - HDR (the libplacebo Vulkan / zscale CPU tonemap can't consume a CUDA
+	//     surface, and mixing CUDA scale with the Vulkan pass is fragile),
+	//   - burn-in (the scale2ref+overlay composite runs on CPU frames),
+	//   - non-NVENC encoders, and no-op when not actually downscaling.
+	// Output height cap for this session — resolved once here so the F4 gate and
+	// the filter chain below share ONE value (a drift between them would emit
+	// scale_cuda for a height that isn't actually a downscale).
+	qcap := resolveQualityCap(cfg.Quality)
+	maxH := qcap.MaxHeight
+	if maxH == 0 {
+		maxH = cfg.Transcode.MaxHeight
+	}
+	useCudaScale := profile.Codec == "h264_nvenc" &&
+		profile.DecodeHwAccel == "cuda" &&
+		cfg.Transcode.HasScaleCuda &&
+		probe.HDR == "" &&
+		cfg.burnSubtitleIndexOrNone() < 0 &&
+		maxH > 0 && probe.Height > maxH
+
 	// Demuxer-side HW-decode hint. Sourced from the profile so a future
 	// codec/hint mismatch is impossible — the encoder + decode hint are
 	// computed once and stay coherent. Notably we do NOT add
@@ -1369,6 +1394,12 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	// decode on the input side.
 	if profile.DecodeHwAccel != "" {
 		args = append(args, "-hwaccel", profile.DecodeHwAccel)
+		// F4: pin decoded frames as CUDA surfaces ONLY on the gated scale_cuda
+		// path, so scale_cuda + h264_nvenc avoid the CPU copy. Off otherwise —
+		// the CPU filter chain can't consume CUDA surfaces.
+		if useCudaScale {
+			args = append(args, "-hwaccel_output_format", "cuda")
+		}
 	}
 
 	// Seek before -i for fast keyframe-aligned start. The new ffmpeg writes
@@ -1527,7 +1558,7 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	// on libx264) and stalls the session. The output height matches qcap.MaxHeight
 	// when the source is downscaled, otherwise probe.Height; the output width is
 	// the source width scaled by the same factor (the filter chain preserves AR).
-	qcap := resolveQualityCap(cfg.Quality)
+	// qcap + maxH were resolved once at the top (shared with the F4 gate).
 	outputHeight := qcap.MaxHeight
 	if outputHeight == 0 {
 		outputHeight = cfg.Transcode.MaxHeight
@@ -1595,10 +1626,7 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	// emit the exact computed width — which can be odd (e.g. 853×480) and
 	// libx264 then refuses to open. We chain a second `scale=trunc(iw/2)*2:...`
 	// after the cap to guarantee even dimensions before format/setparams.
-	maxH := qcap.MaxHeight
-	if maxH == 0 {
-		maxH = cfg.Transcode.MaxHeight
-	}
+	// (maxH was resolved once at the top, shared with the F4 cuda-scale gate.)
 	// VAAPI needs frames as nv12 VAAPI surfaces before the encoder. We do
 	// scale + format conversion on CPU then `hwupload` once at the end —
 	// skips the mesa 25 + Raphael iGPU "Cannot allocate memory" log spam
@@ -1643,12 +1671,21 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	// hwUploadTail — that has to run last, after any subtitle overlay, so it's
 	// appended separately below.
 	var vchain string
-	if maxH > 0 && probe.Height > maxH {
+	switch {
+	case useCudaScale:
+		// F4: scale on the CUDA surface and hand h264_nvenc a yuv420p CUDA frame
+		// directly — no CPU `format`/`setparams` tail (the frame never leaves the
+		// GPU; nvenc records BT.709 SDR metadata from the source). scale_cuda's
+		// `-2` already yields an even width, so the second even-rounding pass the
+		// CPU path needs is unnecessary. useCudaScale already implies a real
+		// downscale (probe.Height > cudaCap) on an SDR, non-burn-in NVENC source.
+		vchain = fmt.Sprintf("scale_cuda=-2:%d:format=yuv420p", maxH)
+	case maxH > 0 && probe.Height > maxH:
 		vchain = fmt.Sprintf(
 			"scale=-2:%d:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,%s",
 			maxH, videoTail,
 		)
-	} else {
+	default:
 		vchain = fmt.Sprintf(
 			"scale=trunc(iw/2)*2:trunc(ih/2)*2,%s",
 			videoTail,
