@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1-beta] - 2026-06-10
+
+
+### Added
+
+- **stream**: UPnP-map the HTTPS port for remote direct-TLS (best-effort)
+
+### Fixed
+
+- **stream**: iOS exige total concreto en el Content-Range del remux
 ## [1.1.0-beta] - 2026-06-10
 
 
@@ -16,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **stream**: delay_moov en el remux para audio AAC con dts negativo
 - **stream**: no anunciar un total falso mientras el remux crece (loop de re-seek)
+
+### Other
+
+- **release**: 1.1.0-beta
 ## [1.0.9-beta] - 2026-06-10
 
 
@@ -786,6 +800,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.1.1-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.0-beta...v1.1.1-beta
 [1.1.0-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.9-beta...v1.1.0-beta
 [1.0.9-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.8-beta...v1.0.9-beta
 [1.0.8-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.7-beta...v1.0.8-beta
