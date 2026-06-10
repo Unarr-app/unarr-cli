@@ -1212,7 +1212,18 @@ func (s *HLSSession) serveCopyPlaylist(w http.ResponseWriter, r *http.Request) {
 	for {
 		data, err := os.ReadFile(path)
 		if err == nil && len(data) > 0 {
-			_, _ = w.Write(data)
+			// Until ENDLIST lands a copy session is a growing EVENT playlist,
+			// and some native players (iOS) treat any not-yet-ended playlist
+			// like LIVE and join at the live edge instead of position 0.
+			// EXT-X-START pins the start to 0 explicitly (RFC 8216 §4.3.5.2);
+			// harmless once the playlist is final.
+			out := data
+			if !strings.Contains(string(data), "#EXT-X-START") {
+				out = []byte(strings.Replace(string(data),
+					"#EXT-X-VERSION:7\n",
+					"#EXT-X-VERSION:7\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n", 1))
+			}
+			_, _ = w.Write(out)
 			return
 		}
 		if r.Context().Err() != nil || time.Now().After(deadline) {
