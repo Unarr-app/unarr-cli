@@ -191,7 +191,29 @@ type HLSSessionConfig struct {
 	// of the same file at the same quality skip ffmpeg entirely. nil disables
 	// caching (per-session tmpdir, deleted on Close — original behavior).
 	Cache *HLSCache
+	// VideoCopy switches the session to HLS-copy mode: ffmpeg `-c:v copy`
+	// (NEVER re-encodes video — I/O-bound, works on a GPU-less NAS), audio
+	// copied when already AAC or re-encoded to AAC otherwise. This replaces
+	// the fragile progressive-remux path (growing fMP4 over manual HTTP
+	// Range) with the robust segmented transport every player handles
+	// (hls.js + native iOS HLS). Differences from the encode mode, all
+	// driven by "segments cut at the SOURCE's keyframes, so their durations
+	// are unknown upfront":
+	//   - the media playlist is ffmpeg's own (EVENT → ENDLIST), served from
+	//     disk — not the pre-rendered uniform-2s VOD manifest;
+	//   - no seek-restart / auto-restart (copy outruns any viewer: the whole
+	//     file is remuxed at I/O speed, minutes at worst on a weak NAS);
+	//   - no HLS cache (re-generating costs no encode — caching would only
+	//     burn disk);
+	//   - StartSec is passed straight to `-ss` (keyframe-snapped by ffmpeg).
+	// See docs/plans/hls-copy-remux-replacement.md (web repo).
+	VideoCopy bool
 }
+
+// copyPlaylistName is the on-disk media playlist ffmpeg owns in VideoCopy
+// mode, under <tmpDir>/video/. Distinct from the encode mode's in-memory
+// manifest so the two can never be confused.
+const copyPlaylistName = "copy.m3u8"
 
 // sourceRef returns the ffmpeg/ffprobe input: the remote URL when set, else the
 // local path. Used everywhere a `-i` argument or a probe target is needed so
@@ -490,6 +512,12 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		fromCache      bool
 		writerLockHeld bool
 	)
+	if cfg.VideoCopy && cfg.Cache != nil {
+		// HLS-copy never caches: re-generating costs no encode (I/O-bound), so
+		// persisting segments would only burn cache budget that real transcodes
+		// need. Private per-session tmpdir, deleted on Close.
+		cfg.Cache = nil
+	}
 	if cfg.Cache != nil {
 		// Debrid URL sessions key by CacheID (info_hash) so re-plays hit cache
 		// despite the URL changing each resolution; local files key by path.
@@ -566,8 +594,16 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		writerLockHeld: writerLockHeld,
 		liveURL:        cfg.SourceURL, // mutable copy; cfg stays immutable
 	}
-	s.manifestVideo = renderVideoPlaylist(probe.DurationSec, segCount)
-	s.manifestRoot = renderMasterPlaylist(probe, cfg.Quality)
+	if cfg.VideoCopy {
+		// Copy mode: ffmpeg owns the media playlist (segments cut at the
+		// source's keyframes → durations unknown upfront, the uniform-2s
+		// pre-render would lie). ServeVideoPlaylist reads it from disk.
+		s.manifestVideo = ""
+		s.manifestRoot = renderMasterPlaylistCopy(probe)
+	} else {
+		s.manifestVideo = renderVideoPlaylist(probe.DurationSec, segCount)
+		s.manifestRoot = renderMasterPlaylist(probe, cfg.Quality)
+	}
 
 	// Cache HIT: every segment + init.mp4 is already on disk. Skip ffmpeg
 	// entirely and mark readyMax so handlers don't wait. Background subtitle
@@ -596,7 +632,12 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	// encode never seals the cache (allSegmentsPresent checks 0..N), matching
 	// today's post-seek behaviour.
 	startIdx := 0
-	if cfg.StartSec > 0 && cfg.StartSec < probe.DurationSec {
+	if cfg.VideoCopy {
+		// Copy mode always numbers from 0: segment indices don't map to
+		// uniform 2s slots, so a StartSec-derived index would be wrong. The
+		// resume seek itself is handled inside buildHLSCopyArgs via `-ss`
+		// (keyframe-snapped) + `-output_ts_offset`.
+	} else if cfg.StartSec > 0 && cfg.StartSec < probe.DurationSec {
 		startIdx = segmentIdxForTime(cfg.StartSec)
 		if startIdx > segCount-1 {
 			startIdx = segCount - 1
@@ -616,7 +657,12 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	// touching the parent ctx.
 	ffCtx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
-	args := buildHLSFFmpegArgsAt(cfg, probe, tmpDir, startIdx, segmentStartSec(startIdx))
+	var args []string
+	if cfg.VideoCopy {
+		args = buildHLSCopyArgs(cfg, probe, tmpDir)
+	} else {
+		args = buildHLSFFmpegArgsAt(cfg, probe, tmpDir, startIdx, segmentStartSec(startIdx))
+	}
 	cmd := exec.CommandContext(ffCtx, cfg.Transcode.FFmpegPath, args...)
 	cmd.Stderr = &hlsStderrCapture{owner: s}
 	if err := cmd.Start(); err != nil {
@@ -644,19 +690,27 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	// triaged from the agent log alone — `encoder=libx264 accel=none` means
 	// the user's ffmpeg has no HW encoders compiled in, which is the most
 	// common root cause (linuxbrew, default brew formula on macOS).
-	profile := ResolveEncoderProfile(cfg.Transcode.HWAccel, cfg.Transcode.Preset)
-	presetNote := ""
-	if profile.Preset != "" {
-		presetNote = " preset=" + profile.Preset
+	encoderNote := ""
+	if cfg.VideoCopy {
+		encoderNote = "encoder=copy (no video re-encode)"
+	} else {
+		profile := ResolveEncoderProfile(cfg.Transcode.HWAccel, cfg.Transcode.Preset)
+		presetNote := ""
+		if profile.Preset != "" {
+			presetNote = " preset=" + profile.Preset
+		}
+		encoderNote = fmt.Sprintf("encoder=%s accel=%s%s", profile.Codec, string(cfg.Transcode.HWAccel), presetNote)
 	}
 	startNote := ""
-	if startIdx > 0 {
+	if cfg.VideoCopy && cfg.StartSec > 0 {
+		startNote = fmt.Sprintf(" start=%.0fs", cfg.StartSec)
+	} else if startIdx > 0 {
 		startNote = fmt.Sprintf(" start=seg-%d@%.0fs", startIdx, segmentStartSec(startIdx))
 	}
-	log.Printf("[hls %s] started: %s, %.1fs, %d segs (quality=%s, encoder=%s accel=%s%s)%s%s",
+	log.Printf("[hls %s] started: %s, %.1fs, %d segs (quality=%s, %s)%s%s",
 		shortHLSID(cfg.SessionID), cfg.logName(),
 		probe.DurationSec, segCount, coalesce(cfg.Quality, "auto"),
-		profile.Codec, string(cfg.Transcode.HWAccel), presetNote, cachedNote, startNote)
+		encoderNote, cachedNote, startNote)
 	return s, nil
 }
 
@@ -953,6 +1007,15 @@ func (s *HLSSession) waitFFmpeg() {
 	}
 	log.Printf("[hls %s] ffmpeg exited: %v", shortHLSID(s.cfg.SessionID), err)
 
+	// Copy mode: no auto-restart. restartFromSegment's `-ss segmentStartSec(N)`
+	// math assumes uniform 2s segments, which copy mode doesn't have — a
+	// restart would corrupt the timeline. A failed copy surfaces through the
+	// player's probe deadline / fallback chain instead.
+	if s.cfg.VideoCopy {
+		log.Printf("[hls %s] copy session failed — not restarting (player falls back)", shortHLSID(s.cfg.SessionID))
+		return
+	}
+
 	// Decide whether to attempt an auto-restart. We don't restart when:
 	//   - the session was closed externally (kill on quality change etc.)
 	//   - we've already retried 3 times within the last 60 s (broken file)
@@ -1129,7 +1192,37 @@ func (s *HLSSession) ServeVideoPlaylist(w http.ResponseWriter, r *http.Request) 
 	s.Touch()
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-cache")
+	if s.cfg.VideoCopy {
+		s.serveCopyPlaylist(w, r)
+		return
+	}
 	_, _ = io.WriteString(w, s.manifestVideo)
+}
+
+// serveCopyPlaylist serves ffmpeg's own media playlist (VideoCopy mode). The
+// file appears within ~1 s of spawn (copy is I/O-bound) but the player's
+// first fetch can race it — poll briefly instead of returning a 404 hls.js
+// would surface as a manifest error. Each request re-reads the file: the
+// playlist GROWS (EVENT) until ffmpeg appends ENDLIST, and players re-poll
+// growing playlists by design.
+func (s *HLSSession) serveCopyPlaylist(w http.ResponseWriter, r *http.Request) {
+	path := filepath.Join(s.tmpDir, "video", copyPlaylistName)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil && len(data) > 0 {
+			_, _ = w.Write(data)
+			return
+		}
+		if r.Context().Err() != nil || time.Now().After(deadline) {
+			http.Error(w, "playlist not ready", http.StatusServiceUnavailable)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // ServeInit writes init.mp4 (the fMP4 init segment) to w.
@@ -1188,7 +1281,10 @@ func (s *HLSSession) ServeSegment(w http.ResponseWriter, r *http.Request, idx in
 	readyMax := s.readyMax
 	s.readyMu.Unlock()
 
-	if idx >= readyMax+hlsSeekAhead || idx < segStart {
+	// Copy mode never seek-restarts: ffmpeg outruns playback (I/O-bound), the
+	// playlist only lists fully-written segments (temp_file), and segment
+	// indices don't map to uniform 2s slots anyway. Just wait for the writer.
+	if !s.cfg.VideoCopy && (idx >= readyMax+hlsSeekAhead || idx < segStart) {
 		if err := s.restartFromSegment(idx); err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
@@ -1208,6 +1304,12 @@ func (s *HLSSession) ServeSegment(w http.ResponseWriter, r *http.Request, idx in
 // `-ss` offset corresponds to segment `targetIdx`. The caller must NOT hold
 // s.mu when calling — the function takes both s.mu and s.readyMu.
 func (s *HLSSession) restartFromSegment(targetIdx int) error {
+	if s.cfg.VideoCopy {
+		// Defensive: callers already gate on VideoCopy, but the `-ss
+		// segmentStartSec(N)` math below assumes uniform 2s segments and
+		// would corrupt a copy session's keyframe-cut timeline.
+		return errors.New("hls: seek-restart not supported in copy mode")
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -1783,6 +1885,122 @@ func renderVideoPlaylist(durationSec float64, segCount int) string {
 // video variant + every text subtitle as an EXT-X-MEDIA group. Audio is muxed
 // into the video segments for the MVP — separate audio renditions can come
 // later (they require a second ffmpeg pipeline producing audio-only segments).
+// buildHLSCopyArgs builds the ffmpeg invocation for VideoCopy mode: video
+// stream copied bit-exact (`-c:v copy`, the segments cut at the source's own
+// keyframes), audio copied when already AAC or re-encoded to AAC 192k
+// otherwise, muxed to fMP4 HLS with ffmpeg writing its OWN media playlist
+// (EVENT while running, ENDLIST on completion) with byte-exact EXTINF
+// durations. Validated empirically on the incident source (HEVC Main10 +
+// EAC3 MKV): seg-0 TTFB ~510 ms, valid hvc1+mp4a stream.
+//
+// Deliberate differences from the encode path:
+//   - no encoder/preset/bitrate/keyframe flags (nothing is encoded);
+//   - `+temp_file` so segments land atomically (write .tmp → rename) and a
+//     listed segment is always complete on disk;
+//   - playlist type EVENT: the timeline grows as ffmpeg outruns playback
+//     (I/O-bound) and players treat it as live-DVR until ENDLIST.
+func buildHLSCopyArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string) []string {
+	args := []string{"-y", "-hide_banner", "-loglevel", "warning", "-stats"}
+
+	// Resume: input-side seek snaps to the keyframe at/before StartSec (demux
+	// seek — instant). -output_ts_offset keeps the fragments' tfdt on the
+	// absolute timeline so the player's clock matches the real position.
+	if cfg.StartSec > 0 && cfg.StartSec < probe.DurationSec {
+		ss := strconv.FormatFloat(cfg.StartSec, 'f', 3, 64)
+		args = append(args, "-ss", ss)
+	}
+
+	if cfg.SourceURL != "" {
+		args = append(args,
+			"-reconnect", "1",
+			"-reconnect_streamed", "1",
+			"-reconnect_delay_max", "5",
+			"-rw_timeout", "30000000",
+		)
+	}
+	args = append(args, "-i", cfg.sourceRef())
+	if cfg.StartSec > 0 && cfg.StartSec < probe.DurationSec {
+		args = append(args, "-output_ts_offset", strconv.FormatFloat(cfg.StartSec, 'f', 3, 64))
+	}
+
+	// Map video + selected audio (same clamping rules as the encode path).
+	args = append(args, "-map", "0:v:0")
+	audioIdx := cfg.AudioIndex
+	if audioIdx < 0 {
+		audioIdx = 0
+		for i, a := range probe.AudioTracks {
+			if a.Default {
+				audioIdx = i
+				break
+			}
+		}
+	}
+	if n := len(probe.AudioTracks); n > 0 && audioIdx >= n {
+		log.Printf("[hls %s] audioIndex %d out of range (%d audio track(s)) — using 0:a:0",
+			shortHLSID(cfg.SessionID), audioIdx, n)
+		audioIdx = 0
+	}
+	args = append(args, "-map", fmt.Sprintf("0:a:%d?", audioIdx))
+
+	// Video: bit-exact copy. HEVC needs the hvc1 tag or Safari/Apple refuses
+	// the track (mkv extracts default to hev1).
+	args = append(args, "-c:v", "copy")
+	if strings.EqualFold(probe.VideoCodec, "hevc") {
+		args = append(args, "-tag:v", "hvc1")
+	}
+
+	// Audio: copy when the SELECTED track is already AAC, else AAC 192k.
+	// (fMP4 HLS carries AAC universally; EAC3/DTS/TrueHD do not.)
+	audioCodec := probe.AudioCodec
+	if audioIdx < len(probe.AudioTracks) {
+		audioCodec = probe.AudioTracks[audioIdx].Codec
+	}
+	if strings.EqualFold(audioCodec, "aac") {
+		args = append(args, "-c:a", "copy")
+	} else {
+		args = append(args, "-c:a", "aac", "-b:a", "192k")
+	}
+
+	args = append(args,
+		"-f", "hls",
+		"-hls_time", strconv.Itoa(hlsSegmentDuration),
+		"-hls_playlist_type", "event",
+		"-hls_segment_type", "fmp4",
+		"-hls_list_size", "0",
+		"-hls_flags", "independent_segments+temp_file",
+		"-hls_fmp4_init_filename", "init.mp4",
+		"-hls_segment_filename", filepath.Join(tmpDir, "video", "seg-%d.m4s"),
+		filepath.Join(tmpDir, "video", copyPlaylistName),
+	)
+	return args
+}
+
+// renderMasterPlaylistCopy builds the master playlist for VideoCopy mode.
+// Unlike the encode master it deliberately OMITS the CODECS attribute: the
+// stream carries the source's codec verbatim (hvc1/avc1/av01 at whatever
+// profile/level the file has) and a wrong hardcoded string makes iOS reject
+// the variant outright, while omission is legal and universally tolerated.
+// Resolution/bandwidth are the source's real values (best-effort).
+func renderMasterPlaylistCopy(probe *StreamProbe) string {
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n")
+	b.WriteString("#EXT-X-VERSION:7\n")
+	// BANDWIDTH is advisory (single variant, no ABR) — a height-based
+	// estimate of typical source bitrates is plenty.
+	bw := 8_000_000
+	switch {
+	case probe.Height >= 2000:
+		bw = 25_000_000
+	case probe.Height >= 1000:
+		bw = 10_000_000
+	case probe.Height >= 700:
+		bw = 5_000_000
+	}
+	b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d\n", bw, probe.Width, probe.Height))
+	b.WriteString("video/index.m3u8\n")
+	return b.String()
+}
+
 func renderMasterPlaylist(probe *StreamProbe, qualityLabel string) string {
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")

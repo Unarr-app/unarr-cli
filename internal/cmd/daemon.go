@@ -998,6 +998,7 @@ func runDaemonStart() error {
 			BurnSubtitleIndex: sess.BurnSubtitleIndex,
 			StartSec:          sess.StartSec,
 			Prewarm:           sess.Prewarm,
+			VideoCopy:         sess.VideoCopy,
 			Transcode:         tcRuntime,
 			Cache:             hlsCache,
 		}, hlsCtx, hlsCancel)
