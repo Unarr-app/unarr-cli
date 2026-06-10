@@ -98,6 +98,19 @@ func TestBuildHLSFFmpegArgsRateControl(t *testing.T) {
 		}
 	})
 
+	t.Run("qsv keeps bitrate + forced_idr", func(t *testing.T) {
+		cfg := base
+		cfg.Transcode.HWAccel = HWAccelQSV
+		got := strings.Join(buildHLSFFmpegArgsAt(cfg, probe, "/tmp/tmpdir", 0, 0), " ")
+		// -forced_idr 1 (QSV's spelling): same non-IDR forced-keyframe failure
+		// mode as NVENC — without it segments stretch to the full GOP.
+		for _, want := range []string{"-look_ahead 0", "-forced_idr 1", "-b:v 6000k"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("qsv argv missing %q\n%s", want, got)
+			}
+		}
+	})
+
 	t.Run("vaapi keeps fixed-bitrate triple", func(t *testing.T) {
 		cfg := base
 		cfg.Transcode.HWAccel = HWAccelVAAPI
