@@ -135,9 +135,12 @@ func TestServeGrowing_BoundedRange(t *testing.T) {
 	}
 }
 
-func TestServeGrowing_EstimateUsedWhileNotFinal(t *testing.T) {
-	// Not final: only 8 bytes produced, but estimate says 100. The advertised
-	// total is the estimate (scrubber timeline); body is what exists so far.
+func TestServeGrowing_UnknownTotalWhileNotFinal(t *testing.T) {
+	// Not final: only 8 bytes produced, estimate says 100. The instance length
+	// is genuinely unknown while the remux grows, so we advertise "/*" (RFC 7233
+	// §4.2) instead of a total the native player would map its timeline onto and
+	// re-seek against (the playback loop). The estimate is only an upper-bound
+	// hint for `end`; body is what exists so far.
 	src := &fakeGrowing{data: []byte("01234567"), final: false, est: 100}
 	ss := &StreamServer{}
 
@@ -149,8 +152,8 @@ func TestServeGrowing_EstimateUsedWhileNotFinal(t *testing.T) {
 	if res.StatusCode != http.StatusPartialContent {
 		t.Fatalf("status = %d, want 206", res.StatusCode)
 	}
-	if got := res.Header.Get("Content-Range"); got != "bytes 0-99/100" {
-		t.Errorf("Content-Range = %q, want bytes 0-99/100 (estimate)", got)
+	if got := res.Header.Get("Content-Range"); got != "bytes 0-99/*" {
+		t.Errorf("Content-Range = %q, want bytes 0-99/* (unknown total)", got)
 	}
 	// Not final → no exact Content-Length (chunked) so we never promise bytes
 	// a still-running remux might not produce.
@@ -163,6 +166,8 @@ func TestServeGrowing_EstimateUsedWhileNotFinal(t *testing.T) {
 }
 
 func TestServeGrowing_HeadProbe(t *testing.T) {
+	// HEAD while growing: total is unknown, so no Content-Length is promised
+	// (advertising the estimate is the bug this fix removes).
 	src := &fakeGrowing{data: make([]byte, 0), final: false, est: 4242}
 	ss := &StreamServer{}
 
@@ -174,11 +179,29 @@ func TestServeGrowing_HeadProbe(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("HEAD status = %d, want 200", res.StatusCode)
 	}
-	if got := res.Header.Get("Content-Length"); got != "4242" {
-		t.Errorf("HEAD Content-Length = %q, want 4242", got)
+	if got := res.Header.Get("Content-Length"); got != "" {
+		t.Errorf("HEAD Content-Length = %q, want empty (unknown total while growing)", got)
 	}
 	if rec.Body.Len() != 0 {
 		t.Errorf("HEAD body = %d bytes, want 0", rec.Body.Len())
+	}
+}
+
+func TestServeGrowing_HeadProbeFinal(t *testing.T) {
+	// HEAD once final: the true total IS known, so advertise it.
+	src := &fakeGrowing{data: make([]byte, 4242), final: true}
+	ss := &StreamServer{}
+
+	req := httptest.NewRequest(http.MethodHead, "/stream", nil)
+	rec := httptest.NewRecorder()
+	ss.serveGrowing(rec, req, src)
+
+	res := rec.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD status = %d, want 200", res.StatusCode)
+	}
+	if got := res.Header.Get("Content-Length"); got != "4242" {
+		t.Errorf("HEAD Content-Length = %q, want 4242 (final size known)", got)
 	}
 }
 
