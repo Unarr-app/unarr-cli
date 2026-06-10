@@ -684,10 +684,28 @@ func runDaemonStart() error {
 		failSession := func(sessionID, code, message string) {
 			log.Printf("[hls %s] failed (%s): %s", agent.ShortID(sessionID), code, message)
 			go func() {
-				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				// Fresh context on purpose: failures cluster exactly when the
+				// daemon ctx is being cancelled (shutdown kills in-flight
+				// session starts), and a report derived from it would die
+				// before reaching the web. The 10s cap still bounds it.
+				rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				if err := agentClient.ReportSessionError(rctx, sessionID, code, message); err != nil {
 					log.Printf("[hls %s] session error report failed: %v", agent.ShortID(sessionID), err)
+				}
+			}()
+		}
+
+		// markReady reports "first bytes are servable" for the no-transcode
+		// paths (direct-play, remux, debrid direct) — one place instead of a
+		// copy per branch. HLS sessions report via watchSessionReady instead
+		// (they wait for seg-0 + attach a health snapshot).
+		markReady := func(sessionID string) {
+			go func() {
+				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				if err := agentClient.MarkSessionReady(rctx, sessionID, nil); err != nil {
+					log.Printf("[stream %s] mark-ready failed: %v", agent.ShortID(sessionID), err)
 				}
 			}()
 		}
@@ -743,7 +761,7 @@ func runDaemonStart() error {
 				if err != nil {
 					playerSessionRegistry.remove(hlsCfg.SessionID)
 					hlsCancel()
-					failSession(hlsCfg.SessionID, "start_failed", err.Error())
+					failSession(hlsCfg.SessionID, sessErrStartFailed, err.Error())
 					return
 				}
 				if prewarm {
@@ -783,17 +801,13 @@ func runDaemonStart() error {
 				provider, perr := engine.NewDebridFileProvider(bctx, sess.DirectURL, sess.FileName, sess.FileSize, refresh)
 				if perr != nil {
 					playerSessionRegistry.remove(sess.SessionID)
-					failSession(sess.SessionID, "start_failed", fmt.Sprintf("debrid provider: %v", perr))
+					failSession(sess.SessionID, sessErrStartFailed, fmt.Sprintf("debrid provider: %v", perr))
 					return
 				}
 				streamSrv.SetFile(provider, sess.TaskID)
 				log.Printf("[stream %s] debrid direct-play: %s (%d bytes)",
 					agent.ShortID(sess.SessionID), provider.FileName(), provider.FileSize())
-				rctx, rcancel := context.WithTimeout(ctx, 10*time.Second)
-				defer rcancel()
-				if err := agentClient.MarkSessionReady(rctx, sess.SessionID, nil); err != nil {
-					log.Printf("[stream %s] mark-ready failed: %v", agent.ShortID(sess.SessionID), err)
-				}
+				markReady(sess.SessionID)
 			}()
 			return
 		}
@@ -806,7 +820,7 @@ func runDaemonStart() error {
 		if sess.DirectURL != "" { // playMethod == "hls" implied (2a returned above)
 			tcRuntime := buildTranscodeRuntime(ctx, cfg)
 			if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
-				failSession(sess.SessionID, "ffmpeg_unavailable", "ffmpeg/ffprobe unavailable (debrid HLS)")
+				failSession(sess.SessionID, sessErrFfmpegMissing, "ffmpeg/ffprobe unavailable (debrid HLS)")
 				return
 			}
 			hlsCtx, hlsCancel := context.WithCancel(ctx)
@@ -833,7 +847,7 @@ func runDaemonStart() error {
 		}
 
 		if sess.FilePath == "" {
-			failSession(sess.SessionID, "start_failed", "empty file path")
+			failSession(sess.SessionID, sessErrStartFailed, "empty file path")
 			return
 		}
 		// SAME base-path self-heal + stat-retry + dir resolution as the raw
@@ -864,19 +878,13 @@ func runDaemonStart() error {
 			log.Printf("[stream %s] direct-play: %s", agent.ShortID(sess.SessionID), filepath.Base(filePath))
 			// File is on disk → ready immediately. Tell the web so the player
 			// attaches <video src> without burning its HEAD-probe retry budget.
-			go func() {
-				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				defer cancel()
-				if err := agentClient.MarkSessionReady(rctx, sess.SessionID, nil); err != nil {
-					log.Printf("[stream %s] mark-ready failed: %v", agent.ShortID(sess.SessionID), err)
-				}
-			}()
+			markReady(sess.SessionID)
 			return
 		}
 
 		tcRuntime := buildTranscodeRuntime(ctx, cfg)
 		if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
-			failSession(sess.SessionID, "ffmpeg_unavailable", "ffmpeg/ffprobe unavailable")
+			failSession(sess.SessionID, sessErrFfmpegMissing, "ffmpeg/ffprobe unavailable")
 			return
 		}
 
@@ -890,7 +898,7 @@ func runDaemonStart() error {
 			probe, perr := engine.ProbeFile(probeCtx, tcRuntime.FFprobePath, filePath)
 			cancelProbe()
 			if perr != nil {
-				failSession(sess.SessionID, "start_failed", fmt.Sprintf("remux probe: %v", perr))
+				failSession(sess.SessionID, sessErrStartFailed, fmt.Sprintf("remux probe: %v", perr))
 				return
 			}
 			tProbe := time.Now()
@@ -898,7 +906,7 @@ func runDaemonStart() error {
 			src, serr := engine.NewRemuxSource(remuxCtx, filePath, probe, tcRuntime.FFmpegPath, sess.FileName)
 			if serr != nil {
 				remuxCancel()
-				failSession(sess.SessionID, "start_failed", fmt.Sprintf("remux start: %v", serr))
+				failSession(sess.SessionID, sessErrStartFailed, fmt.Sprintf("remux start: %v", serr))
 				return
 			}
 			streamSrv.SetGrowingFile(src, sess.TaskID)
@@ -912,13 +920,7 @@ func runDaemonStart() error {
 			log.Printf("[stream %s] remux (copy) → fMP4: %s [probe=%v spawn=%v]",
 				agent.ShortID(sess.SessionID), filepath.Base(filePath),
 				tProbe.Sub(tStart).Round(time.Millisecond), time.Since(tProbe).Round(time.Millisecond))
-			go func() {
-				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				defer cancel()
-				if err := agentClient.MarkSessionReady(rctx, sess.SessionID, nil); err != nil {
-					log.Printf("[stream %s] mark-ready failed: %v", agent.ShortID(sess.SessionID), err)
-				}
-			}()
+			markReady(sess.SessionID)
 			return
 		}
 
@@ -1153,13 +1155,16 @@ func relocateUnreachable(filePath string, allowedRoots []string) string {
 }
 
 // Stable machine codes for the web's session-error channel
-// (POST /api/internal/agent/session-error). Only "file_missing" triggers
+// (POST /api/internal/agent/session-error) — mirrored by
+// SESSION_ERROR_CODES in the web repo. Only "file_missing" triggers
 // destructive self-heal on the web (it prunes the stale library row + task
 // pointer), so the resolver must never return it while the file may exist.
 const (
-	pathErrRejected = "path_rejected"
-	pathErrMissing  = "file_missing"
-	pathErrNoVideo  = "no_video_file"
+	pathErrRejected      = "path_rejected"
+	pathErrMissing       = "file_missing"
+	pathErrNoVideo       = "no_video_file"
+	sessErrFfmpegMissing = "ffmpeg_unavailable"
+	sessErrStartFailed   = "start_failed"
 )
 
 // resolvePlayableFile validates and self-heals a web-provided source path into
