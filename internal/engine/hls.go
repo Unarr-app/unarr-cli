@@ -205,7 +205,8 @@ type HLSSessionConfig struct {
 	//     file is remuxed at I/O speed, minutes at worst on a weak NAS);
 	//   - no HLS cache (re-generating costs no encode — caching would only
 	//     burn disk);
-	//   - StartSec is passed straight to `-ss` (keyframe-snapped by ffmpeg).
+	//   - StartSec is ignored: copy produces from 0 (outruns playback at I/O
+	//     speed); an offset EVENT playlist breaks iOS's native HLS parser.
 	// See docs/plans/hls-copy-remux-replacement.md (web repo).
 	VideoCopy bool
 }
@@ -1902,13 +1903,14 @@ func renderVideoPlaylist(durationSec float64, segCount int) string {
 func buildHLSCopyArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string) []string {
 	args := []string{"-y", "-hide_banner", "-loglevel", "warning", "-stats"}
 
-	// Resume: input-side seek snaps to the keyframe at/before StartSec (demux
-	// seek — instant). -output_ts_offset keeps the fragments' tfdt on the
-	// absolute timeline so the player's clock matches the real position.
-	if cfg.StartSec > 0 && cfg.StartSec < probe.DurationSec {
-		ss := strconv.FormatFloat(cfg.StartSec, 'f', 3, 64)
-		args = append(args, "-ss", ss)
-	}
+	// StartSec is INTENTIONALLY ignored in copy mode: an EVENT playlist whose
+	// entries start at position 0 while the fragments carry an offset tfdt
+	// (-ss + -output_ts_offset) is exactly the shape iOS's native HLS parser
+	// chokes on (observed 2026-06-10: resume at 368s → player error + session
+	// re-bootstrap loop on iPhone). Copy always produces from 0 with true
+	// absolute PTS — it outruns playback at I/O speed, so the resume point
+	// appears in the growing timeline within seconds and the player's own
+	// startPosition seek lands normally.
 
 	if cfg.SourceURL != "" {
 		args = append(args,
@@ -1919,9 +1921,6 @@ func buildHLSCopyArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string) [
 		)
 	}
 	args = append(args, "-i", cfg.sourceRef())
-	if cfg.StartSec > 0 && cfg.StartSec < probe.DurationSec {
-		args = append(args, "-output_ts_offset", strconv.FormatFloat(cfg.StartSec, 'f', 3, 64))
-	}
 
 	// Map video + selected audio (same clamping rules as the encode path).
 	args = append(args, "-map", "0:v:0")

@@ -205,8 +205,9 @@ func TestHLSCopy_ResumeStartSec(t *testing.T) {
 		[]string{"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"},
 		[]string{"-c:a", "aac", "-b:a", "128k"}, 12)
 	_, pl := runCopySession(t, rt, src, 6)
-	// Resume covers roughly the back half (keyframe-snapped, so allow the
-	// full GOP of slack: 60 frames @30fps = 2s).
+	// StartSec must be IGNORED in copy mode: the playlist covers the FULL
+	// timeline from 0 (an offset EVENT playlist breaks iOS's native parser;
+	// the player seeks to the resume point itself). Sum ≈ full 12s.
 	var sum float64
 	for _, line := range strings.Split(pl, "\n") {
 		if strings.HasPrefix(line, "#EXTINF:") {
@@ -215,8 +216,8 @@ func TestHLSCopy_ResumeStartSec(t *testing.T) {
 			sum += d
 		}
 	}
-	if sum < 4 || sum > 9 {
-		t.Errorf("resume EXTINF sum = %.2fs, want ≈6s (12s source, -ss 6, ±GOP)", sum)
+	if sum < 10.5 || sum > 13.5 {
+		t.Errorf("copy EXTINF sum = %.2fs, want ≈12s (StartSec ignored, full timeline)", sum)
 	}
 }
 
