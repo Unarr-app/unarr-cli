@@ -67,11 +67,12 @@ type StreamServer struct {
 	growing  GrowingSource // set instead of provider for the progressive-remux path (3b)
 	taskID   string        // current task being streamed
 
-	server      *http.Server
-	port        int
-	url         string     // best single URL (backward compat)
-	urls        StreamURLs // all available URLs by network type
-	upnpMapping *UPnPMapping
+	server           *http.Server
+	port             int
+	url              string     // best single URL (backward compat)
+	urls             StreamURLs // all available URLs by network type
+	upnpMapping      *UPnPMapping
+	httpsUpnpMapping *UPnPMapping // WAN mapping for the direct-TLS HTTPS port
 
 	// TLS — optional HTTPS listener for direct, valid-cert browser playback
 	// (agent-TLS feature). httpsPort 0 = disabled. tlsCert holds the current
@@ -461,6 +462,21 @@ func (ss *StreamServer) listenTLS(ctx context.Context, mux http.Handler) error {
 	}
 	ss.httpsPort = listener.Addr().(*net.TCPAddr).Port
 
+	// Best-effort: publish the HTTPS port to the WAN so a remote browser can hit
+	// the per-agent direct-TLS host (https://<pubip>.<hash>.agent.unarr.app:<port>)
+	// without a manual port-forward. Mapped here — after the actual bound port is
+	// known — so the web (which encodes the reported httpsPort) and the router
+	// agree. If UPnP/NAT-PMP isn't available the remote path just falls back to
+	// the CloudFlare funnel; the LAN direct path is unaffected.
+	if ss.enableUPnP {
+		if m, err := SetupUPnP(ss.httpsPort); err != nil {
+			log.Printf("[stream] HTTPS UPnP failed: %v (remote direct-TLS falls back to the funnel)", err)
+		} else {
+			ss.httpsUpnpMapping = m
+			log.Printf("[stream] HTTPS UPnP: published port %d to WAN via %s:%d", ss.httpsPort, m.ExternalIP, m.ExternalPort)
+		}
+	}
+
 	tlsCfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		NextProtos: []string{"h2", "http/1.1"},
@@ -634,6 +650,7 @@ func (ss *StreamServer) IdleSince() time.Duration {
 // Call only at daemon shutdown — NOT between file swaps.
 func (ss *StreamServer) Shutdown(ctx context.Context) error {
 	ss.upnpMapping.Remove()
+	ss.httpsUpnpMapping.Remove()
 	if ss.hls != nil {
 		ss.hls.CloseAll()
 	}
