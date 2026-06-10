@@ -302,8 +302,16 @@ func buildFFmpegArgs(filePath string, opts TranscodeOpts) []string {
 	//     until the whole mdat lands and playback never starts.
 	//   * negative_cts_offsets: lets b-frames carry the right pts/dts so
 	//     decoders don't reset the playhead to 0 every fragment.
+	//   * delay_moov: a re-encoded AAC track starts with a negative dts (the
+	//     encoder priming/delay). With empty_moov the moov is written up front,
+	//     BEFORE that delay is known, so the first fragment is malformed and a
+	//     strict demuxer (Safari, and any browser the way Apple decodes HEVC)
+	//     never initialises playback — the <video> loads bytes but never starts,
+	//     and the player re-bootstraps the session every few seconds. delay_moov
+	//     holds the moov until the first packet so the priming dts is handled.
+	//     (Was the "remux loads in Network but won't play" bug.)
 	args = append(args,
-		"-movflags", "+frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets",
+		"-movflags", "+frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets+delay_moov",
 		"-frag_duration", "1000000",
 		"-f", "mp4",
 		"pipe:1",
