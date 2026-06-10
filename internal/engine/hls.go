@@ -1483,12 +1483,21 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		// scene-cut). No B-frame reorder → monotonic DTS → uniform segments, no
 		// "Packet duration is out of range" flood. Safe with -force_key_frames
 		// (unlike -tune ll, which broke per-segment cuts — see note above).
-		args = append(args, "-preset", profile.Preset, "-rc", "vbr", "-bf", "0", "-no-scenecut", "1")
+		// -forced-idr 1 is LOAD-BEARING: NVENC emits -force_key_frames frames
+		// as plain (non-IDR) I-frames on current ffmpeg/driver combos, the HLS
+		// muxer only cuts on IDR, and every segment silently stretches to the
+		// default GOP (250 frames ≈ 10.4 s @24fps) while the server-rendered
+		// playlist still promises hlsSegmentDuration. The PTS↔playlist mismatch
+		// breaks seeks and desyncs subtitles (measured 2026-06-10: 3 segments
+		// per 30 s instead of 15; with -forced-idr exactly 15).
+		args = append(args, "-preset", profile.Preset, "-rc", "vbr", "-bf", "0", "-no-scenecut", "1", "-forced-idr", "1")
 	case "h264_qsv":
 		// veryfast is the fastest realistic QSV preset; medium was too
 		// conservative for first-start. look_ahead=0 keeps the encoder
 		// truly low-latency (no rate-control look-ahead window).
-		args = append(args, "-preset", profile.Preset, "-look_ahead", "0")
+		// -forced_idr: same non-IDR forced-keyframe failure mode as NVENC (see
+		// above) — QSV's AVOption spells it with an underscore.
+		args = append(args, "-preset", profile.Preset, "-look_ahead", "0", "-forced_idr", "1")
 	case "h264_videotoolbox":
 		// VideoToolbox has no "preset" knob; `-realtime` flips into the
 		// low-latency path used by FaceTime. We let the `-b:v / -maxrate

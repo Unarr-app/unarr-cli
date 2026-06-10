@@ -88,7 +88,10 @@ func TestBuildHLSFFmpegArgsRateControl(t *testing.T) {
 		cfg := base
 		cfg.Transcode.HWAccel = HWAccelNVENC
 		got := strings.Join(buildHLSFFmpegArgsAt(cfg, probe, "/tmp/tmpdir", 0, 0), " ")
-		for _, want := range []string{"-rc vbr", "-cq 23", "-b:v 0", "-maxrate 6000k", "-bufsize 12000k"} {
+		// -forced-idr 1 is load-bearing: without it NVENC emits the forced
+		// keyframes as non-IDR and every HLS segment stretches to the full
+		// GOP, desyncing the playlist timeline (subs/seeks).
+		for _, want := range []string{"-rc vbr", "-cq 23", "-b:v 0", "-maxrate 6000k", "-bufsize 12000k", "-forced-idr 1"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("nvenc argv missing %q\n%s", want, got)
 			}
