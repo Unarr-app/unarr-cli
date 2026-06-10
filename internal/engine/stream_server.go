@@ -1477,38 +1477,34 @@ func (ss *StreamServer) serveGrowing(w http.ResponseWriter, r *http.Request, src
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", src.FileName()))
 
-	// The instance length is KNOWN only once ffmpeg has exited. While the remux
-	// is still growing, the final size is genuinely unknown — the source MKV
-	// size is NOT it (the audio re-encode to AAC + fMP4 fragmentation change the
-	// byte count). Advertising that wrong total made the native <video> map its
-	// timeline onto a bogus length, request byte offsets that didn't line up,
-	// re-seek, and reopen the connection hundreds of times a second (the remux
-	// playback loop). Per RFC 7233 §4.2 we now send "/*" (unknown total) while
-	// growing, so the player streams sequentially instead of re-seeking against
-	// a fake size. `end` uses the estimate only as an upper-bound hint.
+	// Total to advertise. iOS/WebKit opens every <video src> with a tiny
+	// "bytes=0-1" probe and REFUSES to play unless that 206 carries a concrete
+	// instance length in Content-Range (bytes 0-1/<total>); "/*" (unknown total)
+	// makes it bail and re-bootstrap the session forever. So we always advertise
+	// a numeric total: the exact size once ffmpeg has exited, the estimate while
+	// still growing. The estimate isn't the byte-exact final size (the audio
+	// re-encode + fMP4 fragmentation shift it), but that's fine — the real
+	// re-seek loop on a growing source was the malformed init segment, fixed by
+	// the encoder's +delay_moov (see buildFFmpegArgs), NOT the advertised total.
 	final := src.Final()
-	total := src.Size()
-	if !final {
-		total = src.EstimatedSize()
+	total := src.EstimatedSize()
+	if final {
+		total = src.Size()
 	}
 	if total <= 0 {
 		total = src.Size()
 	}
 
 	start, explicitEnd := parseByteRange(r.Header.Get("Range"))
-	// A 416 is only sound against a KNOWN total. While growing we can't say a
-	// start is unsatisfiable (more bytes are still coming), so only guard when
-	// final.
-	if final && total > 0 && start >= total {
-		// Range beyond the real end — let the browser recover.
+	if total > 0 && start >= total {
+		// Range beyond what we expect to produce — let the browser recover.
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
 		http.Error(w, "range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
 
 	if r.Method == http.MethodHead {
-		// Only promise a length we actually know (final). While growing, omit it.
-		if final && total > 0 {
+		if total > 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(total, 10))
 		}
 		w.WriteHeader(http.StatusOK)
@@ -1522,20 +1518,13 @@ func (ss *StreamServer) serveGrowing(w http.ResponseWriter, r *http.Request, src
 	if end < start {
 		end = start
 	}
-	if final {
-		if total > 0 {
-			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
-		}
-		// Exact Content-Length only when final (true size known) so we never
-		// promise bytes a still-running remux might not produce.
-		if explicitEnd < 0 {
-			w.Header().Set("Content-Length", strconv.FormatInt(src.Size()-start, 10))
-		}
-	} else {
-		// Growing: honest "unknown total" so the player doesn't re-seek against
-		// a wrong size. No Content-Length (chunked) — bytes flow as ffmpeg makes
-		// them and the read loop below blocks at the live edge.
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/*", start, end))
+	if total > 0 {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
+	}
+	// Exact Content-Length only when the source is final (true size known) so we
+	// never promise bytes a still-running remux might not produce.
+	if final && explicitEnd < 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(src.Size()-start, 10))
 	}
 	w.WriteHeader(http.StatusPartialContent)
 
