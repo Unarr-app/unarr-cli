@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0-beta] - 2026-06-10
+
+
+### Added
+
+- **hls**: full-GPU scale_cuda for NVENC SDR downscales
+
+### Fixed
+
+- **stream**: delay_moov en el remux para audio AAC con dts negativo
+- **stream**: no anunciar un total falso mientras el remux crece (loop de re-seek)
 ## [1.0.9-beta] - 2026-06-10
 
 
@@ -15,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **daemon**: reportar fallos de arranque de sesión a la web + scan en sesión única
+
+### Other
+
+- **release**: 1.0.9-beta
 ## [1.0.8-beta] - 2026-06-10
 
 
@@ -60,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **agent**: per-agent direct-TLS cert client + HTTPS listener wiring
 - **stream**: live transcode telemetry from ffmpeg speed=
 
 ### Documentation
@@ -770,6 +786,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.1.0-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.9-beta...v1.1.0-beta
 [1.0.9-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.8-beta...v1.0.9-beta
 [1.0.8-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.7-beta...v1.0.8-beta
 [1.0.7-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.6-beta...v1.0.7-beta
