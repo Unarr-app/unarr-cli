@@ -1959,20 +1959,22 @@ func buildHLSCopyArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string) [
 		args = append(args, "-tag:v", "hvc1")
 	}
 
-	// Audio: copy when the SELECTED track is already AAC, else AAC 192k.
-	// (fMP4 HLS carries AAC universally; EAC3/DTS/TrueHD do not.)
+	// Audio: copy ONLY when the selected track is AAC with ≤2 channels —
+	// WebKit/Apple HLS rejects multichannel AAC at the first media segment
+	// (observed via the Safari access log: master → index → init → seg-0
+	// fetched twice, then silence — every 5.1 movie failed on iPhone while
+	// stereo-AAC episodes played). Anything else (non-AAC, or AAC 5.1+) is
+	// re-encoded mirroring the encode path exactly: AAC stereo 48k. The
+	// original multichannel track stays intact for external players.
 	audioCodec := probe.AudioCodec
+	audioChannels := 0
 	if audioIdx < len(probe.AudioTracks) {
 		audioCodec = probe.AudioTracks[audioIdx].Codec
+		audioChannels = probe.AudioTracks[audioIdx].Channels
 	}
-	if strings.EqualFold(audioCodec, "aac") {
+	if strings.EqualFold(audioCodec, "aac") && audioChannels > 0 && audioChannels <= 2 {
 		args = append(args, "-c:a", "copy")
 	} else {
-		// Mirror the encode path exactly: AAC stereo 48k. WITHOUT -ac 2 a 5.1
-		// source produces 6-channel ffmpeg-native AAC, which WebKit/Apple HLS
-		// rejects at the first media segment (observed via Safari access log:
-		// master → index → init → seg-0 fetched twice, then silence — every
-		// 5.1 movie failed on iPhone while stereo-AAC episodes played).
 		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2")
 	}
 

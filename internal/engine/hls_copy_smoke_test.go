@@ -205,6 +205,25 @@ func TestHLSCopy_Hevc10Eac3_IncidentShape(t *testing.T) {
 	}
 }
 
+func TestHLSCopy_Aac51MustReencode(t *testing.T) {
+	// AAC is NOT copy-safe when multichannel: WebKit rejects 6-channel AAC at
+	// the first media segment exactly like re-encoded 5.1. Source AAC 5.1 →
+	// must re-encode to stereo, never copy.
+	rt := copyTestRuntime(t)
+	src := genSource(t, rt, "aac51.mkv",
+		[]string{"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"},
+		[]string{"-c:a", "aac", "-ac", "6", "-b:a", "256k"}, 8)
+	s, pl := runCopySession(t, rt, src, 0)
+	assertCopyOutput(t, rt, s, pl, "h264", "aac", 8)
+	args := buildHLSCopyArgs(s.cfg, s.probe, s.tmpDir)
+	if containsSeq(args, "-c:a", "copy") {
+		t.Errorf("AAC 5.1 must NOT be copied (WebKit rejects multichannel AAC), args: %v", args)
+	}
+	if !containsSeq(args, "-ac", "2") {
+		t.Errorf("AAC 5.1 must re-encode to stereo, args: %v", args)
+	}
+}
+
 func TestHLSCopy_ResumeStartSec(t *testing.T) {
 	rt := copyTestRuntime(t)
 	src := genSource(t, rt, "resume.mkv",
