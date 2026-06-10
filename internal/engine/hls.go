@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,6 +64,17 @@ func segmentStartSec(idx int) float64 {
 		return 0
 	}
 	return float64(idx * hlsSegmentDuration)
+}
+
+// segmentIdxForTime returns the index of the segment containing second `sec`
+// of the timeline — the inverse of segmentStartSec. Used to translate a
+// session's StartSec (resume position) into the segment the FIRST ffmpeg
+// should start writing from.
+func segmentIdxForTime(sec float64) int {
+	if sec <= 0 {
+		return 0
+	}
+	return int(sec / float64(hlsSegmentDuration))
 }
 
 // segmentCountForDuration returns how many segments cover a source of the
@@ -159,7 +171,21 @@ type HLSSessionConfig struct {
 	// with the clean one. Forces the video re-encode the HLS path already does
 	// to also composite the subtitle overlay.
 	BurnSubtitleIndex *int
-	Transcode         TranscodeRuntime
+	// StartSec is the playback position (seconds) the viewer will start at —
+	// the saved resume point, or the current position on a quality/audio
+	// switch. When > 0 the FIRST ffmpeg spawns already seeked there
+	// (`-ss` + `-output_ts_offset` + `-start_number`, the same flags as a
+	// seek-restart), instead of encoding from segment 0 only to be
+	// killed by an immediate seek-restart when the player asks for the resume
+	// segment (double spawn, slow resume). 0 = start at the beginning.
+	// Ignored on a cache HIT (every segment is already on disk).
+	StartSec float64
+	// Prewarm marks a background cache-fill session. The daemon defers its
+	// encode until no live encode runs and registers it via RegisterKeep
+	// (never evicting the viewer). It also lets a REAL session close stale
+	// prewarms up front so the cache writer-lock is free for the viewer.
+	Prewarm   bool
+	Transcode TranscodeRuntime
 	// Cache is an optional persistent segment cache keyed by (source, quality,
 	// audio). When set, completed encodes are kept across sessions so re-plays
 	// of the same file at the same quality skip ffmpeg entirely. nil disables
@@ -254,6 +280,21 @@ type HLSSession struct {
 	cacheKey       string
 	fromCache      bool
 	writerLockHeld bool
+
+	// Live transcode telemetry (F3). ffmpeg's -stats progress line is parsed
+	// in hlsStderrCapture.Write into an EWMA of speed= (×realtime) + fps=, plus
+	// an input-bound hint set when the SOURCE read errors (slow/broken pull vs a
+	// too-slow encode). GetTranscodeStats() snapshots this so the ready-watcher
+	// can report a real measurement to the web side — letting the player name a
+	// too-slow transcode honestly in ~4s instead of inferring it from stall
+	// shape over 15-30s. Guarded by statsMu (the stderr goroutine writes; the
+	// watcher goroutine reads).
+	statsMu      sync.Mutex
+	speedEWMA    float64
+	fpsEWMA      float64
+	speedSamples int
+	warmupSeen   int // cold-start frames discarded before the EWMA is trusted
+	inputBound   bool
 }
 
 // hlsSeekAhead is how many segments past the writer's current position the
@@ -303,6 +344,63 @@ func (r *HLSSessionRegistry) Register(s *HLSSession) {
 	for _, prev := range stale {
 		_ = prev.Close()
 	}
+}
+
+// CloseWhere closes + removes every registered session matching pred. Used
+// by the REAL-session path to reap stale prewarm encodes BEFORE its own
+// StartHLSSession runs — that frees the per-key cache writer-lock, so the
+// viewer's encode lands in the persistent cache instead of falling back to
+// an uncached per-session tmpdir (and a SEALED prewarm survives as a cache
+// HIT: closing a from-cache reader never invalidates the entry).
+func (r *HLSSessionRegistry) CloseWhere(pred func(*HLSSession) bool) int {
+	r.mu.Lock()
+	victims := make([]*HLSSession, 0, len(r.sessions))
+	for id, s := range r.sessions {
+		if pred(s) {
+			victims = append(victims, s)
+			delete(r.sessions, id)
+		}
+	}
+	r.mu.Unlock()
+	for _, s := range victims {
+		_ = s.Close()
+	}
+	return len(victims)
+}
+
+// IsPrewarm reports whether this session was started as a background
+// cache-fill (HLSSessionConfig.Prewarm). cfg is immutable after construction.
+func (s *HLSSession) IsPrewarm() bool { return s.cfg.Prewarm }
+
+// RegisterKeep adds a session WITHOUT displacing the others — the prewarm
+// path: a background cache-fill encode must not evict the viewer's live
+// session (Register's eviction killed the stream being watched when the
+// next-episode prewarm got claimed mid-playback). It still replaces (and
+// closes) a previous session with the SAME ID. A later Register() of a real
+// viewer session evicts prewarms like any other session — a completed
+// (sealed) prewarm survives in the segment cache either way.
+func (r *HLSSessionRegistry) RegisterKeep(s *HLSSession) {
+	r.mu.Lock()
+	prev := r.sessions[s.cfg.SessionID]
+	r.sessions[s.cfg.SessionID] = s
+	r.mu.Unlock()
+	if prev != nil && prev != s {
+		_ = prev.Close()
+	}
+}
+
+// HasLiveEncode reports whether any registered session still has a RUNNING
+// ffmpeg (encode not finished). Used to defer prewarm encodes so they never
+// compete with the viewer's live transcode for the encoder.
+func (r *HLSSessionRegistry) HasLiveEncode() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, s := range r.sessions {
+		if !s.EncodeExited() {
+			return true
+		}
+	}
+	return false
 }
 
 // Remove drops a session from the registry without closing it.
@@ -487,11 +585,38 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		return s, nil
 	}
 
+	// Resume-aware first spawn: when the session carries a StartSec (resume
+	// point / position on a quality switch), launch ffmpeg already seeked at
+	// the segment containing it. The web player opens playback at the same
+	// position (hls.js startPosition), so segment 0 would never be requested —
+	// encoding from 0 just to seek-restart milliseconds later wasted a full
+	// ffmpeg spawn and doubled the resume latency. Earlier segments simply
+	// don't exist on disk; ServeSegment's `idx < segStart` branch restarts the
+	// encoder if the user later scrubs back before the resume point. A partial
+	// encode never seals the cache (allSegmentsPresent checks 0..N), matching
+	// today's post-seek behaviour.
+	startIdx := 0
+	if cfg.StartSec > 0 && cfg.StartSec < probe.DurationSec {
+		startIdx = segmentIdxForTime(cfg.StartSec)
+		if startIdx > segCount-1 {
+			startIdx = segCount - 1
+		}
+	} else if cfg.StartSec >= probe.DurationSec && cfg.StartSec > 0 {
+		// Stale resume beyond this source's duration (the file was replaced by
+		// a shorter cut, or progress was saved against another release). Start
+		// from the beginning instead of encoding only the final segment, which
+		// would "end" the video seconds after it starts.
+		log.Printf("[hls %s] startSec %.0f ≥ duration %.0f — starting from 0",
+			shortHLSID(cfg.SessionID), cfg.StartSec, probe.DurationSec)
+	}
+	s.ffmpegSegStart = startIdx
+	s.readyMax = startIdx
+
 	// Spawn ffmpeg under a dedicated context so Close() can kill it without
 	// touching the parent ctx.
 	ffCtx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
-	args := buildHLSFFmpegArgs(cfg, probe, tmpDir)
+	args := buildHLSFFmpegArgsAt(cfg, probe, tmpDir, startIdx, segmentStartSec(startIdx))
 	cmd := exec.CommandContext(ffCtx, cfg.Transcode.FFmpegPath, args...)
 	cmd.Stderr = &hlsStderrCapture{owner: s}
 	if err := cmd.Start(); err != nil {
@@ -524,10 +649,14 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	if profile.Preset != "" {
 		presetNote = " preset=" + profile.Preset
 	}
-	log.Printf("[hls %s] started: %s, %.1fs, %d segs (quality=%s, encoder=%s accel=%s%s)%s",
+	startNote := ""
+	if startIdx > 0 {
+		startNote = fmt.Sprintf(" start=seg-%d@%.0fs", startIdx, segmentStartSec(startIdx))
+	}
+	log.Printf("[hls %s] started: %s, %.1fs, %d segs (quality=%s, encoder=%s accel=%s%s)%s%s",
 		shortHLSID(cfg.SessionID), cfg.logName(),
 		probe.DurationSec, segCount, coalesce(cfg.Quality, "auto"),
-		profile.Codec, string(cfg.Transcode.HWAccel), presetNote, cachedNote)
+		profile.Codec, string(cfg.Transcode.HWAccel), presetNote, cachedNote, startNote)
 	return s, nil
 }
 
@@ -558,13 +687,18 @@ func (s *HLSSession) ProbeInfo() map[string]any {
 	}
 	subs := make([]map[string]any, 0, len(s.probe.SubtitleTracks))
 	for _, sb := range s.probe.SubtitleTracks {
+		// `external`/`path` let the stream server attach a tokened /sub vttUrl
+		// (path-addressed for sidecars, index-addressed for embedded). `path` is
+		// stripped after the URL is built so the raw path isn't doubled in JSON.
 		subs = append(subs, map[string]any{
-			"index":  sb.Index,
-			"lang":   sb.Lang,
-			"codec":  sb.Codec,
-			"title":  sb.Title,
-			"forced": sb.Forced,
-			"text":   sb.IsTextSubtitle(),
+			"index":    sb.Index,
+			"lang":     sb.Lang,
+			"codec":    sb.Codec,
+			"title":    sb.Title,
+			"forced":   sb.Forced,
+			"text":     sb.IsTextSubtitle(),
+			"external": sb.External,
+			"path":     sb.Path,
 		})
 	}
 	return map[string]any{
@@ -580,20 +714,105 @@ func (s *HLSSession) ProbeInfo() map[string]any {
 	}
 }
 
-// ReadyCount returns how many segments are currently fully on disk.
-// Caller can `>= 1` it to check whether seg-0 has landed (and so the
-// player can be told to attach). For cache-HIT sessions this is always
-// `segmentCount` from the moment StartHLSSession returns.
+// ReadyCount returns the session's readyMax watermark: segment idx is on disk
+// iff idx < ReadyCount() AND idx >= WriterStartIdx(). For a from-zero encode
+// this is simply "how many segments are on disk"; for a resume session
+// (StartSec > 0) readyMax is pre-seeded to the start index, so the FIRST real
+// segment has landed only once ReadyCount() > WriterStartIdx() — use that
+// comparison, not `>= 1`, to flip the player's "Preparando…" UI. For
+// cache-HIT sessions this is always `segmentCount` from the moment
+// StartHLSSession returns.
 func (s *HLSSession) ReadyCount() int {
 	s.readyMu.Lock()
 	defer s.readyMu.Unlock()
 	return s.readyMax
 }
 
+// EncodeExited reports whether this session's ffmpeg has finished (clean or
+// crashed) or never ran (cache HIT). False while an encode is producing
+// segments. Used by HasLiveEncode to defer prewarm work.
+func (s *HLSSession) EncodeExited() bool {
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
+	return s.exited
+}
+
+// WriterStartIdx returns the segment index the CURRENT ffmpeg writer started
+// at: 0 for a from-the-beginning encode, the resume segment for a StartSec
+// session, the seek target after a seek-restart. See ReadyCount for the
+// "first segment landed" comparison.
+func (s *HLSSession) WriterStartIdx() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ffmpegSegStart
+}
+
 // FromCache reports whether this session was served from the HLS cache
 // (no ffmpeg subprocess spawned). Used by ready-watcher logic to short-
 // circuit polling — a cache HIT is ready the moment we return.
 func (s *HLSSession) FromCache() bool { return s.fromCache }
+
+// TranscodeStats is a point-in-time snapshot of live ffmpeg progress for one
+// HLS session (F3). SpeedX < 1.0 means the encode runs slower than realtime —
+// the player can't sustain playback without buffering. Samples==0 means no
+// -stats line has been parsed yet (the watcher keeps waiting before reporting).
+type TranscodeStats struct {
+	SpeedX     float64 // EWMA of ffmpeg speed= (×realtime; 1.0 = exactly realtime)
+	Fps        float64 // EWMA of ffmpeg fps=
+	Samples    int     // progress lines parsed so far (0 = no telemetry yet)
+	InputBound bool    // source read hit I/O errors (slow/broken pull, not encode)
+	FromCache  bool    // replayed from cache → no live encode, stats meaningless
+}
+
+// GetTranscodeStats returns a snapshot of the parsed ffmpeg progress EWMAs.
+func (s *HLSSession) GetTranscodeStats() TranscodeStats {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	return TranscodeStats{
+		SpeedX:     s.speedEWMA,
+		Fps:        s.fpsEWMA,
+		Samples:    s.speedSamples,
+		InputBound: s.inputBound,
+		FromCache:  s.fromCache,
+	}
+}
+
+// hlsStatsWarmupSkip is how many leading -stats frames to discard before
+// trusting the EWMA. ffmpeg's first readings reflect the pipeline filling
+// (often speed=0.0x) and would otherwise drag a healthy encoder into a false
+// "struggling" verdict that pauses a stream which plays fine once warmed up.
+const hlsStatsWarmupSkip = 2
+
+// recordProgress folds one parsed ffmpeg -stats sample into the session EWMAs.
+// alpha=0.3 smooths the noisy per-line numbers while still tracking a sustained
+// slowdown within a few samples (~2s of encoding).
+func (s *HLSSession) recordProgress(speedX, fps float64) {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	// Drop the cold-start frames so a steady-state slowdown — not the encoder
+	// spin-up — is what the watcher reports.
+	if s.warmupSeen < hlsStatsWarmupSkip {
+		s.warmupSeen++
+		return
+	}
+	const alpha = 0.3
+	if s.speedSamples == 0 {
+		s.speedEWMA = speedX
+		s.fpsEWMA = fps
+	} else {
+		s.speedEWMA = alpha*speedX + (1-alpha)*s.speedEWMA
+		s.fpsEWMA = alpha*fps + (1-alpha)*s.fpsEWMA
+	}
+	s.speedSamples++
+}
+
+// markInputBound flags that ffmpeg reported a source-read error — the wall is
+// the input pull (slow debrid link / dropped torrent peer), not the encoder.
+func (s *HLSSession) markInputBound() {
+	s.statsMu.Lock()
+	s.inputBound = true
+	s.statsMu.Unlock()
+}
 
 // IsClosed reports whether Close() has been invoked. Exposed (vs the
 // internal isClosed) so external watchers — the ready-webhook
@@ -1076,11 +1295,6 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 
 // ---- ffmpeg argument builders ----
 
-// buildHLSFFmpegArgs returns the argv for the initial HLS encode (start at 0).
-func buildHLSFFmpegArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string) []string {
-	return buildHLSFFmpegArgsAt(cfg, probe, tmpDir, 0, 0)
-}
-
 // EncoderProfile names the codec + preset + decoder hint combination the HLS
 // pipeline picks for the given hardware backend + transcode config. Exposed
 // so callers can log the chosen encoder before ffmpeg launches and so both
@@ -1140,7 +1354,10 @@ func ResolveEncoderProfile(hw HWAccel, configuredPreset string) EncoderProfile {
 // `-output_ts_offset` keeps the segment PTS aligned with manifest timeline.
 func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string, startIdx int, startSec float64) []string {
 	profile := ResolveEncoderProfile(cfg.Transcode.HWAccel, cfg.Transcode.Preset)
-	args := []string{"-y", "-hide_banner", "-loglevel", "warning"}
+	// -stats forces ffmpeg to emit the frame=/fps=/speed= progress line to
+	// stderr even at -loglevel warning; hlsStderrCapture parses it for live
+	// transcode telemetry (F3) without logging it.
+	args := []string{"-y", "-hide_banner", "-loglevel", "warning", "-stats"}
 
 	// Demuxer-side HW-decode hint. Sourced from the profile so a future
 	// codec/hint mismatch is impossible — the encoder + decode hint are
@@ -1266,12 +1483,21 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		// scene-cut). No B-frame reorder → monotonic DTS → uniform segments, no
 		// "Packet duration is out of range" flood. Safe with -force_key_frames
 		// (unlike -tune ll, which broke per-segment cuts — see note above).
-		args = append(args, "-preset", profile.Preset, "-rc", "vbr", "-bf", "0", "-no-scenecut", "1")
+		// -forced-idr 1 is LOAD-BEARING: NVENC emits -force_key_frames frames
+		// as plain (non-IDR) I-frames on current ffmpeg/driver combos, the HLS
+		// muxer only cuts on IDR, and every segment silently stretches to the
+		// default GOP (250 frames ≈ 10.4 s @24fps) while the server-rendered
+		// playlist still promises hlsSegmentDuration. The PTS↔playlist mismatch
+		// breaks seeks and desyncs subtitles (measured 2026-06-10: 3 segments
+		// per 30 s instead of 15; with -forced-idr exactly 15).
+		args = append(args, "-preset", profile.Preset, "-rc", "vbr", "-bf", "0", "-no-scenecut", "1", "-forced-idr", "1")
 	case "h264_qsv":
 		// veryfast is the fastest realistic QSV preset; medium was too
 		// conservative for first-start. look_ahead=0 keeps the encoder
 		// truly low-latency (no rate-control look-ahead window).
-		args = append(args, "-preset", profile.Preset, "-look_ahead", "0")
+		// -forced_idr: same non-IDR forced-keyframe failure mode as NVENC (see
+		// above) — QSV's AVOption spells it with an underscore.
+		args = append(args, "-preset", profile.Preset, "-look_ahead", "0", "-forced_idr", "1")
 	case "h264_videotoolbox":
 		// VideoToolbox has no "preset" knob; `-realtime` flips into the
 		// low-latency path used by FaceTime. We let the `-b:v / -maxrate
@@ -1332,7 +1558,31 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	if bitrate == "" {
 		bitrate = "5M"
 	}
-	args = append(args, "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate)
+	// Rate control: capped constant-quality where the encoder supports it well
+	// (libx264 CRF, NVENC CQ), plain CBR-ish elsewhere. Constant quality is the
+	// on-the-fly analogue of per-title encoding: easy scenes (dialogue, anime
+	// flats) emit FAR fewer bits than the fixed target — which is what keeps a
+	// funnel/LTE link from stalling — while complex scenes can still use up to
+	// `-maxrate` (the same ceiling as before, so worst-case quality and the
+	// level-derived VBV pair are unchanged). `-bufsize 2×maxrate` gives the VBV
+	// a standard one-segment window to absorb spikes; the old 1× window forced
+	// the encoder to flatline at the cap. CPB stays far below every H.264
+	// level's limit (level 3.1 allows 14 Mbps CPB vs our 3M at 480p).
+	switch codec {
+	case "libx264":
+		// Capped CRF: no -b:v (CRF drives quality), -maxrate/-bufsize cap it.
+		args = append(args, "-crf", "23", "-maxrate", bitrate, "-bufsize", doubleBitrate(bitrate))
+	case "h264_nvenc":
+		// NVENC constant-quality VBR: -cq targets quality, -b:v 0 disables the
+		// default 2M average-bitrate target that would otherwise fight it.
+		args = append(args, "-cq", "23", "-b:v", "0", "-maxrate", bitrate, "-bufsize", doubleBitrate(bitrate))
+	default:
+		// QSV / VideoToolbox / VAAPI: keep the proven fixed-bitrate triple —
+		// their constant-quality knobs (ICQ, -q:v) have vendor-specific gotchas
+		// (VideoToolbox ignores -q:v when -b:v is set; QSV ICQ conflicts with
+		// look_ahead=0) and we can't regression-test them here.
+		args = append(args, "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate)
+	}
 
 	// Force keyframe alignment with segment boundaries.
 	args = append(args, "-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", hlsSegmentDuration))
@@ -1581,6 +1831,46 @@ type hlsStderrCapture struct {
 
 const maxStderrBuf = 64 * 1024
 
+// ffmpeg -stats progress lines look like:
+//
+//	frame=  123 fps= 30 q=28.0 size=  456kB time=00:00:08.00 speed=1.05x
+//
+// emitted with a trailing \r (overwrite-in-place), once per ~0.5s. We parse
+// speed=/fps= out of them for live transcode telemetry (F3) and DON'T log them
+// (one per 0.5s would drown the daemon log) — only \n-terminated warning/error
+// lines reach log.Printf below.
+var (
+	reFFmpegSpeed = regexp.MustCompile(`speed=\s*([0-9.]+)x`)
+	reFFmpegFps   = regexp.MustCompile(`fps=\s*([0-9.]+)`)
+)
+
+func parseFFmpegProgress(line string) (speedX, fps float64, ok bool) {
+	m := reFFmpegSpeed.FindStringSubmatch(line)
+	if m == nil {
+		return 0, 0, false
+	}
+	v, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	if fm := reFFmpegFps.FindStringSubmatch(line); fm != nil {
+		fps, _ = strconv.ParseFloat(fm[1], 64)
+	}
+	return v, fps, true
+}
+
+// isInputBoundLine spots ffmpeg stderr that means the SOURCE read failed (slow
+// debrid link, dropped torrent peer, network timeout) rather than the encoder
+// being too slow — so the player names the bottleneck as the link, not the GPU.
+func isInputBoundLine(line string) bool {
+	l := strings.ToLower(line)
+	return strings.Contains(l, "i/o error") ||
+		strings.Contains(l, "connection reset") ||
+		strings.Contains(l, "rw_timeout") ||
+		strings.Contains(l, "error in the pull function") ||
+		strings.Contains(l, "connection timed out")
+}
+
 func (c *hlsStderrCapture) Write(p []byte) (int, error) {
 	// If the incoming chunk alone exceeds the cap (very long unterminated
 	// line), drop the buffered prefix AND truncate p so a single multi-MB
@@ -1589,20 +1879,33 @@ func (c *hlsStderrCapture) Write(p []byte) (int, error) {
 		c.buf.Reset()
 		p = p[len(p)-maxStderrBuf:]
 	} else if c.buf.Len()+len(p) > maxStderrBuf {
-		// Drop the unterminated partial line; we'll resync on the next \n.
+		// Drop the unterminated partial line; we'll resync on the next \r/\n.
 		c.buf.Reset()
 	}
 	c.buf.Write(p)
+	// Frame on \r OR \n: ffmpeg's progress line is \r-terminated, warnings are
+	// \n-terminated. Parsing progress per-frame keeps the EWMA fresh; logging
+	// only the \n lines keeps the log readable.
 	for {
-		line, rest, ok := strings.Cut(c.buf.String(), "\n")
-		if !ok {
+		s := c.buf.String()
+		idx := strings.IndexAny(s, "\r\n")
+		if idx < 0 {
 			break
 		}
+		line := strings.TrimSpace(s[:idx])
 		c.buf.Reset()
-		c.buf.WriteString(rest)
-		if line = strings.TrimSpace(line); line != "" {
-			log.Printf("[hls %s] ffmpeg: %s", shortHLSID(c.owner.cfg.SessionID), line)
+		c.buf.WriteString(s[idx+1:])
+		if line == "" {
+			continue
 		}
+		if speedX, fps, ok := parseFFmpegProgress(line); ok {
+			c.owner.recordProgress(speedX, fps)
+			continue // progress line — telemetry only, never logged
+		}
+		if isInputBoundLine(line) {
+			c.owner.markInputBound()
+		}
+		log.Printf("[hls %s] ffmpeg: %s", shortHLSID(c.owner.cfg.SessionID), line)
 	}
 	return len(p), nil
 }

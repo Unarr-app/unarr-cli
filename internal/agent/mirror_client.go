@@ -13,7 +13,7 @@ import (
 type MirrorEntry struct {
 	URL     string `json:"url"`
 	Label   string `json:"label"`
-	Kind    string `json:"kind"`    // "clearnet" | "tor"
+	Kind    string `json:"kind"` // "clearnet" | "tor"
 	Primary bool   `json:"primary"`
 }
 

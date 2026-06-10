@@ -5,12 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.9-beta] - 2026-06-10
+
+
+### Changed
+
+- **daemon**: revisión crítica del reporte de errores de sesión
+
+### Fixed
+
+- **daemon**: reportar fallos de arranque de sesión a la web + scan en sesión única
+## [1.0.8-beta] - 2026-06-10
+
+
+### Added
+
+- **hls**: resume-aware first spawn + capped-CRF/CQ rate control
+- **subtitles**: subtitle-fetch jobs vía sync + auto-fetch opcional en scan
+
+### Fixed
+
+- **hls**: forced-idr en NVENC/QSV — los segmentos ignoraban force_key_frames
+- **hls**: los prewarms ya no desalojan la sesión del espectador + trickplay 12x
+
+### Other
+
+- **release**: 1.0.8-beta
+## [1.0.7-beta] - 2026-06-08
+
+
+### Added
+
+- **subs**: resilient subtitle extraction — sidecars, charset, torrent/debrid
+
+### Other
+
+- **release**: 1.0.7-beta
+## [1.0.6-beta] - 2026-06-07
+
+
+### Added
+
+- **agent**: per-machine key handoff + revocation handling
+
+### Fixed
+
+- **agent**: only treat explicit 410/403 as revocation; honour --config
+
+### Other
+
+- **release**: 1.0.6-beta
+## [1.0.5-beta] - 2026-06-07
+
+
+### Added
+
+- **stream**: live transcode telemetry from ffmpeg speed=
+
+### Documentation
+
+- **docker**: explain why GPU Vulkan tonemap can't init in-container
+
+### Fixed
+
+- **docker**: derive bundled dep arch from dpkg, not TARGETARCH default
+- **torrent**: suppress noisy UPnP AddPortMapping warnings
+
+### Other
+
+- **release**: 1.0.5-beta
 ## [1.0.4-beta] - 2026-06-04
 
 
 ### Fixed
 
 - **stream**: self-heal host→container path skew in HLS + sidecar handlers
+
+### Other
+
+- **release**: 1.0.4-beta
 ## [1.0.3-beta] - 2026-06-04
 
 
@@ -697,6 +770,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.0.9-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.8-beta...v1.0.9-beta
+[1.0.8-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.7-beta...v1.0.8-beta
+[1.0.7-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.6-beta...v1.0.7-beta
+[1.0.6-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.5-beta...v1.0.6-beta
+[1.0.5-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.4-beta...v1.0.5-beta
 [1.0.4-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.3-beta...v1.0.4-beta
 [1.0.3-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.2-beta...v1.0.3-beta
 [1.0.2-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.1-beta...v1.0.2-beta

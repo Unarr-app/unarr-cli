@@ -66,6 +66,18 @@ type SyncClient struct {
 	// It should delete the files and return the IDs of successfully deleted items.
 	OnDeleteFiles func(items []LibraryDeleteRequest) []int
 
+	// OnSubtitleFetch is called when the server requests on-demand subtitle
+	// downloads. It should download each (from req.URL, already VTT), write a
+	// sidecar next to req.FilePath, and return the IDs successfully fetched plus
+	// the ones that failed (so the web can mark them errored).
+	OnSubtitleFetch func(reqs []SubtitleFetchRequest) ([]int, []SubtitleFetchError)
+
+	// OnRevoked is called when a sync is rejected because this agent's credential
+	// was revoked (the user deleted the agent from the dashboard). The daemon
+	// wires this to wipe the stored key + stop — it must NOT keep retrying or the
+	// server will reject every sync forever.
+	OnRevoked func(err error)
+
 	// SyncNow triggers an immediate sync (e.g., on task completion).
 	SyncNow chan struct{}
 
@@ -83,6 +95,11 @@ type SyncClient struct {
 	// deleteInFlight tracks item IDs currently being processed or awaiting confirmation.
 	// Prevents the same file from being passed to OnDeleteFiles multiple times.
 	deleteInFlight map[int]struct{}
+
+	// Subtitle-fetch jobs awaiting confirmation + dedup (guarded by pendingDeleteMu).
+	pendingSubtitlesFetched []int
+	pendingSubtitlesFailed  []SubtitleFetchError
+	subtitleInFlight        map[int]struct{}
 }
 
 // NewSyncClient creates a sync client.
@@ -152,6 +169,12 @@ func (sc *SyncClient) doSync(ctx context.Context) {
 	resp, err := sc.client.Sync(ctx, req)
 	if err != nil {
 		if ctx.Err() == nil {
+			// Credential revoked (agent deleted from the dashboard) → stop; don't
+			// spam a sync the server will reject forever.
+			if IsRevoked(err) && sc.OnRevoked != nil {
+				sc.OnRevoked(err)
+				return
+			}
 			log.Printf("sync failed: %v", err)
 		}
 		return
@@ -207,6 +230,20 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 			delete(sc.deleteInFlight, id)
 		}
 		sc.pendingDeleteConfirmed = nil
+	}
+	if len(sc.pendingSubtitlesFetched) > 0 {
+		req.SubtitlesFetched = sc.pendingSubtitlesFetched
+		for _, id := range sc.pendingSubtitlesFetched {
+			delete(sc.subtitleInFlight, id)
+		}
+		sc.pendingSubtitlesFetched = nil
+	}
+	if len(sc.pendingSubtitlesFailed) > 0 {
+		req.SubtitlesFailed = sc.pendingSubtitlesFailed
+		for _, f := range sc.pendingSubtitlesFailed {
+			delete(sc.subtitleInFlight, f.ID)
+		}
+		sc.pendingSubtitlesFailed = nil
 	}
 	sc.pendingDeleteMu.Unlock()
 	return req
@@ -277,6 +314,37 @@ func (sc *SyncClient) processResponse(resp *SyncResponse) {
 					sc.pendingDeleteMu.Unlock()
 				}
 			}(newItems)
+		}
+	}
+
+	// On-demand subtitle fetches — dedup against in-flight, run off the sync
+	// goroutine (network + disk I/O), confirm on the next cycle.
+	if len(resp.SubtitleFetches) > 0 && sc.OnSubtitleFetch != nil {
+		sc.pendingDeleteMu.Lock()
+		if sc.subtitleInFlight == nil {
+			sc.subtitleInFlight = make(map[int]struct{})
+		}
+		var newReqs []SubtitleFetchRequest
+		for _, r := range resp.SubtitleFetches {
+			if _, inFlight := sc.subtitleInFlight[r.ID]; !inFlight {
+				newReqs = append(newReqs, r)
+				sc.subtitleInFlight[r.ID] = struct{}{}
+			}
+		}
+		sc.pendingDeleteMu.Unlock()
+
+		if len(newReqs) > 0 {
+			go func(reqs []SubtitleFetchRequest) {
+				done, failed := sc.OnSubtitleFetch(reqs)
+				// Both done and failed are reported on the next uplink; buildRequest
+				// clears them from subtitleInFlight when it flushes them. A failure
+				// becomes status='error' on the web (no silent infinite retry — the
+				// user re-requests, which creates a fresh row).
+				sc.pendingDeleteMu.Lock()
+				sc.pendingSubtitlesFetched = append(sc.pendingSubtitlesFetched, done...)
+				sc.pendingSubtitlesFailed = append(sc.pendingSubtitlesFailed, failed...)
+				sc.pendingDeleteMu.Unlock()
+			}(newReqs)
 		}
 	}
 }

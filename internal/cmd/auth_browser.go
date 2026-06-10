@@ -24,7 +24,7 @@ const browserAuthTimeout = 60 * time.Second
 //  3. User logs in and clicks "Authorize" on the web page
 //  4. Web redirects to localhost:{port}/callback?token=tc_...&state={state}
 //  5. CLI validates state, extracts token, closes server
-func browserAuth(apiURL string) (string, error) {
+func browserAuth(apiURL, agentID string) (string, error) {
 	// Validate apiURL is a well-formed HTTP(S) URL
 	parsed, err := url.Parse(apiURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
@@ -96,8 +96,12 @@ func browserAuth(apiURL string) (string, error) {
 		}
 	}()
 
-	// Open browser
+	// Open browser. Forward the agentId so the server mints a per-machine key
+	// bound to it (omitted → server falls back to the legacy general key).
 	authURL := fmt.Sprintf("%s/unarr/auth?state=%s&port=%d", apiURL, url.QueryEscape(state), port)
+	if agentID != "" {
+		authURL += "&agentId=" + url.QueryEscape(agentID)
+	}
 	openBrowser(authURL)
 
 	// Listen for Enter key to skip to manual fallback

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"strings"
@@ -15,6 +16,20 @@ import (
 	"github.com/torrentclaw/unarr/internal/agent"
 	"github.com/torrentclaw/unarr/internal/config"
 )
+
+// clearRevokedIdentity wipes the stored credential (api key + agentId) after the
+// server reports this machine's registration was revoked, so a re-run of the
+// given command mints a fresh identity instead of looping against a dead key.
+func clearRevokedIdentity(cfg config.Config, retryCmd string) {
+	cfg.Auth.APIKey = ""
+	cfg.Agent.ID = ""
+	if err := config.Save(cfg, resolvedConfigPath()); err != nil {
+		log.Printf("could not clear revoked credential: %v", err)
+	}
+	fmt.Println("  This machine's previous registration was removed from your account.")
+	fmt.Printf("  Run `unarr %s` again to reconnect it as a new agent.\n", retryCmd)
+	fmt.Println()
+}
 
 func newLoginCmd() *cobra.Command {
 	var apiURL string
@@ -70,11 +85,18 @@ func runLogin(apiURLOverride string) error {
 
 	var apiKey string
 
+	// Resolve the agentId up front so the browser-authorize flow can bind the
+	// minted per-machine key to it.
+	agentID := cfg.Agent.ID
+	if agentID == "" {
+		agentID = uuid.New().String()
+	}
+
 	// Try browser-based auth first
 	fmt.Println("  Opening browser to connect your account...")
 	fmt.Println()
 
-	browserKey, browserErr := browserAuth(apiURL)
+	browserKey, browserErr := browserAuth(apiURL, agentID)
 	if browserErr == nil && strings.HasPrefix(browserKey, "tc_") {
 		apiKey = browserKey
 		green.Println("  ✓ Connected via browser")
@@ -120,11 +142,6 @@ func runLogin(apiURLOverride string) error {
 
 	fmt.Print("  Verifying API key... ")
 
-	agentID := cfg.Agent.ID
-	if agentID == "" {
-		agentID = uuid.New().String()
-	}
-
 	hostname, _ := os.Hostname()
 	agentName := cfg.Agent.Name
 	if agentName == "" {
@@ -143,7 +160,19 @@ func runLogin(apiURLOverride string) error {
 	if err != nil {
 		color.Red("FAILED")
 		fmt.Println()
+		// The stored credential was revoked (this machine was deleted from the
+		// dashboard). Drop it so the next run mints a fresh identity.
+		if agent.IsRevoked(err) {
+			clearRevokedIdentity(cfg, "login")
+			return nil
+		}
 		return fmt.Errorf("API key validation failed: %w", err)
+	}
+
+	// Manual-paste bootstrap: the server minted a per-machine key bound to this
+	// agentId. Swap to it and discard the general key the user pasted.
+	if resp.AgentKey != "" {
+		apiKey = resp.AgentKey
 	}
 
 	green.Println("OK")

@@ -139,15 +139,56 @@ func (c *Client) ReportUpgradeResult(ctx context.Context, agentID string, succes
 // will reach the same conclusion via HEAD probes anyway if this call
 // fails. We log the error in the caller but don't retry — by the time
 // a retry would land the user is likely already playing.
-func (c *Client) MarkSessionReady(ctx context.Context, sessionID string) error {
+func (c *Client) MarkSessionReady(ctx context.Context, sessionID string, health *SessionHealth) error {
 	req := struct {
-		SessionID string `json:"sessionId"`
-	}{SessionID: sessionID}
+		SessionID string         `json:"sessionId"`
+		Health    *SessionHealth `json:"health,omitempty"`
+	}{SessionID: sessionID, Health: health}
 	var resp StatusResponse
 	if err := c.doPost(ctx, "/api/internal/agent/session-ready", req, &resp); err != nil {
 		return fmt.Errorf("mark session ready: %w", err)
 	}
 	return nil
+}
+
+// ReportSessionError is the failure-path counterpart of MarkSessionReady: it
+// tells the web a streaming session can NOT start (file gone, path rejected,
+// ffmpeg missing, spawn failure…). The web marks the session failed, pushes an
+// SSE "failed" event so the player stops probing a playlist that will never
+// exist, and self-heals stale library state on code "file_missing".
+//
+// code is one of the stable machine codes the web understands:
+// "file_missing" | "path_rejected" | "no_video_file" | "ffmpeg_unavailable" |
+// "start_failed". message is free-form detail for diagnostics.
+//
+// Best-effort like MarkSessionReady: on older web deployments without the
+// endpoint this 404s — the caller logs and the player falls back to its
+// probe-deadline behaviour, exactly as before this channel existed.
+func (c *Client) ReportSessionError(ctx context.Context, sessionID, code, message string) error {
+	req := struct {
+		SessionID string `json:"sessionId"`
+		Code      string `json:"code"`
+		Message   string `json:"message,omitempty"`
+	}{SessionID: sessionID, Code: code, Message: message}
+	var resp StatusResponse
+	if err := c.doPost(ctx, "/api/internal/agent/session-error", req, &resp); err != nil {
+		return fmt.Errorf("report session error: %w", err)
+	}
+	return nil
+}
+
+// SessionHealth is an OPTIONAL live-transcode health snapshot attached to a
+// session-ready report (F3). A nil *SessionHealth means the agent has no
+// telemetry to share (cache hit, direct-play, or progress not yet stable) and
+// the web side keeps its stall-shape heuristic. Old web replicas ignore the
+// extra field; old agents simply never send it.
+type SessionHealth struct {
+	// "ok" (≥ realtime) | "marginal" (keeps up barely) | "struggling" (can't).
+	Health string `json:"health"`
+	// ffmpeg speed= EWMA: 1.0 = exactly realtime, < 1.0 = slower than playback.
+	RealtimeRatio float64 `json:"realtimeRatio"`
+	// "realtime" | "transcode" (encoder is the wall) | "input_bound" (source read).
+	Reason string `json:"reason"`
 }
 
 // RefreshStreamURL re-resolves a fresh debrid direct URL for a live streaming

@@ -23,6 +23,23 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// portfwdFilterHandler wraps anacrolix/log handlers and drops the noisy
+// UPnP/NAT-PMP port-mapping warnings (e.g. "error: AddPortMapping: 500 Internal
+// Server Error") that home routers emit when they reject the mapping. Everything
+// else passes through unchanged.
+type portfwdFilterHandler struct {
+	inner []alog.Handler
+}
+
+func (h portfwdFilterHandler) Handle(r alog.Record) {
+	if strings.Contains(r.Text(), "AddPortMapping") {
+		return
+	}
+	for _, inner := range h.inner {
+		inner.Handle(r)
+	}
+}
+
 var defaultTrackers = []string{
 	// Tier 1: ngosang/trackerslist "best" + newtrackon "stable"
 	"udp://tracker.opentrackr.org:1337/announce",
@@ -126,6 +143,16 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	tcfg.Seed = cfg.SeedEnabled
 	tcfg.NoUpload = !cfg.SeedEnabled
 	tcfg.Logger = alog.Default.FilterLevel(alog.Warning)
+	// Drop the noisy UPnP/NAT-PMP port-mapping warnings. The library attempts to
+	// map the listen port on the router for inbound peers (best-effort, only
+	// helps on routers that support it). Many home routers reject AddPortMapping
+	// with "500 Internal Server Error" and the lib retries on every lease cycle,
+	// spamming the log. The rejection is harmless (download works over DHT +
+	// outbound peers), so suppress just that line while keeping the attempts for
+	// routers that do support it.
+	tcfg.Logger.SetHandlers(portfwdFilterHandler{
+		inner: append([]alog.Handler(nil), alog.Default.Handlers...),
+	})
 
 	// No browser-facing WebTorrent peer; daemon never seeds via WSS.
 	tcfg.DisableWebtorrent = true

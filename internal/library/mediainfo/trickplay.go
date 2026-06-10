@@ -107,9 +107,16 @@ func ReadCachedTrickplay(mediaPath string, width int) (TrickplayManifest, bool) 
 // GenerateTrickplay builds the montage sprite + manifest for mediaPath and caches
 // them in the sidecar dir. ONE ffmpeg pass samples a frame every intervalSec
 // (fps=1/interval), scales each to width (even height), and tiles them into a
-// single JPEG. The whole file is decoded once — slow but a one-time, cached,
-// scan-time cost (run with idle I/O priority by the prewarm), and it removes ALL
-// live extraction during playback (no contention with the active stream).
+// single JPEG.
+//
+// `-skip_frame nokey` makes the decoder touch ONLY keyframes — ~12× less CPU
+// than the old full decode (measured 233 s → 19 s CPU on a 24-min 1080p
+// episode), which matters because this runs alongside live streaming on the
+// same box. The fps filter still emits one frame per UNIFORM tick (it
+// repeats the latest keyframe for ticks between keyframes), so the manifest
+// contract — tileIndex = floor(t / IntervalSec) — is unchanged and cached
+// clients keep working; each tile just shows the nearest keyframe ≤ its
+// tick (≤ one GOP off, invisible at 240-320 px scrub size).
 //
 // durationSec drives the grid size; pass the probed duration (0 → error, nothing
 // to sample). The caller owns the ctx deadline (generous at scan time).
@@ -179,10 +186,18 @@ func GenerateTrickplay(ctx context.Context, ffmpegPath, mediaPath string, interv
 	tmpSprite := spritePath + ".tmp"
 
 	// fps filter wants a rational; format 1/effInterval with enough precision.
+	// eof_action=pass: with -skip_frame nokey a short/all-inter clip can decode
+	// to a SINGLE keyframe, and fps's default eof handling emits zero frames
+	// from a one-frame stream (it never sees a later PTS to close the first
+	// tick) → "Nothing was written into output". pass flushes the last frame
+	// at EOF instead; on normal media it only matters at the very end, where
+	// -frames:v 1 + the tile grid already bound the output.
 	fps := fmt.Sprintf("1/%s", strconv.FormatFloat(effInterval, 'f', 3, 64))
-	vf := fmt.Sprintf("fps=%s,scale=%d:-2,tile=%dx%d", fps, width, cols, rows)
+	vf := fmt.Sprintf("fps=%s:eof_action=pass,scale=%d:-2,tile=%dx%d", fps, width, cols, rows)
 	args := []string{
 		"-nostdin", "-loglevel", "error", "-y",
+		// Decoder-level keyframe-only mode — must precede -i (input option).
+		"-skip_frame", "nokey",
 		"-i", mediaPath,
 		"-frames:v", "1",
 		"-vf", vf,

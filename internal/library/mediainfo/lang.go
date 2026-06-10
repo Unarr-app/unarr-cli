@@ -64,7 +64,13 @@ var langNormalize = map[string]string{
 	"mlt": "mt", "mt": "mt",
 	"swa": "sw", "sw": "sw",
 	"afr": "af", "af": "af",
-	"lat": "la", "la": "la",
+	"kan": "kn", "kn": "kn",
+	"mal": "ml", "ml": "ml",
+	"mar": "mr", "mr": "mr",
+	"pan": "pa", "pa": "pa",
+	"guj": "gu", "gu": "gu",
+	"kann": "kn",
+	"lat":  "la", "la": "la",
 
 	// Full English names (ffprobe sometimes returns these instead of codes)
 	"english": "en", "spanish": "es", "french": "fr", "german": "de",

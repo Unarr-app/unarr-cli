@@ -16,7 +16,7 @@ type fakePersister struct {
 	tasks map[string]bool
 }
 
-func newFakePersister() *fakePersister { return &fakePersister{tasks: map[string]bool{}} }
+func newFakePersister() *fakePersister      { return &fakePersister{tasks: map[string]bool{}} }
 func (f *fakePersister) Add(t agent.Task)   { f.mu.Lock(); f.tasks[t.ID] = true; f.mu.Unlock() }
 func (f *fakePersister) Remove(id string)   { f.mu.Lock(); delete(f.tasks, id); f.mu.Unlock() }
 func (f *fakePersister) has(id string) bool { f.mu.Lock(); defer f.mu.Unlock(); return f.tasks[id] }

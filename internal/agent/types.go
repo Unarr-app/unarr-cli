@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 )
 
@@ -65,7 +68,13 @@ type RegisterRequest struct {
 
 // RegisterResponse is returned by the server after registration.
 type RegisterResponse struct {
-	Success  bool         `json:"success"`
+	Success bool `json:"success"`
+	// AgentKey is a freshly-minted per-machine API key, present only when the
+	// CLI registered with the user's general key (manual-paste bootstrap). The
+	// CLI must persist it and authenticate with it from then on, discarding the
+	// general key. Empty in the browser-authorize path (the token already IS the
+	// agent key) and on every later register.
+	AgentKey string       `json:"agentKey,omitempty"`
 	User     UserInfo     `json:"user"`
 	Features FeatureFlags `json:"features"`
 }
@@ -196,6 +205,32 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
+}
+
+// IsRevoked reports whether an error is an EXPLICIT server revocation signal —
+// the user deleted this agent from the dashboard. The server sends 410
+// agent_revoked (the registration is tombstoned OR the per-machine key was
+// revoked — the auth layer maps a revoked agent key to 410, not 401) or 403
+// agent_key_mismatch (the key belongs to another machine). On these the daemon
+// wipes its credential and requires a fresh `unarr login`.
+//
+// A BARE 401 is deliberately NOT treated as revoked: it's ambiguous (a deploy
+// blip, a load-balancer hiccup, a transient auth error) and must never wipe a
+// working agent's credential. The retry/log paths handle a transient 401; a
+// genuine revocation always arrives as 410.
+func IsRevoked(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	if he.StatusCode == http.StatusGone {
+		return true
+	}
+	if he.StatusCode == http.StatusForbidden &&
+		strings.Contains(he.Message, "agent_key_mismatch") {
+		return true
+	}
+	return false
 }
 
 // AgentInfo holds metadata about the running agent for display.
@@ -331,6 +366,17 @@ type LibrarySyncRequest struct {
 	AgentID       string            `json:"agentId,omitempty"` // lets the server scope stale-cleanup per agent
 	IsLastBatch   bool              `json:"isLastBatch"`
 	SyncStartedAt string            `json:"syncStartedAt,omitempty"` // ISO-8601; same for all batches in a session
+	// ScanRoots lists EVERY root this sync session covered (a session spans all
+	// roots since 1.0.9 — one syncStartedAt, one isLastBatch). The server scopes
+	// stale-row cleanup of a partial session to these prefixes. Older servers
+	// ignore the field and fall back to ScanPath.
+	ScanRoots []string `json:"scanRoots,omitempty"`
+	// FullCycle marks a session that covered every root the agent scans
+	// (daemon auto-scan, `unarr scan` without args). The server may then reap
+	// unseen rows REGARDLESS of path prefix — old-base-path ghost rows
+	// included. Must stay false for a manual subtree scan or when any root's
+	// scan failed, or the cleanup would reap rows the session never visited.
+	FullCycle bool `json:"fullCycle,omitempty"`
 }
 
 // LibrarySyncItem is a single scanned media file with ffprobe metadata.
@@ -398,6 +444,11 @@ type SyncRequest struct {
 	Tasks           []TaskState `json:"tasks"`
 	CanDelete       bool        `json:"canDelete"`                 // library.allow_delete is enabled
 	DeleteConfirmed []int       `json:"deleteConfirmed,omitempty"` // library item IDs successfully deleted from disk
+	// Subtitle-fetch job IDs the agent completed (sidecar written to disk).
+	SubtitlesFetched []int `json:"subtitlesFetched,omitempty"`
+	// Subtitle-fetch jobs that permanently failed (download/write error) — the web
+	// marks them errored so the UI fails fast instead of waiting for a timeout.
+	SubtitlesFailed []SubtitleFetchError `json:"subtitlesFailed,omitempty"`
 	// Live managed-VPN split-tunnel state, sent every sync so the web sees the
 	// WireGuard slot owner update in near-realtime (vs. register, once at startup).
 	// VPNActive has no omitempty: false (tunnel down) must reach the server so it
@@ -450,6 +501,20 @@ type StreamSession struct {
 	// omitted. Forces a full video re-encode (the overlay can't ride a copy
 	// path), so the web only sends it when the user picks a bitmap sub.
 	BurnSubtitleIndex *int `json:"burnSubtitleIndex,omitempty"`
+	// StartSec is the playback position (seconds) the viewer opens at — the
+	// saved resume point, or the current position on a quality/audio switch.
+	// HLS sessions spawn the FIRST ffmpeg already seeked there instead of
+	// encoding from segment 0 and immediately seek-restarting (double spawn,
+	// slow resume). 0/omitted = start at the beginning. Older daemons simply
+	// don't decode the field and keep the old start-at-0 behaviour.
+	StartSec float64 `json:"startSec,omitempty"`
+	// Prewarm marks a background cache-fill session (next-episode prewarm,
+	// hover prewarm): the daemon must encode it WITHOUT displacing the
+	// viewer's live session — it waits until the active encode finishes and
+	// registers alongside instead of evicting (Register kills every other
+	// session; a prewarm claimed mid-playback used to kill the stream the
+	// user was watching). False/omitted = a real viewer session.
+	Prewarm bool `json:"prewarm,omitempty"`
 	// PlayMethod is how the daemon should serve this session:
 	//   ""       — default (HLS transcode); also what legacy servers send.
 	//   "direct" — the source is already browser-native (the web decided this
@@ -470,14 +535,31 @@ type StreamSession struct {
 
 // SyncResponse is returned by the server with all pending actions for the CLI.
 type SyncResponse struct {
-	NewTasks       []Task                 `json:"newTasks,omitempty"`
-	Controls       []ControlAction        `json:"controls,omitempty"`
-	StreamRequests []StreamRequest        `json:"streamRequests,omitempty"`
-	StreamSessions []StreamSession        `json:"streamSessions,omitempty"`
-	Watching       bool                   `json:"watching"`
-	Upgrade        *UpgradeSignal         `json:"upgrade,omitempty"`
-	Scan           bool                   `json:"scan,omitempty"`
-	FilesToDelete  []LibraryDeleteRequest `json:"filesToDelete,omitempty"`
+	NewTasks        []Task                 `json:"newTasks,omitempty"`
+	Controls        []ControlAction        `json:"controls,omitempty"`
+	StreamRequests  []StreamRequest        `json:"streamRequests,omitempty"`
+	StreamSessions  []StreamSession        `json:"streamSessions,omitempty"`
+	Watching        bool                   `json:"watching"`
+	Upgrade         *UpgradeSignal         `json:"upgrade,omitempty"`
+	Scan            bool                   `json:"scan,omitempty"`
+	FilesToDelete   []LibraryDeleteRequest `json:"filesToDelete,omitempty"`
+	SubtitleFetches []SubtitleFetchRequest `json:"subtitleFetches,omitempty"`
+}
+
+// SubtitleFetchRequest is a server-side request to download a subtitle (from our
+// proxy URL, already charset-fixed + VTT) and save it as a sidecar next to a
+// media file. URL is the absolute /api/internal/subtitles/proxy URL.
+type SubtitleFetchRequest struct {
+	ID       int    `json:"id"`
+	FilePath string `json:"filePath"`
+	Lang     string `json:"lang"`
+	URL      string `json:"url"`
+}
+
+// SubtitleFetchError reports a permanently-failed subtitle fetch back to the web.
+type SubtitleFetchError struct {
+	ID    int    `json:"id"`
+	Error string `json:"error"`
 }
 
 // ---------------------------------------------------------------------------
