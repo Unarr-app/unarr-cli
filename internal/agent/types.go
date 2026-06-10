@@ -426,6 +426,11 @@ type SyncRequest struct {
 	Tasks           []TaskState `json:"tasks"`
 	CanDelete       bool        `json:"canDelete"`                 // library.allow_delete is enabled
 	DeleteConfirmed []int       `json:"deleteConfirmed,omitempty"` // library item IDs successfully deleted from disk
+	// Subtitle-fetch job IDs the agent completed (sidecar written to disk).
+	SubtitlesFetched []int `json:"subtitlesFetched,omitempty"`
+	// Subtitle-fetch jobs that permanently failed (download/write error) — the web
+	// marks them errored so the UI fails fast instead of waiting for a timeout.
+	SubtitlesFailed []SubtitleFetchError `json:"subtitlesFailed,omitempty"`
 	// Live managed-VPN split-tunnel state, sent every sync so the web sees the
 	// WireGuard slot owner update in near-realtime (vs. register, once at startup).
 	// VPNActive has no omitempty: false (tunnel down) must reach the server so it
@@ -512,14 +517,31 @@ type StreamSession struct {
 
 // SyncResponse is returned by the server with all pending actions for the CLI.
 type SyncResponse struct {
-	NewTasks       []Task                 `json:"newTasks,omitempty"`
-	Controls       []ControlAction        `json:"controls,omitempty"`
-	StreamRequests []StreamRequest        `json:"streamRequests,omitempty"`
-	StreamSessions []StreamSession        `json:"streamSessions,omitempty"`
-	Watching       bool                   `json:"watching"`
-	Upgrade        *UpgradeSignal         `json:"upgrade,omitempty"`
-	Scan           bool                   `json:"scan,omitempty"`
-	FilesToDelete  []LibraryDeleteRequest `json:"filesToDelete,omitempty"`
+	NewTasks        []Task                 `json:"newTasks,omitempty"`
+	Controls        []ControlAction        `json:"controls,omitempty"`
+	StreamRequests  []StreamRequest        `json:"streamRequests,omitempty"`
+	StreamSessions  []StreamSession        `json:"streamSessions,omitempty"`
+	Watching        bool                   `json:"watching"`
+	Upgrade         *UpgradeSignal         `json:"upgrade,omitempty"`
+	Scan            bool                   `json:"scan,omitempty"`
+	FilesToDelete   []LibraryDeleteRequest `json:"filesToDelete,omitempty"`
+	SubtitleFetches []SubtitleFetchRequest `json:"subtitleFetches,omitempty"`
+}
+
+// SubtitleFetchRequest is a server-side request to download a subtitle (from our
+// proxy URL, already charset-fixed + VTT) and save it as a sidecar next to a
+// media file. URL is the absolute /api/internal/subtitles/proxy URL.
+type SubtitleFetchRequest struct {
+	ID       int    `json:"id"`
+	FilePath string `json:"filePath"`
+	Lang     string `json:"lang"`
+	URL      string `json:"url"`
+}
+
+// SubtitleFetchError reports a permanently-failed subtitle fetch back to the web.
+type SubtitleFetchError struct {
+	ID    int    `json:"id"`
+	Error string `json:"error"`
 }
 
 // ---------------------------------------------------------------------------

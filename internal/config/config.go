@@ -211,6 +211,21 @@ type LibraryConfig struct {
 	// generation never saturates the machine or the NAS. Default 0.7; 0 falls back
 	// to the default. Linux-only (no load reading elsewhere → unthrottled).
 	PrewarmMaxLoadRatio float64 `toml:"prewarm_max_load_ratio"`
+
+	// On-demand / automatic subtitle fetching from the web (Wyzie aggregator,
+	// PRO). The web can always push a hot request (library/player button); this
+	// section only controls SCAN-TIME auto-fetch, which is OFF by default.
+	Subtitles SubtitlesConfig `toml:"subtitles"`
+}
+
+// SubtitlesConfig controls scan-time subtitle auto-fetch.
+type SubtitlesConfig struct {
+	// AutoFetch: during a library scan, fetch missing subtitles for the preferred
+	// languages and write them as sidecars. Default false (opt-in).
+	AutoFetch bool `toml:"auto_fetch"`
+	// Languages: preferred subtitle languages (ISO 639-1) to ensure exist, in
+	// priority order, e.g. ["es", "en"]. Empty → auto-fetch does nothing.
+	Languages []string `toml:"languages"`
 }
 
 // TrickplayConfig controls scan-time trickplay sprite generation.

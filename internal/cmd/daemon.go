@@ -594,6 +594,14 @@ func runDaemonStart() error {
 		}
 	}
 
+	// Wire: sync receives on-demand subtitle-fetch jobs (write VTT sidecars).
+	// Always available (additive, no deletion) as long as we have scan paths.
+	if len(daemonCfg.ScanPaths) > 0 {
+		sc.OnSubtitleFetch = func(reqs []agent.SubtitleFetchRequest) ([]int, []agent.SubtitleFetchError) {
+			return library.FetchSubtitles(reqs, daemonCfg.ScanPaths)
+		}
+	}
+
 	// Wire: sync receives stream requests for completed downloads
 	d.OnStreamRequested = func(sr agent.StreamRequest) {
 		if streamSrv.CurrentTaskID() == sr.TaskID {

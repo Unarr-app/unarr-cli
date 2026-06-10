@@ -12,9 +12,9 @@
 //
 // Lifecycle:
 //
-//   t, err := funnel.Start(ctx, funnel.Config{Port: 11819})
-//   defer t.Close()
-//   url, err := t.WaitURL(30 * time.Second)  // blocks until cloudflared emits the URL
+//	t, err := funnel.Start(ctx, funnel.Config{Port: 11819})
+//	defer t.Close()
+//	url, err := t.WaitURL(30 * time.Second)  // blocks until cloudflared emits the URL
 //
 // The tunnel runs until the context is cancelled or t.Close() is called.
 package funnel
@@ -200,4 +200,3 @@ func (t *Tunnel) scanStderr(r io.Reader) {
 		}
 	}
 }
-

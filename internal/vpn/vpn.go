@@ -174,11 +174,11 @@ type wgConf struct {
 	dns        []netip.Addr
 	mtu        int
 
-	peerPublicKey  string // hex
-	presharedKey   string // hex (optional)
-	endpoint       string // resolved ip:port
-	allowedIPs     []string
-	keepalive      int
+	peerPublicKey string // hex
+	presharedKey  string // hex (optional)
+	endpoint      string // resolved ip:port
+	allowedIPs    []string
+	keepalive     int
 }
 
 func (w *wgConf) uapi() string {

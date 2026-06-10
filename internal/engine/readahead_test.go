@@ -10,10 +10,10 @@ func TestDynamicReadahead(t *testing.T) {
 	}{
 		{"unknown bitrate → default", 0, defaultReadahead},
 		{"negative → default", -1, defaultReadahead},
-		{"low bitrate clamps to min", 1_000_000, minReadahead},      // 1 Mbps → ~3.75 MiB < 8 MiB
-		{"mid bitrate scales", 5_000_000, 5_000_000 / 8 * readaheadSeconds}, // 5 Mbps → ~18.75 MiB
+		{"low bitrate clamps to min", 1_000_000, minReadahead},                       // 1 Mbps → ~3.75 MiB < 8 MiB
+		{"mid bitrate scales", 5_000_000, 5_000_000 / 8 * readaheadSeconds},          // 5 Mbps → ~18.75 MiB
 		{"high bitrate within range", 25_000_000, 25_000_000 / 8 * readaheadSeconds}, // 4K ~25 Mbps → ~93.75 MiB
-		{"very high clamps to max", 80_000_000, maxReadahead},       // 80 Mbps → 300 MiB > cap
+		{"very high clamps to max", 80_000_000, maxReadahead},                        // 80 Mbps → 300 MiB > cap
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
