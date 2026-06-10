@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.9-beta] - 2026-06-10
+
+
+### Changed
+
+- **daemon**: revisión crítica del reporte de errores de sesión
+
+### Fixed
+
+- **daemon**: reportar fallos de arranque de sesión a la web + scan en sesión única
 ## [1.0.8-beta] - 2026-06-10
 
 
@@ -17,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **hls**: forced-idr en NVENC/QSV — los segmentos ignoraban force_key_frames
 - **hls**: los prewarms ya no desalojan la sesión del espectador + trickplay 12x
+
+### Other
+
+- **release**: 1.0.8-beta
 ## [1.0.7-beta] - 2026-06-08
 
 
@@ -756,6 +770,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.0.9-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.8-beta...v1.0.9-beta
 [1.0.8-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.7-beta...v1.0.8-beta
 [1.0.7-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.6-beta...v1.0.7-beta
 [1.0.6-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.5-beta...v1.0.6-beta
