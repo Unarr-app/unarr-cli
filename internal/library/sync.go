@@ -1,11 +1,73 @@
 package library
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/torrentclaw/unarr/internal/agent"
 )
+
+// SyncOptions describes ONE library sync session — a set of batches sharing a
+// single syncStartedAt so the server can reap rows not seen by the session.
+type SyncOptions struct {
+	AgentID string
+	// ScanPath is the primary root, kept for pre-scanRoots servers.
+	ScanPath string
+	// ScanRoots lists every root this session covers (see LibrarySyncRequest).
+	ScanRoots []string
+	// FullCycle: the session spans every configured root — the server may reap
+	// unseen rows regardless of path prefix. NEVER set it for a subtree scan.
+	FullCycle bool
+	// OnProgress, when non-nil, is called after each batch with (sent, total).
+	OnProgress func(sent, total int)
+}
+
+// SyncResult aggregates the per-batch server responses of a session.
+type SyncResult struct {
+	Synced  int
+	Matched int
+	Removed int
+}
+
+// SyncBatches uploads items to the server in batches of 100 as ONE sync
+// session: every batch shares the same syncStartedAt and only the final one
+// carries isLastBatch, so the server's stale-row cleanup sees the whole cycle
+// at once. The single source of the batching protocol — shared by `unarr scan`
+// (cmd/scan.go) and the daemon auto-scan (cmd/daemon.go); before this each
+// root synced as its own session and the per-agent cleanup could reap rows of
+// roots the session never visited.
+func SyncBatches(ctx context.Context, ac *agent.Client, items []agent.LibrarySyncItem, opts SyncOptions) (SyncResult, error) {
+	const batchSize = 100
+	var res SyncResult
+	syncStartedAt := time.Now().UTC().Format(time.RFC3339)
+	for i := 0; i < len(items); i += batchSize {
+		end := i + batchSize
+		if end > len(items) {
+			end = len(items)
+		}
+		resp, err := ac.SyncLibrary(ctx, agent.LibrarySyncRequest{
+			Items:         items[i:end],
+			ScanPath:      opts.ScanPath,
+			AgentID:       opts.AgentID,
+			IsLastBatch:   end >= len(items),
+			SyncStartedAt: syncStartedAt,
+			ScanRoots:     opts.ScanRoots,
+			FullCycle:     opts.FullCycle,
+		})
+		if err != nil {
+			return res, err
+		}
+		res.Synced += resp.Synced
+		res.Matched += resp.Matched
+		res.Removed += resp.Removed
+		if opts.OnProgress != nil {
+			opts.OnProgress(end, len(items))
+		}
+	}
+	return res, nil
+}
 
 // relToRoot returns the file's path relative to the scan root (forward-slashed),
 // or "" when it doesn't live under root. The server stores this so streaming can

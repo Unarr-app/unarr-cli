@@ -632,63 +632,17 @@ func runDaemonStart() error {
 			}()
 		}
 
-		allowedRoots := streamAllowedRoots(cfg)
-
-		filePath := filepath.Clean(sr.FilePath)
 		// Self-heal a base-path mismatch: the web may hand us a path under an old
 		// root (e.g. /mnt/nas/peliculas/… from before a binary→docker move) that
 		// is now outside our allowed dirs but whose file still exists under a
-		// current root (/downloads/…). Remap the path's tail onto an allowed root
-		// so playback works immediately; the next re-scan persists the fix to the
-		// DB. See docs/plans/unarr-path-resilience.md.
-		if !isAllowedStreamPath(filePath, allowedRoots...) {
-			if remapped := relocateUnreachable(filePath, allowedRoots); remapped != "" {
-				log.Printf("[%s] stream self-heal: remapped %s → %s", agent.ShortID(sr.TaskID), filePath, remapped)
-				filePath = remapped
-			} else {
-				log.Printf("[%s] stream request rejected: path outside allowed dirs: %s", agent.ShortID(sr.TaskID), filePath)
-				reportStreamError(fmt.Sprintf("path outside allowed dirs: %s", filePath))
-				return
-			}
-		}
-		// os.Stat over NFS can transiently fail (ESTALE/EAGAIN/timeout) right
-		// after a remount or under load. Retry a few times before giving up so
-		// a hiccup doesn't surface as a spurious "file not found" — this is the
-		// root of the intermittent "works on the 3rd try" stream failures.
-		var info os.FileInfo
-		var statErr error
-		for attempt := 0; attempt < 3; attempt++ {
-			if info, statErr = os.Stat(filePath); statErr == nil {
-				break
-			}
-			if attempt < 2 {
-				time.Sleep(300 * time.Millisecond)
-			}
-		}
-		if statErr != nil {
-			// Last resort before failing: the file may simply have moved within
-			// an allowed root — try to relocate it by path tail.
-			if remapped := relocateUnreachable(filePath, allowedRoots); remapped != "" {
-				log.Printf("[%s] stream self-heal: relocated missing %s → %s", agent.ShortID(sr.TaskID), filePath, remapped)
-				filePath = remapped
-				info, statErr = os.Stat(filePath)
-			}
-		}
-		if statErr != nil {
-			log.Printf("[%s] stream request: file not found after retries: %s (%v)", agent.ShortID(sr.TaskID), filePath, statErr)
-			reportStreamError(fmt.Sprintf("file not found: %s", filePath))
+		// current root (/downloads/…). resolvePlayableFile remaps, stat-retries
+		// (NFS) and resolves directories; the next re-scan persists the fix to
+		// the DB. See docs/plans/unarr-path-resilience.md.
+		filePath, errCode, perr := resolvePlayableFile(sr.FilePath, streamAllowedRoots(cfg), agent.ShortID(sr.TaskID))
+		if perr != nil {
+			log.Printf("[%s] stream request rejected (%s): %v", agent.ShortID(sr.TaskID), errCode, perr)
+			reportStreamError(perr.Error())
 			return
-		}
-
-		if info.IsDir() {
-			found := engine.FindVideoFile(filePath)
-			if found == "" {
-				log.Printf("[%s] stream request: no video file in directory: %s", agent.ShortID(sr.TaskID), filePath)
-				reportStreamError(fmt.Sprintf("no video file in directory: %s", filePath))
-				return
-			}
-			filePath = found
-			log.Printf("[%s] resolved directory to video file: %s", agent.ShortID(sr.TaskID), filepath.Base(filePath))
 		}
 
 		cancelStreamContexts()
@@ -718,6 +672,24 @@ func runDaemonStart() error {
 	d.OnStreamSession = func(sess agent.StreamSession) {
 		if playerSessionRegistry.has(sess.SessionID) {
 			return // already running
+		}
+
+		// failSession logs AND reports a startup failure to the web — every
+		// abort path in this handler must go through it. A silent `return`
+		// here left the player probing a playlist that would never exist
+		// until its 30s deadline (incident 2026-06-10: deleted file + stale
+		// library row = eternal "Preparando sesión"). Best-effort: on old web
+		// deployments the endpoint 404s and the player falls back to the
+		// probe deadline, exactly as before.
+		failSession := func(sessionID, code, message string) {
+			log.Printf("[hls %s] failed (%s): %s", agent.ShortID(sessionID), code, message)
+			go func() {
+				rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				if err := agentClient.ReportSessionError(rctx, sessionID, code, message); err != nil {
+					log.Printf("[hls %s] session error report failed: %v", agent.ShortID(sessionID), err)
+				}
+			}()
 		}
 
 		// startHLSPlayback starts an HLS encode (local file or debrid URL) and
@@ -771,7 +743,7 @@ func runDaemonStart() error {
 				if err != nil {
 					playerSessionRegistry.remove(hlsCfg.SessionID)
 					hlsCancel()
-					log.Printf("[hls %s] start failed: %v", agent.ShortID(hlsCfg.SessionID), err)
+					failSession(hlsCfg.SessionID, "start_failed", err.Error())
 					return
 				}
 				if prewarm {
@@ -811,7 +783,7 @@ func runDaemonStart() error {
 				provider, perr := engine.NewDebridFileProvider(bctx, sess.DirectURL, sess.FileName, sess.FileSize, refresh)
 				if perr != nil {
 					playerSessionRegistry.remove(sess.SessionID)
-					log.Printf("[stream %s] debrid provider failed: %v", agent.ShortID(sess.SessionID), perr)
+					failSession(sess.SessionID, "start_failed", fmt.Sprintf("debrid provider: %v", perr))
 					return
 				}
 				streamSrv.SetFile(provider, sess.TaskID)
@@ -834,7 +806,7 @@ func runDaemonStart() error {
 		if sess.DirectURL != "" { // playMethod == "hls" implied (2a returned above)
 			tcRuntime := buildTranscodeRuntime(ctx, cfg)
 			if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
-				log.Printf("[hls %s] rejected: ffmpeg/ffprobe unavailable (debrid HLS)", agent.ShortID(sess.SessionID))
+				failSession(sess.SessionID, "ffmpeg_unavailable", "ffmpeg/ffprobe unavailable (debrid HLS)")
 				return
 			}
 			hlsCtx, hlsCancel := context.WithCancel(ctx)
@@ -860,43 +832,22 @@ func runDaemonStart() error {
 			return
 		}
 
-		filePath := sess.FilePath
-		if filePath == "" {
-			log.Printf("[hls %s] rejected: empty file path", agent.ShortID(sess.SessionID))
+		if sess.FilePath == "" {
+			failSession(sess.SessionID, "start_failed", "empty file path")
 			return
 		}
-		filePath = filepath.Clean(filePath)
-		// Apply the SAME base-path self-heal remap as the raw /stream handler
-		// (OnStreamRequest above). Without it, a path under an old/host base
+		// SAME base-path self-heal + stat-retry + dir resolution as the raw
+		// /stream handler (resolvePlayableFile). A path under an old/host base
 		// (e.g. /mnt/nas/peliculas/… handed by the web while this docker agent
-		// mounts that media at /downloads) is rejected here even though the raw
-		// path self-heals it — so the web silently falls back to the raw stream
-		// and HLS/remux never runs (no transcode, slow funnel start). NOTE: this
-		// replicates only the lexical-remap; the raw handler additionally retries
-		// os.Stat for transient NFS errors. The HLS dir-check below proceeds (not
-		// rejects) on a stat error, so it tolerates an NFS blip differently.
+		// mounts that media at /downloads) remaps onto the current root; a path
+		// whose file is genuinely gone fails fast as "file_missing" so the web
+		// can prune the stale library row and the player can fall back, instead
+		// of the player probing a playlist that will never exist.
 		// See docs/plans/unarr-path-resilience.md.
-		hlsAllowedRoots := streamAllowedRoots(cfg)
-		if !isAllowedStreamPath(filePath, hlsAllowedRoots...) {
-			if remapped := relocateUnreachable(filePath, hlsAllowedRoots); remapped != "" {
-				log.Printf("[hls %s] self-heal: remapped %s → %s",
-					agent.ShortID(sess.SessionID), filePath, remapped)
-				filePath = remapped
-			} else {
-				log.Printf("[hls %s] rejected: path outside allowed dirs: %s",
-					agent.ShortID(sess.SessionID), filePath)
-				return
-			}
-		}
-		// Resolve directory → first video file (matches StreamRequest behavior).
-		if info, err := os.Stat(filePath); err == nil && info.IsDir() {
-			found := engine.FindVideoFile(filePath)
-			if found == "" {
-				log.Printf("[hls %s] rejected: no video file in dir %s",
-					agent.ShortID(sess.SessionID), filePath)
-				return
-			}
-			filePath = found
+		filePath, errCode, perr := resolvePlayableFile(sess.FilePath, streamAllowedRoots(cfg), "hls "+agent.ShortID(sess.SessionID))
+		if perr != nil {
+			failSession(sess.SessionID, errCode, perr.Error())
+			return
 		}
 
 		// Direct-play (hueco #3 / 3a): the web decided this source is already
@@ -925,7 +876,7 @@ func runDaemonStart() error {
 
 		tcRuntime := buildTranscodeRuntime(ctx, cfg)
 		if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
-			log.Printf("[hls %s] rejected: ffmpeg/ffprobe unavailable", agent.ShortID(sess.SessionID))
+			failSession(sess.SessionID, "ffmpeg_unavailable", "ffmpeg/ffprobe unavailable")
 			return
 		}
 
@@ -939,7 +890,7 @@ func runDaemonStart() error {
 			probe, perr := engine.ProbeFile(probeCtx, tcRuntime.FFprobePath, filePath)
 			cancelProbe()
 			if perr != nil {
-				log.Printf("[stream %s] remux probe failed: %v", agent.ShortID(sess.SessionID), perr)
+				failSession(sess.SessionID, "start_failed", fmt.Sprintf("remux probe: %v", perr))
 				return
 			}
 			tProbe := time.Now()
@@ -947,7 +898,7 @@ func runDaemonStart() error {
 			src, serr := engine.NewRemuxSource(remuxCtx, filePath, probe, tcRuntime.FFmpegPath, sess.FileName)
 			if serr != nil {
 				remuxCancel()
-				log.Printf("[stream %s] remux start failed: %v", agent.ShortID(sess.SessionID), serr)
+				failSession(sess.SessionID, "start_failed", fmt.Sprintf("remux start: %v", serr))
 				return
 			}
 			streamSrv.SetGrowingFile(src, sess.TaskID)
@@ -1201,6 +1152,79 @@ func relocateUnreachable(filePath string, allowedRoots []string) string {
 	return ""
 }
 
+// Stable machine codes for the web's session-error channel
+// (POST /api/internal/agent/session-error). Only "file_missing" triggers
+// destructive self-heal on the web (it prunes the stale library row + task
+// pointer), so the resolver must never return it while the file may exist.
+const (
+	pathErrRejected = "path_rejected"
+	pathErrMissing  = "file_missing"
+	pathErrNoVideo  = "no_video_file"
+)
+
+// resolvePlayableFile validates and self-heals a web-provided source path into
+// a playable on-disk video file. Shared by the raw /stream handler and every
+// session transport (HLS / remux / direct-play) so they all behave
+// identically — before this, the HLS path replicated only the lexical remap
+// and silently diverged on stat retries (docs/plans/unarr-path-resilience.md):
+//
+//  1. Containment: the cleaned path must live under an allowed root; if not,
+//     relocate it by path tail (old base path → current mount).
+//  2. Existence: os.Stat with retries (NFS can transiently fail right after a
+//     remount or under load — the root of the "works on the 3rd try" stream
+//     failures), then one last relocate for files that moved within a root.
+//  3. Directories resolve to their first contained video file.
+//
+// On failure returns a stable errCode: "path_rejected" means the file EXISTS
+// at the original path but outside every allowed root (an agent config
+// problem — the web must NOT prune library rows over it); "file_missing"
+// means no readable file was found anywhere; "no_video_file" is a directory
+// with nothing playable inside.
+func resolvePlayableFile(rawPath string, allowedRoots []string, logLabel string) (string, string, error) {
+	filePath := filepath.Clean(rawPath)
+	if !isAllowedStreamPath(filePath, allowedRoots...) {
+		if remapped := relocateUnreachable(filePath, allowedRoots); remapped != "" {
+			log.Printf("[%s] stream self-heal: remapped %s → %s", logLabel, filePath, remapped)
+			filePath = remapped
+		} else if _, err := os.Stat(filePath); err == nil {
+			return "", pathErrRejected, fmt.Errorf("path outside allowed dirs: %s", filePath)
+		} else {
+			return "", pathErrMissing, fmt.Errorf("file not found under any allowed root: %s", filePath)
+		}
+	}
+	var info os.FileInfo
+	var statErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if info, statErr = os.Stat(filePath); statErr == nil {
+			break
+		}
+		if attempt < 2 {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	if statErr != nil {
+		// Last resort before failing: the file may simply have moved within
+		// an allowed root — try to relocate it by path tail.
+		if remapped := relocateUnreachable(filePath, allowedRoots); remapped != "" {
+			log.Printf("[%s] stream self-heal: relocated missing %s → %s", logLabel, filePath, remapped)
+			filePath = remapped
+			info, statErr = os.Stat(filePath)
+		}
+	}
+	if statErr != nil {
+		return "", pathErrMissing, fmt.Errorf("file not found after retries: %s (%v)", filePath, statErr)
+	}
+	if info.IsDir() {
+		found := engine.FindVideoFile(filePath)
+		if found == "" {
+			return "", pathErrNoVideo, fmt.Errorf("no video file in directory: %s", filePath)
+		}
+		log.Printf("[%s] resolved directory to video file: %s", logLabel, filepath.Base(found))
+		filePath = found
+	}
+	return filePath, "", nil
+}
+
 func formatSpeedLog(bps int64) string {
 	switch {
 	case bps >= 1024*1024*1024:
@@ -1291,19 +1315,26 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 			}
 		}
 
-		// Scan each path independently and sync per path so the server can
-		// scope stale-item deletion to the correct directory prefix.
-		const batchSize = 100
-		totalSynced := 0
+		// Scan every path, then sync ALL of them as ONE session (single
+		// syncStartedAt + final isLastBatch via library.SyncBatches). Per-root
+		// sessions let the server's per-agent stale cleanup reap rows of roots
+		// a session never visited; one full-cycle session makes the cleanup
+		// sound AND lets it reap old-base-path ghost rows (fullCycle=true —
+		// only when every root scanned cleanly).
+		var syncItems []agent.LibrarySyncItem
+		var coveredRoots []string
+		fullCycle := true
 		var mergedItems []library.LibraryItem
 
 		for _, scanPath := range scanPaths {
 			cache, err := library.Scan(ctx, scanPath, existing, scanOpts)
 			if err != nil {
 				log.Printf("[auto-scan] scan failed for %s: %v", scanPath, err)
+				fullCycle = false
 				continue
 			}
 			mergedItems = append(mergedItems, cache.Items...)
+			coveredRoots = append(coveredRoots, scanPath)
 
 			if prewarmFFmpeg != "" {
 				library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
@@ -1323,28 +1354,28 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 				log.Printf("[auto-scan] no items under %s", scanPath)
 				continue
 			}
+			syncItems = append(syncItems, items...)
+		}
 
-			syncStartedAt := time.Now().UTC().Format(time.RFC3339)
-			for i := 0; i < len(items); i += batchSize {
-				end := i + batchSize
-				if end > len(items) {
-					end = len(items)
-				}
-				isLast := end >= len(items)
-
-				_, err := ac.SyncLibrary(ctx, agent.LibrarySyncRequest{
-					Items:         items[i:end],
-					ScanPath:      scanPath,
-					AgentID:       cfg.Agent.ID,
-					IsLastBatch:   isLast,
-					SyncStartedAt: syncStartedAt,
-				})
-				if err != nil {
-					log.Printf("[auto-scan] sync failed for %s: %v", scanPath, err)
-					break
-				}
+		totalSynced := 0
+		if len(syncItems) > 0 {
+			res, err := library.SyncBatches(ctx, ac, syncItems, library.SyncOptions{
+				AgentID:   cfg.Agent.ID,
+				ScanPath:  coveredRoots[0],
+				ScanRoots: coveredRoots,
+				FullCycle: fullCycle,
+			})
+			if err != nil {
+				log.Printf("[auto-scan] sync failed: %v", err)
+			} else if res.Removed > 0 {
+				log.Printf("[auto-scan] server removed %d stale item(s)", res.Removed)
 			}
-			totalSynced += len(items)
+			totalSynced = res.Synced
+		} else {
+			// An entirely-empty library can't open a sync session (the server
+			// requires ≥1 item per batch), so stale rows survive until a file
+			// reappears — same trade-off as before, now explicit.
+			log.Printf("[auto-scan] no items under any scan path — skipping sync")
 		}
 
 		// Save merged cache for incremental scanning next time.

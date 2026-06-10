@@ -361,6 +361,17 @@ type LibrarySyncRequest struct {
 	AgentID       string            `json:"agentId,omitempty"` // lets the server scope stale-cleanup per agent
 	IsLastBatch   bool              `json:"isLastBatch"`
 	SyncStartedAt string            `json:"syncStartedAt,omitempty"` // ISO-8601; same for all batches in a session
+	// ScanRoots lists EVERY root this sync session covered (a session spans all
+	// roots since 1.0.9 — one syncStartedAt, one isLastBatch). The server scopes
+	// stale-row cleanup of a partial session to these prefixes. Older servers
+	// ignore the field and fall back to ScanPath.
+	ScanRoots []string `json:"scanRoots,omitempty"`
+	// FullCycle marks a session that covered every root the agent scans
+	// (daemon auto-scan, `unarr scan` without args). The server may then reap
+	// unseen rows REGARDLESS of path prefix — old-base-path ghost rows
+	// included. Must stay false for a manual subtree scan or when any root's
+	// scan failed, or the cleanup would reap rows the session never visited.
+	FullCycle bool `json:"fullCycle,omitempty"`
 }
 
 // LibrarySyncItem is a single scanned media file with ffprobe metadata.

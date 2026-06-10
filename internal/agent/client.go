@@ -131,6 +131,32 @@ func (c *Client) MarkSessionReady(ctx context.Context, sessionID string, health 
 	return nil
 }
 
+// ReportSessionError is the failure-path counterpart of MarkSessionReady: it
+// tells the web a streaming session can NOT start (file gone, path rejected,
+// ffmpeg missing, spawn failure…). The web marks the session failed, pushes an
+// SSE "failed" event so the player stops probing a playlist that will never
+// exist, and self-heals stale library state on code "file_missing".
+//
+// code is one of the stable machine codes the web understands:
+// "file_missing" | "path_rejected" | "no_video_file" | "ffmpeg_unavailable" |
+// "start_failed". message is free-form detail for diagnostics.
+//
+// Best-effort like MarkSessionReady: on older web deployments without the
+// endpoint this 404s — the caller logs and the player falls back to its
+// probe-deadline behaviour, exactly as before this channel existed.
+func (c *Client) ReportSessionError(ctx context.Context, sessionID, code, message string) error {
+	req := struct {
+		SessionID string `json:"sessionId"`
+		Code      string `json:"code"`
+		Message   string `json:"message,omitempty"`
+	}{SessionID: sessionID, Code: code, Message: message}
+	var resp StatusResponse
+	if err := c.doPost(ctx, "/api/internal/agent/session-error", req, &resp); err != nil {
+		return fmt.Errorf("report session error: %w", err)
+	}
+	return nil
+}
+
 // SessionHealth is an OPTIONAL live-transcode health snapshot attached to a
 // session-ready report (F3). A nil *SessionHealth means the agent has no
 // telemetry to share (cache hit, direct-play, or progress not yet stable) and

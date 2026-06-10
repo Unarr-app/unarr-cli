@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -40,20 +39,40 @@ to see available quality upgrades.`,
 			if showStatus {
 				return runScanStatus()
 			}
+			cfg := loadConfig()
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
+			// All scanned roots feed ONE sync session (single syncStartedAt +
+			// final isLastBatch) so the server's stale-row cleanup sees the
+			// whole cycle at once. fullCycle only without an explicit path —
+			// a subtree scan must never let the server reap outside it.
 			if len(args) == 0 {
-				cfg := loadConfig()
 				paths := library.ResolveScanPaths(cfg.Download.Dir, cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir, cfg.Library.ScanPath)
 				if len(paths) == 0 {
 					return fmt.Errorf("usage: unarr scan <path>\n\nNo scan paths configured. Provide a path or set up downloads.dir via 'unarr init'")
 				}
+				var items []agent.LibrarySyncItem
 				for _, p := range paths {
-					if err := runScan(p, workers, ffprobe, noSync); err != nil {
+					cache, err := runScan(ctx, cfg, p, workers, ffprobe)
+					if err != nil {
 						return err
 					}
+					items = append(items, library.BuildSyncItems(cache)...)
 				}
+				if noSync || jsonOut {
+					return nil
+				}
+				return syncToServer(ctx, cfg, items, paths, true)
+			}
+			cache, err := runScan(ctx, cfg, args[0], workers, ffprobe)
+			if err != nil {
+				return err
+			}
+			if noSync || jsonOut {
 				return nil
 			}
-			return runScan(args[0], workers, ffprobe, noSync)
+			return syncToServer(ctx, cfg, library.BuildSyncItems(cache), []string{args[0]}, false)
 		},
 	}
 
@@ -65,17 +84,19 @@ to see available quality upgrades.`,
 	return cmd
 }
 
-func runScan(dirPath string, workers int, ffprobePath string, noSync bool) error {
+// runScan walks one root, saves the cache and prewarms sidecars. Syncing to
+// the server is the CALLER's job (RunE) — all roots of an invocation feed one
+// sync session via syncToServer, so per-root sessions can't trick the server
+// into reaping rows of roots the session never visited.
+func runScan(ctx context.Context, cfg config.Config, dirPath string, workers int, ffprobePath string) (*library.LibraryCache, error) {
 	// Validate path
 	info, err := os.Stat(dirPath)
 	if err != nil {
-		return fmt.Errorf("path not found: %s", dirPath)
+		return nil, fmt.Errorf("path not found: %s", dirPath)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("not a directory: %s", dirPath)
+		return nil, fmt.Errorf("not a directory: %s", dirPath)
 	}
-
-	cfg := loadConfig()
 
 	// Resolve workers: flag → config → default 8
 	if workers == 0 {
@@ -92,10 +113,6 @@ func runScan(dirPath string, workers int, ffprobePath string, noSync bool) error
 
 	// Load existing cache for incremental scanning
 	existing, _ := library.LoadCache()
-
-	// Context with signal handling
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	bold := color.New(color.Bold)
 	bold.Printf("\n  Scanning %s...\n\n", dirPath)
@@ -114,14 +131,14 @@ func runScan(dirPath string, workers int, ffprobePath string, noSync bool) error
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("scan failed: %w", err)
+		return nil, fmt.Errorf("scan failed: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "\r\033[K") // clear progress line
 
 	// Save cache
 	if err := library.SaveCache(cache); err != nil {
-		return fmt.Errorf("save cache: %w", err)
+		return nil, fmt.Errorf("save cache: %w", err)
 	}
 
 	// Remember scan path in config
@@ -133,11 +150,12 @@ func runScan(dirPath string, workers int, ffprobePath string, noSync bool) error
 	// Print summary
 	printScanSummary(cache)
 
-	// JSON output mode
+	// JSON output mode — emit the cache and skip the prewarm (the caller skips
+	// the sync via the same flag).
 	if jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(cache)
+		return cache, enc.Encode(cache)
 	}
 
 	// Pre-extract sidecars (text subs → WebVTT, panel frames → JPEG) into a hidden
@@ -162,15 +180,14 @@ func runScan(dirPath string, workers int, ffprobePath string, noSync bool) error
 		}
 	}
 
-	// Sync to server
-	if !noSync {
-		return syncToServer(ctx, cfg, cache)
-	}
-
-	return nil
+	return cache, nil
 }
 
-func syncToServer(ctx context.Context, cfg config.Config, cache *library.LibraryCache) error {
+// syncToServer uploads the scanned items of THIS invocation as one sync
+// session. roots lists every root the invocation scanned; fullCycle marks a
+// no-args run that covered all configured roots (the server may then reap
+// stale rows regardless of prefix — see LibrarySyncRequest.FullCycle).
+func syncToServer(ctx context.Context, cfg config.Config, items []agent.LibrarySyncItem, roots []string, fullCycle bool) error {
 	apiKey := apiKeyFlag
 	if apiKey == "" {
 		apiKey = cfg.Auth.APIKey
@@ -182,50 +199,28 @@ func syncToServer(ctx context.Context, cfg config.Config, cache *library.Library
 
 	ac := agent.NewClient(cfg.Auth.APIURL, apiKey, "unarr/"+Version)
 
-	items := library.BuildSyncItems(cache)
-
 	if len(items) == 0 {
 		color.Yellow("\n  No valid items to sync.")
 		return nil
 	}
 
-	// Send in batches of 100
-	const batchSize = 100
-	totalSynced := 0
-	totalMatched := 0
-	totalRemoved := 0
-	syncStartedAt := time.Now().UTC().Format(time.RFC3339)
-
-	for i := 0; i < len(items); i += batchSize {
-		end := i + batchSize
-		if end > len(items) {
-			end = len(items)
-		}
-		batch := items[i:end]
-		isLast := end >= len(items)
-
-		fmt.Fprintf(os.Stderr, "\r  Syncing %d/%d items...\033[K", end, len(items))
-
-		resp, err := ac.SyncLibrary(ctx, agent.LibrarySyncRequest{
-			Items:         batch,
-			ScanPath:      cache.Path,
-			AgentID:       cfg.Agent.ID,
-			IsLastBatch:   isLast,
-			SyncStartedAt: syncStartedAt,
-		})
-		if err != nil {
-			return fmt.Errorf("sync failed: %w", err)
-		}
-
-		totalSynced += resp.Synced
-		totalMatched += resp.Matched
-		totalRemoved += resp.Removed
+	res, err := library.SyncBatches(ctx, ac, items, library.SyncOptions{
+		AgentID:   cfg.Agent.ID,
+		ScanPath:  roots[0],
+		ScanRoots: roots,
+		FullCycle: fullCycle,
+		OnProgress: func(sent, total int) {
+			fmt.Fprintf(os.Stderr, "\r  Syncing %d/%d items...\033[K", sent, total)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("sync failed: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "\r\033[K")
 
 	green := color.New(color.FgGreen)
-	green.Printf("\n  ✓ Synced %d items (%d matched, %d removed)\n", totalSynced, totalMatched, totalRemoved)
+	green.Printf("\n  ✓ Synced %d items (%d matched, %d removed)\n", res.Synced, res.Matched, res.Removed)
 
 	apiURL := strings.TrimSuffix(cfg.Auth.APIURL, "/")
 	fmt.Printf("  → View upgrades at %s/library\n\n", apiURL)
