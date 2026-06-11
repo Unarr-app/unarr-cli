@@ -317,7 +317,12 @@ type HLSSession struct {
 	fpsEWMA      float64
 	speedSamples int
 	warmupSeen   int // cold-start frames discarded before the EWMA is trusted
-	inputBound   bool
+	// Walltime of the LAST source-read error ffmpeg reported. Windowed (see
+	// hlsInputBoundWindow) instead of a sticky bool: with the F1 continuous
+	// monitor a single transient read blip (peer drop, debrid hiccup ffmpeg
+	// reconnects through) must not reclassify every sub-realtime dip as
+	// "input_bound/struggling" for the rest of a multi-hour session.
+	inputErrAt time.Time
 }
 
 // hlsSeekAhead is how many segments past the writer's current position the
@@ -394,6 +399,12 @@ func (r *HLSSessionRegistry) CloseWhere(pred func(*HLSSession) bool) int {
 // IsPrewarm reports whether this session was started as a background
 // cache-fill (HLSSessionConfig.Prewarm). cfg is immutable after construction.
 func (s *HLSSession) IsPrewarm() bool { return s.cfg.Prewarm }
+
+// IsVideoCopy reports whether this session serves -c:v copy (no video
+// re-encode). Copy sessions emit no ffmpeg -stats telemetry, so the ready
+// watcher posts a one-shot "copy" health heartbeat instead of waiting for
+// speed= samples that never arrive.
+func (s *HLSSession) IsVideoCopy() bool { return s.cfg.VideoCopy }
 
 // RegisterKeep adds a session WITHOUT displacing the others — the prewarm
 // path: a background cache-fill encode must not evict the viewer's live
@@ -830,10 +841,15 @@ func (s *HLSSession) GetTranscodeStats() TranscodeStats {
 		SpeedX:     s.speedEWMA,
 		Fps:        s.fpsEWMA,
 		Samples:    s.speedSamples,
-		InputBound: s.inputBound,
+		InputBound: !s.inputErrAt.IsZero() && time.Since(s.inputErrAt) < hlsInputBoundWindow,
 		FromCache:  s.fromCache,
 	}
 }
+
+// hlsInputBoundWindow bounds how long a source-read error keeps classifying
+// the session as input-bound. Past it, a sub-realtime encode is the encoder's
+// own problem again (the transient link blip resolved or ffmpeg reconnected).
+const hlsInputBoundWindow = 30 * time.Second
 
 // hlsStatsWarmupSkip is how many leading -stats frames to discard before
 // trusting the EWMA. ffmpeg's first readings reflect the pipeline filling
@@ -868,7 +884,22 @@ func (s *HLSSession) recordProgress(speedX, fps float64) {
 // the input pull (slow debrid link / dropped torrent peer), not the encoder.
 func (s *HLSSession) markInputBound() {
 	s.statsMu.Lock()
-	s.inputBound = true
+	s.inputErrAt = time.Now()
+	s.statsMu.Unlock()
+}
+
+// resetTranscodeStats re-arms the cold-start warmup and drops the EWMAs +
+// input-error mark. MUST be called whenever a NEW ffmpeg process starts
+// inside the same session (seek restart, auto-restart supervisor): the new
+// process's pipeline-fill frames read speed=0.0x, and folding them into the
+// already-warmed EWMA drags a healthy 1.5x encode under the 0.75 struggling
+// floor in two samples — which the F1 health monitor would then report as a
+// false "struggling" (pausing the player) right at the seek the user made.
+func (s *HLSSession) resetTranscodeStats() {
+	s.statsMu.Lock()
+	s.warmupSeen = 0
+	s.speedSamples = 0 // recordProgress re-seeds the EWMA on the next sample
+	s.inputErrAt = time.Time{}
 	s.statsMu.Unlock()
 }
 
@@ -1415,6 +1446,7 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 	}
 
 	// Reset session state so the poll + wait machinery picks up the new run.
+	s.resetTranscodeStats() // new ffmpeg = new cold ramp; don't poison the EWMA
 	s.mu.Lock()
 	s.cmd = cmd
 	s.cancel = cancel

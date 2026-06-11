@@ -187,7 +187,10 @@ type SessionHealth struct {
 	Health string `json:"health"`
 	// ffmpeg speed= EWMA: 1.0 = exactly realtime, < 1.0 = slower than playback.
 	RealtimeRatio float64 `json:"realtimeRatio"`
-	// "realtime" | "transcode" (encoder is the wall) | "input_bound" (source read).
+	// "realtime" | "transcode" (encoder is the wall) | "input_bound" (source
+	// read) | "copy" (HLS-copy session: no encode — always realtime; the
+	// heartbeat exists so the web can tell "copy session" from "old agent
+	// with no telemetry", which both used to read as a null health).
 	Reason string `json:"reason"`
 }
 

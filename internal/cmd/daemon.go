@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1614,15 +1615,21 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	readyPosted := false
-	postReady := func(health *agent.SessionHealth) {
+	// `kind` labels the log line: a failed health re-post must not read as a
+	// failed READY (the ready already landed — whoever debugs an eternal
+	// "Preparando…" would chase the wrong webhook). Returns the error so the
+	// F1 monitor only advances its baseline on a post that actually landed.
+	postReady := func(health *agent.SessionHealth, kind string) error {
 		// Parent ctx so a session cancel mid-POST (user closed tab, daemon
 		// shutdown) tears down the in-flight webhook instead of blocking the
 		// goroutine for up to 10 s on a now-orphan call.
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		if err := client.MarkSessionReady(rctx, sessionID, health); err != nil {
-			log.Printf("[hls %s] mark-ready failed: %v", agent.ShortID(sessionID), err)
+		err := client.MarkSessionReady(rctx, sessionID, health)
+		if err != nil {
+			log.Printf("[hls %s] %s failed: %v", agent.ShortID(sessionID), kind, err)
 		}
 		cancel()
+		return err
 	}
 	for {
 		// Session torn down through a path that didn't cancel ctx (registry
@@ -1639,20 +1646,42 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 		// `>= 1` would fire "ready" instantly and freeze the player waiting
 		// on a segment that doesn't exist yet.
 		if !readyPosted && (hsess.FromCache() || hsess.ReadyCount() > hsess.WriterStartIdx()) {
-			postReady(nil)
+			_ = postReady(nil, "mark-ready")
 			readyPosted = true
 			// Cache replay has no live encode → no telemetry to report, done.
 			if hsess.FromCache() {
 				return
 			}
+			// HLS-copy session (F2): ffmpeg copies I/O-bound and emits no
+			// usable -stats, so there is nothing to monitor — but a one-shot
+			// "copy" heartbeat lets the web tell "copy session, producer
+			// fine" from "old agent, no telemetry" (both read as null before).
+			// Deliberately a SECOND post (not merged into the ready one): an
+			// older web rejects the unknown "copy" reason with a 400, and that
+			// must never block the ready flip itself.
+			if hsess.IsVideoCopy() {
+				_ = postReady(&agent.SessionHealth{Health: "ok", RealtimeRatio: 1, Reason: "copy"}, "copy health heartbeat (ready already marked)")
+				return
+			}
 		}
 		// Phase 2 (F3): once enough -stats samples accumulated (encoder past
-		// its cold ramp), report ONE live-health snapshot so the player can
-		// name a too-slow transcode in ~4s instead of inferring it from stalls.
+		// its cold ramp), report the first live-health snapshot so the player
+		// can name a too-slow transcode in ~4s instead of inferring it from
+		// stalls — then keep MONITORING (F1): an encode that is fine in
+		// minute 1 can fall behind in minute 20 (complex scene, GPU stolen by
+		// another process) and the player's stall triage needs the fresh
+		// ratio, not the boot-time snapshot.
 		// >=4 samples ≈ 2s of encoding past seg-0; the EWMA has settled by then.
 		if readyPosted {
 			if st := hsess.GetTranscodeStats(); st.Samples >= 4 {
-				postReady(classifyAgentHealth(st))
+				first := classifyAgentHealth(st)
+				if postReady(first, "health snapshot (ready already marked)") != nil {
+					// Snapshot never landed — hand the monitor an empty
+					// baseline so its first tick re-posts instead of
+					// believing the web already knows this state.
+					first = &agent.SessionHealth{}
+				}
+				monitorSessionHealth(ctx, hsess, sessionID, first, postReady)
 				return
 			}
 		}
@@ -1669,7 +1698,7 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 			// Ready but never got stable telemetry — report whatever we have so
 			// the player isn't left without a verdict (better partial than none).
 			if st := hsess.GetTranscodeStats(); st.Samples > 0 {
-				postReady(classifyAgentHealth(st))
+				_ = postReady(classifyAgentHealth(st), "late health snapshot (ready already marked)")
 			}
 			return
 		}
@@ -1712,6 +1741,59 @@ func fetchAgentCert(ctx context.Context, client *agent.Client, hash string) {
 		return
 	}
 	log.Printf("[acme] installed cert for *.%s.%s", hash, base)
+}
+
+// monitorSessionHealth keeps re-posting the live transcode health for the
+// rest of the session (F1). Re-posts when the verdict BUCKET flips — only
+// after the new bucket holds for 2 consecutive ticks (hysteresis: an EWMA
+// dancing around a cutoff like 0.95 must not webhook every 5s) — or when the
+// ratio drifts ≥0.15 within the same bucket. Worst case is therefore one
+// post per 2 ticks during a genuinely volatile encode, none when steady. A
+// failed post keeps the previous baseline so the next tick retries — losing
+// the single ok→struggling transition webhook would blind the player for
+// the rest of the session. Exits with the session (ctx cancel or registry
+// close); no own deadline on purpose — the session lifetime IS the bound.
+func monitorSessionHealth(ctx context.Context, hsess *engine.HLSSession, sessionID string, last *agent.SessionHealth, post func(*agent.SessionHealth, string) error) {
+	const ratioDrift = 0.15
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	pendingBucket := ""
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if hsess.IsClosed() {
+			return
+		}
+		st := hsess.GetTranscodeStats()
+		if st.Samples == 0 {
+			// Fresh ffmpeg (seek restart re-armed the warmup) — wait for the
+			// new process's own measurements.
+			continue
+		}
+		h := classifyAgentHealth(st)
+		if h.Health == last.Health {
+			pendingBucket = ""
+			if math.Abs(h.RealtimeRatio-last.RealtimeRatio) < ratioDrift {
+				continue
+			}
+		} else if h.Health != pendingBucket {
+			// First tick in a different bucket — remember it, post only if
+			// the next tick still agrees (filters threshold flapping AND any
+			// residual cold-ramp dip a restart reset didn't fully absorb).
+			pendingBucket = h.Health
+			continue
+		} else {
+			pendingBucket = ""
+		}
+		log.Printf("[hls %s] health %s→%s (speed %.2fx→%.2fx)", agent.ShortID(sessionID), last.Health, h.Health, last.RealtimeRatio, h.RealtimeRatio)
+		if post(h, "health update") != nil {
+			continue // baseline unchanged → next tick retries the transition
+		}
+		last = h
+	}
 }
 
 // Realtime-ratio cutoffs for classifyAgentHealth. This is a cross-repo contract
