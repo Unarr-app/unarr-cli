@@ -634,10 +634,11 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	// today's post-seek behaviour.
 	startIdx := 0
 	if cfg.VideoCopy {
-		// Copy mode always numbers from 0: segment indices don't map to
-		// uniform 2s slots, so a StartSec-derived index would be wrong. The
-		// resume seek itself is handled inside buildHLSCopyArgs via `-ss`
-		// (keyframe-snapped) + `-output_ts_offset`.
+		// Copy mode always starts from 0: segment indices don't map to
+		// uniform 2s slots, so a StartSec-derived index would be wrong.
+		// StartSec is intentionally ignored (see buildHLSCopyArgs); the
+		// player seeks to the resume point via its own startPosition once
+		// the growing playlist reaches that position.
 	} else if cfg.StartSec > 0 && cfg.StartSec < probe.DurationSec {
 		startIdx = segmentIdxForTime(cfg.StartSec)
 		if startIdx > segCount-1 {
@@ -704,7 +705,9 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	}
 	startNote := ""
 	if cfg.VideoCopy && cfg.StartSec > 0 {
-		startNote = fmt.Sprintf(" start=%.0fs", cfg.StartSec)
+		// Copy ignores StartSec on purpose (see buildHLSCopyArgs) — log the
+		// requested resume point honestly so nobody reads "ffmpeg seeked".
+		startNote = fmt.Sprintf(" resume=%.0fs requested (copy encodes from 0)", cfg.StartSec)
 	} else if startIdx > 0 {
 		startNote = fmt.Sprintf(" start=seg-%d@%.0fs", startIdx, segmentStartSec(startIdx))
 	}
@@ -1108,14 +1111,22 @@ func (s *HLSSession) pollSegments(ctx context.Context) {
 			}
 			// Last segment is "ready" only when ffmpeg has exited (no successor
 			// can ever appear) or when a later segment exists.
-			if i == s.segmentCount-1 {
+			//
+			// For VideoCopy sessions, segmentCount is the encode-mode estimate
+			// (ceil(dur/2s)) and is always larger than the real segment count
+			// on wide-GOP sources (keyframe-cut → fewer segments). We must
+			// NOT rely solely on `i == s.segmentCount-1` to detect the last
+			// real segment — when exited and no successor exists the current
+			// segment IS the last one, regardless of its index.
+			noSuccessor := func() bool { _, e := os.Stat(next); return e != nil }
+			if i == s.segmentCount-1 || (exited && noSuccessor()) {
 				if !exited {
 					break
 				}
 				highest = i + 1
 				break
 			}
-			if _, err := os.Stat(next); err != nil {
+			if noSuccessor() {
 				break
 			}
 			highest = i + 1
@@ -1130,7 +1141,14 @@ func (s *HLSSession) pollSegments(ctx context.Context) {
 				close(ch)
 			}
 		}
-		if exited && highest >= s.segmentCount {
+		// Exit when all expected segments are ready. For encode mode,
+		// segmentCount is exact; for VideoCopy it's an overestimate, but the
+		// `exited && noSuccessor()` branch above always marks the real last
+		// segment, so highest will reach segmentCount only if the source
+		// happens to have exactly that many keyframe segments — or never if
+		// it has fewer. Exit also when exited and highest stopped advancing
+		// (no more segments will ever appear).
+		if exited && (highest >= s.segmentCount || highest == start) {
 			return
 		}
 	}
@@ -1219,9 +1237,16 @@ func (s *HLSSession) serveCopyPlaylist(w http.ResponseWriter, r *http.Request) {
 			// harmless once the playlist is final.
 			out := data
 			if !strings.Contains(string(data), "#EXT-X-START") {
-				out = []byte(strings.Replace(string(data),
-					"#EXT-X-VERSION:7\n",
-					"#EXT-X-VERSION:7\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n", 1))
+				// Anchor on #EXTM3U (REQUIRED first line per RFC 8216) instead
+				// of a specific VERSION value, so an ffmpeg that bumps the
+				// playlist version can't silently skip the injection.
+				replaced := strings.Replace(string(data),
+					"#EXTM3U\n",
+					"#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n", 1)
+				if replaced == string(data) {
+					log.Printf("[hls %s] WARNING: EXT-X-START injection failed (no #EXTM3U header?)", shortHLSID(s.cfg.SessionID))
+				}
+				out = []byte(replaced)
 			}
 			_, _ = w.Write(out)
 			return
@@ -1268,7 +1293,11 @@ func (s *HLSSession) ServeInit(w http.ResponseWriter, r *http.Request) {
 // in real time (~25 minutes wait at 1080p software encode).
 func (s *HLSSession) ServeSegment(w http.ResponseWriter, r *http.Request, idx int) {
 	s.Touch()
-	if idx < 0 || idx >= s.segmentCount {
+	// segmentCount is exact for the encode mode (uniform 2s slots) but only an
+	// ESTIMATE for copy mode (cuts go at source keyframes): a short-GOP source
+	// can legitimately produce more segments than the estimate, and bounding
+	// would 404 the real tail. Copy trusts ffmpeg's playlist as the authority.
+	if idx < 0 || (!s.cfg.VideoCopy && idx >= s.segmentCount) {
 		http.Error(w, "segment out of range", http.StatusNotFound)
 		return
 	}

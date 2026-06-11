@@ -526,7 +526,7 @@ type StreamSession struct {
 	// into fMP4 segments, audio to AAC when needed. The robust replacement for
 	// the progressive-remux path: same near-zero CPU (video never re-encoded,
 	// works on a GPU-less NAS), but in the segmented transport every player
-	// handles. Set by webs that know this agent supports it (≥1.0.10).
+	// handles. Set by webs that know this agent supports it (gate: HLS_COPY_MIN_VERSION web-side).
 	VideoCopy bool `json:"videoCopy,omitempty"`
 	// DirectURL, when set, is an HTTPS link to the media resolved server-side
 	// from the user's debrid account (hueco #2 / 2a). The source has no local
