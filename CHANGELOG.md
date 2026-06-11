@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2-beta] - 2026-06-11
+
+
+### Added
+
+- **stream**: HLS-copy — reemplazo resiliente del remux progresivo
+
+### Fixed
+
+- **stream**: hallazgos de la revisión crítica del modo copy
+- **stream**: no copiar AAC multicanal en modo copy (WebKit lo rechaza igual)
+- **stream**: downmix estéreo en el audio re-encodeado del modo copy
+- **stream**: EXT-X-START=0 en el playlist copy mientras crece
+- **stream**: el modo copy ignora StartSec (offset EVENT rompe iOS nativo)
 ## [1.1.1-beta] - 2026-06-10
 
 
@@ -15,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **stream**: iOS exige total concreto en el Content-Range del remux
+
+### Other
+
+- **release**: 1.1.1-beta
 ## [1.1.0-beta] - 2026-06-10
 
 
@@ -800,6 +818,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.1.2-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.1-beta...v1.1.2-beta
 [1.1.1-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.0-beta...v1.1.1-beta
 [1.1.0-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.9-beta...v1.1.0-beta
 [1.0.9-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.8-beta...v1.0.9-beta
