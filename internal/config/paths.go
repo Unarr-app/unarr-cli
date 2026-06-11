@@ -38,6 +38,15 @@ func FilePath() string {
 	return filepath.Join(Dir(), "config.toml")
 }
 
+// LockPath returns the daemon single-instance lock file, alongside config.toml.
+// Scoped to the config dir so a separate UNARR_CONFIG_DIR (e.g. a dev agent)
+// gets its own lock and can run concurrently; two daemons sharing one config
+// dir cannot — that's the case that causes cross-talk (same agentId/hash/secret
+// racing each other).
+func LockPath() string {
+	return filepath.Join(Dir(), "unarr.lock")
+}
+
 // DataDir returns the data directory for logs, cache, etc.
 //   - Linux:   ~/.local/share/unarr
 //   - macOS:   ~/Library/Application Support/unarr

@@ -23,6 +23,14 @@ func TestFilePath(t *testing.T) {
 	}
 }
 
+func TestLockPath(t *testing.T) {
+	t.Setenv("UNARR_CONFIG_DIR", "/custom/path")
+	path := LockPath()
+	if path != "/custom/path/unarr.lock" {
+		t.Errorf("LockPath() = %q, want /custom/path/unarr.lock", path)
+	}
+}
+
 func TestDataDir(t *testing.T) {
 	dir := DataDir()
 	if dir == "" {

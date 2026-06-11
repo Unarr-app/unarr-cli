@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
 	"github.com/torrentclaw/unarr/internal/acme"
 	"github.com/torrentclaw/unarr/internal/agent"
@@ -117,6 +118,31 @@ func runDaemonStart() error {
 	if cfg.Download.Dir == "" {
 		return fmt.Errorf("no download directory — run 'unarr init' first")
 	}
+
+	// Single-instance lock: refuse to start if another daemon already holds
+	// this config dir. Two daemons sharing one config.toml race over the same
+	// agentId / agentHash / streamSecret and corrupt each other's sync state.
+	// flock is advisory + kernel-released on process death (even SIGKILL), so
+	// there's no stale-lock problem. A separate UNARR_CONFIG_DIR gets its own
+	// lock path and runs concurrently (this is how the dev agent coexists).
+	lockDir := config.Dir()
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	instanceLock := flock.New(config.LockPath())
+	locked, err := instanceLock.TryLock()
+	if err != nil {
+		return fmt.Errorf("acquire instance lock %s: %w", config.LockPath(), err)
+	}
+	if !locked {
+		return fmt.Errorf("another unarr daemon is already running for this config (%s).\n"+
+			"Stop it with 'unarr stop', or use a separate UNARR_CONFIG_DIR to run a second agent", lockDir)
+	}
+	defer func() {
+		if err := instanceLock.Unlock(); err != nil {
+			log.Printf("[lock] release %s: %v", config.LockPath(), err)
+		}
+	}()
 
 	// Validate configured paths are safe
 	if err := cfg.ValidatePaths(); err != nil {
