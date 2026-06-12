@@ -592,3 +592,38 @@ type WatchProgressUpdate struct {
 type WatchProgressResponse struct {
 	Success bool `json:"success"`
 }
+
+// ---------------------------------------------------------------------------
+// Skip-segment types (intro/credits detection — see library/skipdetect.go)
+// ---------------------------------------------------------------------------
+
+// SkipSegmentRange is one detected skippable range inside a media file.
+type SkipSegmentRange struct {
+	Category string  `json:"category"` // "intro" | "credits"
+	StartSec float64 `json:"startSec"`
+	EndSec   float64 `json:"endSec"`
+}
+
+// SkipSegmentItem carries the detected segments of one library file. The
+// server resolves FilePath against the user's library_item rows (synced just
+// before) to attach the segments to a content identity.
+type SkipSegmentItem struct {
+	FilePath    string             `json:"filePath"`
+	Title       string             `json:"title,omitempty"`
+	Season      int                `json:"season,omitempty"`
+	Episode     int                `json:"episode,omitempty"`
+	DurationSec float64            `json:"durationSec"`
+	Segments    []SkipSegmentRange `json:"segments"`
+}
+
+// SkipSegmentsRequest submits detected skip segments after a library scan.
+type SkipSegmentsRequest struct {
+	AgentID string            `json:"agentId,omitempty"`
+	Items   []SkipSegmentItem `json:"items"`
+}
+
+// SkipSegmentsResponse reports how many segments the server stored.
+type SkipSegmentsResponse struct {
+	Stored    int `json:"stored"`
+	Unmatched int `json:"unmatched"`
+}

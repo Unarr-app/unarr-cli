@@ -193,7 +193,7 @@ type LibraryConfig struct {
 	FFmpegPath   string `toml:"ffmpeg_path"`   // optional explicit path (used by the HLS streaming transcoder)
 	BackupDir    string `toml:"backup_dir"`    // for replaced files
 	AutoScan     bool   `toml:"auto_scan"`     // enable daily auto-scan in daemon (default true)
-	ScanInterval string `toml:"scan_interval"` // e.g. "24h", "12h", "6h" (default "24h")
+	ScanInterval string `toml:"scan_interval"` // e.g. "1h", "6h", "24h" (default "1h", like Plex/Jellyfin periodic scans)
 	AllowDelete  bool   `toml:"allow_delete"`  // allow web UI to request file deletion from disk
 
 	// Sidecar caching: extract text subtitles (WebVTT) and thumbnail frames once
@@ -203,6 +203,13 @@ type LibraryConfig struct {
 	// timeout). Both default true; disable to save the disk/CPU of pre-extraction.
 	CacheSubtitles  bool `toml:"cache_subtitles"`  // default true
 	CacheThumbnails bool `toml:"cache_thumbnails"` // default true
+
+	// Skip-segment detection: after each scan, find intro/credits ranges by
+	// comparing chromaprint audio fingerprints between episodes of a season
+	// (plus black-frame credits for movies) and submit them to the web so the
+	// player can offer "Skip intro" / "Skip credits". Cached per file; only
+	// new files do work. Default true.
+	SkipDetect bool `toml:"skip_detect"`
 
 	// Trickplay: at scan time, build ONE montage JPEG of frames sampled every
 	// Interval seconds (+ a JSON manifest), cached in .unarr next to the media.
@@ -314,10 +321,11 @@ func Default() Config {
 		},
 		Library: LibraryConfig{
 			AutoScan:        true,
-			ScanInterval:    "24h",
+			ScanInterval:    "1h",
 			Workers:         8,
 			CacheSubtitles:  true,
 			CacheThumbnails: true,
+			SkipDetect:      true,
 			Trickplay: TrickplayConfig{
 				Enabled:  true,
 				Interval: "10s",
@@ -395,6 +403,9 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	}
 	if !meta.IsDefined("library", "cache_thumbnails") {
 		cfg.Library.CacheThumbnails = true
+	}
+	if !meta.IsDefined("library", "skip_detect") {
+		cfg.Library.SkipDetect = true
 	}
 	// Trickplay defaults ON for configs predating these keys (small sidecar JPEG;
 	// makes the scrubber instant + contention-free). Explicit `enabled = false`

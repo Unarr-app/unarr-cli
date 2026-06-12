@@ -512,3 +512,14 @@ func (c *Client) handleResponse(resp *http.Response, dst any) error {
 
 	return nil
 }
+
+// SubmitSkipSegments uploads detected intro/credits segments after a library
+// scan. Must run AFTER SyncLibrary — the server resolves file paths against
+// the freshly-synced library_item rows.
+func (c *Client) SubmitSkipSegments(ctx context.Context, req SkipSegmentsRequest) (*SkipSegmentsResponse, error) {
+	var resp SkipSegmentsResponse
+	if err := c.doPostWith(ctx, c.librarySyncClient, "/api/internal/agent/skip-segments", req, &resp); err != nil {
+		return nil, fmt.Errorf("skip segments: %w", err)
+	}
+	return &resp, nil
+}

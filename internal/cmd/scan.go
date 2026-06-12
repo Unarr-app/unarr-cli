@@ -53,17 +53,27 @@ to see available quality upgrades.`,
 					return fmt.Errorf("usage: unarr scan <path>\n\nNo scan paths configured. Provide a path or set up downloads.dir via 'unarr init'")
 				}
 				var items []agent.LibrarySyncItem
+				var caches []*library.LibraryCache
 				for _, p := range paths {
 					cache, err := runScan(ctx, cfg, p, workers, ffprobe)
 					if err != nil {
 						return err
 					}
+					caches = append(caches, cache)
 					items = append(items, library.BuildSyncItems(cache)...)
 				}
 				if noSync || jsonOut {
 					return nil
 				}
-				return syncToServer(ctx, cfg, items, paths, true)
+				if err := syncToServer(ctx, cfg, items, paths, true); err != nil {
+					return err
+				}
+				if ac := scanAPIClient(cfg); ac != nil {
+					for _, cache := range caches {
+						detectAndSubmitSkipSegments(ctx, cfg, ac, cache)
+					}
+				}
+				return nil
 			}
 			cache, err := runScan(ctx, cfg, args[0], workers, ffprobe)
 			if err != nil {
@@ -72,7 +82,13 @@ to see available quality upgrades.`,
 			if noSync || jsonOut {
 				return nil
 			}
-			return syncToServer(ctx, cfg, library.BuildSyncItems(cache), []string{args[0]}, false)
+			if err := syncToServer(ctx, cfg, library.BuildSyncItems(cache), []string{args[0]}, false); err != nil {
+				return err
+			}
+			if ac := scanAPIClient(cfg); ac != nil {
+				detectAndSubmitSkipSegments(ctx, cfg, ac, cache)
+			}
+			return nil
 		},
 	}
 
@@ -181,6 +197,19 @@ func runScan(ctx context.Context, cfg config.Config, dirPath string, workers int
 	}
 
 	return cache, nil
+}
+
+// scanAPIClient builds the agent API client for post-scan submissions, using
+// the same key resolution as syncToServer. Nil when no key is configured.
+func scanAPIClient(cfg config.Config) *agent.Client {
+	apiKey := apiKeyFlag
+	if apiKey == "" {
+		apiKey = cfg.Auth.APIKey
+	}
+	if apiKey == "" {
+		return nil
+	}
+	return agent.NewClient(cfg.Auth.APIURL, apiKey, "unarr/"+Version)
 }
 
 // syncToServer uploads the scanned items of THIS invocation as one sync

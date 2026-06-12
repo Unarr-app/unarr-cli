@@ -1073,7 +1073,7 @@ func runDaemonStart() error {
 	// Start auto-scan goroutine
 	scanPaths := daemonCfg.ScanPaths
 	if len(scanPaths) > 0 && cfg.Library.AutoScan {
-		scanInterval := 24 * time.Hour
+		scanInterval := time.Hour
 		if cfg.Library.ScanInterval != "" {
 			if parsed, err := time.ParseDuration(cfg.Library.ScanInterval); err == nil && parsed > 0 {
 				scanInterval = parsed
@@ -1487,6 +1487,9 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 			if err := library.SaveCache(mergedCache); err != nil {
 				log.Printf("[auto-scan] save cache failed: %v", err)
 			}
+			// Intro/credits detection AFTER the sync above — the server maps
+			// file paths to the library_item rows that sync just created.
+			detectAndSubmitSkipSegments(ctx, cfg, ac, mergedCache)
 		}
 
 		log.Printf("[auto-scan] synced %d items across %d path(s)", totalSynced, len(scanPaths))
