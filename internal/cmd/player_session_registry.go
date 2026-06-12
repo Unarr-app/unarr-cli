@@ -41,6 +41,12 @@ func (r *playerSessionRegistryT) remove(sessionID string) {
 	delete(r.cancels, sessionID)
 }
 
+func (r *playerSessionRegistryT) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.cancels)
+}
+
 // cancelAllPlayerSessions cancels every running session. Called on daemon
 // shutdown so the ffmpeg children and SSE consumers exit cleanly.
 func cancelAllPlayerSessions() {

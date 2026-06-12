@@ -461,6 +461,10 @@ type SyncRequest struct {
 	// IsDocker — see RegisterRequest.IsDocker. Sent every sync so the web keeps
 	// the flag fresh even if the agent migrated binary↔docker between restarts.
 	IsDocker bool `json:"isDocker"`
+	// AgentStatus — daemon lifecycle state ("running" | "updating" |
+	// "shutting_down"). Lets the web show "agent updating" during an upgrade
+	// restart instead of a hard session error. Empty (older agents) → "running".
+	AgentStatus string `json:"agentStatus,omitempty"`
 }
 
 // ControlAction represents a server-side control signal for a task.

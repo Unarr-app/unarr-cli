@@ -59,6 +59,10 @@ type SyncClient struct {
 	// WireGuard tunnel is up, the mode, and the exit server) so the web can track
 	// which agent holds the single WG slot.
 	GetVPNState func() (active bool, mode, server string)
+	// GetAgentStatus returns the daemon lifecycle state ("running" | "updating"
+	// | "shutting_down") so the web can show "agent updating" during an upgrade
+	// restart instead of a hard error. Empty → treated as "running".
+	GetAgentStatus func() string
 	// GetFunnelURL returns the CloudFlare Quick Tunnel public hostname if one
 	// is active, else "". Sent on every sync so the web picks it up live.
 	GetFunnelURL func() string
@@ -216,6 +220,9 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 	}
 	if sc.GetVPNState != nil {
 		req.VPNActive, req.VPNMode, req.VPNServer = sc.GetVPNState()
+	}
+	if sc.GetAgentStatus != nil {
+		req.AgentStatus = sc.GetAgentStatus()
 	}
 	if sc.GetFunnelURL != nil {
 		req.FunnelURL = sc.GetFunnelURL()

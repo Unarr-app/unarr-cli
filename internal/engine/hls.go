@@ -437,6 +437,15 @@ func (r *HLSSessionRegistry) HasLiveEncode() bool {
 	return false
 }
 
+// Count reports how many sessions are currently registered (live or recently
+// finished but not yet swept). Used by the graceful auto-upgrade gate to defer
+// applying an update while the agent is actively streaming.
+func (r *HLSSessionRegistry) Count() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.sessions)
+}
+
 // Remove drops a session from the registry without closing it.
 func (r *HLSSessionRegistry) Remove(id string) {
 	r.mu.Lock()

@@ -579,6 +579,12 @@ func runDaemonStart() error {
 	sc.GetFreeSlots = manager.FreeSlots
 	sc.GetTaskStates = manager.TaskStates
 	d.GetActiveCount = manager.ActiveCount
+	// Live stream count for the graceful auto-upgrade gate: player sessions
+	// (in-browser HLS / direct-play / remux) + HLS transcode sessions. An auto
+	// upgrade defers while this is > 0 so it never cuts a viewer mid-playback.
+	d.GetActiveStreamCount = func() int {
+		return playerSessionRegistry.count() + streamSrv.HLS().Count()
+	}
 
 	// Trigger immediate sync when a download slot frees up
 	manager.OnTaskDone = func() { d.TriggerSync() }

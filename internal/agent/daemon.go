@@ -56,6 +56,11 @@ type Daemon struct {
 	OnStreamSession   func(sess StreamSession)
 	OnControlAction   func(action, taskID string, deleteFiles bool)
 	GetActiveCount    func() int // returns number of active downloads (wired from manager)
+	// GetActiveStreamCount returns the number of live stream sessions (player +
+	// HLS transcode). Wired from cmd. The graceful AUTO-upgrade path defers
+	// while this is > 0 so it never cuts a viewer mid-playback; a MANUAL
+	// `unarr update` ignores it and applies immediately.
+	GetActiveStreamCount func() int
 	// OnAgentKeyMinted fires when a register reply carries a freshly-minted
 	// per-machine key (the daemon registered with a general/legacy key). cmd
 	// persists it so the next start authenticates with the bound agent key —
@@ -68,6 +73,8 @@ type Daemon struct {
 	Info                AgentInfo
 	State               DaemonState
 	lastNotifiedVersion string
+	// upgradeDeferring guards a single defer-until-idle waiter for auto-upgrade.
+	upgradeDeferring atomic.Bool
 
 	// Managed-VPN split-tunnel state, set by cmd/daemon.go before Run and folded
 	// into DaemonState on every write so external tools (`unarr vpn status`) see it.
@@ -285,7 +292,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return
 		}
 		log.Printf("[upgrade] new version available: %s — applying auto-upgrade", version)
-		go d.applyAutoUpgrade(version)
+		go d.deferAutoUpgradeUntilIdle(version)
 	}
 	d.sync.OnScan = func() {
 		log.Printf("Library scan requested by server")
@@ -302,6 +309,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.sync.GetFunnelURL = func() string {
 		return d.funnelURL
+	}
+	d.sync.GetAgentStatus = func() string {
+		return d.State.Status
 	}
 	d.sync.OnSyncSuccess = func() {
 		d.State.LastHeartbeat = time.Now()
@@ -332,6 +342,40 @@ func (d *Daemon) Deregister() {
 	RemoveState()
 }
 
+// deferAutoUpgradeUntilIdle holds an AUTO-upgrade until the agent is idle (no
+// active stream), then applies it. The user's call: no background update is
+// worth cutting a viewer mid-playback. A MANUAL `unarr update` bypasses this
+// entirely (see cmd/self_update.go) and is the escape hatch for an urgent fix.
+//
+// Runs in its own goroutine. A process-lifetime guard keeps exactly ONE waiter
+// even though the server re-sends the upgrade signal on every sync.
+func (d *Daemon) deferAutoUpgradeUntilIdle(version string) {
+	if !d.upgradeDeferring.CompareAndSwap(false, true) {
+		return
+	}
+	defer d.upgradeDeferring.Store(false)
+
+	activeStreams := func() int {
+		if d.GetActiveStreamCount == nil {
+			return 0
+		}
+		return d.GetActiveStreamCount()
+	}
+
+	if n := activeStreams(); n > 0 {
+		log.Printf("[upgrade] v%s deferred — %d active stream(s); will apply when idle", version, n)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if n := activeStreams(); n == 0 {
+				break
+			}
+		}
+		log.Printf("[upgrade] no active streams — applying deferred upgrade to v%s", version)
+	}
+	d.applyAutoUpgrade(version) // exits the process on success
+}
+
 // applyAutoUpgrade downloads the target version and exits so the service
 // supervisor (systemd Restart=always on Linux) respawns on the new binary.
 // Triggered by the server's upgrade signal — opt-in flag set by the user from
@@ -359,6 +403,13 @@ func (d *Daemon) applyAutoUpgrade(targetVersion string) {
 		}
 		return
 	}
+
+	// Tell the web we're updating so a NEW playback attempt during the brief
+	// restart sees "agent updating" instead of a hard session error. One
+	// heartbeat carries this before the (blocking) download + os.Exit below.
+	d.State.Status = "updating"
+	WriteState(&d.State)
+	d.TriggerSync()
 
 	upgrader := &upgrade.Upgrader{
 		CurrentVersion: currentClean,
