@@ -248,6 +248,7 @@ func runDaemonStart() error {
 		HWDevices:          hwDiag.Devices,
 		AutoUpgrade:        cfg.Daemon.AutoUpgradeEnabled(),
 		Downlink:           cfg.Daemon.Downlink,
+		PreferredMethods:   cfg.Download.MethodOrder(),
 	}
 
 	// Create HTTP client with mirror failover so a `.com` block-out rolls
@@ -381,6 +382,17 @@ func runDaemonStart() error {
 	// Create debrid downloader
 	debridDl := engine.NewDebridDownloader()
 	usenetDl := engine.NewUsenetDownloader(agentClient)
+	// Enable usenet when the user explicitly lists it in preferred_methods — the
+	// downloader gates on this flag, so without it a "usenet" preference would
+	// resolve to nothing. (Auto users keep the historical behaviour.)
+	methodOrder := cfg.Download.MethodOrder()
+	for _, m := range methodOrder {
+		if m == "usenet" {
+			usenetDl.SetEnabled(true)
+			log.Printf("[usenet] enabled via preferred_methods")
+			break
+		}
+	}
 
 	// Pre-flight disk reserve: refuse a download that would leave less than this
 	// many bytes free, so a download never fills the filesystem to 0 mid-write.
@@ -392,9 +404,10 @@ func runDaemonStart() error {
 
 	// Create download manager
 	manager := engine.NewManager(engine.ManagerConfig{
-		MaxConcurrent: cfg.Download.MaxConcurrent,
-		OutputDir:     cfg.Download.Dir,
-		Notifications: cfg.Notifications.Enabled,
+		MaxConcurrent:    cfg.Download.MaxConcurrent,
+		OutputDir:        cfg.Download.Dir,
+		Notifications:    cfg.Notifications.Enabled,
+		PreferredMethods: methodOrder,
 		Organize: engine.OrganizeConfig{
 			Enabled:    cfg.Organize.Enabled,
 			MoviesDir:  cfg.Organize.MoviesDir,

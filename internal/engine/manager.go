@@ -15,6 +15,11 @@ type ManagerConfig struct {
 	OutputDir     string
 	Organize      OrganizeConfig
 	Notifications bool // send desktop notifications on complete/fail
+	// PreferredMethods is the agent's ordered download-method preference from
+	// config.toml (e.g. ["debrid","usenet"]). Non-empty → it gates which methods
+	// resolveMethod will try, ignoring the per-task preference. Empty/nil → defer
+	// to the task's web-sent preference (legacy auto/torrent-first).
+	PreferredMethods []string
 }
 
 // Manager orchestrates concurrent downloads with method resolution and fallback.
@@ -380,7 +385,7 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 		return
 	}
 
-	method, err := resolveMethod(ctx, task, m.downloaders)
+	method, err := resolveMethod(ctx, task, m.downloaders, m.cfg.PreferredMethods)
 	if err != nil {
 		m.fail(ctx, task, "no method available: "+err.Error())
 		return
@@ -416,7 +421,7 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 			return
 		}
 		// Try fallback
-		if tryFallback(task, m.downloaders) {
+		if tryFallback(task, m.downloaders, m.cfg.PreferredMethods) {
 			log.Printf("[%s] %s failed, trying fallback: %v", agent.ShortID(task.ID), method, err)
 			if err := task.Transition(StatusResolving); err == nil {
 				m.processTaskRetry(ctx, task)
@@ -432,7 +437,7 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 
 // processTaskRetry handles fallback after a method failure.
 func (m *Manager) processTaskRetry(ctx context.Context, task *Task) {
-	method, err := resolveMethod(ctx, task, m.downloaders)
+	method, err := resolveMethod(ctx, task, m.downloaders, m.cfg.PreferredMethods)
 	if err != nil {
 		m.fail(ctx, task, "fallback failed: "+err.Error())
 		return
