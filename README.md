@@ -466,7 +466,8 @@ dir = "~/Media"
 # Ordered download-method preference. The web honours this list, so anything NOT
 # listed is disabled — e.g. ["debrid"] means debrid-only and never falls back to
 # torrent; ["debrid","usenet"] tries debrid then usenet. Omit (or use ["auto"])
-# to let the server decide (default: auto / torrent-first). Debrid/usenet must be
+# to let the server decide (default: auto — if you have debrid configured, cached
+# titles use debrid automatically, otherwise torrent). Debrid/usenet must be
 # configured in your TorrentClaw account — the agent only fetches links the web
 # resolves. Requires unarr >= 1.1.5-beta.
 preferred_methods = ["auto"]     # e.g. ["debrid"], ["debrid","usenet"], or ["auto"]
