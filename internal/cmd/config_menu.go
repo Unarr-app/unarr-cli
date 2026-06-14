@@ -157,9 +157,21 @@ func configDownloads(cfg *config.Config) error {
 		concurrent = "3"
 	}
 
-	validMethods := map[string]bool{"auto": true, "torrent": true, "debrid": true, "usenet": true}
-	if !validMethods[cfg.Download.PreferredMethod] {
-		cfg.Download.PreferredMethod = "auto"
+	// Method preference is an ordered list (PreferredMethods). The menu exposes
+	// the common presets as a single choice; custom orders can still be hand-set
+	// in config.toml. Derive the current preset from the effective order.
+	methodPreset := "auto"
+	switch strings.Join(cfg.Download.MethodOrder(), ",") {
+	case "torrent":
+		methodPreset = "torrent"
+	case "debrid":
+		methodPreset = "debrid"
+	case "usenet":
+		methodPreset = "usenet"
+	case "debrid,torrent":
+		methodPreset = "debrid,torrent"
+	case "debrid,usenet":
+		methodPreset = "debrid,usenet"
 	}
 
 	validQualities := map[string]bool{"": true, "720p": true, "1080p": true, "2160p": true}
@@ -174,13 +186,16 @@ func configDownloads(cfg *config.Config) error {
 				Value(&cfg.Download.Dir),
 			huh.NewSelect[string]().
 				Title("Preferred method").
+				Description("Methods not listed are disabled (e.g. debrid-only never uses torrent)").
 				Options(
-					huh.NewOption("Auto (torrent + debrid when available)", "auto"),
+					huh.NewOption("Auto (web decides — torrent + debrid when available)", "auto"),
 					huh.NewOption("Torrent only (BitTorrent P2P)", "torrent"),
 					huh.NewOption("Debrid only (Real-Debrid, AllDebrid...)", "debrid"),
 					huh.NewOption("Usenet only (requires Pro)", "usenet"),
+					huh.NewOption("Debrid, then torrent", "debrid,torrent"),
+					huh.NewOption("Debrid, then usenet (requires Pro)", "debrid,usenet"),
 				).
-				Value(&cfg.Download.PreferredMethod),
+				Value(&methodPreset),
 			huh.NewSelect[string]().
 				Title("Preferred quality").
 				Description("Hint for automatic torrent selection").
@@ -224,6 +239,15 @@ func configDownloads(cfg *config.Config) error {
 	n, _ := strconv.Atoi(concurrent)
 	if n > 0 {
 		cfg.Download.MaxConcurrent = n
+	}
+	// Persist the preset as the ordered list (source of truth). "auto" clears the
+	// list; legacy PreferredMethod is kept in sync so an old reader still works.
+	if methodPreset == "auto" {
+		cfg.Download.PreferredMethods = nil
+		cfg.Download.PreferredMethod = "auto"
+	} else {
+		cfg.Download.PreferredMethods = strings.Split(methodPreset, ",")
+		cfg.Download.PreferredMethod = cfg.Download.PreferredMethods[0]
 	}
 	return nil
 }

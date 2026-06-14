@@ -41,6 +41,9 @@ type DaemonConfig struct {
 	HWDevices     []string // device files + driver bins detected at probe time
 	AutoUpgrade   bool     // honor server-flagged upgrades by downloading + restarting (default: true)
 	Downlink      string   // realtime downlink transport: "auto" (SSE+long-poll fallback) | "sse" | "poll"
+	// PreferredMethods is the ordered download-method preference from config.toml
+	// (e.g. ["debrid","usenet"]). Reported to the web so it honours the gating.
+	PreferredMethods []string
 }
 
 // Daemon manages agent registration and the sync loop.
@@ -165,6 +168,7 @@ func (d *Daemon) Register(ctx context.Context) error {
 		VPNServer:          d.vpnServer,
 		FunnelURL:          d.funnelURL,
 		IsDocker:           RunningInDocker(),
+		PreferredMethods:   d.cfg.PreferredMethods,
 	}
 	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {
 		req.DiskFreeBytes = free

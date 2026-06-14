@@ -31,7 +31,7 @@ func TestResolveMethodAuto(t *testing.T) {
 	}
 
 	task := &Task{PreferredMethod: "auto"}
-	method, err := resolveMethod(context.Background(), task, downloaders)
+	method, err := resolveMethod(context.Background(), task, downloaders, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestResolveMethodSpecific(t *testing.T) {
 	}
 
 	task := &Task{PreferredMethod: "debrid"}
-	method, err := resolveMethod(context.Background(), task, downloaders)
+	method, err := resolveMethod(context.Background(), task, downloaders, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestResolveMethodSkipsTried(t *testing.T) {
 		PreferredMethod: "auto",
 		TriedMethods:    []DownloadMethod{MethodTorrent},
 	}
-	method, err := resolveMethod(context.Background(), task, downloaders)
+	method, err := resolveMethod(context.Background(), task, downloaders, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestResolveMethodNoneAvailable(t *testing.T) {
 	}
 
 	task := &Task{PreferredMethod: "auto"}
-	_, err := resolveMethod(context.Background(), task, downloaders)
+	_, err := resolveMethod(context.Background(), task, downloaders, nil)
 	if err == nil {
 		t.Error("expected error when no method available")
 	}
@@ -95,7 +95,7 @@ func TestResolveMethodAvailabilityError(t *testing.T) {
 	}
 
 	task := &Task{ID: "test-resolve-err", PreferredMethod: "auto"}
-	method, err := resolveMethod(context.Background(), task, downloaders)
+	method, err := resolveMethod(context.Background(), task, downloaders, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestTryFallbackAutoMode(t *testing.T) {
 		ResolvedMethod:  MethodTorrent,
 	}
 
-	if !tryFallback(task, downloaders) {
+	if !tryFallback(task, downloaders, nil) {
 		t.Error("should have fallback available")
 	}
 	if len(task.TriedMethods) != 1 || task.TriedMethods[0] != MethodTorrent {
@@ -135,7 +135,82 @@ func TestTryFallbackSpecificMode(t *testing.T) {
 		ResolvedMethod:  MethodTorrent,
 	}
 
-	if tryFallback(task, downloaders) {
+	if tryFallback(task, downloaders, nil) {
 		t.Error("should not fallback in specific mode")
+	}
+}
+
+// ── config.toml preferred_methods gating ──────────────────────────────────
+
+// Config list wins over the per-task preference: a "debrid only" agent picks
+// debrid even when the task says auto AND torrent is available (the old bug:
+// torrent-first auto stole every download from debrid-only users).
+func TestResolveMethodConfigListWins(t *testing.T) {
+	downloaders := map[DownloadMethod]Downloader{
+		MethodTorrent: &mockDownloader{method: MethodTorrent, available: true},
+		MethodDebrid:  &mockDownloader{method: MethodDebrid, available: true},
+	}
+	task := &Task{PreferredMethod: "auto"} // web said auto
+	method, err := resolveMethod(context.Background(), task, downloaders, []string{"debrid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != MethodDebrid {
+		t.Errorf("method = %q, want debrid (config list debrid-only wins)", method)
+	}
+}
+
+// A method not in the config list is NEVER used, even if it's the only one
+// available — failing closed is the whole point of "debrid only".
+func TestResolveMethodConfigListGatesOutTorrent(t *testing.T) {
+	downloaders := map[DownloadMethod]Downloader{
+		MethodTorrent: &mockDownloader{method: MethodTorrent, available: true},
+		MethodDebrid:  &mockDownloader{method: MethodDebrid, available: false},
+	}
+	task := &Task{PreferredMethod: "auto"}
+	_, err := resolveMethod(context.Background(), task, downloaders, []string{"debrid"})
+	if err == nil {
+		t.Error("expected error: torrent is available but not in the debrid-only list")
+	}
+}
+
+// Ordered list honours order: debrid first, then usenet.
+func TestResolveMethodConfigListOrder(t *testing.T) {
+	downloaders := map[DownloadMethod]Downloader{
+		MethodTorrent: &mockDownloader{method: MethodTorrent, available: true},
+		MethodDebrid:  &mockDownloader{method: MethodDebrid, available: false},
+		MethodUsenet:  &mockDownloader{method: MethodUsenet, available: true},
+	}
+	task := &Task{PreferredMethod: "auto"}
+	method, err := resolveMethod(context.Background(), task, downloaders, []string{"debrid", "usenet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != MethodUsenet {
+		t.Errorf("method = %q, want usenet (debrid unavailable, next in list)", method)
+	}
+}
+
+// A multi-method config list allows fallback within the list...
+func TestTryFallbackConfigListMulti(t *testing.T) {
+	downloaders := map[DownloadMethod]Downloader{
+		MethodTorrent: &mockDownloader{method: MethodTorrent, available: true},
+		MethodDebrid:  &mockDownloader{method: MethodDebrid, available: true},
+	}
+	task := &Task{PreferredMethod: "auto", ResolvedMethod: MethodDebrid}
+	if !tryFallback(task, downloaders, []string{"debrid", "torrent"}) {
+		t.Error("should fall back to torrent (in the list)")
+	}
+}
+
+// ...but a single-method config list has no fallback (debrid-only never torrents).
+func TestTryFallbackConfigListSingle(t *testing.T) {
+	downloaders := map[DownloadMethod]Downloader{
+		MethodTorrent: &mockDownloader{method: MethodTorrent, available: true},
+		MethodDebrid:  &mockDownloader{method: MethodDebrid, available: true},
+	}
+	task := &Task{PreferredMethod: "auto", ResolvedMethod: MethodDebrid}
+	if tryFallback(task, downloaders, []string{"debrid"}) {
+		t.Error("debrid-only must not fall back to torrent")
 	}
 }

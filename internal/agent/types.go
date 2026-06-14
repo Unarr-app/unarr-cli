@@ -64,6 +64,10 @@ type RegisterRequest struct {
 	// self-update refuses to run in Docker). No omitempty: false (a binary
 	// install) is a meaningful state the server must see to keep the button.
 	IsDocker bool `json:"isDocker"`
+	// PreferredMethods is the agent's ordered download-method preference from
+	// config.toml (e.g. ["debrid","usenet"]). The web honours it so a "debrid
+	// only" agent is never handed a torrent task. Empty/["auto"] → web decides.
+	PreferredMethods []string `json:"preferredMethods,omitempty"`
 }
 
 // RegisterResponse is returned by the server after registration.

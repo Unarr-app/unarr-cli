@@ -45,13 +45,21 @@ type AgentConfig struct {
 }
 
 type DownloadConfig struct {
-	Dir              string `toml:"dir"`
-	PreferredMethod  string `toml:"preferred_method"`
-	PreferredQuality string `toml:"preferred_quality"` // "2160p", "1080p", "720p" — hint for auto-selection
-	MaxConcurrent    int    `toml:"max_concurrent"`
-	MinFreeDiskMB    int    `toml:"min_free_disk_mb"`   // refuse a download if it would leave less than this free (reserve to keep the FS healthy); default 2048, 0 = disable
-	MaxDownloadSpeed string `toml:"max_download_speed"` // e.g. "10MB", "500KB", "0" = unlimited
-	MaxUploadSpeed   string `toml:"max_upload_speed"`   // e.g. "1MB", "0" = unlimited
+	Dir string `toml:"dir"`
+	// PreferredMethod (singular, legacy) — kept for back-compat. A single
+	// "auto"|"torrent"|"debrid"|"usenet". Superseded by PreferredMethods.
+	PreferredMethod string `toml:"preferred_method"`
+	// PreferredMethods (ordered list) is the source of truth when set, e.g.
+	// ["debrid","usenet"] = try debrid, then usenet, and DISABLE torrent (it's
+	// not in the list). ["auto"] or empty → defer to the web policy. The web
+	// honours this (reported on register) so a "debrid only" agent never gets a
+	// torrent task it didn't ask for. See MethodOrder() for resolution.
+	PreferredMethods []string `toml:"preferred_methods"`
+	PreferredQuality string   `toml:"preferred_quality"` // "2160p", "1080p", "720p" — hint for auto-selection
+	MaxConcurrent    int      `toml:"max_concurrent"`
+	MinFreeDiskMB    int      `toml:"min_free_disk_mb"`   // refuse a download if it would leave less than this free (reserve to keep the FS healthy); default 2048, 0 = disable
+	MaxDownloadSpeed string   `toml:"max_download_speed"` // e.g. "10MB", "500KB", "0" = unlimited
+	MaxUploadSpeed   string   `toml:"max_upload_speed"`   // e.g. "1MB", "0" = unlimited
 	// Seeding lifecycle (BitTorrent only). Off by default — the daemon leeches
 	// then drops the torrent. Enable to keep uploading after a download finishes;
 	// seeding stops at whichever target is hit first, or never if both are unset.
@@ -254,6 +262,46 @@ func (t TrickplayConfig) IntervalSeconds() float64 {
 		return d.Seconds()
 	}
 	return 10
+}
+
+// validMethod reports whether s is a known download backend.
+func validMethod(s string) bool {
+	return s == "torrent" || s == "debrid" || s == "usenet"
+}
+
+// MethodOrder returns the effective ordered download-method preference, or nil
+// for "auto" (defer to the web policy / torrent-first fallback). PreferredMethods
+// (the list) wins; the legacy singular PreferredMethod is the fallback. "auto"
+// anywhere collapses to nil. Unknown entries are dropped, dupes removed, order
+// preserved. A nil/empty result means "no explicit preference".
+func (c DownloadConfig) MethodOrder() []string {
+	src := c.PreferredMethods
+	if len(src) == 0 && c.PreferredMethod != "" {
+		src = []string{c.PreferredMethod}
+	}
+	out := make([]string, 0, len(src))
+	for _, m := range src {
+		m = strings.ToLower(strings.TrimSpace(m))
+		if m == "auto" {
+			return nil // auto anywhere → defer
+		}
+		if validMethod(m) && !contains(out, m) {
+			out = append(out, m)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // Default returns a Config with sensible defaults. Used both for fresh
