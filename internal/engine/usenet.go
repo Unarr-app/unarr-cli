@@ -288,10 +288,28 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		finalPath = taskDir
 	}
 
-	// Get final file size
+	// Force the delivered file(s) to durable storage before reporting success.
+	// Symmetric with the debrid path (2026-06-15 NFS incident): the prod download
+	// dir is a network mount, and post-processing reads the data back for par2 from
+	// the page cache while the write-back to the server can still lag — a later open
+	// (organize, stream, ffprobe) would then see a short file. fsync commits it now
+	// and surfaces a write-back error here, where it's actionable.
+	if err := syncTree(finalPath); err != nil {
+		return nil, fmt.Errorf("flush to disk failed (write-back/network-mount error): %w", err)
+	}
+
+	// Get final file size — after the durable flush, so the size is real. Walk
+	// directories (multi-file releases) instead of reporting the dir inode size.
 	var finalSize int64
 	if fi, err := os.Stat(finalPath); err == nil {
-		finalSize = fi.Size()
+		if fi.IsDir() {
+			finalSize, _ = dirSize(finalPath)
+		} else {
+			finalSize = fi.Size()
+		}
+	}
+	if finalSize == 0 {
+		return nil, fmt.Errorf("usenet delivery is empty after post-processing: %s", finalPath)
 	}
 
 	// Clean up resume state on successful completion
@@ -496,4 +514,43 @@ func sanitizeDir(name string) string {
 		name = name[:200]
 	}
 	return name
+}
+
+// syncTree fsyncs path so its data is durable before the download is treated as
+// complete. For a directory (multi-file release) it fsyncs every regular file
+// underneath. A Sync error is returned, not swallowed — on a network mount a
+// failed write-back must fail the download instead of leaving a truncated file.
+func syncTree(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return syncFile(path)
+	}
+	return filepath.Walk(path, func(p string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		return syncFile(p)
+	})
+}
+
+// syncFile flushes a single file's dirty pages to durable storage. fsync flushes
+// the inode's cached writes regardless of the (read-only) open mode, so it commits
+// data the post-processing library wrote and already closed.
+func syncFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
 }
