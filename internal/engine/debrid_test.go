@@ -96,6 +96,47 @@ func TestDebridDownloadSuccess(t *testing.T) {
 	}
 }
 
+// TestDebridDownloadTruncatedStream reproduces the 2026-06-15 incident shape: the
+// server advertises a full Content-Length but delivers a short body (a CDN edge
+// closing the connection early). The download must surface an error and return NO
+// success Result — otherwise verify() would receive a half file. A Content-Length
+// shortfall is caught by the read layer (io.ErrUnexpectedEOF); the post-loop length
+// guard, Sync, and on-disk re-stat are the added defenses for the clean-EOF and
+// write-back-loss variants the read layer can't see.
+func TestDebridDownloadTruncatedStream(t *testing.T) {
+	full := 1024 * 100    // advertised length
+	delivered := full / 4 // bytes actually written before the handler returns
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", full))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(strings.Repeat("x", delivered)))
+		// Handler returns without writing the rest → client sees a short body.
+	}))
+	defer srv.Close()
+
+	d := NewDebridDownloader()
+	task := &Task{
+		ID:             "debrid-trunc-001",
+		InfoHash:       "abc123def456abc123def456abc123def456abc1",
+		Title:          "Truncated",
+		DirectURL:      srv.URL + "/file.mkv",
+		DirectFileName: "Truncated.1080p.mkv",
+		Status:         StatusDownloading,
+	}
+
+	progressCh := make(chan Progress, 100)
+	result, err := d.Download(context.Background(), task, t.TempDir(), progressCh)
+	close(progressCh)
+
+	if err == nil {
+		t.Fatal("expected error for a truncated stream, got nil (a short file would be passed to verify as complete)")
+	}
+	if result != nil {
+		t.Errorf("expected nil result on a truncated stream, got %+v", result)
+	}
+}
+
 func TestDebridDownloadNoURL(t *testing.T) {
 	d := NewDebridDownloader()
 	task := &Task{ID: "no-url-001", DirectURL: ""}

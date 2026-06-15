@@ -188,7 +188,19 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 	if err != nil {
 		return nil, fmt.Errorf("open file: %w", err)
 	}
-	defer file.Close()
+	// Guarded close: error paths below clean up the fd via defer, while the
+	// success path closes explicitly and inspects the error (a swallowed Close
+	// error hides write-back failures on network mounts — the root cause of the
+	// 2026-06-15 NFS truncation incident).
+	closed := false
+	closeFile := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		return file.Close()
+	}
+	defer func() { _ = closeFile() }()
 
 	// Download with progress reporting
 	downloaded := startOffset
@@ -258,6 +270,40 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 		if readErr != nil {
 			return nil, fmt.Errorf("read response: %w", readErr)
 		}
+	}
+
+	// Guard against a premature end-of-stream: if the server advertised a length
+	// and we read fewer bytes, the transfer was truncated (e.g. a debrid CDN edge
+	// closing the connection). Don't hand a short file to verify as if complete.
+	if totalBytes > 0 && downloaded < totalBytes {
+		return nil, fmt.Errorf("incomplete download: got %s of %s", formatBytes(downloaded), formatBytes(totalBytes))
+	}
+
+	// Force the OS to flush the file to durable storage BEFORE we report success.
+	// Without this, every Write() can succeed into the page cache while the actual
+	// write-back to a network mount (the prod download dir is an NFS share at
+	// /mnt/nas/peliculas) lags or fails — verify() then stats a half-flushed file
+	// and rejects it ("size mismatch"). fsync surfaces a write-back error here,
+	// where it's actionable, instead of silently truncating the file.
+	if err := file.Sync(); err != nil {
+		return nil, fmt.Errorf("flush to disk failed (write-back/network-mount error): %w", err)
+	}
+	if err := closeFile(); err != nil {
+		return nil, fmt.Errorf("close file failed (write-back/network-mount error): %w", err)
+	}
+
+	// Safety net: after a durable flush, the on-disk size must match what we wrote.
+	// On a stalled mount a write-back error can still leave the file short even
+	// when Sync/Close returned nil. This is also the ONLY integrity check when the
+	// server sent no Content-Length (totalBytes == 0 → the guard above is skipped).
+	// Remove the corrupt partial so a retry starts clean, rather than passing a
+	// truncated file to verify().
+	if fi, statErr := os.Stat(destPath); statErr == nil && fi.Size() < downloaded {
+		if rmErr := os.Remove(destPath); rmErr != nil {
+			log.Printf("[%s] failed to remove corrupt partial %s: %v", agent.ShortID(task.ID), destPath, rmErr)
+		}
+		return nil, fmt.Errorf("post-write size mismatch: wrote %s but file is %s on disk — likely a stalled or failing storage mount (%s)",
+			formatBytes(downloaded), formatBytes(fi.Size()), outputDir)
 	}
 
 	log.Printf("[%s] debrid download complete: %s (%s)", agent.ShortID(task.ID), fileName, formatBytes(downloaded))
