@@ -5,12 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6-beta] - 2026-06-15
+
+
+### Documentation
+
+- **install**: point install one-liners at unarr.app
+- clarify auto mode prefers cached debrid when configured
+- document preferred_methods ordered download-method list
+
+### Fixed
+
+- **debrid**: fsync before verify to stop NFS write-back truncation
 ## [1.1.5-beta] - 2026-06-14
 
 
 ### Added
 
 - **downloads**: ordered preferred_methods list honored for web tasks
+
+### Other
+
+- **release**: 1.1.5-beta
 ## [1.1.4-beta] - 2026-06-12
 
 
@@ -850,6 +866,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.1.6-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.5-beta...v1.1.6-beta
 [1.1.5-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.4-beta...v1.1.5-beta
 [1.1.4-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.3-beta...v1.1.4-beta
 [1.1.3-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.2-beta...v1.1.3-beta
