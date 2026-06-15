@@ -23,13 +23,13 @@ Built-in torrent engine, debrid (Real-Debrid / AllDebrid), and NZB support. Stre
 ### Quick install (Linux/macOS)
 
 ```bash
-curl -fsSL https://get.torrentclaw.com/install.sh | sh
+curl -fsSL https://unarr.app/install.sh | sh
 ```
 
 ### PowerShell (Windows)
 
 ```powershell
-irm https://get.torrentclaw.com/install.ps1 | iex
+irm https://unarr.app/install.ps1 | iex
 ```
 
 ### Homebrew (macOS/Linux)

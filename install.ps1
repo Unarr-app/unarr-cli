@@ -1,5 +1,5 @@
 # unarr — Windows installer (PowerShell 5.1+)
-# Usage: irm https://get.unarr.com/install.ps1 | iex
+# Usage: irm https://unarr.app/install.ps1 | iex
 #    or: irm https://raw.githubusercontent.com/torrentclaw/unarr/main/install.ps1 | iex
 #
 # Options (env vars):

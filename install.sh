@@ -1,6 +1,6 @@
 #!/bin/sh
 # unarr — cross-platform installer (Linux / macOS)
-# Usage: curl -fsSL https://get.unarr.com/install.sh | sh
+# Usage: curl -fsSL https://unarr.app/install.sh | sh
 #    or: curl -fsSL https://raw.githubusercontent.com/torrentclaw/unarr/main/install.sh | sh
 #
 # Options (env vars):
