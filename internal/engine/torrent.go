@@ -534,10 +534,17 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 			default: // don't block if channel full
 			}
 
-			// Check completion
+			// Check completion. BytesCompleted counts only SHA1-VERIFIED pieces, so
+			// torrent content can't be silently truncated — but assert nothing is
+			// still missing (selective-file accounting, a piece that failed its last
+			// hash) before declaring done. A non-zero remainder is an integrity
+			// failure → the manager re-downloads (anacrolix re-checks pieces).
 			if downloaded >= totalBytes {
 				if isTTY {
 					fmt.Fprintln(os.Stderr) // newline after \r progress
+				}
+				if missing := t.BytesMissing(); missing > 0 {
+					return nil, integrityErr("truncated", "torrent reported complete but %s of verified pieces are still missing", formatBytes(missing))
 				}
 				log.Printf("[%s] download complete: %s", task.ID[:8], fileName)
 				return &Result{}, nil

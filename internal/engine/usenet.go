@@ -277,9 +277,15 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		log.Printf("[%s] extracted archive", shortID)
 	}
 	if ppResult.VerifyNote != "" {
-		// Degraded verification (par2 missing / repair failed): surface it loudly
-		// so the delivered file isn't silently assumed good.
+		// Degraded verification (par2 missing / transient probe error): surface it
+		// loudly so the delivered file isn't silently assumed good.
 		log.Printf("[%s] WARNING: %s", shortID, ppResult.VerifyNote)
+	}
+	if ppResult.Corrupt {
+		// par2 DEFINITIVELY confirmed unrepairable damage — fail as an integrity
+		// error so the manager re-downloads clean instead of completing a corrupt
+		// release (symmetric with the debrid/torrent guards).
+		return nil, integrityErr("par2_failed", "usenet delivery is corrupt: %s", ppResult.VerifyNote)
 	}
 
 	finalPath := ppResult.FinalPath

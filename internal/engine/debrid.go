@@ -276,7 +276,11 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 	// and we read fewer bytes, the transfer was truncated (e.g. a debrid CDN edge
 	// closing the connection). Don't hand a short file to verify as if complete.
 	if totalBytes > 0 && downloaded < totalBytes {
-		return nil, fmt.Errorf("incomplete download: got %s of %s", formatBytes(downloaded), formatBytes(totalBytes))
+		// Integrity, not transport — the manager re-downloads. Keep the partial
+		// (NOT removed): the bytes written so far are sequentially correct, so the
+		// retry resumes via HTTP Range from where the stream was cut instead of
+		// re-fetching the whole file.
+		return nil, integrityErr("truncated", "incomplete download: got %s of %s", formatBytes(downloaded), formatBytes(totalBytes))
 	}
 
 	// Force the OS to flush the file to durable storage BEFORE we report success.
@@ -286,10 +290,13 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 	// and rejects it ("size mismatch"). fsync surfaces a write-back error here,
 	// where it's actionable, instead of silently truncating the file.
 	if err := file.Sync(); err != nil {
-		return nil, fmt.Errorf("flush to disk failed (write-back/network-mount error): %w", err)
+		_ = closeFile()
+		_ = os.Remove(destPath) // uncertain on-disk state — drop it so the retry starts clean
+		return nil, integrityErr("flush_failed", "flush to disk failed (write-back/network-mount error): %v", err)
 	}
 	if err := closeFile(); err != nil {
-		return nil, fmt.Errorf("close file failed (write-back/network-mount error): %w", err)
+		_ = os.Remove(destPath)
+		return nil, integrityErr("flush_failed", "close file failed (write-back/network-mount error): %v", err)
 	}
 
 	// Safety net: after a durable flush, the on-disk size must match what we wrote.
@@ -302,7 +309,7 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 		if rmErr := os.Remove(destPath); rmErr != nil {
 			log.Printf("[%s] failed to remove corrupt partial %s: %v", agent.ShortID(task.ID), destPath, rmErr)
 		}
-		return nil, fmt.Errorf("post-write size mismatch: wrote %s but file is %s on disk — likely a stalled or failing storage mount (%s)",
+		return nil, integrityErr("truncated", "post-write size mismatch: wrote %s but file is %s on disk — likely a stalled or failing storage mount (%s)",
 			formatBytes(downloaded), formatBytes(fi.Size()), outputDir)
 	}
 

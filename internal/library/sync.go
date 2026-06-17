@@ -89,6 +89,29 @@ func BuildSyncItems(cache *LibraryCache) []agent.LibrarySyncItem {
 	items := make([]agent.LibrarySyncItem, 0, len(cache.Items))
 	for _, item := range cache.Items {
 		if item.ScanError != "" {
+			// A file ffprobe can't read is almost always a truncated/corrupt
+			// download (2026-06-15 NFS write-back truncation). Previously these were
+			// silently dropped — the file vanished from the library with no trace.
+			// Emit a minimal DAMAGED row instead so the web flags it (badge +
+			// blocked playback + re-download) rather than hiding it. All fields below
+			// are populated before ffprobe runs, so they're valid even on scan error.
+			// The scanner re-probes damaged items every scan, so a clean re-download
+			// to the same path self-heals the verdict.
+			items = append(items, agent.LibrarySyncItem{
+				FilePath:        item.FilePath,
+				FileName:        item.FileName,
+				FileSize:        item.FileSize,
+				Title:           item.Title,
+				Year:            item.Year,
+				ContentType:     DeriveContentType(item),
+				Season:          item.Season,
+				Episode:         item.Episode,
+				Fingerprint:     item.Fingerprint,
+				RelPath:         relToRoot(cache.Path, item.FilePath),
+				LibraryRootKey:  "library",
+				Integrity:       "damaged",
+				IntegrityReason: "unreadable",
+			})
 			continue
 		}
 		si := agent.LibrarySyncItem{

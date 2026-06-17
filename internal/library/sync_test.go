@@ -52,8 +52,10 @@ func TestBuildSyncItems(t *testing.T) {
 
 	items := BuildSyncItems(cache)
 
-	if len(items) != 2 {
-		t.Fatalf("expected 2 items (1 skipped), got %d", len(items))
+	// 3 items: the movie, the show, and the scan-error file surfaced as DAMAGED
+	// (no longer silently dropped — the web flags it for re-download).
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items (1 damaged), got %d", len(items))
 	}
 
 	// First item: movie with full media info
@@ -96,6 +98,18 @@ func TestBuildSyncItems(t *testing.T) {
 	}
 	if show.Resolution != "" {
 		t.Errorf("resolution should be empty, got %q", show.Resolution)
+	}
+
+	// Third item: scan-error file surfaced as damaged (unreadable), not skipped.
+	damaged := items[2]
+	if damaged.FilePath != "/media/bad.mkv" {
+		t.Errorf("damaged filePath = %q, want /media/bad.mkv", damaged.FilePath)
+	}
+	if damaged.Integrity != "damaged" {
+		t.Errorf("integrity = %q, want damaged", damaged.Integrity)
+	}
+	if damaged.IntegrityReason != "unreadable" {
+		t.Errorf("integrityReason = %q, want unreadable", damaged.IntegrityReason)
 	}
 }
 

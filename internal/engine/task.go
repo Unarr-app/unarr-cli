@@ -31,9 +31,11 @@ var validTransitions = map[TaskStatus][]TaskStatus{
 	StatusClaimed:     {StatusResolving, StatusCancelled},
 	StatusResolving:   {StatusDownloading, StatusFailed, StatusCancelled},
 	StatusDownloading: {StatusVerifying, StatusFailed, StatusResolving, StatusCancelled},
-	StatusVerifying:   {StatusOrganizing, StatusFailed},
-	StatusOrganizing:  {StatusSeeding, StatusCompleted},
-	StatusSeeding:     {StatusCompleted},
+	// Verifying → Resolving: the on-disk verify found a truncated/corrupt file and
+	// the manager is re-downloading the same source (bounded integrity retry).
+	StatusVerifying:  {StatusOrganizing, StatusFailed, StatusResolving},
+	StatusOrganizing: {StatusSeeding, StatusCompleted},
+	StatusSeeding:    {StatusCompleted},
 }
 
 // Task represents a download task with its full lifecycle state.

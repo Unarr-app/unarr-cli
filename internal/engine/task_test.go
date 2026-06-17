@@ -35,6 +35,7 @@ func TestTransitionValid(t *testing.T) {
 		{StatusResolving, StatusDownloading},
 		{StatusDownloading, StatusVerifying},
 		{StatusVerifying, StatusOrganizing},
+		{StatusVerifying, StatusResolving}, // integrity retry: re-download after a failed on-disk verify
 		{StatusOrganizing, StatusCompleted},
 	}
 
@@ -60,7 +61,6 @@ func TestTransitionInvalid(t *testing.T) {
 		{StatusClaimed, StatusCompleted},
 		{StatusCompleted, StatusDownloading},
 		{StatusFailed, StatusCompleted},
-		{StatusVerifying, StatusResolving},
 	}
 
 	for _, tt := range invalid {

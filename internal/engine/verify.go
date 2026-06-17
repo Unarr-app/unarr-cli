@@ -29,14 +29,19 @@ func verify(result *Result) error {
 	}
 
 	if actualSize == 0 {
-		return fmt.Errorf("download is empty: %s", result.FilePath)
+		// Integrity, not transport: a zero-byte result is corrupt — let the manager
+		// re-download clean rather than surface an empty file as completed.
+		return integrityErr("empty", "download is empty: %s", result.FilePath)
 	}
 
-	// If we know the expected size, check within 2% tolerance
+	// If we know the expected size, check within 2% tolerance (container/muxing
+	// overhead). A shortfall beyond that is a truncated/corrupt file — classify it
+	// as an IntegrityError so the manager re-downloads clean instead of completing
+	// a half file (the last line of defense across every backend).
 	if result.Size > 0 {
 		tolerance := int64(float64(result.Size) * 0.02)
 		if actualSize < result.Size-tolerance {
-			return fmt.Errorf("size mismatch: expected %d, got %d", result.Size, actualSize)
+			return integrityErr("size_mismatch", "size mismatch: expected %d, got %d", result.Size, actualSize)
 		}
 	}
 

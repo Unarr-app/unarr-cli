@@ -14,6 +14,13 @@ import (
 // be checked is delivered UNVERIFIED, not verified.
 var ErrPar2NotInstalled = errors.New("par2 not installed")
 
+// ErrPar2Unrepairable is returned by Par2Verify when parity confirms the data is
+// damaged AND par2 reports repair is not possible — the file is definitively
+// corrupt (distinct from a transient par2 probe error). The pipeline marks the
+// delivery Corrupt so the engine treats it as an integrity failure and
+// re-downloads, rather than shipping a broken file with a soft warning.
+var ErrPar2Unrepairable = errors.New("par2: verification failed and repair not possible")
+
 // par2Lookup probes whether the par2 binary is on PATH. It's a package var so
 // tests can simulate a missing binary without touching the real PATH.
 var par2Lookup = func() bool {
@@ -42,7 +49,7 @@ func Par2Verify(par2File string) error {
 			return &Par2RepairableError{Par2File: par2File}
 		}
 		if strings.Contains(outStr, "Repair is not possible") {
-			return fmt.Errorf("par2: verification failed and repair not possible:\n%s", outStr)
+			return fmt.Errorf("%w:\n%s", ErrPar2Unrepairable, outStr)
 		}
 		return fmt.Errorf("par2 verify: %w\n%s", err, outStr)
 	}

@@ -23,6 +23,12 @@ type Result struct {
 	// the file is unverified rather than silently assuming it's good. Empty means
 	// either "verified OK" or "no parity shipped" — both are non-degraded.
 	VerifyNote string
+	// Corrupt is true when par2 DEFINITIVELY confirmed the data is damaged and it
+	// could not be repaired (repair failed, or corruption detected with no par2
+	// binary to fix it). The engine treats this as an integrity failure and
+	// re-downloads — distinct from VerifyNote's softer "unverified but delivered"
+	// (e.g. no parity shipped, or a transient probe error).
+	Corrupt bool
 }
 
 // Options configures post-processing behavior.
@@ -58,14 +64,28 @@ func Process(dir string, downloadedFiles map[string]string, opts Options) (*Resu
 				result.Repaired = true
 				log.Printf("[usenet] par2: repair successful")
 			case errors.Is(repairErr, ErrPar2NotInstalled):
-				result.VerifyNote = "par2 corruption detected but `par2` is not installed — cannot repair, delivered POSSIBLY CORRUPT"
+				// Damage confirmed by parity, but no binary to repair it — the
+				// delivered file IS corrupt. Mark it so the engine re-downloads.
+				result.Corrupt = true
+				result.VerifyNote = "par2 corruption detected but `par2` is not installed — cannot repair, file is CORRUPT"
 				log.Printf("[usenet] WARNING: %s", result.VerifyNote)
 			default:
-				result.VerifyNote = fmt.Sprintf("par2 repair failed — file may be corrupt: %v", repairErr)
+				// Repair attempted and failed — the data is damaged beyond recovery.
+				result.Corrupt = true
+				result.VerifyNote = fmt.Sprintf("par2 repair failed — file is corrupt: %v", repairErr)
 				log.Printf("[usenet] WARNING: %s", result.VerifyNote)
 			}
+		case errors.Is(err, ErrPar2Unrepairable):
+			// Parity confirmed the data is damaged and unrepairable — definitively
+			// corrupt (NOT a transient probe error). Engine re-downloads.
+			result.Corrupt = true
+			result.VerifyNote = fmt.Sprintf("par2: file is corrupt and cannot be repaired: %v", err)
+			log.Printf("[usenet] WARNING: %s", result.VerifyNote)
 		default:
-			result.VerifyNote = fmt.Sprintf("par2 verification error — file may be corrupt: %v", err)
+			// A transient par2 probe/exec error (binary crash, I/O hiccup) — can't
+			// confirm corruption, so deliver UNVERIFIED with a loud note rather than
+			// nuking a possibly-good file.
+			result.VerifyNote = fmt.Sprintf("par2 verification error — file unverified: %v", err)
 			log.Printf("[usenet] WARNING: %s", result.VerifyNote)
 		}
 	}
