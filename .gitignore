@@ -45,3 +45,7 @@ dist-ffbinaries/
 
 # Claude Code: keep entirely local, do not track
 .claude/
+# graphify knowledge graph (local, regenerable)
+graphify-out/
+CLAUDE.md
+.claude/settings.json
