@@ -778,8 +778,10 @@ func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 		session.ServeVideoPlaylist(w, r)
 	case resource == "video/init.mp4":
 		session.ServeInit(w, r)
-	case strings.HasPrefix(resource, "video/seg-") && strings.HasSuffix(resource, ".m4s"):
-		idxStr := strings.TrimSuffix(strings.TrimPrefix(resource, "video/seg-"), ".m4s")
+	case strings.HasPrefix(resource, "video/seg-") && (strings.HasSuffix(resource, ".m4s") || strings.HasSuffix(resource, ".ts")):
+		// COPY-VOD serves MPEG-TS segments (seg-N.ts); encode/EVENT-copy serve
+		// fMP4 (seg-N.m4s). Strip whichever extension is present.
+		idxStr := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(resource, "video/seg-"), ".m4s"), ".ts")
 		idx, err := strconv.Atoi(idxStr)
 		if err != nil {
 			http.Error(w, "bad segment index", http.StatusBadRequest)

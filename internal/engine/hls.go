@@ -324,6 +324,18 @@ type HLSSession struct {
 	// reconnects through) must not reclassify every sub-realtime dip as
 	// "input_bound/struggling" for the rest of a multi-hour session.
 	inputErrAt time.Time
+
+	// ── COPY-VOD state (hls_copy_vod.go) ──
+	// copyVOD=true means this VideoCopy session uses the keyframe-indexed VOD
+	// model: a complete pre-rendered manifest + on-demand per-segment `-c:v copy`
+	// (no continuous ffmpeg, no EVENT growing playlist). copySegStarts is the
+	// keyframe boundary table — segment i spans copySegStarts[i]..[i+1], with
+	// copySegStarts[len-1] == durationSec. Empty when the session uses the legacy
+	// EVENT copy path (remote URL / keyframe-index failure).
+	copyVOD       bool
+	copySegStarts []float64
+	copyGenMu     sync.Mutex
+	copyGen       map[int]*sync.Mutex // per-index gate single-flighting segment gen
 }
 
 // hlsSeekAhead is how many segments past the writer's current position the
@@ -680,9 +692,17 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		liveURL:        cfg.SourceURL, // mutable copy; cfg stays immutable
 	}
 	if cfg.VideoCopy {
-		// Copy mode: ffmpeg owns the media playlist (segments cut at the
-		// source's keyframes → durations unknown upfront, the uniform-2s
-		// pre-render would lie). ServeVideoPlaylist reads it from disk.
+		// COPY-VOD (preferred for local files): keyframe-index the source, render
+		// a COMPLETE VOD manifest, and generate each `-c:v copy` segment on
+		// demand — known total duration + seek-anywhere, no continuous ffmpeg.
+		// startCopyVOD sets the manifest + segment table + readyMax itself.
+		if startCopyVOD(ctx, s) {
+			return s, nil
+		}
+		// Fallback (remote URL / keyframe-index failure): legacy EVENT copy —
+		// ffmpeg owns a growing media playlist (segments cut at the source's
+		// keyframes → durations unknown upfront). ServeVideoPlaylist reads it
+		// from disk; spawn the continuous copy ffmpeg below.
 		s.manifestVideo = ""
 		s.manifestRoot = renderMasterPlaylistCopy(probe)
 	} else {
@@ -1315,7 +1335,9 @@ func (s *HLSSession) ServeVideoPlaylist(w http.ResponseWriter, r *http.Request) 
 	s.Touch()
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-cache")
-	if s.cfg.VideoCopy {
+	// COPY-VOD pre-renders a complete manifest (like the encode path) — serve it
+	// in-memory. Only the legacy EVENT copy path reads ffmpeg's growing playlist.
+	if s.cfg.VideoCopy && !s.copyVOD {
 		s.serveCopyPlaylist(w, r)
 		return
 	}
@@ -1370,6 +1392,13 @@ func (s *HLSSession) serveCopyPlaylist(w http.ResponseWriter, r *http.Request) {
 func (s *HLSSession) ServeInit(w http.ResponseWriter, r *http.Request) {
 	s.Touch()
 	path := filepath.Join(s.tmpDir, "video", "init.mp4")
+	// COPY-VOD uses MPEG-TS segments — there is no fMP4 init segment and the
+	// manifest carries no EXT-X-MAP, so no player should request this. Answer
+	// 404 rather than blocking on an init that will never be written.
+	if s.copyVOD {
+		http.Error(w, "no init segment (mpegts copy-vod)", http.StatusNotFound)
+		return
+	}
 	// Init segment is the first thing ffmpeg writes — wait briefly for it.
 	deadline := time.Now().Add(30 * time.Second)
 	for {
@@ -1407,6 +1436,25 @@ func (s *HLSSession) ServeSegment(w http.ResponseWriter, r *http.Request, idx in
 	}
 
 	path := filepath.Join(s.tmpDir, "video", fmt.Sprintf("seg-%d.m4s", idx))
+
+	// COPY-VOD: generate this MPEG-TS segment on demand (`-c:v copy` from its
+	// keyframe boundary). segmentCount is exact here, so bound it. A seek
+	// anywhere hits this path — one short copy spawn, not a linear-remux wait.
+	if s.copyVOD {
+		if idx >= s.segmentCount {
+			http.Error(w, "segment out of range", http.StatusNotFound)
+			return
+		}
+		if err := s.ensureCopySegment(r.Context(), idx); err != nil {
+			log.Printf("[hls %s] copy-vod seg-%d gen failed: %v", shortHLSID(s.cfg.SessionID), idx, err)
+			http.Error(w, "segment unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "video/mp2t")
+		w.Header().Set("Cache-Control", "max-age=3600")
+		http.ServeFile(w, r, s.copySegPath(idx))
+		return
+	}
 	// Fast path: file already on disk (either current writer reached it, or
 	// a previous session left it there before a seek-restart).
 	if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
