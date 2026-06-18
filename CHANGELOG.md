@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0-beta] - 2026-06-18
+
+
+### Added
+
+- **agent**: report max_stream_sessions in the register payload
+- **hls**: seek-anywhere copy-vod via on-demand MPEG-TS segments
+- **stream**: configurable max concurrent HLS sessions (max_stream_sessions)
+
+### Fixed
+
+- **stream**: evict the same-content predecessor before unrelated viewers
+- **stream**: trust unarr dev origin :3029 in default CORS allowlist
+
+### Other
+
+- ignore graphify-out/
+
+### Build
+
+- **lint**: add SOLID/complexity gate for new Go code
 ## [1.1.7-beta] - 2026-06-17
 
 
@@ -12,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **engine**: cross-backend integrity guard with retry-then-damaged
 - **usenet**: fsync delivered files before reporting complete
+
+### Other
+
+- **release**: 1.1.7-beta
 ## [1.1.6-beta] - 2026-06-15
 
 
@@ -877,6 +902,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.2.0-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.7-beta...v1.2.0-beta
 [1.1.7-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.6-beta...v1.1.7-beta
 [1.1.6-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.5-beta...v1.1.6-beta
 [1.1.5-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.4-beta...v1.1.5-beta
