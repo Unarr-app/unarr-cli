@@ -1,10 +1,10 @@
-.PHONY: all build test lint coverage clean fmt vet check install-hooks changelog release release-patch release-minor release-major release-dry ship ship-dry ship-push
+.PHONY: all build test lint arch coverage clean fmt vet check install-hooks changelog release release-patch release-minor release-major release-dry ship ship-dry ship-push
 
 BINARY = unarr
 SENTRY_DSN ?=
 LDFLAGS = -s -w -X github.com/torrentclaw/unarr/internal/sentry.dsn=$(SENTRY_DSN)
 
-all: fmt vet lint test build
+all: fmt vet lint arch test build
 
 ## Build the binary (stripped, ~28MB)
 build:
@@ -18,6 +18,13 @@ test:
 ## Run linter (requires golangci-lint)
 lint:
 	golangci-lint run ./...
+
+## Architectural / SOLID gate — file size (<500), func length, cyclomatic + cognitive
+## complexity (15), nesting, dup, max-params (5). Scoped to NEW/CHANGED code vs origin/main
+## (legacy god-files grandfathered). Keeps the LLM from producing spaghetti / god-files.
+arch:
+	@bash scripts/check-arch.sh
+	@golangci-lint run -c .golangci.arch.yml ./...
 
 ## Run tests with coverage report (excludes CLI layer — cmd/ is glue code)
 COVER_PKGS = $(shell go list ./... | grep -v '/cmd')

@@ -22,6 +22,18 @@ pre-commit:
         else
           echo "golangci-lint not installed, skipping (install: https://golangci-lint.run/welcome/install/)"
         fi
+    # Architectural / SOLID gate — blocks spaghetti & god-files in NEW/CHANGED code only
+    # (legacy grandfathered vs origin/main). File size <500, func length, cyclo + cognitive
+    # complexity 15, nesting, dup, max-params 5. See .golangci.arch.yml + scripts/check-arch.sh.
+    arch-gate:
+      glob: "*.go"
+      run: |
+        bash scripts/check-arch.sh || exit 1
+        if command -v golangci-lint &> /dev/null; then
+          golangci-lint run -c .golangci.arch.yml ./...
+        else
+          echo "golangci-lint not installed, skipping arch lint (file-length gate still ran)"
+        fi
 
 pre-push:
   commands:

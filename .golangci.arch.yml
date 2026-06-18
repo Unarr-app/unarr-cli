@@ -1,0 +1,83 @@
+# Architectural / SOLID quality gate — analog of the web's ESLint architectural gate
+# (max-lines 500 / complexity 15 / cognitive 15 / max-depth 4 / max-params 5 / no-dup).
+#
+# SEPARATE from .golangci.yml (correctness/security, full repo). This config holds ONLY
+# the complexity/maintainability linters and is scoped to NEW/CHANGED code via
+# `issues.new-from-rev` so the ~11 pre-existing god-files (hls.go 2302, stream_server.go
+# 1980, daemon.go 1860, ...) are grandfathered — exactly like eslint-suppressions.json.
+# New code MUST pass; legacy is not retro-broken.
+#
+# Run: golangci-lint run -c .golangci.arch.yml ./...   (or `make arch`)
+# File-length (>500) is enforced separately by scripts/check-arch.sh (golangci has no
+# file-line linter).
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - funlen      # function length            (web: max-lines-per-function 150)
+    - gocyclo     # cyclomatic complexity       (web: complexity 15)
+    - gocognit    # cognitive complexity        (web: sonarjs/cognitive-complexity 15)
+    - cyclop      # per-func + package cyclo backstop
+    - nestif      # deeply nested if blocks     (web: max-depth 4)
+    - dupl        # copy-paste clone detection  (web: sonarjs/no-identical-functions + jscpd)
+    - maintidx    # maintainability index floor
+    - revive      # used ONLY for argument-limit (web: max-params 5)
+  settings:
+    funlen:
+      lines: 150
+      statements: 80
+      ignore-comments: true
+    gocyclo:
+      min-complexity: 15
+    gocognit:
+      min-complexity: 15
+    cyclop:
+      max-complexity: 15
+    nestif:
+      min-complexity: 4
+    dupl:
+      threshold: 150
+    maintidx:
+      under: 20
+    revive:
+      # With an explicit rules list, revive runs ONLY these rules (no default ruleset).
+      rules:
+        - name: argument-limit
+          arguments: [5]
+  exclusions:
+    paths:
+      - dist
+      - vendor
+    rules:
+      # Tests are exempt from architectural limits (table-driven tests get long/complex).
+      - linters:
+          - funlen
+          - gocyclo
+          - gocognit
+          - cyclop
+          - nestif
+          - dupl
+          - maintidx
+          - revive
+        path: _test\.go
+      # Generated code is exempt.
+      - linters:
+          - funlen
+          - gocyclo
+          - gocognit
+          - cyclop
+          - nestif
+          - dupl
+          - maintidx
+          - revive
+        path: '(\.pb\.go|_gen\.go|mock_.*\.go)$'
+
+issues:
+  # Grandfather legacy: only flag issues introduced relative to origin/main.
+  new-from-rev: origin/main
+  max-issues-per-linter: 0
+  max-same-issues: 0
