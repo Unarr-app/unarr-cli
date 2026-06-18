@@ -119,6 +119,36 @@ func TestRegisterEvictsPrewarmBeforeViewer(t *testing.T) {
 	}
 }
 
+// At the cap, a re-open / quality-change / audio-switch (a new session with the
+// SAME CacheID as an existing one) must evict ITS OWN predecessor, not an
+// unrelated viewer — even when the predecessor was touched more recently than
+// the stranger. This is what stops an audio-switch on a full box from killing
+// another user's live stream.
+func TestRegisterEvictsSameContentPredecessorBeforeStranger(t *testing.T) {
+	r := NewHLSSessionRegistry(2)
+	mk := func(id, cacheID string, ageSec int) *HLSSession {
+		s := bareSession(id, false, false)
+		s.cfg.CacheID = cacheID
+		s.lastTouch = time.Now().Add(-time.Duration(ageSec) * time.Second)
+		return s
+	}
+	a := mk("a", "hashA", 1)  // predecessor of the incoming content, but NEWEST
+	b := mk("b", "hashB", 60) // unrelated stranger, oldest
+	r.Register(a)
+	r.Register(b)
+	// Incoming C re-opens hashA (audio-switch / quality-change of A's content).
+	r.Register(mk("c", "hashA", 0))
+	if r.Get("a") != nil || !a.isClosed() {
+		t.Fatal("same-content predecessor (a) must be evicted+closed even though it was newer than the stranger")
+	}
+	if r.Get("b") == nil {
+		t.Fatal("unrelated stranger (b) must survive — only the incoming content's predecessor is reclaimed")
+	}
+	if r.Get("c") == nil {
+		t.Fatal("incoming session c must be registered")
+	}
+}
+
 func TestHasLiveEncode(t *testing.T) {
 	r := NewHLSSessionRegistry(1)
 	if r.HasLiveEncode() {

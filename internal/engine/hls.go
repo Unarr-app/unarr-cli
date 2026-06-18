@@ -371,9 +371,12 @@ func (r *HLSSessionRegistry) Get(id string) *HLSSession {
 // changes. A shared/server agent raises maxSessions so N viewers coexist.
 //
 // Eviction order (victims first): prewarm encodes before real viewer sessions
-// (a prewarm is a cheap background cache-fill that reseeds from cache), then
-// least-recently-touched before recently-touched — so an active viewer is the
-// last thing we ever kill.
+// (a prewarm is a cheap background cache-fill that reseeds from cache), then the
+// incoming session's OWN predecessor — an existing session for the SAME content
+// (same CacheID/info_hash), which is what a re-open / quality-change / audio
+// switch produces — before unrelated viewers, then least-recently-touched. So a
+// viewer who switches audio reclaims their own slot instead of evicting a
+// stranger, and an active unrelated viewer is the last thing we ever kill.
 func (r *HLSSessionRegistry) Register(s *HLSSession) {
 	r.mu.Lock()
 	closing := make([]*HLSSession, 0, len(r.sessions))
@@ -387,7 +390,7 @@ func (r *HLSSessionRegistry) Register(s *HLSSession) {
 		}
 	}
 	if keepN := r.maxSessions - 1; len(others) > keepN {
-		sortEvictionVictimsFirst(others)
+		sortEvictionVictimsFirst(others, s.cfg.CacheID)
 		for _, v := range others[:len(others)-keepN] {
 			delete(r.sessions, v.cfg.SessionID)
 			closing = append(closing, v)
@@ -401,23 +404,35 @@ func (r *HLSSessionRegistry) Register(s *HLSSession) {
 }
 
 // sortEvictionVictimsFirst orders sessions so the best eviction victims come
-// first: prewarm encodes before real viewer sessions, then least-recently-
-// touched before recently-touched. The caller evicts the leading slice.
-func sortEvictionVictimsFirst(sessions []*HLSSession) {
+// first: prewarm encodes, then the incoming session's own predecessor (a live
+// session for the SAME content as incomingCacheID — a re-open / quality / audio
+// switch), then least-recently-touched. The caller evicts the leading slice, so
+// a content re-open reclaims its own slot before any unrelated viewer is killed.
+// incomingCacheID == "" (local-file sessions with no cache key) disables the
+// same-content tier so empty keys never match each other.
+func sortEvictionVictimsFirst(sessions []*HLSSession, incomingCacheID string) {
 	type meta struct {
-		prewarm bool
-		touched time.Time
+		prewarm     bool
+		sameContent bool
+		touched     time.Time
 	}
 	m := make(map[*HLSSession]meta, len(sessions))
 	for _, s := range sessions {
 		s.mu.Lock()
-		m[s] = meta{prewarm: s.cfg.Prewarm, touched: s.lastTouch}
+		m[s] = meta{
+			prewarm:     s.cfg.Prewarm,
+			sameContent: incomingCacheID != "" && s.cfg.CacheID == incomingCacheID,
+			touched:     s.lastTouch,
+		}
 		s.mu.Unlock()
 	}
 	sort.SliceStable(sessions, func(i, j int) bool {
 		mi, mj := m[sessions[i]], m[sessions[j]]
 		if mi.prewarm != mj.prewarm {
 			return mi.prewarm // prewarms first
+		}
+		if mi.sameContent != mj.sameContent {
+			return mi.sameContent // the incoming content's predecessor before strangers
 		}
 		return mi.touched.Before(mj.touched) // older first
 	})
