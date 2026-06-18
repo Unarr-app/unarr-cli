@@ -249,6 +249,7 @@ func runDaemonStart() error {
 		AutoUpgrade:        cfg.Daemon.AutoUpgradeEnabled(),
 		Downlink:           cfg.Daemon.Downlink,
 		PreferredMethods:   cfg.Download.MethodOrder(),
+		MaxStreamSessions:  cfg.Download.MaxStreamSessions,
 	}
 
 	// Create HTTP client with mirror failover so a `.com` block-out rolls

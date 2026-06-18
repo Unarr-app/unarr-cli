@@ -68,6 +68,14 @@ type RegisterRequest struct {
 	// config.toml (e.g. ["debrid","usenet"]). The web honours it so a "debrid
 	// only" agent is never handed a torrent task. Empty/["auto"] → web decides.
 	PreferredMethods []string `json:"preferredMethods,omitempty"`
+	// MaxStreamSessions is how many concurrent in-browser HLS sessions this
+	// daemon will hold (config.toml downloads.max_stream_sessions; 1 on a
+	// personal agent, higher on a shared/server agent). The web reads it to
+	// clamp its own concurrent-session minting so it never hands this agent more
+	// streams than it can serve — above the cap the agent's LRU evicts a live
+	// viewer. omitempty: a legacy agent that doesn't report it → web falls back
+	// to its own cap.
+	MaxStreamSessions int `json:"maxStreamSessions,omitempty"`
 }
 
 // RegisterResponse is returned by the server after registration.

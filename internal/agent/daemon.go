@@ -44,6 +44,10 @@ type DaemonConfig struct {
 	// PreferredMethods is the ordered download-method preference from config.toml
 	// (e.g. ["debrid","usenet"]). Reported to the web so it honours the gating.
 	PreferredMethods []string
+	// MaxStreamSessions is the concurrent-HLS-session cap (config.toml
+	// downloads.max_stream_sessions). Reported to the web so it never mints more
+	// concurrent streams than this agent can hold.
+	MaxStreamSessions int
 }
 
 // Daemon manages agent registration and the sync loop.
@@ -169,6 +173,7 @@ func (d *Daemon) Register(ctx context.Context) error {
 		FunnelURL:          d.funnelURL,
 		IsDocker:           RunningInDocker(),
 		PreferredMethods:   d.cfg.PreferredMethods,
+		MaxStreamSessions:  d.cfg.MaxStreamSessions,
 	}
 	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {
 		req.DiskFreeBytes = free
