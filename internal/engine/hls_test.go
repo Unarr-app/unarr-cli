@@ -159,7 +159,7 @@ func TestRenderMasterPlaylistNoSubs(t *testing.T) {
 }
 
 func TestHLSSessionRegistry(t *testing.T) {
-	r := NewHLSSessionRegistry()
+	r := NewHLSSessionRegistry(1)
 	if r.Get("missing") != nil {
 		t.Error("Get on empty registry should return nil")
 	}
@@ -230,7 +230,7 @@ func TestHLSSessionProbeInfoNil(t *testing.T) {
 }
 
 func TestSweepIdle(t *testing.T) {
-	r := NewHLSSessionRegistry()
+	r := NewHLSSessionRegistry(1)
 	idleSession := &HLSSession{
 		cfg:       HLSSessionConfig{SessionID: "old"},
 		lastTouch: time.Now().Add(-2 * hlsSessionTTL),

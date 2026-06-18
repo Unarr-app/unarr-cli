@@ -22,7 +22,7 @@ import (
 // Pueden sobreescribirse en tests para inyectar mocks.
 type streamDeps struct {
 	newStreamEngine func(cfg engine.StreamConfig) (*engine.StreamEngine, error)
-	newStreamServer func(port int) *engine.StreamServer
+	newStreamServer func(port, maxStreamSessions int) *engine.StreamServer
 	openPlayer      func(url, override string) (string, *exec.Cmd, error)
 }
 
@@ -145,8 +145,9 @@ func runStreamWithDeps(input string, port int, noOpen bool, playerCmd string, de
 		yellow.Println("  Warning: no video files found, streaming largest file")
 	}
 
-	// Start HTTP server
-	srv := deps.newStreamServer(port)
+	// Start HTTP server. The manual `unarr stream` command serves a single local
+	// file to one player → single-viewer (1).
+	srv := deps.newStreamServer(port, 1)
 	if err := srv.Listen(ctx); err != nil {
 		eng.Shutdown(context.Background())
 		return fmt.Errorf("start server: %w", err)

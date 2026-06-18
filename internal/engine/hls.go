@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -332,14 +333,25 @@ type HLSSession struct {
 const hlsSeekAhead = 8
 
 // HLSSessionRegistry tracks active sessions keyed by ID.
+//
+// maxSessions bounds how many live sessions coexist: a new Register evicts the
+// lowest-priority sessions until at most maxSessions remain. 1 (the default)
+// reproduces the historical personal-agent behaviour (one daemon == one viewer
+// == one stream; a new session evicts every other). A shared/server agent (the
+// trial-remux VPS) sets it higher so N viewers stream concurrently.
 type HLSSessionRegistry struct {
-	mu       sync.RWMutex
-	sessions map[string]*HLSSession
+	mu          sync.RWMutex
+	sessions    map[string]*HLSSession
+	maxSessions int
 }
 
-// NewHLSSessionRegistry returns an empty registry.
-func NewHLSSessionRegistry() *HLSSessionRegistry {
-	return &HLSSessionRegistry{sessions: make(map[string]*HLSSession)}
+// NewHLSSessionRegistry returns an empty registry capped at maxSessions live
+// sessions (coerced to >= 1).
+func NewHLSSessionRegistry(maxSessions int) *HLSSessionRegistry {
+	if maxSessions < 1 {
+		maxSessions = 1
+	}
+	return &HLSSessionRegistry{sessions: make(map[string]*HLSSession), maxSessions: maxSessions}
 }
 
 // Get fetches a session by ID; returns nil if not registered.
@@ -352,26 +364,63 @@ func (r *HLSSessionRegistry) Get(id string) *HLSSession {
 // Register adds a session under its ID. Replaces any previous session with
 // the same ID (which is closed first to release ffmpeg + tmpdir).
 //
-// Also closes EVERY OTHER active session, since one daemon == one viewer ==
-// one stream at a time. Without this, repeatedly opening the player (or
-// changing quality) leaves orphan ffmpegs running until the 30 min idle
-// sweeper reaps them, and N concurrent transcodes saturate the CPU.
+// Then it evicts the lowest-priority OTHER sessions until at most maxSessions
+// remain (this new one included). At maxSessions==1 that means closing every
+// other session — the historical "one daemon == one viewer == one stream"
+// behaviour, which also stops orphan ffmpegs piling up across re-opens / quality
+// changes. A shared/server agent raises maxSessions so N viewers coexist.
+//
+// Eviction order (victims first): prewarm encodes before real viewer sessions
+// (a prewarm is a cheap background cache-fill that reseeds from cache), then
+// least-recently-touched before recently-touched — so an active viewer is the
+// last thing we ever kill.
 func (r *HLSSessionRegistry) Register(s *HLSSession) {
 	r.mu.Lock()
-	stale := make([]*HLSSession, 0, len(r.sessions))
+	closing := make([]*HLSSession, 0, len(r.sessions))
+	if prev, ok := r.sessions[s.cfg.SessionID]; ok && prev != s {
+		closing = append(closing, prev) // same id re-registered → close the old encode
+	}
+	others := make([]*HLSSession, 0, len(r.sessions))
 	for id, prev := range r.sessions {
-		if id == s.cfg.SessionID {
-			stale = append(stale, prev)
-			continue
+		if id != s.cfg.SessionID {
+			others = append(others, prev)
 		}
-		stale = append(stale, prev)
-		delete(r.sessions, id)
+	}
+	if keepN := r.maxSessions - 1; len(others) > keepN {
+		sortEvictionVictimsFirst(others)
+		for _, v := range others[:len(others)-keepN] {
+			delete(r.sessions, v.cfg.SessionID)
+			closing = append(closing, v)
+		}
 	}
 	r.sessions[s.cfg.SessionID] = s
 	r.mu.Unlock()
-	for _, prev := range stale {
+	for _, prev := range closing {
 		_ = prev.Close()
 	}
+}
+
+// sortEvictionVictimsFirst orders sessions so the best eviction victims come
+// first: prewarm encodes before real viewer sessions, then least-recently-
+// touched before recently-touched. The caller evicts the leading slice.
+func sortEvictionVictimsFirst(sessions []*HLSSession) {
+	type meta struct {
+		prewarm bool
+		touched time.Time
+	}
+	m := make(map[*HLSSession]meta, len(sessions))
+	for _, s := range sessions {
+		s.mu.Lock()
+		m[s] = meta{prewarm: s.cfg.Prewarm, touched: s.lastTouch}
+		s.mu.Unlock()
+	}
+	sort.SliceStable(sessions, func(i, j int) bool {
+		mi, mj := m[sessions[i]], m[sessions[j]]
+		if mi.prewarm != mj.prewarm {
+			return mi.prewarm // prewarms first
+		}
+		return mi.touched.Before(mj.touched) // older first
+	})
 }
 
 // CloseWhere closes + removes every registered session matching pred. Used

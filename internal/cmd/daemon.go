@@ -421,8 +421,11 @@ func runDaemonStart() error {
 	taskStore := agent.NewActiveTaskStore()
 	manager.SetTaskStore(taskStore)
 
-	// Create persistent stream server
-	streamSrv := engine.NewStreamServer(cfg.Download.StreamPort)
+	// Create persistent stream server. MaxStreamSessions caps concurrent HLS
+	// viewers (1 = personal-agent single-viewer; higher on a shared/server agent).
+	streamSrv := engine.NewStreamServer(cfg.Download.StreamPort, cfg.Download.MaxStreamSessions)
+	log.Printf("[stream] HLS server on port %d (max concurrent sessions: %d)",
+		cfg.Download.StreamPort, cfg.Download.MaxStreamSessions)
 	streamSrv.SetUPnPEnabled(cfg.Download.EnableUPnP)
 	// Wire ffmpeg so /thumbnail can extract single frames for the web's "file
 	// characteristics" panel (frames on demand). Empty = thumbnails 503.
@@ -931,9 +934,14 @@ func runDaemonStart() error {
 			}
 			hlsCtx, hlsCancel := context.WithCancel(ctx)
 			startHLSPlayback(engine.HLSSessionConfig{
-				SessionID:         sess.SessionID,
-				SourceURL:         sess.DirectURL,
-				CacheID:           sess.InfoHash,
+				SessionID: sess.SessionID,
+				SourceURL: sess.DirectURL,
+				CacheID:   sess.InfoHash,
+				// HLS-copy (-c:v copy) when the web flagged the source as copyable
+				// (h264 in a non-native container / non-aac audio). The HLS engine
+				// already supports VideoCopy + SourceURL; this branch just never
+				// passed the flag, so every debrid HLS session re-encoded video.
+				VideoCopy:         sess.VideoCopy,
 				FileName:          sess.FileName,
 				Quality:           sess.Quality,
 				AudioIndex:        sess.AudioIndex,

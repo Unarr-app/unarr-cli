@@ -121,7 +121,7 @@ func TestParseThumbWidth(t *testing.T) {
 }
 
 func TestThumbnailHandler_MissingPath_400(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	rec := httptest.NewRecorder()
 	srv.thumbnailHandler(rec, thumbReq("198.51.100.7:40000", ""))
 	if rec.Code != http.StatusBadRequest {
@@ -130,7 +130,7 @@ func TestThumbnailHandler_MissingPath_400(t *testing.T) {
 }
 
 func TestThumbnailHandler_BadToken_404(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	rec := httptest.NewRecorder()
 	// Path present (so we pass the 400 gate) but a bogus token → 404, no oracle.
 	srv.thumbnailHandler(rec, thumbReq("198.51.100.7:40000", "?p="+url.QueryEscape("/tmp/x.mkv")+"&t=deadbeef.0000"))
@@ -140,7 +140,7 @@ func TestThumbnailHandler_BadToken_404(t *testing.T) {
 }
 
 func TestThumbnailHandler_ValidToken_NonexistentFile_404(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	path := "/nonexistent/never-here.mkv"
 	tok := mintStreamToken(srv.streamSecret, streamScopeThumb(path), time.Now())
 	rec := httptest.NewRecorder()
@@ -151,7 +151,7 @@ func TestThumbnailHandler_ValidToken_NonexistentFile_404(t *testing.T) {
 }
 
 func TestThumbnailHandler_NoFFmpeg_503(t *testing.T) {
-	srv := NewStreamServer(0) // ffmpegPath left empty
+	srv := NewStreamServer(0, 1) // ffmpegPath left empty
 	dir := t.TempDir()
 	path := filepath.Join(dir, "movie.mkv")
 	if err := os.WriteFile(path, []byte("not really a video"), 0o600); err != nil {
@@ -169,7 +169,7 @@ func TestThumbnailHandler_NoFFmpeg_503(t *testing.T) {
 // "ffmpeg" that writes JPEG magic bytes to stdout — no real ffmpeg/video
 // needed. Validates 200 + image/jpeg + the body is passed through verbatim.
 func TestThumbnailHandler_Success(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "movie.mkv")
 	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {

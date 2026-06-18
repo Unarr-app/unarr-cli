@@ -189,7 +189,7 @@ func TestStreamServerStartShutdown(t *testing.T) {
 		totalBytes: 1024,
 	}
 
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	if srv.Port() != 0 {
 		t.Errorf("initial port should be 0, got %d", srv.Port())
 	}

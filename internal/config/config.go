@@ -72,6 +72,20 @@ type DownloadConfig struct {
 	StreamPort      int     `toml:"stream_port"`       // fixed port for streaming HTTP server (default: 11818)
 	HTTPSStreamPort int     `toml:"https_stream_port"` // HTTPS stream listener for direct valid-cert playback (default: 11819, 0 = disabled). Only serves once a certificate is present (agent-TLS feature).
 	EnableUPnP      bool    `toml:"enable_upnp"`       // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in)
+	// MaxStreamSessions caps simultaneous in-browser HLS stream sessions on this
+	// daemon. Default 1 = the personal-agent model (one daemon == one viewer ==
+	// one stream; a new session evicts the previous). Raise it on a SHARED /
+	// server agent (e.g. the trial-remux VPS) so N viewers stream concurrently
+	// instead of each new session killing the others. Only bounds the HLS path
+	// (the multi-session registry); the single-file direct/remux-fMP4 path is
+	// unaffected. 0/negative → treated as 1.
+	//
+	// INVARIANT (trial-remux VPS): keep this >= the web's trial concurrency cap
+	// (TRIAL_ACCOUNT_CONCURRENCY in torrentclaw-web). If the web mints more
+	// concurrent streamingSessions than this, the registry's LRU evicts a LIVE
+	// viewer mid-stream. Note a re-open / quality-change / audio-switch creates
+	// an extra session, so allow headroom above the raw viewer cap on a shared box.
+	MaxStreamSessions int `toml:"max_stream_sessions"`
 	// RequireStreamToken gates remote (non-loopback) /stream + /hls requests on a
 	// signed, short-lived token embedded in the URLs the agent reports. Default
 	// true (secure by default); loopback callers (local mpv/vlc) are always exempt.
@@ -324,6 +338,7 @@ func Default() Config {
 			MinFreeDiskMB:      2048, // 2 GiB reserve
 			StreamPort:         11818,
 			HTTPSStreamPort:    11819,
+			MaxStreamSessions:  1,    // personal-agent default: one stream at a time
 			RequireStreamToken: true, // secure by default; loopback exempt
 			Transcode: TranscodeConfig{
 				Enabled: true,
@@ -438,6 +453,11 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	}
 	if !meta.IsDefined("downloads", "https_stream_port") {
 		cfg.Download.HTTPSStreamPort = 11819
+	}
+	if cfg.Download.MaxStreamSessions <= 0 {
+		// Predates the key (or set to 0/negative) → personal-agent default of 1.
+		// A shared/server agent sets it explicitly (e.g. 5 on the trial VPS).
+		cfg.Download.MaxStreamSessions = 1
 	}
 	if !meta.IsDefined("general", "country") {
 		cfg.General.Country = "US"

@@ -128,7 +128,7 @@ func streamReq(remoteAddr, query string) *http.Request {
 
 func newServedServer(t *testing.T) *StreamServer {
 	t.Helper()
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	srv.SetFile(newFakeProvider("movie.mkv", []byte("fake video bytes")), "task-1")
 	return srv
 }
@@ -195,7 +195,7 @@ func TestStreamHandler_EnforcementOff_NoToken_200(t *testing.T) {
 // --- /hls handler enforcement ------------------------------------------------
 
 func TestHLSHandler_RemoteBadToken_404(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	// A syntactically valid session id (UUID-ish) with a bogus token segment.
 	const sess = "11111111-1111-4111-8111-111111111111"
 	r := httptest.NewRequest(http.MethodGet, "http://stream.test/hls/"+sess+"/badtoken/master.m3u8", nil)
@@ -208,7 +208,7 @@ func TestHLSHandler_RemoteBadToken_404(t *testing.T) {
 }
 
 func TestHLSBaseURLs_CarryTokenSegment(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	srv.urls.LAN = "http://192.168.1.2:11818/stream"
 	const sess = "22222222-2222-4222-8222-222222222222"
 	urls := srv.hlsBaseURLs(sess)

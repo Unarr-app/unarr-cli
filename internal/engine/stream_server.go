@@ -141,7 +141,9 @@ type StreamServer struct {
 	speedtestActive atomic.Bool  // single-flight guard for /speedtest (unauth + public via funnel)
 }
 
-// NewStreamServer creates a stream server bound to the given port.
+// NewStreamServer creates a stream server bound to the given port, allowing up
+// to maxStreamSessions concurrent in-browser HLS sessions (coerced to >= 1;
+// 1 = personal-agent single-viewer).
 // Call Listen() to start accepting connections, then SetFile() to serve content.
 //
 // UPnP is opt-in: call SetUPnPEnabled(true) before Listen() to publish the
@@ -149,10 +151,10 @@ type StreamServer struct {
 // reach the server. This matches the security default — /stream and /hls
 // have no auth, so exposing them to the public internet is something the
 // operator must explicitly request.
-func NewStreamServer(port int) *StreamServer {
+func NewStreamServer(port, maxStreamSessions int) *StreamServer {
 	return &StreamServer{
 		port:         port,
-		hls:          NewHLSSessionRegistry(),
+		hls:          NewHLSSessionRegistry(maxStreamSessions),
 		streamSecret: newStreamSecret(),
 		requireToken: true, // secure by default; the agent self-mints tokens
 	}

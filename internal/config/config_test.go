@@ -18,6 +18,9 @@ func TestDefault(t *testing.T) {
 	if cfg.Download.MaxConcurrent != 3 {
 		t.Errorf("default MaxConcurrent = %d, want 3", cfg.Download.MaxConcurrent)
 	}
+	if cfg.Download.MaxStreamSessions != 1 {
+		t.Errorf("default MaxStreamSessions = %d, want 1", cfg.Download.MaxStreamSessions)
+	}
 	if cfg.General.Country != "US" {
 		t.Errorf("default Country = %q, want US", cfg.General.Country)
 	}
@@ -243,6 +246,48 @@ enabled = false
 
 	if cfg.Download.Transcode.Enabled {
 		t.Error("Transcode.Enabled = true, want false (user explicitly disabled)")
+	}
+}
+
+func TestLoadMaxStreamSessions(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Config predating the key → coerced to the personal-agent default of 1.
+	missing := filepath.Join(tmp, "missing.toml")
+	os.WriteFile(missing, []byte(`[auth]
+api_key = "tc_x"
+`), 0o644)
+	cfg, err := Load(missing)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Download.MaxStreamSessions != 1 {
+		t.Errorf("MaxStreamSessions (key absent) = %d, want 1", cfg.Download.MaxStreamSessions)
+	}
+
+	// Explicit 0 (or negative) must also coerce to 1, never 0 (which would
+	// evict every session on register and serve nobody).
+	zero := filepath.Join(tmp, "zero.toml")
+	os.WriteFile(zero, []byte(`[downloads]
+max_stream_sessions = 0
+`), 0o644)
+	if cfg, err = Load(zero); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Download.MaxStreamSessions != 1 {
+		t.Errorf("MaxStreamSessions (0) = %d, want 1", cfg.Download.MaxStreamSessions)
+	}
+
+	// A shared/server agent raising it is honoured verbatim.
+	five := filepath.Join(tmp, "five.toml")
+	os.WriteFile(five, []byte(`[downloads]
+max_stream_sessions = 5
+`), 0o644)
+	if cfg, err = Load(five); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Download.MaxStreamSessions != 5 {
+		t.Errorf("MaxStreamSessions (5) = %d, want 5", cfg.Download.MaxStreamSessions)
 	}
 }
 

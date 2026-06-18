@@ -65,7 +65,7 @@ func freePort(t *testing.T) int {
 func TestStreamServerTLS_HotInstall(t *testing.T) {
 	cert, leaf := genSelfSignedCert(t)
 
-	ss := NewStreamServer(0) // HTTP on a random free port
+	ss := NewStreamServer(0, 1) // HTTP on a random free port
 	ss.EnableTLS(freePort(t))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -122,7 +122,7 @@ func TestStreamServerTLS_HotInstall(t *testing.T) {
 // TestStreamServerTLS_Disabled verifies that with TLS not armed, no HTTPS port
 // is opened and the HTTP listener is unaffected.
 func TestStreamServerTLS_Disabled(t *testing.T) {
-	ss := NewStreamServer(0)
+	ss := NewStreamServer(0, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := ss.Listen(ctx); err != nil {
@@ -139,7 +139,7 @@ func TestStreamServerTLS_Disabled(t *testing.T) {
 // (not a panic) when the cert pair is absent — the daemon treats this as
 // "TLS off, HTTP keeps serving".
 func TestLoadTLSCertificateFromFiles_Missing(t *testing.T) {
-	ss := NewStreamServer(0)
+	ss := NewStreamServer(0, 1)
 	err := ss.LoadTLSCertificateFromFiles(
 		t.TempDir()+"/nope.crt", t.TempDir()+"/nope.key")
 	if err == nil {

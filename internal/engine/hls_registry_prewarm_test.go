@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // bare session: no ffmpeg, no tmpdir — exercises pure registry semantics.
 func bareSession(id string, prewarm bool, exited bool) *HLSSession {
@@ -13,7 +16,7 @@ func bareSession(id string, prewarm bool, exited bool) *HLSSession {
 // session (the old Register-for-everything path killed the stream being
 // watched when the next-episode prewarm got claimed mid-playback).
 func TestRegisterKeepDoesNotEvict(t *testing.T) {
-	r := NewHLSSessionRegistry()
+	r := NewHLSSessionRegistry(1)
 	live := bareSession("live", false, false)
 	r.Register(live)
 
@@ -42,7 +45,7 @@ func TestRegisterKeepDoesNotEvict(t *testing.T) {
 }
 
 func TestCloseWherePrewarmsOnly(t *testing.T) {
-	r := NewHLSSessionRegistry()
+	r := NewHLSSessionRegistry(1)
 	live := bareSession("live", false, false)
 	pre1 := bareSession("pre1", true, false)
 	pre2 := bareSession("pre2", true, true)
@@ -62,8 +65,62 @@ func TestCloseWherePrewarmsOnly(t *testing.T) {
 	}
 }
 
+// With maxSessions > 1, Register keeps up to the cap and evicts only the
+// least-recently-touched once the cap is exceeded (the shared/server agent).
+func TestRegisterEvictsByCapLRU(t *testing.T) {
+	r := NewHLSSessionRegistry(3)
+	mk := func(id string, ageSec int) *HLSSession {
+		s := bareSession(id, false, false)
+		s.lastTouch = time.Now().Add(-time.Duration(ageSec) * time.Second)
+		return s
+	}
+	a, b, c := mk("a", 30), mk("b", 20), mk("c", 10) // a = oldest
+	r.Register(a)
+	r.Register(b)
+	r.Register(c)
+	if r.Count() != 3 {
+		t.Fatalf("3 sessions under cap 3 should all survive, got %d", r.Count())
+	}
+	// 4th session exceeds the cap → evict the least-recently-touched (a).
+	d := mk("d", 5)
+	r.Register(d)
+	if r.Count() != 3 {
+		t.Fatalf("after eviction want 3, got %d", r.Count())
+	}
+	if r.Get("a") != nil || !a.isClosed() {
+		t.Fatal("least-recently-touched session a must be evicted and closed")
+	}
+	if r.Get("b") == nil || r.Get("c") == nil || r.Get("d") == nil {
+		t.Fatal("b, c, d must survive")
+	}
+}
+
+// Eviction prefers prewarm encodes over real viewer sessions even when the
+// prewarm was touched more recently — a live viewer is killed last.
+func TestRegisterEvictsPrewarmBeforeViewer(t *testing.T) {
+	r := NewHLSSessionRegistry(2)
+	live := bareSession("live", false, false)
+	live.lastTouch = time.Now().Add(-60 * time.Second) // older than the prewarm
+	r.Register(live)
+	pre := bareSession("pre", true, false)
+	pre.lastTouch = time.Now() // newest, but a prewarm
+	r.RegisterKeep(pre)
+	// New viewer at the cap → evict the prewarm first, keep the older live one.
+	v2 := bareSession("v2", false, false)
+	r.Register(v2)
+	if r.Get("pre") != nil || !pre.isClosed() {
+		t.Fatal("prewarm should be evicted first (before a real viewer)")
+	}
+	if r.Get("live") == nil {
+		t.Fatal("live viewer must survive despite being older than the prewarm")
+	}
+	if r.Get("v2") == nil {
+		t.Fatal("new viewer must be registered")
+	}
+}
+
 func TestHasLiveEncode(t *testing.T) {
-	r := NewHLSSessionRegistry()
+	r := NewHLSSessionRegistry(1)
 	if r.HasLiveEncode() {
 		t.Fatal("empty registry must report no live encode")
 	}

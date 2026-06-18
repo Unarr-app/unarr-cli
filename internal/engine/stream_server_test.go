@@ -38,7 +38,7 @@ func (f *fakeFileProviderSeekable) NewFileReader(_ context.Context) io.ReadSeekC
 // TestStreamServer_healMediaPath covers the host→container base-path self-heal
 // used by the path-scoped handlers (/thumbnail, /trickplay, /sub).
 func TestStreamServer_healMediaPath(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 
 	// No resolver installed → identity (preserves the pre-fix 404 behaviour).
 	if got := srv.healMediaPath("/mnt/nas/peliculas/a/b/c.mkv"); got != "/mnt/nas/peliculas/a/b/c.mkv" {
@@ -65,7 +65,7 @@ func TestStreamServer_healMediaPath(t *testing.T) {
 // TestStreamServer_Listen_BindsPort verifica que Listen() enlaza a un puerto
 // y URL() devuelve una URL accesible.
 func TestStreamServer_Listen_BindsPort(t *testing.T) {
-	srv := NewStreamServer(0) // puerto aleatorio
+	srv := NewStreamServer(0, 1) // puerto aleatorio
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -88,7 +88,7 @@ func TestStreamServer_Listen_BindsPort(t *testing.T) {
 
 // TestStreamServer_Listen_RandomPort verifica que port=0 asigna un puerto disponible.
 func TestStreamServer_Listen_RandomPort(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
@@ -105,7 +105,7 @@ func TestStreamServer_Listen_RandomPort(t *testing.T) {
 // TestStreamServer_URL_Format verifica que la URL tiene el formato correcto
 // con host y puerto.
 func TestStreamServer_URL_Format(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
@@ -124,7 +124,7 @@ func TestStreamServer_URL_Format(t *testing.T) {
 
 // TestStreamServer_HasFile verifica que HasFile() refleja el estado correcto.
 func TestStreamServer_HasFile(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
@@ -150,7 +150,7 @@ func TestStreamServer_HasFile(t *testing.T) {
 
 // TestStreamServer_ClearFile verifica que ClearFile() elimina el provider actual.
 func TestStreamServer_ClearFile(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
@@ -174,7 +174,7 @@ func TestStreamServer_ClearFile(t *testing.T) {
 // TestStreamServer_NoFile_Returns404 verifica que sin archivo configurado
 // el servidor devuelve 404.
 func TestStreamServer_NoFile_Returns404(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
@@ -197,7 +197,7 @@ func TestStreamServer_NoFile_Returns404(t *testing.T) {
 // el servidor sirve el contenido correctamente.
 func TestStreamServer_WithFile_Returns200(t *testing.T) {
 	content := []byte("fake video bytes for testing")
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
@@ -227,7 +227,7 @@ func TestStreamServer_WithFile_Returns200(t *testing.T) {
 // TestStreamServer_Shutdown_ReleasesPort verifica que después de Shutdown()
 // el servidor no sigue respondiendo.
 func TestStreamServer_Shutdown_ReleasesPort(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
@@ -264,7 +264,7 @@ func TestStreamServer_Shutdown_ReleasesPort(t *testing.T) {
 // son manejados correctamente.
 func TestStreamServer_Concurrent(t *testing.T) {
 	content := []byte("streaming content for concurrent access")
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
@@ -308,7 +308,7 @@ func TestStreamServer_Concurrent(t *testing.T) {
 // TestStreamServer_SetFile_SwapsProvider verifica que SetFile() reemplaza
 // el provider anterior correctamente.
 func TestStreamServer_SetFile_SwapsProvider(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
@@ -336,7 +336,7 @@ func TestStreamServer_SetFile_SwapsProvider(t *testing.T) {
 // TestStreamServer_Health_NoFile verifica que /health devuelve streaming:false
 // cuando no hay archivo configurado.
 func TestStreamServer_Health_NoFile(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
@@ -372,7 +372,7 @@ func TestStreamServer_Health_NoFile(t *testing.T) {
 // TestStreamServer_Health_WithFile verifica que /health devuelve streaming:true
 // y el nombre del archivo cuando hay un archivo configurado.
 func TestStreamServer_Health_WithFile(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
@@ -411,7 +411,7 @@ func TestStreamServer_Health_WithFile(t *testing.T) {
 // nombre de fichero, taskID ni client IP cuando el caller no es loopback.
 // Protección contra reconnaissance vía LAN / UPnP / Tailscale.
 func TestStreamServer_Health_NonLoopback_NoLeak(t *testing.T) {
-	srv := NewStreamServer(0) // UPnP off by default — keep test hermetic
+	srv := NewStreamServer(0, 1) // UPnP off by default — keep test hermetic
 	ctx := context.Background()
 	if err := srv.Listen(ctx); err != nil {
 		t.Fatalf("Listen() error: %v", err)
@@ -460,7 +460,7 @@ func TestStreamServer_Health_NonLoopback_NoLeak(t *testing.T) {
 // allowlist reciben Access-Control-Allow-Origin y que ningún otro origen
 // es eco-reflejado.
 func TestStreamServer_CORS_Allowlist(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 	if err := srv.Listen(ctx); err != nil {
 		t.Fatalf("Listen: %v", err)
@@ -502,7 +502,7 @@ func TestStreamServer_CORS_Allowlist(t *testing.T) {
 // TestStreamServer_CORS_ExtraOrigin verifica que SetCORSAllowedOrigins añade
 // origins al baseline sin removerlos.
 func TestStreamServer_CORS_ExtraOrigin(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	srv.SetCORSAllowedOrigins([]string{"https://custom.example"})
 	ctx := context.Background()
 	if err := srv.Listen(ctx); err != nil {
@@ -525,7 +525,7 @@ func TestStreamServer_CORS_ExtraOrigin(t *testing.T) {
 // session IDs con caracteres ilegales devolviendo 404 (uniforme con sesión
 // inexistente) para no filtrar el formato aceptado a un attacker.
 func TestStreamServer_HLS_InvalidSessionID(t *testing.T) {
-	srv := NewStreamServer(0) // UPnP off by default — keep test hermetic
+	srv := NewStreamServer(0, 1) // UPnP off by default — keep test hermetic
 	ctx := context.Background()
 	if err := srv.Listen(ctx); err != nil {
 		t.Fatalf("Listen() error: %v", err)
@@ -553,7 +553,7 @@ func TestStreamServer_HLS_InvalidSessionID(t *testing.T) {
 // TestStreamServer_MKV_ContentType verifica que el Content-Type para .mkv
 // es el correcto.
 func TestStreamServer_MKV_ContentType(t *testing.T) {
-	srv := NewStreamServer(0)
+	srv := NewStreamServer(0, 1)
 	ctx := context.Background()
 
 	if err := srv.Listen(ctx); err != nil {
