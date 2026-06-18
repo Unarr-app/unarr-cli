@@ -49,6 +49,11 @@ var defaultCORSAllowedOrigins = []string{
 	"http://torrentf3aifidcsaaanmnmuhv2s53r6hqsl3zkmfidiaxainkeqk5id.onion",
 	"http://localhost:3030",
 	"http://127.0.0.1:3030",
+	// unarr brand dev server (`pnpm dev:unarr`, port 3029). The unarr web player
+	// runs here locally; without these the browser drops every /hls + /stream
+	// response and playback fails on the unarr dev page (mirrors the 3030 pair).
+	"http://localhost:3029",
+	"http://127.0.0.1:3029",
 }
 
 // buildCORSAllowlist merges the default origins with any extras supplied by
