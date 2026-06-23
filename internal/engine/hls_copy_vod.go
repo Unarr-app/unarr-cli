@@ -30,9 +30,15 @@
 // the device declares native decode, i.e. Safari) stays on the legacy EVENT
 // path — no regression, just no seek-anywhere there yet.
 //
-// Scope: LOCAL-FILE H.264 copy sessions. A remote (debrid) URL can't be
-// keyframe-indexed without downloading the whole file, so those keep the
-// legacy EVENT path too (see StartHLSSession).
+// Scope: H.264 copy sessions. LOCAL files get an exact keyframe index
+// (frame-accurate seek). REMOTE sources (connector/IPTV/debrid) can't be
+// keyframe-indexed without downloading the whole file, so they plan UNIFORM
+// segments from the known duration instead — full duration + seek still work,
+// but seek is GOP-rounded (the on-demand `-ss` input-seek lands on the nearest
+// keyframe ≤ the boundary). A remote source without HTTP range support, or with
+// no known duration, falls back to the legacy EVENT path (see StartHLSSession).
+// Remote COPY-VOD also spawns a one-shot subtitle sidecar extractor, since its
+// on-demand video segments never read the whole file the way the EVENT copy does.
 
 package engine
 
@@ -43,6 +49,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -341,17 +348,14 @@ func (s *HLSSession) generateCopySegment(ctx context.Context, idx int) error {
 	return nil
 }
 
-// startCopyVOD attempts to set up a COPY-VOD session: index keyframes, plan the
-// segment table, render the complete VOD manifest. Returns false (no error) if
-// the source can't be COPY-VOD'd (remote URL, non-H.264 codec, indexing failed)
-// so the caller falls back to the legacy EVENT copy path. No ffmpeg is spawned
-// here — segments are produced lazily on first request.
+// startCopyVOD attempts to set up a COPY-VOD session: plan the segment table,
+// render the complete VOD manifest (full duration + seek-anywhere), and — for a
+// remote source — kick off a one-shot subtitle sidecar extractor. Returns false
+// (no error) if the source can't be COPY-VOD'd (non-H.264 codec, no known
+// duration, remote without HTTP range support, local keyframe-index failure) so
+// the caller falls back to the legacy EVENT copy path. No video ffmpeg is
+// spawned here — segments are produced lazily on first request.
 func startCopyVOD(ctx context.Context, s *HLSSession) bool {
-	// Remote sources can't be keyframe-indexed cheaply (would download the whole
-	// file) → legacy EVENT path handles them.
-	if s.cfg.SourceURL != "" || s.cfg.SourcePath == "" {
-		return false
-	}
 	// MPEG-TS transport carries H.264 universally but not HEVC/AV1 (see package
 	// comment). Non-H.264 copy → legacy EVENT path (no regression).
 	if !copyVODEligibleCodec(s.probe.VideoCodec) {
@@ -359,13 +363,44 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 			shortHLSID(s.cfg.SessionID), s.probe.VideoCodec)
 		return false
 	}
-	kfs, err := indexKeyframes(ctx, s.cfg.Transcode.FFprobePath, s.cfg.sourceRef())
-	if err != nil {
-		log.Printf("[hls %s] copy-vod keyframe index failed (%v) — using EVENT copy",
-			shortHLSID(s.cfg.SessionID), err)
+
+	var starts []float64
+	switch {
+	case s.cfg.SourceURL != "":
+		// REMOTE (connector/IPTV/debrid): a keyframe index would download the
+		// whole file, so plan UNIFORM segments from the known duration. The
+		// on-demand `-ss` input-seek rounds DOWN to the nearest keyframe, so seek
+		// is GOP-accurate (≤copyVODTargetSec off) while the full timeline shows
+		// upfront. Needs a known duration + HTTP range support (else every
+		// segment's -ss would re-read from byte 0); without either, EVENT copy.
+		if s.durationSec <= 0 {
+			log.Printf("[hls %s] copy-vod skipped: remote source has no known duration — using EVENT copy",
+				shortHLSID(s.cfg.SessionID))
+			return false
+		}
+		if !sourceSupportsRange(ctx, s.cfg.sourceRef()) {
+			log.Printf("[hls %s] copy-vod skipped: remote source lacks HTTP range support — using EVENT copy",
+				shortHLSID(s.cfg.SessionID))
+			return false
+		}
+		starts = planUniformSegments(s.durationSec)
+		// The on-demand video segments never read the whole file, so subtitles
+		// ride a separate one-shot pass that fills subs/ progressively.
+		startCopyVODSubtitles(s)
+	case s.cfg.SourcePath != "":
+		// LOCAL: a fast demux-only keyframe scan gives exact keyframe boundaries
+		// (frame-accurate seek, no GOP rounding).
+		kfs, err := indexKeyframes(ctx, s.cfg.Transcode.FFprobePath, s.cfg.sourceRef())
+		if err != nil {
+			log.Printf("[hls %s] copy-vod keyframe index failed (%v) — using EVENT copy",
+				shortHLSID(s.cfg.SessionID), err)
+			return false
+		}
+		starts = planCopySegments(kfs, s.durationSec)
+	default:
 		return false
 	}
-	starts := planCopySegments(kfs, s.durationSec)
+
 	if len(starts) < 2 {
 		log.Printf("[hls %s] copy-vod planning yielded no segments — using EVENT copy",
 			shortHLSID(s.cfg.SessionID))
@@ -383,7 +418,113 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	s.readyMax = s.segmentCount
 	s.exited = true
 	s.readyMu.Unlock()
-	log.Printf("[hls %s] copy-vod: %d keyframes → %d segments, %.1fs (on-demand -c:v copy, mpegts)",
-		shortHLSID(s.cfg.SessionID), len(kfs), s.segmentCount, s.durationSec)
+	mode := "local/keyframe"
+	if s.cfg.SourceURL != "" {
+		mode = "remote/uniform"
+	}
+	log.Printf("[hls %s] copy-vod: %d segments, %.1fs (on-demand -c:v copy, mpegts, %s)",
+		shortHLSID(s.cfg.SessionID), s.segmentCount, s.durationSec, mode)
 	return true
+}
+
+// planUniformSegments plans a COPY-VOD segment table at fixed copyVODTargetSec
+// boundaries across 0..duration — for REMOTE sources where a real keyframe index
+// isn't affordable. Same shape as planCopySegments (starts[0]==0, final element
+// ==duration, len-1 == segment count); the difference is the interior boundaries
+// are wall-clock multiples, not keyframes, so an on-demand `-ss` input-seek
+// rounds down to the nearest preceding keyframe. A sub-1 s trailing sliver is
+// folded into the last segment (no near-empty final fragment).
+func planUniformSegments(duration float64) []float64 {
+	if duration <= 0 {
+		return nil
+	}
+	starts := []float64{0}
+	for t := copyVODTargetSec; t < duration-1.0; t += copyVODTargetSec {
+		starts = append(starts, t)
+	}
+	starts = append(starts, duration)
+	return starts
+}
+
+// sourceSupportsRange reports whether url answers an HTTP byte-range request
+// (status 206). COPY-VOD on a remote source seeks every segment with `-ss`,
+// which only stays cheap when the server honours Range — otherwise each segment
+// re-reads from byte 0. A tight timeout keeps a dead/slow panel from stalling
+// session start; any error reports false (→ caller uses the EVENT copy path).
+func sourceSupportsRange(ctx context.Context, url string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Range", "bytes=0-1")
+	// IPTV panels commonly gate on a player UA; match a VLC-class client so the
+	// probe reflects what the segment ffmpeg can actually pull, not a Go default.
+	req.Header.Set("User-Agent", "VLC/3.0.20 LibVLC/3.0.20")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == http.StatusPartialContent
+}
+
+// startCopyVODSubtitles spawns a background ffmpeg that reads the remote source
+// ONCE and writes a WebVTT sidecar per TEXT subtitle track (subs/s<idx>.vtt),
+// mirroring the EVENT copy path's in-pass sidecars — needed because COPY-VOD's
+// on-demand segments never read the whole file. `-flush_packets 1` streams each
+// cue to disk so the sidecar fills progressively (ServeSubtitleVTT serves what's
+// read so far). The extractor starts a few seconds late so the first video
+// segment isn't contended on a single-line panel, and its cancel is stored on
+// s.cancel so Close() kills it. No-op when the source has no text subtitles.
+func startCopyVODSubtitles(s *HLSSession) {
+	var outs []string
+	for _, sb := range s.probe.SubtitleTracks {
+		if !sb.IsTextSubtitle() {
+			continue
+		}
+		outs = append(outs,
+			"-map", fmt.Sprintf("0:s:%d?", sb.Index),
+			"-c:s", "webvtt",
+			"-flush_packets", "1",
+			"-f", "webvtt",
+			filepath.Join(s.tmpDir, "subs", fmt.Sprintf("s%d.vtt", sb.Index)),
+		)
+	}
+	if len(outs) == 0 {
+		return
+	}
+	args := []string{
+		"-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+		"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+		"-rw_timeout", "30000000",
+		"-i", s.cfg.sourceRef(),
+	}
+	args = append(args, outs...)
+
+	ffCtx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.cancel = cancel
+	s.mu.Unlock()
+
+	go func() {
+		// Yield the panel to the first video segment before opening a second read.
+		select {
+		case <-ffCtx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+		cmd := exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
+		var errBuf bytes.Buffer
+		cmd.Stderr = &errBuf
+		if err := cmd.Run(); err != nil && ffCtx.Err() == nil {
+			log.Printf("[hls %s] copy-vod subtitle extractor: %v (%s)",
+				shortHLSID(s.cfg.SessionID), err, strings.TrimSpace(errBuf.String()))
+			return
+		}
+		if ffCtx.Err() == nil {
+			log.Printf("[hls %s] copy-vod subtitle sidecars complete", shortHLSID(s.cfg.SessionID))
+		}
+	}()
 }

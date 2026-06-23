@@ -83,6 +83,50 @@ func TestPlanCopySegmentsFoldsTinyTail(t *testing.T) {
 	}
 }
 
+func TestPlanUniformSegments(t *testing.T) {
+	// 30s → fixed copyVODTargetSec (6s) boundaries: [0,6,12,18,24,30].
+	starts := planUniformSegments(30.0)
+	if starts[0] != 0 {
+		t.Errorf("first start = %v, want 0", starts[0])
+	}
+	if last := starts[len(starts)-1]; math.Abs(last-30.0) > 1e-9 {
+		t.Errorf("last start = %v, want 30.0", last)
+	}
+	for i := 1; i < len(starts); i++ {
+		if starts[i] <= starts[i-1] {
+			t.Fatalf("starts not strictly increasing at %d: %v", i, starts)
+		}
+		if d := starts[i] - starts[i-1]; d < 1.0 {
+			t.Errorf("segment %d duration %v < 1s: %v", i-1, d, starts)
+		}
+	}
+	// Interior boundaries are wall-clock multiples of the target (NOT keyframes).
+	for i := 1; i < len(starts)-1; i++ {
+		if math.Mod(starts[i], copyVODTargetSec) > 1e-9 {
+			t.Errorf("interior boundary %v is not a %vs multiple", starts[i], copyVODTargetSec)
+		}
+	}
+}
+
+func TestPlanUniformSegmentsEdge(t *testing.T) {
+	// Source shorter than one target segment → a single segment [0,dur].
+	if s := planUniformSegments(3.0); len(s) != 2 || s[0] != 0 || math.Abs(s[1]-3.0) > 1e-9 {
+		t.Fatalf("short source plan = %v, want [0 3]", s)
+	}
+	// The loop stops at < dur-1, so the final fragment is always ≥1s — no
+	// near-empty trailing segment regardless of where the end lands.
+	for _, dur := range []float64{24.5, 25.0, 36.2, 90.0} {
+		s := planUniformSegments(dur)
+		if tail := s[len(s)-1] - s[len(s)-2]; tail < 1.0 {
+			t.Errorf("dur %v left a sub-1s tail %v: %v", dur, tail, s)
+		}
+	}
+	// Non-positive duration → no plan (caller falls back to EVENT copy).
+	if s := planUniformSegments(0); s != nil {
+		t.Errorf("planUniformSegments(0) = %v, want nil", s)
+	}
+}
+
 func TestRenderVideoPlaylistCopyVOD(t *testing.T) {
 	starts := []float64{0, 6.006, 12.012, 18.0}
 	m := renderVideoPlaylistCopyVOD(starts)
