@@ -673,6 +673,12 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		cleanupOnError()
 		return nil, fmt.Errorf("hls: mkdir video: %w", err)
 	}
+	// subs/ holds the WebVTT sidecars that buildHLSCopyArgs emits as additional
+	// outputs of the single copy pass (one remote read fills both video/ and subs/).
+	if err := os.MkdirAll(filepath.Join(tmpDir, "subs"), 0o755); err != nil {
+		cleanupOnError()
+		return nil, fmt.Errorf("hls: mkdir subs: %w", err)
+	}
 
 	segCount := segmentCountForDuration(probe.DurationSec)
 
@@ -1413,6 +1419,26 @@ func (s *HLSSession) ServeInit(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "video/mp4")
 	w.Header().Set("Cache-Control", "max-age=3600")
+	http.ServeFile(w, r, path)
+}
+
+// ServeSubtitleVTT serves a WebVTT sidecar (subs/s<idx>.vtt) that buildHLSCopyArgs
+// emits as an additional output of the copy pass. idx is the embedded subtitle
+// stream index (0:s:idx); the caller (hlsHandler) has already validated it as a
+// non-negative integer, so the path can never escape the subs/ dir.
+//
+// The file fills as ffmpeg reads the (remote) input, so a client fetching it
+// mid-transcode gets cues only up to the read position — accepted for this MVP.
+// 404 until the first byte exists rather than blocking, mirroring ServeInit.
+func (s *HLSSession) ServeSubtitleVTT(w http.ResponseWriter, r *http.Request, idx int) {
+	s.Touch()
+	path := filepath.Join(s.tmpDir, "subs", fmt.Sprintf("s%d.vtt", idx))
+	if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
+		http.Error(w, "subtitle track unavailable", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	http.ServeFile(w, r, path)
 }
 
@@ -2171,6 +2197,30 @@ func buildHLSCopyArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string) [
 		"-hls_segment_filename", filepath.Join(tmpDir, "video", "seg-%d.m4s"),
 		filepath.Join(tmpDir, "video", copyPlaylistName),
 	)
+
+	// Subtitle sidecars: one WebVTT output per TEXT track, appended AFTER the HLS
+	// playlist filename so each becomes an ADDITIONAL output of THIS SAME ffmpeg
+	// invocation (ffmpeg applies the trailing -map/-c/-f to the filename that
+	// follows). One pass, one remote read: the .vtt fills as the copy reads the
+	// file — so remote (connector/IPTV) sources get sidecars without the /sub
+	// on-demand extraction re-reading the whole multi-GB remote input. Bitmap
+	// subs (PGS/DVB) are skipped here — they need burn-in, out of scope.
+	for _, sb := range probe.SubtitleTracks {
+		if !sb.IsTextSubtitle() {
+			continue
+		}
+		args = append(args,
+			"-map", fmt.Sprintf("0:s:%d?", sb.Index),
+			"-c:s", "webvtt",
+			// Flush each cue to disk as it's demuxed — without this the WebVTT
+			// avio buffer (~tens of KB) holds every cue until it fills or ffmpeg
+			// exits, so the growing sidecar reads as empty for most of the movie
+			// and ServeSubtitleVTT 404s. Cheap for a low-bitrate text stream.
+			"-flush_packets", "1",
+			"-f", "webvtt",
+			filepath.Join(tmpDir, "subs", fmt.Sprintf("s%d.vtt", sb.Index)),
+		)
+	}
 	return args
 }
 

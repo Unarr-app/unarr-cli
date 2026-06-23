@@ -706,6 +706,7 @@ func (ss *StreamServer) HLSURLsJSON(sessionID string) string {
 //	video/index.m3u8           — video media playlist
 //	video/init.mp4             — fMP4 init segment
 //	video/seg-<n>.m4s          — video segment
+//	subs/s<n>.vtt              — WebVTT sidecar (in-pass copy, remote sources)
 func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 	ss.lastActivity.Store(time.Now().UnixNano())
 
@@ -772,7 +773,7 @@ func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-cache")
 		info := session.ProbeInfo()
-		ss.attachSubtitleVTTURLs(info, session.cfg.sourceRef())
+		ss.attachSubtitleVTTURLs(info, session)
 		_ = json.NewEncoder(w).Encode(info)
 	case resource == "video/index.m3u8":
 		session.ServeVideoPlaylist(w, r)
@@ -788,10 +789,22 @@ func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		session.ServeSegment(w, r, idx)
+	case strings.HasPrefix(resource, "subs/s") && strings.HasSuffix(resource, ".vtt"):
+		// WebVTT sidecar produced in-pass by buildHLSCopyArgs (remote/EVENT-copy
+		// sources). The HLS path token was already verified above, so this needs
+		// only to parse the track index. strconv.Atoi rejects anything that isn't
+		// a plain integer (no "..", "/", signs that resolve to a path) — combined
+		// with the non-negative check below, the resolved path can't escape subs/.
+		idxStr := strings.TrimSuffix(strings.TrimPrefix(resource, "subs/s"), ".vtt")
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil || idx < 0 {
+			http.Error(w, "bad subtitle index", http.StatusBadRequest)
+			return
+		}
+		session.ServeSubtitleVTT(w, r, idx)
 	default:
-		// Subtitles are no longer served here — the web player fetches each text
-		// track on demand from /sub (subtitleHandler). The master playlist no
-		// longer advertises a SUBTITLES group, so no player requests subs/sub-*.
+		// Other subtitle forms are served on demand from /sub (subtitleHandler) for
+		// local sources; remote sources use the in-pass subs/s<N>.vtt sidecars above.
 		http.Error(w, "unknown hls resource", http.StatusNotFound)
 	}
 }
@@ -1349,19 +1362,26 @@ func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) 
 // server needing the source path — it's the single subtitle wiring path that
 // makes embedded subs work on streams that were never library-scanned.
 //
-//   - embedded (external=false): /sub?p=<srcRef>&i=<index>&t=<tok>
-//   - external (external=true) : /sub?p=<sidecar path>&i=-1&t=<tok>&l=<lang>
+//   - embedded, LOCAL source : /sub?p=<srcRef>&i=<index>&t=<tok>
+//   - embedded, REMOTE source: /hls/<sessionID>/<hlsTok>/subs/s<index>.vtt
+//   - external (external=true): /sub?p=<sidecar path>&i=-1&t=<tok>&l=<lang>
 //
-// The token uses the SAME streamScopeSub(path,index) the web mints with, so a
-// library-scanned track and a probe-derived one address identically. The raw
-// "path" key is removed after the URL is built (it's encoded in the URL already).
-// URLs are root-relative; the player resolves them against the funnel origin it
-// fetched probe.json from. Bitmap tracks get no vttUrl (burn-in only).
-func (ss *StreamServer) attachSubtitleVTTURLs(info map[string]any, srcRef string) {
+// For LOCAL embedded tracks the /sub token uses the SAME streamScopeSub(path,index)
+// the web mints with, so a library-scanned track and a probe-derived one address
+// identically — and /sub re-reads a local file cheaply. For REMOTE (connector/IPTV)
+// embedded tracks /sub is unusable (it would re-read the whole multi-GB remote input
+// → 500), so we point at the in-pass WebVTT sidecar served under the session's /hls
+// path instead, tokened with the SAME streamScopeHLS scope the master/segments use.
+// The raw "path" key is removed after the URL is built. URLs are root-relative; the
+// player resolves them against the funnel origin it fetched probe.json from. Bitmap
+// tracks get no vttUrl (burn-in only).
+func (ss *StreamServer) attachSubtitleVTTURLs(info map[string]any, session *HLSSession) {
 	subsAny, ok := info["subtitles"].([]map[string]any)
 	if !ok {
 		return
 	}
+	srcRef := session.cfg.sourceRef()
+	remote := session.cfg.SourceURL != ""
 	now := time.Now()
 	for _, sb := range subsAny {
 		isText, _ := sb["text"].(bool)
@@ -1369,32 +1389,50 @@ func (ss *StreamServer) attachSubtitleVTTURLs(info map[string]any, srcRef string
 			delete(sb, "path")
 			continue
 		}
-		external, _ := sb["external"].(bool)
-		var p string
-		var idx int
-		if external {
-			p, _ = sb["path"].(string)
-			idx = -1
-		} else {
-			p = srcRef
-			if iv, ok := sb["index"].(int); ok {
-				idx = iv
-			}
+		if u := ss.subtitleVTTURLFor(sb, srcRef, session.cfg.SessionID, remote, now); u != "" {
+			sb["vttUrl"] = u
 		}
-		if p == "" {
-			delete(sb, "path")
-			continue
-		}
-		tok := mintStreamToken(ss.streamSecret, streamScopeSub(p, idx), now)
-		u := "/sub?p=" + url.QueryEscape(p) + "&i=" + strconv.Itoa(idx) + "&t=" + tok
-		if external {
-			if lang, _ := sb["lang"].(string); lang != "" && lang != "und" {
-				u += "&l=" + url.QueryEscape(lang)
-			}
-		}
-		sb["vttUrl"] = u
 		delete(sb, "path")
 	}
+}
+
+// subtitleVTTURLFor builds the tokened vttUrl for one TEXT subtitle entry, picking
+// the right form for embedded-local / embedded-remote / external (see
+// attachSubtitleVTTURLs). Returns "" when no URL can be built (unknown source).
+func (ss *StreamServer) subtitleVTTURLFor(
+	sb map[string]any, srcRef, sessionID string, remote bool, now time.Time,
+) string {
+	external, _ := sb["external"].(bool)
+	idx := -1
+	if !external {
+		if iv, ok := sb["index"].(int); ok {
+			idx = iv
+		}
+	}
+	// Remote embedded track → in-pass WebVTT sidecar under the session's /hls path.
+	if remote && !external && idx >= 0 {
+		base := "/hls/" + sessionID
+		if ss.requireToken {
+			base += "/" + mintStreamToken(ss.streamSecret, streamScopeHLS(sessionID), now)
+		}
+		return base + "/subs/s" + strconv.Itoa(idx) + ".vtt"
+	}
+	// Local embedded → srcRef; external sidecar → its path.
+	p := srcRef
+	if external {
+		p, _ = sb["path"].(string)
+	}
+	if p == "" {
+		return ""
+	}
+	tok := mintStreamToken(ss.streamSecret, streamScopeSub(p, idx), now)
+	u := "/sub?p=" + url.QueryEscape(p) + "&i=" + strconv.Itoa(idx) + "&t=" + tok
+	if external {
+		if lang, _ := sb["lang"].(string); lang != "" && lang != "und" {
+			u += "&l=" + url.QueryEscape(lang)
+		}
+	}
+	return u
 }
 
 // writeVTT writes the standard WebVTT response headers + body for both the
