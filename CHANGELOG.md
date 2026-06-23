@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1-beta] - 2026-06-23
+
+
+### Added
+
+- **hls**: emit WebVTT subtitle sidecars in the EVENT-copy pass (remote sources)
 ## [1.2.0-beta] - 2026-06-18
 
 
@@ -21,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- **release**: 1.2.0-beta
 - ignore graphify-out/
 
 ### Build
@@ -902,6 +909,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.2.1-beta]: https://github.com/torrentclaw/unarr/compare/v1.2.0-beta...v1.2.1-beta
 [1.2.0-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.7-beta...v1.2.0-beta
 [1.1.7-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.6-beta...v1.1.7-beta
 [1.1.6-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.5-beta...v1.1.6-beta
