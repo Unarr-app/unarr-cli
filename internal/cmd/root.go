@@ -102,6 +102,8 @@ Source:         https://github.com/torrentclaw/unarr`,
 	streamCmd.GroupID = "download"
 
 	// Daemon Management
+	upCmd := newUpCmd()
+	upCmd.GroupID = "daemon"
 	startCmd := newStartCmd()
 	startCmd.GroupID = "daemon"
 	stopCmd := newStopCmd()
@@ -153,6 +155,7 @@ Source:         https://github.com/torrentclaw/unarr`,
 		downloadCmd,
 		streamCmd,
 		// Daemon Management
+		upCmd,
 		startCmd,
 		stopCmd,
 		statusCmd,
