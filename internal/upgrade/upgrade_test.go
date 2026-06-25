@@ -60,7 +60,7 @@ func TestArchiveName(t *testing.T) {
 
 func TestReleaseURL(t *testing.T) {
 	url := releaseURL("0.3.0", "unarr_0.3.0_linux_amd64.tar.gz")
-	want := "https://torrentclaw.com/releases/download/v0.3.0/unarr_0.3.0_linux_amd64.tar.gz"
+	want := "https://github.com/Unarr-app/unarr-cli/releases/download/v0.3.0/unarr_0.3.0_linux_amd64.tar.gz"
 	if url != want {
 		t.Errorf("releaseURL = %q, want %q", url, want)
 	}
@@ -313,6 +313,28 @@ func TestFetchLatestVersionMockServer(t *testing.T) {
 	}
 }
 
+func TestFetchLatestVersionGitHub(t *testing.T) {
+	// The list endpoint is newest-first and includes prereleases — the updater
+	// must pick the freshest `-beta`, not skip to a stable like releases/latest.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, `[{"tag_name":"v2.5.1-beta"},{"tag_name":"v2.5.0-beta"}]`)
+	}))
+	defer srv.Close()
+
+	// Default base is GitHub → fetchLatestVersion takes the API branch. Route the
+	// api.github.com request to the test server via the rewrite transport.
+	restore := swapHTTPClient(&http.Client{Transport: &rewriteTransport{url: srv.URL}})
+	defer restore()
+
+	ver, err := fetchLatestVersion(context.Background())
+	if err != nil {
+		t.Fatalf("fetchLatestVersion() = %v", err)
+	}
+	if ver != "2.5.1-beta" {
+		t.Errorf("fetchLatestVersion() = %q, want %q", ver, "2.5.1-beta")
+	}
+}
+
 // --- New tests below ---
 
 // swapHTTPClient replaces the package-level httpClient and returns a restore function.
@@ -409,19 +431,19 @@ func TestReleaseURLEdgeCases(t *testing.T) {
 			name:     "pre-release version",
 			version:  "2.0.0-beta.1",
 			filename: "unarr_2.0.0-beta.1_darwin_arm64.tar.gz",
-			wantURL:  "https://torrentclaw.com/releases/download/v2.0.0-beta.1/unarr_2.0.0-beta.1_darwin_arm64.tar.gz",
+			wantURL:  "https://github.com/Unarr-app/unarr-cli/releases/download/v2.0.0-beta.1/unarr_2.0.0-beta.1_darwin_arm64.tar.gz",
 		},
 		{
 			name:     "checksums file",
 			version:  "3.0.0",
 			filename: "checksums.txt",
-			wantURL:  "https://torrentclaw.com/releases/download/v3.0.0/checksums.txt",
+			wantURL:  "https://github.com/Unarr-app/unarr-cli/releases/download/v3.0.0/checksums.txt",
 		},
 		{
 			name:     "windows zip",
 			version:  "1.2.3",
 			filename: "unarr_1.2.3_windows_amd64.zip",
-			wantURL:  "https://torrentclaw.com/releases/download/v1.2.3/unarr_1.2.3_windows_amd64.zip",
+			wantURL:  "https://github.com/Unarr-app/unarr-cli/releases/download/v1.2.3/unarr_1.2.3_windows_amd64.zip",
 		},
 	}
 	for _, tt := range tests {
@@ -536,13 +558,13 @@ func TestFetchLatestVersionWithHTTPTest(t *testing.T) {
 	}{
 		{
 			name:       "valid response",
-			body:       "v3.1.4\n",
+			body:       `[{"tag_name":"v3.1.4"}]`,
 			statusCode: 200,
 			wantVer:    "3.1.4",
 		},
 		{
 			name:       "valid response without v prefix",
-			body:       "2.0.0",
+			body:       `[{"tag_name":"2.0.0"}]`,
 			statusCode: 200,
 			wantVer:    "2.0.0",
 		},

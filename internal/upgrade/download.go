@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -181,9 +182,57 @@ func verifyChecksumWithOptions(ctx context.Context, version, archivePath string,
 	return nil
 }
 
-// fetchLatestVersion queries the TorrentClaw release endpoint (/version) for the
-// latest version string (e.g. "0.8.1"). No GitHub dependency.
+// fetchLatestVersion returns the newest published release version (no leading
+// "v"). For the default GitHub origin it queries the Releases API list endpoint
+// — which, unlike releases/latest, includes prereleases, so the `-beta` channel
+// resolves. For a custom base (staging / tests) it falls back to the plain
+// `{base}/version` text endpoint a web origin serves.
 func fetchLatestVersion(ctx context.Context) (string, error) {
+	if isGitHubBase() {
+		return fetchLatestVersionGitHub(ctx)
+	}
+	return fetchLatestVersionText(ctx)
+}
+
+// fetchLatestVersionGitHub reads the newest release tag from the GitHub REST
+// API. The list endpoint returns releases newest-first and includes
+// prereleases (releases/latest would skip every `-beta`). Unauthenticated GitHub
+// API calls are rate-limited per IP (60/hr) — the caller caches the result.
+func fetchLatestVersionGitHub(ctx context.Context) (string, error) {
+	url := githubAPIBase + "/releases?per_page=1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "unarr-updater")
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch latest release: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("github releases API: HTTP %d", resp.StatusCode)
+	}
+
+	var releases []struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&releases); err != nil {
+		return "", fmt.Errorf("decode releases: %w", err)
+	}
+	if len(releases) == 0 || releases[0].TagName == "" {
+		return "", fmt.Errorf("no releases found at %s", url)
+	}
+
+	return strings.TrimPrefix(strings.TrimSpace(releases[0].TagName), "v"), nil
+}
+
+// fetchLatestVersionText reads a plain "vX.Y.Z" string from `{base}/version` —
+// the endpoint a staging / mirror web origin serves.
+func fetchLatestVersionText(ctx context.Context) (string, error) {
 	url := updateBaseURL + "/version"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

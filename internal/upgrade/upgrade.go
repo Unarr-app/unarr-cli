@@ -242,26 +242,43 @@ func archiveName(version string) string {
 	return fmt.Sprintf("%s_%s_%s_%s.%s", binaryName, version, runtime.GOOS, runtime.GOARCH, ext)
 }
 
-// updateBaseURL is the base URL the self-updater fetches releases from —
-// TorrentClaw's own app, no GitHub dependency (the org is shadow-banned, so
-// GitHub releases/raw/API all 404 to anonymous clients). Defaults to the
-// production apex; SetBaseURL points it at the configured host (cfg.Auth.APIURL)
-// so mirrors / onion / staging work, and tests can point it at an httptest.Server.
-var updateBaseURL = "https://torrentclaw.com"
+// githubOwnerRepo is the public GitHub repo the signed releases live in.
+const githubOwnerRepo = "Unarr-app/unarr-cli"
+
+// updateBaseURL is the asset host the self-updater downloads from. Default is
+// the project's public GitHub Releases: GitHub serves release assets at
+// `{base}/releases/download/v{ver}/{file}` — exactly the path releaseURL builds
+// — so pointing the base at the repo is all it takes. SetBaseURL overrides it
+// (UNARR_UPDATE_BASE for a staging origin, or an httptest.Server in tests); a
+// custom base is assumed to mirror the same asset layout.
+var updateBaseURL = "https://github.com/" + githubOwnerRepo
+
+// githubAPIBase is the REST base for the version check. The list endpoint
+// (releases?per_page=1) is used rather than releases/latest because the latter
+// hides prereleases and the channel is currently all `-beta`. Only consulted
+// while updateBaseURL still points at GitHub (isGitHubBase).
+const githubAPIBase = "https://api.github.com/repos/" + githubOwnerRepo
 
 // SetBaseURL overrides the release endpoint base (trailing slash trimmed).
-// No-op for empty input so a blank config can't break the default.
+// No-op for empty input so a blank override can't break the default.
 func SetBaseURL(base string) {
 	if base != "" {
 		updateBaseURL = strings.TrimRight(base, "/")
 	}
 }
 
+// isGitHubBase reports whether downloads still target GitHub (vs a staging or
+// test origin set via SetBaseURL). Drives which version-check endpoint is used.
+func isGitHubBase() bool {
+	return strings.HasPrefix(updateBaseURL, "https://github.com/")
+}
+
 // releaseURL returns the download URL for a release asset:
 //
 //	{base}/releases/download/v{version}/{filename}
 //
-// served by the app's src/app/releases/download/[...seg] route handler.
+// which is GitHub's native release-asset path (and the layout a staging origin
+// must mirror).
 func releaseURL(version, filename string) string {
 	return fmt.Sprintf("%s/releases/download/v%s/%s", updateBaseURL, version, filename)
 }

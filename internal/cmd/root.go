@@ -50,10 +50,12 @@ Source:         https://github.com/torrentclaw/unarr`,
 			if noColor || os.Getenv("NO_COLOR") != "" {
 				color.NoColor = true
 			}
-			// Self-updater fetches releases from the configured host (default
-			// torrentclaw.com), not GitHub — so mirrors / onion / staging /
-			// UNARR_API_URL all route updates correctly.
-			upgrade.SetBaseURL(loadConfig().Auth.APIURL)
+			// Self-updater pulls signed releases directly from the project's
+			// public GitHub Releases (decoupled from the API host). Override the
+			// origin for staging or tests via UNARR_UPDATE_BASE; empty keeps
+			// GitHub. loadConfig() still runs here for early config + Sentry init.
+			loadConfig()
+			upgrade.SetBaseURL(os.Getenv("UNARR_UPDATE_BASE"))
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
