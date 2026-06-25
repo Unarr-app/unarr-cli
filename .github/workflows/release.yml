@@ -41,7 +41,7 @@ jobs:
       # reproducible releases. Single source of truth = go.mod's `go` line.
       - name: Pin Go toolchain from go.mod
         run: echo "GOTOOLCHAIN=go$(awk '/^go /{print $2; exit}' go.mod)" >> "$GITHUB_ENV"
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: release --clean
