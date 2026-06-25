@@ -1,15 +1,15 @@
 # unarr
 
-> **⚠️ Beta** — unarr is under active development. Features may change, and bugs are expected. [Report issues here](https://github.com/torrentclaw/unarr/issues).
+> **⚠️ Beta** — unarr is under active development. Features may change, and bugs are expected. [Report issues here](https://github.com/Unarr-app/unarr-cli/issues).
 
-[![CI](https://github.com/torrentclaw/unarr/actions/workflows/ci.yml/badge.svg)](https://github.com/torrentclaw/unarr/actions/workflows/ci.yml)
-[![Latest Release](https://img.shields.io/github/v/release/torrentclaw/unarr)](https://github.com/torrentclaw/unarr/releases)
+[![CI](https://github.com/Unarr-app/unarr-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/Unarr-app/unarr-cli/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/Unarr-app/unarr-cli)](https://github.com/Unarr-app/unarr-cli/releases)
 [![Go Report Card](https://goreportcard.com/badge/github.com/torrentclaw/unarr)](https://goreportcard.com/report/github.com/torrentclaw/unarr)
-[![Coverage](https://img.shields.io/codecov/c/github/torrentclaw/unarr)](https://codecov.io/gh/torrentclaw/unarr)
-[![VirusTotal](https://img.shields.io/badge/VirusTotal-scanned-brightgreen?logo=virustotal)](https://github.com/torrentclaw/unarr/releases)
+[![Coverage](https://img.shields.io/codecov/c/github/Unarr-app/unarr-cli)](https://codecov.io/gh/Unarr-app/unarr-cli)
+[![VirusTotal](https://img.shields.io/badge/VirusTotal-scanned-brightgreen?logo=virustotal)](https://github.com/Unarr-app/unarr-cli/releases)
 [![Docker Pulls](https://img.shields.io/docker/pulls/torrentclaw/unarr)](https://hub.docker.com/r/torrentclaw/unarr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/torrentclaw/unarr)](go.mod)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/Unarr-app/unarr-cli)](go.mod)
 
 The single-binary terminal client for torrent, debrid, and usenet downloads. **Free and open source.**
 
@@ -32,10 +32,10 @@ curl -fsSL https://unarr.app/install.sh | sh
 irm https://unarr.app/install.ps1 | iex
 ```
 
-### Homebrew (macOS/Linux)
+### Homebrew (macOS/Linux) — coming soon
 
 ```bash
-brew install torrentclaw/tap/unarr
+brew install unarr-app/tap/unarr
 ```
 
 ### Docker
@@ -62,7 +62,7 @@ docker run -it --rm \
 
 ```bash
 mkdir -p torrentclaw && cd torrentclaw
-curl -fsSL https://raw.githubusercontent.com/torrentclaw/unarr/main/docker-compose.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/Unarr-app/unarr-cli/main/docker-compose.yml -o docker-compose.yml
 docker compose up -d
 ```
 
@@ -112,13 +112,13 @@ go install github.com/torrentclaw/unarr/cmd/unarr@latest
 
 ### GitHub Releases
 
-Download prebuilt binaries for Linux, macOS, and Windows from [GitHub Releases](https://github.com/torrentclaw/unarr/releases).
+Download prebuilt binaries for Linux, macOS, and Windows from [GitHub Releases](https://github.com/Unarr-app/unarr-cli/releases).
 
 ### Build from source
 
 ```bash
-git clone https://github.com/torrentclaw/unarr.git
-cd unarr
+git clone https://github.com/Unarr-app/unarr-cli.git
+cd unarr-cli
 make build
 ```
 
@@ -142,6 +142,7 @@ unarr start
 | Command | Description |
 |---------|-------------|
 | `unarr init` | First-time configuration wizard (API key, download dir, daemon) |
+| `unarr login` | Authenticate with your account (opens browser) |
 | `unarr config` | Edit all settings interactively (speed, organization, etc.) |
 | `unarr migrate` | Import settings and wanted list from Sonarr/Radarr/Prowlarr [pre-beta] |
 
@@ -162,6 +163,12 @@ unarr start
 | `unarr download <hash\|magnet>` | One-shot download (no daemon needed) |
 | `unarr stream <hash\|magnet>` | Stream a torrent directly to mpv/vlc/browser |
 
+### Library
+
+| Command | Description |
+|---------|-------------|
+| `unarr scan <path>` | Scan a folder, analyze video files with ffprobe, sync quality data |
+
 ### Daemon Management
 
 | Command | Description |
@@ -181,8 +188,9 @@ unarr start
 |---------|-------------|
 | `unarr stats` | Show catalog statistics |
 | `unarr doctor` | Diagnose configuration and connectivity |
+| `unarr mirrors` | Manage mirror failover list (list / update / test) |
 | `unarr clean` | Remove temporary files, logs, and cached data |
-| `unarr self-update` | Update unarr to the latest version |
+| `unarr upgrade` | Update unarr to the latest version (alias: `unarr self-update`) |
 | `unarr version` | Show version info |
 | `unarr completion <shell>` | Generate shell completion scripts |
 
@@ -250,6 +258,12 @@ unarr stream <hash> --no-open   # just print the URL
 
 Downloads pieces sequentially and serves the video over a local HTTP server. Auto-detects mpv, vlc, or your default browser.
 
+**Subtitles.** When the source file contains embedded text subtitles (SRT, ASS, PGS in an MKV), the daemon extracts them as WebVTT sidecars during the same transcode pass and serves them alongside the HLS stream. The web player lists available subtitle tracks automatically — no separate subtitle download needed.
+
+**Seek-anywhere (copy-VOD).** For sources with browser-compatible codecs (H.264 + AAC), the daemon uses a copy pass instead of re-encoding. This enables full random-seek across the entire duration from the first play, at near-zero CPU cost.
+
+**Audio tracks.** Multi-audio MKVs expose all tracks (e.g. `fr`, `en`, `es`) in the player's audio menu. Switching tracks starts a new session from the current position.
+
 ## Download
 
 One-shot download by info hash or magnet link (no daemon required).
@@ -289,9 +303,6 @@ unarr can route your **downloads** through a managed WireGuard VPN, so peers and
 trackers see the VPN server's IP instead of yours. It runs entirely in userspace
 (wireguard-go + a gVisor netstack) — **no root, no `wg-quick`, no changes to your
 OS routing table**.
-
-Requires a **PRO+ plan with the VPN add-on**. Set it up at
-[torrentclaw.com/vpn](https://torrentclaw.com/vpn).
 
 ```bash
 # Turn it on (writes [downloads.vpn] enabled = true to your config)
@@ -392,7 +403,7 @@ docker pull torrentclaw/unarr:latest
 docker compose up -d
 ```
 
-Tags published: `latest`, `0.9`, `0.9.7`, ... — pin to a minor (`0.9`)
+Tags published: `latest`, `1.2`, `1.2.2`, ... — pin to a minor (`1.2`)
 for opt-in patch updates without surprises.
 
 ## Clean
@@ -671,17 +682,38 @@ unarr completion powershell >> $PROFILE
 
 Completions provide tab-completion for commands, flags, and flag values (e.g. `--type <Tab>` shows `movie` and `show`).
 
+## Scan
+
+Walk a folder recursively, analyze each video file with ffprobe, and sync quality data to your account.
+
+```bash
+unarr scan ~/Media              # scan default download dir
+unarr scan /mnt/nas/Movies      # scan a specific path
+unarr scan ~/Media --status     # show last scan results without re-scanning
+unarr scan ~/Media --workers 4  # use 4 parallel ffprobe workers
+unarr scan ~/Media --no-sync    # analyze locally without uploading results
+```
+
+The daemon also runs an automatic background scan when it detects new files in the download directory.
+
+## Mirrors
+
+Mirrors are alternate base URLs the agent falls back to when the primary domain is unreachable — useful for bypassing DNS blocks, ISP filters, or short-lived outages without restarting the agent.
+
+```bash
+unarr mirrors list     # show currently configured mirrors
+unarr mirrors update   # refresh from the server's canonical list
+unarr mirrors test     # probe every configured mirror for latency and reachability
+```
+
 ## Coming Soon
 
 These commands are planned for future releases:
 
 | Command | Description |
 |---------|-------------|
-| `unarr upgrade` | Find a better version of a torrent |
 | `unarr moreseed` | Find same quality with more seeders |
 | `unarr compare` | Compare two torrents side by side |
-| `unarr scan` | Scan your media library for upgrades |
-| `unarr add` | Search and add torrents to your client |
 | `unarr monitor` | Watch for new episodes of a series |
 | `unarr open` | Open content in the browser |
 
