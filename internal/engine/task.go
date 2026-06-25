@@ -182,6 +182,25 @@ func (t *Task) GetStreamURL() string {
 	return t.StreamURL
 }
 
+// SetResolvedMethod records the resolved download method thread-safely. The
+// download goroutine writes it (resolve/fallback) while API-handler goroutines
+// (cancel/pause) and the progress reporter (ToStatusUpdate) read it — so every
+// access must go through the task mutex. Do NOT read it directly inside a
+// section that already holds t.mu (e.g. ToStatusUpdate): RWMutex is not
+// reentrant.
+func (t *Task) SetResolvedMethod(m DownloadMethod) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ResolvedMethod = m
+}
+
+// GetResolvedMethod returns the resolved download method thread-safely.
+func (t *Task) GetResolvedMethod() DownloadMethod {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.ResolvedMethod
+}
+
 // UpdateProgress updates download metrics thread-safely.
 func (t *Task) UpdateProgress(p Progress) {
 	t.mu.Lock()

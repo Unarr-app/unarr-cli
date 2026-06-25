@@ -262,7 +262,7 @@ func (m *Manager) CancelTask(taskID string) {
 		cancel()
 	}
 
-	if dl, exists := m.downloaders[task.ResolvedMethod]; exists {
+	if dl, exists := m.downloaders[task.GetResolvedMethod()]; exists {
 		dl.Pause(taskID) // stop download, keep files
 	}
 
@@ -289,7 +289,7 @@ func (m *Manager) PauseTask(taskID string) {
 		cancel()
 	}
 
-	if dl, exists := m.downloaders[task.ResolvedMethod]; exists {
+	if dl, exists := m.downloaders[task.GetResolvedMethod()]; exists {
 		dl.Pause(taskID) // stop download, keep files for resume
 	}
 
@@ -312,7 +312,7 @@ func (m *Manager) CancelAndDeleteFiles(taskID string) {
 		cancel()
 	}
 
-	if dl, exists := m.downloaders[task.ResolvedMethod]; exists {
+	if dl, exists := m.downloaders[task.GetResolvedMethod()]; exists {
 		dl.Cancel(taskID) // stop download + delete files
 	}
 
@@ -447,7 +447,7 @@ func (m *Manager) attemptDownload(ctx context.Context, task *Task) (*Result, err
 	if err != nil {
 		return nil, fmt.Errorf("no method available: %w", err)
 	}
-	task.ResolvedMethod = method
+	task.SetResolvedMethod(method)
 	log.Printf("[%s] resolved method: %s", agent.ShortID(task.ID), method)
 
 	if err := task.Transition(StatusDownloading); err != nil {
@@ -479,7 +479,7 @@ func (m *Manager) attemptFallback(ctx context.Context, task *Task) (*Result, err
 	if err != nil {
 		return nil, fmt.Errorf("fallback failed: %w", err)
 	}
-	task.ResolvedMethod = method
+	task.SetResolvedMethod(method)
 	log.Printf("[%s] fallback to: %s", agent.ShortID(task.ID), method)
 	if err := task.Transition(StatusDownloading); err != nil {
 		return nil, fmt.Errorf("transition error: %w", err)
