@@ -88,9 +88,11 @@ func (u *Upgrader) Execute(ctx context.Context, targetVersion string) Result {
 		return u.fail("no write permission to %s — run with elevated privileges or move the binary to a user-writable location", binDir)
 	}
 
-	// 4. Download archive
+	// 4. Download archive. download resolves the mirror (GitHub → Hetzner
+	// fallback) and returns the base it used so checksums + signature are
+	// verified against the SAME mirror's artifacts.
 	u.log(fmt.Sprintf("Downloading v%s...", targetVersion))
-	archivePath, err := downloadWithRetry(ctx, targetVersion, u.log)
+	archivePath, base, err := downloadWithRetry(ctx, targetVersion, u.log)
 	if err != nil {
 		return u.fail("download: %v", err)
 	}
@@ -102,10 +104,10 @@ func (u *Upgrader) Execute(ctx context.Context, targetVersion string) Result {
 	} else {
 		u.log("Verifying checksum (release signature verification not configured for this build)...")
 	}
-	if err := verifyChecksum(ctx, targetVersion, archivePath); err != nil {
+	if err := verifyChecksum(ctx, targetVersion, archivePath, base); err != nil {
 		if errors.Is(err, ErrMissingSignature) && u.AllowUnsigned {
 			u.log("WARNING: release is unsigned and --allow-unsigned was passed; continuing with SHA256-only verification")
-			if err := verifyChecksumOnly(ctx, targetVersion, archivePath); err != nil {
+			if err := verifyChecksumOnly(ctx, targetVersion, archivePath, base); err != nil {
 				return u.fail("checksum: %v", err)
 			}
 		} else {

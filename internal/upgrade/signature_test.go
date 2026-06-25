@@ -38,7 +38,7 @@ func TestSignatureVerificationDisabledByDefault(t *testing.T) {
 		t.Fatal("expected SignatureVerificationConfigured() to be false when pubkey is empty")
 	}
 	// verifyChecksumsSignature should be a no-op when no key is embedded.
-	if err := verifyChecksumsSignature(context.Background(), "0.0.0", []byte("anything")); err != nil {
+	if err := verifyChecksumsSignature(context.Background(), "0.0.0", updateBaseURL, []byte("anything")); err != nil {
 		t.Fatalf("expected nil when pubkey is empty, got %v", err)
 	}
 }
@@ -78,7 +78,7 @@ func TestSignatureVerifiesGoodSignature(t *testing.T) {
 
 	withReleaseHost(t, srv.URL)
 
-	if err := verifyChecksumsSignature(context.Background(), "0.0.0", checksumsBody); err != nil {
+	if err := verifyChecksumsSignature(context.Background(), "0.0.0", updateBaseURL, checksumsBody); err != nil {
 		t.Fatalf("verifyChecksumsSignature(good) = %v, want nil", err)
 	}
 }
@@ -102,7 +102,7 @@ func TestSignatureRejectsBadSignature(t *testing.T) {
 
 	withReleaseHost(t, srv.URL)
 
-	err = verifyChecksumsSignature(context.Background(), "0.0.0", body)
+	err = verifyChecksumsSignature(context.Background(), "0.0.0", updateBaseURL, body)
 	if err == nil || !strings.Contains(err.Error(), "verification failed") {
 		t.Fatalf("expected verification failure, got %v", err)
 	}
@@ -118,7 +118,7 @@ func TestSignatureMissingFile(t *testing.T) {
 	defer srv.Close()
 	withReleaseHost(t, srv.URL)
 
-	err := verifyChecksumsSignature(context.Background(), "0.0.0", []byte("body"))
+	err := verifyChecksumsSignature(context.Background(), "0.0.0", updateBaseURL, []byte("body"))
 	if !errors.Is(err, ErrMissingSignature) {
 		t.Fatalf("expected ErrMissingSignature, got %v", err)
 	}

@@ -30,12 +30,12 @@ func retryDelay(attempt int) time.Duration {
 
 // downloadWithRetry fetches the release archive, retrying on transient errors.
 // onProgress is called with user-facing messages (may be nil).
-func downloadWithRetry(ctx context.Context, version string, onProgress func(string)) (string, error) {
+func downloadWithRetry(ctx context.Context, version string, onProgress func(string)) (string, string, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxDownloadRetries; attempt++ {
-		path, err := download(ctx, version)
+		path, base, err := download(ctx, version)
 		if err == nil {
-			return path, nil
+			return path, base, nil
 		}
 		lastErr = err
 		if attempt < maxDownloadRetries {
@@ -46,63 +46,81 @@ func downloadWithRetry(ctx context.Context, version string, onProgress func(stri
 			}
 			select {
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return "", "", ctx.Err()
 			case <-time.After(delay):
 			}
 		}
 	}
-	return "", lastErr
+	return "", "", lastErr
 }
 
-// getReleaseAsset GETs a release asset, trying each host in assetBases() until
-// one returns 200 — primary (GitHub) first, then the Hetzner-backed fallback.
-// Returns the live response (caller closes Body); the last host's non-200 status
-// or transport error is reported when every host fails.
-func getReleaseAsset(ctx context.Context, version, filename string) (*http.Response, error) {
+// getReleaseAsset resolves a release asset by trying each host in assetBases()
+// until one returns 200 — primary (GitHub) first, then the Hetzner-backed
+// fallback. It returns the live response (caller closes Body) AND the base that
+// served it, so the rest of the update fetches checksums.txt + checksums.txt.sig
+// from that SAME mirror. The two builds (GitHub Actions and local ship) are NOT
+// guaranteed byte-identical across mirrors, so a checksums.txt from one host
+// must never be verified against an archive from another. The last host's
+// non-200 status or transport error is reported when every host fails.
+func getReleaseAsset(ctx context.Context, version, filename string) (*http.Response, string, error) {
 	var lastErr error
 	for _, base := range assetBases() {
-		url := releaseURL(base, version, filename)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		resp, err := getReleaseAssetFromBase(ctx, base, version, filename)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		req.Header.Set("User-Agent", "unarr-updater")
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			lastErr = fmt.Errorf("fetch %s: %w", url, err)
-			continue
-		}
-		if resp.StatusCode == http.StatusOK {
-			return resp, nil
-		}
-		lastErr = fmt.Errorf("fetch %s: HTTP %d", url, resp.StatusCode)
-		resp.Body.Close()
+		return resp, base, nil
 	}
-	return nil, lastErr
+	return nil, "", lastErr
+}
+
+// getReleaseAssetFromBase GETs a release asset from ONE specific base, with no
+// failover. Used once the archive has pinned the mirror, so checksums.txt and
+// checksums.txt.sig come from the same host as the binary they describe. Returns
+// the live response on 200 (caller closes Body); otherwise an error carrying the
+// non-200 status or transport failure.
+func getReleaseAssetFromBase(ctx context.Context, base, version, filename string) (*http.Response, error) {
+	url := releaseURL(base, version, filename)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "unarr-updater")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch %s: %w", url, err)
+	}
+	if resp.StatusCode == http.StatusOK {
+		return resp, nil
+	}
+	resp.Body.Close()
+	return nil, fmt.Errorf("fetch %s: HTTP %d", url, resp.StatusCode)
 }
 
 // download fetches the release archive to a temporary file (primary host, then
-// the Hetzner-backed fallback).
-func download(ctx context.Context, version string) (string, error) {
-	resp, err := getReleaseAsset(ctx, version, archiveName(version))
+// the Hetzner-backed fallback) and returns the temp path plus the base that
+// served the archive — the caller verifies checksums + signature against that
+// same mirror.
+func download(ctx context.Context, version string) (string, string, error) {
+	resp, base, err := getReleaseAsset(ctx, version, archiveName(version))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 
 	tmp, err := os.CreateTemp("", "unarr-download-*.tmp")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer tmp.Close()
 
 	if _, err := io.Copy(tmp, resp.Body); err != nil {
 		os.Remove(tmp.Name())
-		return "", fmt.Errorf("write archive: %w", err)
+		return "", "", fmt.Errorf("write archive: %w", err)
 	}
 
-	return tmp.Name(), nil
+	return tmp.Name(), base, nil
 }
 
 // verifyChecksum downloads checksums.txt and verifies the archive's SHA256.
@@ -111,20 +129,25 @@ func download(ctx context.Context, version string) (string, error) {
 // trusting any hash inside it — this turns the checksum file from a passive
 // integrity check into an authenticated artifact that a maintainer or CI key
 // compromise cannot trivially forge.
-func verifyChecksum(ctx context.Context, version, archivePath string) error {
-	return verifyChecksumWithOptions(ctx, version, archivePath, true)
+func verifyChecksum(ctx context.Context, version, archivePath, base string) error {
+	return verifyChecksumWithOptions(ctx, version, archivePath, base, true)
 }
 
 // verifyChecksumOnly skips the ed25519 signature step. Used by Upgrader
 // when --allow-unsigned is set and the release is known to predate signing
 // (or when a release accidentally shipped without a .sig file).
-func verifyChecksumOnly(ctx context.Context, version, archivePath string) error {
-	return verifyChecksumWithOptions(ctx, version, archivePath, false)
+func verifyChecksumOnly(ctx context.Context, version, archivePath, base string) error {
+	return verifyChecksumWithOptions(ctx, version, archivePath, base, false)
 }
 
-func verifyChecksumWithOptions(ctx context.Context, version, archivePath string, verifySignature bool) error {
-	// Download checksums.txt (primary host, then the Hetzner-backed fallback).
-	resp, err := getReleaseAsset(ctx, version, "checksums.txt")
+// verifyChecksumWithOptions verifies archivePath against checksums.txt fetched
+// from `base` — the SAME mirror that served the archive (resolved by download).
+// Fetching checksums + signature from that one host guarantees they describe the
+// archive we actually downloaded, never another mirror's (possibly differently
+// built) artifacts.
+func verifyChecksumWithOptions(ctx context.Context, version, archivePath, base string, verifySignature bool) error {
+	// Download checksums.txt from the archive's mirror (no cross-host failover).
+	resp, err := getReleaseAssetFromBase(ctx, base, version, "checksums.txt")
 	if err != nil {
 		return fmt.Errorf("fetch checksums: %w", err)
 	}
@@ -142,7 +165,7 @@ func verifyChecksumWithOptions(ctx context.Context, version, archivePath string,
 	// caller via SignatureVerificationConfigured) or when the caller
 	// explicitly opts out via --allow-unsigned.
 	if verifySignature {
-		if err := verifyChecksumsSignature(ctx, version, checksumsContent); err != nil {
+		if err := verifyChecksumsSignature(ctx, version, base, checksumsContent); err != nil {
 			return fmt.Errorf("verify signature: %w", err)
 		}
 	}

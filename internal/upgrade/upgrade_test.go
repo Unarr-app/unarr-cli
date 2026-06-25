@@ -641,7 +641,7 @@ func TestDownloadWithHTTPTest(t *testing.T) {
 		})
 		defer restore()
 
-		path, err := download(context.Background(), "1.0.0")
+		path, _, err := download(context.Background(), "1.0.0")
 		if err != nil {
 			t.Fatalf("download() error = %v", err)
 		}
@@ -667,7 +667,7 @@ func TestDownloadWithHTTPTest(t *testing.T) {
 		})
 		defer restore()
 
-		_, err := download(context.Background(), "99.99.99")
+		_, _, err := download(context.Background(), "99.99.99")
 		if err == nil {
 			t.Error("download() with 404 should return error")
 		}
@@ -691,7 +691,7 @@ func TestDownloadWithHTTPTest(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // cancel immediately
 
-		_, err := download(ctx, "1.0.0")
+		_, _, err := download(ctx, "1.0.0")
 		if err == nil {
 			t.Error("download() with cancelled context should return error")
 		}
@@ -747,7 +747,7 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 	t.Run("matching checksum (valid signature)", func(t *testing.T) {
 		body := []byte(fmt.Sprintf("0000000000000000000000000000000000000000000000000000000000000000  other_file.tar.gz\n%s  %s\n", correctHash, expectedArchiveName))
 		serve(t, signedChecksumsHandler(body, priv))
-		if err := verifyChecksum(context.Background(), "1.0.0", archivePath); err != nil {
+		if err := verifyChecksum(context.Background(), "1.0.0", archivePath, updateBaseURL); err != nil {
 			t.Errorf("verifyChecksum() = %v, want nil", err)
 		}
 	})
@@ -756,7 +756,7 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 		wrongHash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		body := []byte(fmt.Sprintf("%s  %s\n", wrongHash, expectedArchiveName))
 		serve(t, signedChecksumsHandler(body, priv))
-		err := verifyChecksum(context.Background(), "1.0.0", archivePath)
+		err := verifyChecksum(context.Background(), "1.0.0", archivePath, updateBaseURL)
 		if err == nil {
 			t.Fatal("verifyChecksum() with wrong hash should return error")
 		}
@@ -768,7 +768,7 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 	t.Run("archive not in checksums", func(t *testing.T) {
 		body := []byte("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890  some_other_file.tar.gz\n")
 		serve(t, signedChecksumsHandler(body, priv))
-		err := verifyChecksum(context.Background(), "1.0.0", archivePath)
+		err := verifyChecksum(context.Background(), "1.0.0", archivePath, updateBaseURL)
 		if err == nil {
 			t.Fatal("verifyChecksum() with missing entry should return error")
 		}
@@ -783,7 +783,7 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 		// Correct checksums, but signed by the WRONG key → must be rejected BEFORE
 		// any hash is trusted (the whole point of signing the checksums file).
 		serve(t, signedChecksumsHandler(body, otherPriv))
-		err := verifyChecksum(context.Background(), "1.0.0", archivePath)
+		err := verifyChecksum(context.Background(), "1.0.0", archivePath, updateBaseURL)
 		if err == nil {
 			t.Fatal("verifyChecksum() with bad signature should return error")
 		}
@@ -802,7 +802,7 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 			}
 			_, _ = w.Write(body)
 		}))
-		err := verifyChecksum(context.Background(), "1.0.0", archivePath)
+		err := verifyChecksum(context.Background(), "1.0.0", archivePath, updateBaseURL)
 		if err == nil {
 			t.Fatal("verifyChecksum() with missing signature should return error")
 		}
@@ -822,7 +822,7 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 			}
 			_, _ = w.Write(body)
 		}))
-		if err := verifyChecksumOnly(context.Background(), "1.0.0", archivePath); err != nil {
+		if err := verifyChecksumOnly(context.Background(), "1.0.0", archivePath, updateBaseURL); err != nil {
 			t.Errorf("verifyChecksumOnly() = %v, want nil (signature skipped)", err)
 		}
 	})
@@ -831,7 +831,7 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 		serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(500)
 		}))
-		err := verifyChecksum(context.Background(), "1.0.0", archivePath)
+		err := verifyChecksum(context.Background(), "1.0.0", archivePath, updateBaseURL)
 		if err == nil {
 			t.Fatal("verifyChecksum() with server error should return error")
 		}
@@ -843,7 +843,7 @@ func TestVerifyChecksumWithHTTPTest(t *testing.T) {
 	t.Run("nonexistent archive file", func(t *testing.T) {
 		body := []byte(fmt.Sprintf("%s  %s\n", correctHash, expectedArchiveName))
 		serve(t, signedChecksumsHandler(body, priv))
-		if err := verifyChecksum(context.Background(), "1.0.0", "/nonexistent-archive-path"); err == nil {
+		if err := verifyChecksum(context.Background(), "1.0.0", "/nonexistent-archive-path", updateBaseURL); err == nil {
 			t.Error("verifyChecksum() with nonexistent archive should return error")
 		}
 	})
@@ -880,7 +880,7 @@ func TestVerifyChecksumCaseInsensitive(t *testing.T) {
 	})
 	defer restore()
 
-	if err := verifyChecksum(context.Background(), "1.0.0", archivePath); err != nil {
+	if err := verifyChecksum(context.Background(), "1.0.0", archivePath, updateBaseURL); err != nil {
 		t.Errorf("verifyChecksum() with uppercase hash = %v, want nil", err)
 	}
 }
@@ -1145,7 +1145,7 @@ func TestDownloadSetsUserAgent(t *testing.T) {
 	})
 	defer restore()
 
-	path, err := download(context.Background(), "1.0.0")
+	path, _, err := download(context.Background(), "1.0.0")
 	if err != nil {
 		t.Fatalf("download() = %v", err)
 	}
@@ -1190,5 +1190,42 @@ func TestSafeZipPath(t *testing.T) {
 		if _, ok := safeZipPath(name, "unarr.exe", absDest); ok {
 			t.Errorf("safeZipPath(%q) = ok:true, want ok:false", name)
 		}
+	}
+}
+
+// TestDownloadReportsServingMirror locks in the single-mirror invariant: when the
+// primary (GitHub) 404s the archive and the fallback (Hetzner) serves it,
+// download must return the FALLBACK base — so checksums.txt + .sig are later
+// verified against the same mirror that served the binary, never mixed across
+// two mirrors whose builds are not guaranteed byte-identical.
+func TestDownloadReportsServingMirror(t *testing.T) {
+	archive := []byte("archive-bytes")
+	wantName := archiveName("1.0.0")
+
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r) // primary has no assets for this version
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, wantName) {
+			_, _ = w.Write(archive)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer fallback.Close()
+
+	prevPrimary, prevFallback := updateBaseURL, fallbackBaseURL
+	updateBaseURL, fallbackBaseURL = primary.URL, fallback.URL
+	t.Cleanup(func() { updateBaseURL, fallbackBaseURL = prevPrimary, prevFallback })
+
+	path, base, err := download(context.Background(), "1.0.0")
+	if err != nil {
+		t.Fatalf("download() error = %v", err)
+	}
+	defer os.Remove(path)
+
+	if base != fallback.URL {
+		t.Errorf("download() resolved base = %q, want fallback %q", base, fallback.URL)
 	}
 }
