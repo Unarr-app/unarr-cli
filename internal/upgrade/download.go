@@ -215,7 +215,7 @@ func fetchLatestVersion(ctx context.Context) (string, error) {
 // prereleases (releases/latest would skip every `-beta`). Unauthenticated GitHub
 // API calls are rate-limited per IP (60/hr) — the caller caches the result.
 func fetchLatestVersionGitHub(ctx context.Context) (string, error) {
-	url := githubAPIBase + "/releases?per_page=1"
+	url := githubAPIBase + "/releases?per_page=100"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -236,14 +236,69 @@ func fetchLatestVersionGitHub(ctx context.Context) (string, error) {
 	var releases []struct {
 		TagName string `json:"tag_name"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&releases); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&releases); err != nil {
 		return "", fmt.Errorf("decode releases: %w", err)
 	}
-	if len(releases) == 0 || releases[0].TagName == "" {
+	tags := make([]string, 0, len(releases))
+	for _, r := range releases {
+		tags = append(tags, r.TagName)
+	}
+	// The releases endpoint is not semver-ordered (nor reliably created-at
+	// ordered), so the newest version must be chosen client-side.
+	best := pickLatestVersion(tags)
+	if best == "" {
 		return "", fmt.Errorf("no releases found at %s", url)
 	}
+	return best, nil
+}
 
-	return strings.TrimPrefix(strings.TrimSpace(releases[0].TagName), "v"), nil
+// pickLatestVersion returns the highest version (no leading "v") among the tag
+// names, comparing major.minor.patch and ignoring any prerelease suffix.
+func pickLatestVersion(tags []string) string {
+	best := ""
+	for _, t := range tags {
+		v := strings.TrimPrefix(strings.TrimSpace(t), "v")
+		if v == "" {
+			continue
+		}
+		if best == "" || versionLess(best, v) {
+			best = v
+		}
+	}
+	return best
+}
+
+// versionLess reports whether a < b by major.minor.patch. Prerelease suffixes
+// are ignored (parseInt-style: each segment is read up to its first non-digit),
+// matching the agent-version comparison on the web.
+func versionLess(a, b string) bool {
+	a0, a1, a2 := splitVersion(a)
+	b0, b1, b2 := splitVersion(b)
+	if a0 != b0 {
+		return a0 < b0
+	}
+	if a1 != b1 {
+		return a1 < b1
+	}
+	return a2 < b2
+}
+
+func splitVersion(v string) (int, int, int) {
+	parts := strings.SplitN(v, ".", 3)
+	seg := func(i int) int {
+		if i >= len(parts) {
+			return 0
+		}
+		n := 0
+		for _, c := range parts[i] {
+			if c < '0' || c > '9' {
+				break
+			}
+			n = n*10 + int(c-'0')
+		}
+		return n
+	}
+	return seg(0), seg(1), seg(2)
 }
 
 // fetchLatestVersionText reads a plain "vX.Y.Z" string from `{base}/version` —
