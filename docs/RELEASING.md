@@ -43,10 +43,17 @@ SKIP_DOCKER=1 make ship
   **highest semver client-side** — the GitHub list endpoint is NOT semver-
   ordered (it returned an old tag as `[0]` after a backfill), so never trust
   `releases[0]`.
+- **One mirror per update:** the updater resolves the archive's mirror first
+  (GitHub → Hetzner fallback) and then fetches `checksums.txt` + `.sig` from
+  **that same host** — it never mixes a binary from one mirror with checksums
+  from another. So verification is sound regardless of whether the two mirrors'
+  artifacts happen to be byte-identical.
 - Signature: ed25519 over `checksums.txt`; the public key is compiled in
   (`internal/upgrade/signature.go`), the private key is `RELEASE_SIGNING_KEY`.
-  `checksums.txt` + `.sig` are byte-identical across mirrors (one goreleaser
-  build), so a signature from either host verifies the other's checksums.
+  The two builds (GitHub Actions + local `make ship`) ARE byte-identical anyway —
+  reproducible via `-trimpath` + `mod_timestamp` + a Go toolchain pinned from
+  `go.mod` (`release.yml` and `ship.sh` derive the same `GOTOOLCHAIN`), so anyone
+  can rebuild a tag and confirm the published checksums.
 
 ## CI
 

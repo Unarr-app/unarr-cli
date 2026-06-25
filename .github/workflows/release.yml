@@ -36,6 +36,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # Pin the Go toolchain to the exact go.mod version (same expression ship.sh
+      # uses) so the GitHub build is byte-identical to the local Hetzner build —
+      # reproducible releases. Single source of truth = go.mod's `go` line.
+      - name: Pin Go toolchain from go.mod
+        run: echo "GOTOOLCHAIN=go$(awk '/^go /{print $2; exit}' go.mod)" >> "$GITHUB_ENV"
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"

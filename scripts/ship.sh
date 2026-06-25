@@ -140,8 +140,12 @@ fi
 
 # 1. Build (+ sign checksums via the goreleaser `signs:` block, which consumes
 # RELEASE_SIGNING_KEY — exported above; missing key already aborted the run).
-info "goreleaser build + sign ($TAG)"
-SENTRY_DSN="${SENTRY_DSN:-}" RELEASE_SIGNING_KEY="$RELEASE_SIGNING_KEY" \
+# Pin the Go toolchain to the exact version in go.mod (force it even on a newer
+# local Go) so this build is byte-identical to the GitHub Actions build, which
+# installs the same go.mod version via setup-go. Single source of truth = go.mod.
+GO_PIN="go$(awk '/^go /{print $2; exit}' go.mod)"
+info "goreleaser build + sign ($TAG, GOTOOLCHAIN=$GO_PIN)"
+GOTOOLCHAIN="$GO_PIN" SENTRY_DSN="${SENTRY_DSN:-}" RELEASE_SIGNING_KEY="$RELEASE_SIGNING_KEY" \
   goreleaser release --clean --skip=publish
 [ -f dist/checksums.txt.sig ] || die "checksums.txt.sig not produced — signing step did not run"
 ok "dist/ ready (checksums.txt + checksums.txt.sig)"

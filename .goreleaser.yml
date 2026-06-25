@@ -15,6 +15,16 @@ builds:
     binary: unarr
     env:
       - CGO_ENABLED=0
+    # Reproducible builds: -trimpath drops the absolute build path (which differs
+    # between a GitHub runner /home/runner/... and a local ship /home/<user>/...),
+    # and mod_timestamp pins every embedded/file mtime to the commit time. With
+    # CGO disabled and the Go toolchain pinned (release.yml + ship.sh derive it
+    # from go.mod), the GitHub and Hetzner builds are byte-identical — so the two
+    # mirrors' checksums.txt + .sig match. (The updater also never mixes mirrors;
+    # see internal/upgrade — this just makes the artifacts auditable/rebuildable.)
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
     goos:
       - linux
       - darwin
