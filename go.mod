@@ -9,7 +9,7 @@ require (
 	github.com/anacrolix/torrent v1.61.0
 	github.com/charmbracelet/huh v1.0.0
 	github.com/fatih/color v1.19.0
-	github.com/getsentry/sentry-go v0.44.1
+	github.com/getsentry/sentry-go v0.47.0
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0
 	github.com/huin/goupnp v1.3.0
@@ -59,7 +59,7 @@ require (
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/edsrzf/mmap-go v1.2.0 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
