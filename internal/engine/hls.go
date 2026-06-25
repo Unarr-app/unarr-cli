@@ -784,6 +784,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	}
 	s.cmd = cmd
 
+	//nolint:gosec // G118: waitFFmpeg owns the ffmpeg process lifecycle (Wait+cleanup); it must outlive ffCtx, not be cancelled by it. ffCtx is already wired into the process via CommandContext above.
 	go s.waitFFmpeg()
 	go s.pollSegments(ffCtx)
 

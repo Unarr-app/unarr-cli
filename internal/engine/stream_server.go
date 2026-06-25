@@ -1188,6 +1188,7 @@ func (ss *StreamServer) writeJPEG(w http.ResponseWriter, jpeg []byte) {
 	// doesn't re-fetch. private — it's a frame of the user's own file.
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 	w.Header().Set("Content-Length", strconv.Itoa(len(jpeg)))
+	//nolint:gosec // G705: jpeg is raw image bytes from the ffmpeg thumbnail extractor; Content-Type is image/jpeg (not HTML), so there is no XSS surface.
 	if _, err := w.Write(jpeg); err != nil {
 		log.Printf("[thumbnail] write failed: %v", err)
 	}

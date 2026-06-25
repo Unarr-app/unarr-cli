@@ -678,6 +678,7 @@ func makeReadable(path string) {
 		} else if firstFile == "" {
 			firstFile = p
 		}
+		//nolint:gosec // G122: makeReadable walks the user's own local download dir to fix share permissions; symlink TOCTOU is not a threat model here (no privileged caller, no untrusted root).
 		if err := os.Chmod(p, mode); err != nil {
 			chmodFails++
 			log.Printf("[organize] makeReadable chmod %q: %v", p, err)

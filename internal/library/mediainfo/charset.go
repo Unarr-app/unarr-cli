@@ -75,6 +75,7 @@ func DecodeSubtitleToUTF8(data []byte, langHint string) ([]byte, string) {
 	// BOM wins — it's unambiguous.
 	switch {
 	case bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}):
+		//nolint:gosec // G602: HasPrefix matched a 3-byte BOM, so len(data) >= 3 — the slice bound is provably in range.
 		return data[3:], "bom-utf8"
 	case bytes.HasPrefix(data, []byte{0xFF, 0xFE}):
 		return decodeWith(data, unicode.UTF16(unicode.LittleEndian, unicode.UseBOM), "bom-utf16le")

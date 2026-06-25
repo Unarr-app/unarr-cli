@@ -37,6 +37,13 @@ type streamSource interface {
 	Close() error
 }
 
+// Compile-time proof both concrete sources satisfy the contract (also keeps the
+// interface "used" so it can't silently rot out of sync with its implementors).
+var (
+	_ streamSource = (*diskFileSource)(nil)
+	_ streamSource = (*transcodeSource)(nil)
+)
+
 // ─────────────────────────────────────────────────────────────────────────────
 // disk passthrough
 // ─────────────────────────────────────────────────────────────────────────────
@@ -136,6 +143,9 @@ func newTranscodeSource(
 		if fi, statErr := os.Stat(srcPath); statErr == nil {
 			estimate = fi.Size()
 		}
+	case ActionTranscodeVideo:
+		// Real re-encode: the source size is meaningless for the output, so
+		// leave estimate at 0 and fall through to the bitrate×duration model.
 	}
 	if estimate <= 0 {
 		estimate = estimateOutputSize(probe, opts)
