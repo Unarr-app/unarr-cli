@@ -57,14 +57,30 @@ func readStatus() agentStatus {
 // same way the daemon does).
 func configPath() string { return config.FilePath() }
 
-// logFilePath is where a foreground / manually-started daemon writes its log.
-// Service installs (systemd --user) log to journald instead — see "View logs".
-func logFilePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+// dumpLogs delegates to `unarr daemon logs` — the daemon knows where its logs
+// live (journald for a systemd service, a file otherwise), so the tray never has
+// to guess a path. The combined output is written to a temp file so it can be
+// opened in a viewer without a terminal; any error the command printed is part
+// of that text, so the user always sees something actionable.
+func dumpLogs() (string, error) {
+	out, err := exec.Command(unarrBin(), "daemon", "logs").CombinedOutput()
+	if len(out) == 0 {
+		msg := "No logs available."
+		if err != nil {
+			msg += " (" + err.Error() + ")"
+		}
+		out = []byte(msg + "\nIf the agent runs in the foreground, logs go to its" +
+			" terminal. Install it as a service (unarr daemon install) to persist them.\n")
 	}
-	return filepath.Join(home, ".local", "share", "unarr", "unarr.log")
+	f, ferr := os.CreateTemp("", "unarr-logs-*.txt")
+	if ferr != nil {
+		return "", ferr
+	}
+	defer f.Close()
+	if _, werr := f.Write(out); werr != nil {
+		return "", werr
+	}
+	return f.Name(), nil
 }
 
 // openPath opens a file or directory with the OS default handler (no terminal).

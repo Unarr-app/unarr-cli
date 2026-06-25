@@ -61,6 +61,18 @@ func openFile(path string) {
 	}
 }
 
+// openLogs captures the daemon's logs to a temp file and opens it in a viewer.
+func openLogs() {
+	path, err := dumpLogs()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: logs:", err)
+		return
+	}
+	if err := openPath(path); err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: open logs:", err)
+	}
+}
+
 func main() {
 	systray.Run(onReady, func() {})
 }
@@ -142,7 +154,7 @@ func onReady() {
 			case <-mEdit.ClickedCh:
 				openFile(configPath())
 			case <-mLogs.ClickedCh:
-				openFile(logFilePath())
+				openLogs()
 			case <-mDocs.ClickedCh:
 				openURL(docsURL())
 			case <-mQuit.ClickedCh:
