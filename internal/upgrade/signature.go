@@ -45,28 +45,9 @@ func verifyChecksumsSignature(ctx context.Context, version string, checksumsCont
 		return nil
 	}
 
-	url := releaseURL(version, "checksums.txt.sig")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	rawSig, err := fetchSignature(ctx, version)
 	if err != nil {
 		return err
-	}
-	req.Header.Set("User-Agent", "unarr-updater")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetch signature: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return ErrMissingSignature
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("fetch signature: HTTP %d", resp.StatusCode)
-	}
-
-	// Signature file is base64(signature)\n — small and bounded.
-	rawSig, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
-	if err != nil {
-		return fmt.Errorf("read signature: %w", err)
 	}
 	sig, err := decodeSignature(rawSig)
 	if err != nil {
@@ -79,6 +60,47 @@ func verifyChecksumsSignature(ctx context.Context, version string, checksumsCont
 		return errors.New("ed25519 signature verification failed")
 	}
 	return nil
+}
+
+// fetchSignature downloads checksums.txt.sig (base64(signature)\n — small and
+// bounded), trying each host in assetBases(): primary (GitHub) then the
+// Hetzner-backed fallback. When EVERY host 404s it reports ErrMissingSignature
+// (the release genuinely ships no signature); other failures surface as-is.
+// checksums.txt + .sig are byte-identical across mirrors (one goreleaser build),
+// so a signature from the fallback verifies a checksums.txt from the primary.
+func fetchSignature(ctx context.Context, version string) ([]byte, error) {
+	var lastErr error
+	for _, base := range assetBases() {
+		url := releaseURL(base, version, "checksums.txt.sig")
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("User-Agent", "unarr-updater")
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("fetch signature: %w", err)
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			data, rerr := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+			resp.Body.Close()
+			if rerr != nil {
+				return nil, fmt.Errorf("read signature: %w", rerr)
+			}
+			return data, nil
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			lastErr = fmt.Errorf("fetch signature: HTTP %d", resp.StatusCode)
+		}
+	}
+	// No host had the .sig and none errored otherwise → genuinely unsigned.
+	if lastErr == nil {
+		return nil, ErrMissingSignature
+	}
+	return nil, lastErr
 }
 
 // SignatureVerificationConfigured reports whether the build has a release

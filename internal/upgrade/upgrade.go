@@ -245,13 +245,20 @@ func archiveName(version string) string {
 // githubOwnerRepo is the public GitHub repo the signed releases live in.
 const githubOwnerRepo = "Unarr-app/unarr-cli"
 
-// updateBaseURL is the asset host the self-updater downloads from. Default is
-// the project's public GitHub Releases: GitHub serves release assets at
-// `{base}/releases/download/v{ver}/{file}` — exactly the path releaseURL builds
-// — so pointing the base at the repo is all it takes. SetBaseURL overrides it
-// (UNARR_UPDATE_BASE for a staging origin, or an httptest.Server in tests); a
-// custom base is assumed to mirror the same asset layout.
+// updateBaseURL is the PRIMARY asset host: the project's public GitHub Releases.
+// GitHub serves assets at `{base}/releases/download/v{ver}/{file}` — exactly the
+// path releaseURL builds. SetBaseURL overrides it (UNARR_UPDATE_BASE for a
+// staging origin, or an httptest.Server in tests); a custom base must mirror the
+// same asset layout.
 var updateBaseURL = "https://github.com/" + githubOwnerRepo
+
+// fallbackBaseURL is the SECONDARY asset host, tried when the primary is
+// unreachable — the web origin, which proxies the self-hosted Hetzner mirror.
+// Dual-publishing every release keeps it current, so a GitHub account takedown
+// (which has happened before) doesn't strand deployed agents: they transparently
+// fail over to Hetzner. Set from the agent's API host (cfg.Auth.APIURL) in root
+// PreRun; default is the production apex. Empty disables the fallback.
+var fallbackBaseURL = "https://torrentclaw.com"
 
 // githubAPIBase is the REST base for the version check. The list endpoint
 // (releases?per_page=1) is used rather than releases/latest because the latter
@@ -259,7 +266,7 @@ var updateBaseURL = "https://github.com/" + githubOwnerRepo
 // while updateBaseURL still points at GitHub (isGitHubBase).
 const githubAPIBase = "https://api.github.com/repos/" + githubOwnerRepo
 
-// SetBaseURL overrides the release endpoint base (trailing slash trimmed).
+// SetBaseURL overrides the PRIMARY release base (trailing slash trimmed).
 // No-op for empty input so a blank override can't break the default.
 func SetBaseURL(base string) {
 	if base != "" {
@@ -267,18 +274,36 @@ func SetBaseURL(base string) {
 	}
 }
 
-// isGitHubBase reports whether downloads still target GitHub (vs a staging or
-// test origin set via SetBaseURL). Drives which version-check endpoint is used.
+// SetFallbackBaseURL sets the SECONDARY (Hetzner-backed) release base, normally
+// the agent's API host. No-op on empty so a blank config keeps the default apex.
+func SetFallbackBaseURL(base string) {
+	if base != "" {
+		fallbackBaseURL = strings.TrimRight(base, "/")
+	}
+}
+
+// isGitHubBase reports whether the PRIMARY base still targets GitHub (vs a
+// staging/test origin set via SetBaseURL). Drives the version-check endpoint.
 func isGitHubBase() bool {
 	return strings.HasPrefix(updateBaseURL, "https://github.com/")
 }
 
-// releaseURL returns the download URL for a release asset:
+// assetBases is the ordered list of hosts to try for a release asset: the
+// primary (GitHub) first, then the Hetzner-backed fallback — de-duplicated, and
+// skipping an empty fallback.
+func assetBases() []string {
+	bases := []string{updateBaseURL}
+	if fallbackBaseURL != "" && fallbackBaseURL != updateBaseURL {
+		bases = append(bases, fallbackBaseURL)
+	}
+	return bases
+}
+
+// releaseURL returns the download URL for a release asset on a given base:
 //
 //	{base}/releases/download/v{version}/{filename}
 //
-// which is GitHub's native release-asset path (and the layout a staging origin
-// must mirror).
-func releaseURL(version, filename string) string {
-	return fmt.Sprintf("%s/releases/download/v%s/%s", updateBaseURL, version, filename)
+// GitHub's native release-asset path (and the layout the Hetzner mirror serves).
+func releaseURL(base, version, filename string) string {
+	return fmt.Sprintf("%s/releases/download/v%s/%s", base, version, filename)
 }

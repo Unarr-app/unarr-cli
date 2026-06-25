@@ -59,7 +59,7 @@ func TestArchiveName(t *testing.T) {
 }
 
 func TestReleaseURL(t *testing.T) {
-	url := releaseURL("0.3.0", "unarr_0.3.0_linux_amd64.tar.gz")
+	url := releaseURL(updateBaseURL, "0.3.0", "unarr_0.3.0_linux_amd64.tar.gz")
 	want := "https://github.com/Unarr-app/unarr-cli/releases/download/v0.3.0/unarr_0.3.0_linux_amd64.tar.gz"
 	if url != want {
 		t.Errorf("releaseURL = %q, want %q", url, want)
@@ -448,7 +448,7 @@ func TestReleaseURLEdgeCases(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := releaseURL(tt.version, tt.filename)
+			got := releaseURL(updateBaseURL, tt.version, tt.filename)
 			if got != tt.wantURL {
 				t.Errorf("releaseURL(%q, %q) = %q, want %q", tt.version, tt.filename, got, tt.wantURL)
 			}

@@ -54,25 +54,42 @@ func downloadWithRetry(ctx context.Context, version string, onProgress func(stri
 	return "", lastErr
 }
 
-// download fetches the release archive to a temporary file.
-func download(ctx context.Context, version string) (string, error) {
-	url := releaseURL(version, archiveName(version))
+// getReleaseAsset GETs a release asset, trying each host in assetBases() until
+// one returns 200 — primary (GitHub) first, then the Hetzner-backed fallback.
+// Returns the live response (caller closes Body); the last host's non-200 status
+// or transport error is reported when every host fails.
+func getReleaseAsset(ctx context.Context, version, filename string) (*http.Response, error) {
+	var lastErr error
+	for _, base := range assetBases() {
+		url := releaseURL(base, version, filename)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("User-Agent", "unarr-updater")
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("fetch %s: %w", url, err)
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			return resp, nil
+		}
+		lastErr = fmt.Errorf("fetch %s: HTTP %d", url, resp.StatusCode)
+		resp.Body.Close()
+	}
+	return nil, lastErr
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// download fetches the release archive to a temporary file (primary host, then
+// the Hetzner-backed fallback).
+func download(ctx context.Context, version string) (string, error) {
+	resp, err := getReleaseAsset(ctx, version, archiveName(version))
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "unarr-updater")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("fetch %s: %w", url, err)
-	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("fetch %s: HTTP %d", url, resp.StatusCode)
-	}
 
 	tmp, err := os.CreateTemp("", "unarr-download-*.tmp")
 	if err != nil {
@@ -106,23 +123,12 @@ func verifyChecksumOnly(ctx context.Context, version, archivePath string) error 
 }
 
 func verifyChecksumWithOptions(ctx context.Context, version, archivePath string, verifySignature bool) error {
-	// Download checksums.txt
-	url := releaseURL(version, "checksums.txt")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", "unarr-updater")
-
-	resp, err := httpClient.Do(req)
+	// Download checksums.txt (primary host, then the Hetzner-backed fallback).
+	resp, err := getReleaseAsset(ctx, version, "checksums.txt")
 	if err != nil {
 		return fmt.Errorf("fetch checksums: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("fetch checksums: HTTP %d", resp.StatusCode)
-	}
 
 	// Read the entire checksums.txt content first so we can both parse and
 	// verify the signature over the same bytes.
@@ -189,9 +195,19 @@ func verifyChecksumWithOptions(ctx context.Context, version, archivePath string,
 // `{base}/version` text endpoint a web origin serves.
 func fetchLatestVersion(ctx context.Context) (string, error) {
 	if isGitHubBase() {
-		return fetchLatestVersionGitHub(ctx)
+		v, err := fetchLatestVersionGitHub(ctx)
+		if err == nil {
+			return v, nil
+		}
+		if fallbackBaseURL == "" {
+			return "", err
+		}
+		// GitHub unreachable (outage / account takedown) → fail over to the
+		// Hetzner-backed marker the web origin serves.
+		return fetchLatestVersionText(ctx, fallbackBaseURL)
 	}
-	return fetchLatestVersionText(ctx)
+	// Primary overridden to a non-GitHub origin (staging/tests): use its marker.
+	return fetchLatestVersionText(ctx, updateBaseURL)
 }
 
 // fetchLatestVersionGitHub reads the newest release tag from the GitHub REST
@@ -231,9 +247,9 @@ func fetchLatestVersionGitHub(ctx context.Context) (string, error) {
 }
 
 // fetchLatestVersionText reads a plain "vX.Y.Z" string from `{base}/version` —
-// the endpoint a staging / mirror web origin serves.
-func fetchLatestVersionText(ctx context.Context) (string, error) {
-	url := updateBaseURL + "/version"
+// the endpoint a staging / mirror / Hetzner-backed web origin serves.
+func fetchLatestVersionText(ctx context.Context, base string) (string, error) {
+	url := base + "/version"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err

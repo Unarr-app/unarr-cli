@@ -50,12 +50,14 @@ Source:         https://github.com/torrentclaw/unarr`,
 			if noColor || os.Getenv("NO_COLOR") != "" {
 				color.NoColor = true
 			}
-			// Self-updater pulls signed releases directly from the project's
-			// public GitHub Releases (decoupled from the API host). Override the
-			// origin for staging or tests via UNARR_UPDATE_BASE; empty keeps
-			// GitHub. loadConfig() still runs here for early config + Sentry init.
-			loadConfig()
+			// Self-updater pulls signed releases primarily from the project's
+			// public GitHub Releases, with the agent's API host (which proxies the
+			// Hetzner mirror) as an automatic fallback — so a GitHub account
+			// takedown can't strand the agent. UNARR_UPDATE_BASE overrides the
+			// PRIMARY origin for staging/tests; empty keeps GitHub.
+			cfg := loadConfig()
 			upgrade.SetBaseURL(os.Getenv("UNARR_UPDATE_BASE"))
+			upgrade.SetFallbackBaseURL(cfg.Auth.APIURL)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,

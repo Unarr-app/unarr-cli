@@ -22,6 +22,16 @@ func withReleasePubKey(t *testing.T, encoded string) {
 	t.Cleanup(func() { releasePubKeyBase64 = prev })
 }
 
+// withReleaseHost points BOTH the primary and fallback asset bases at one test
+// server, so the updater's GitHub→Hetzner failover never escapes to a real
+// network during unit tests (assetBases de-dups the two equal bases to one).
+func withReleaseHost(t *testing.T, url string) {
+	t.Helper()
+	prevPrimary, prevFallback := updateBaseURL, fallbackBaseURL
+	updateBaseURL, fallbackBaseURL = url, url
+	t.Cleanup(func() { updateBaseURL, fallbackBaseURL = prevPrimary, prevFallback })
+}
+
 func TestSignatureVerificationDisabledByDefault(t *testing.T) {
 	withReleasePubKey(t, "")
 	if SignatureVerificationConfigured() {
@@ -66,9 +76,7 @@ func TestSignatureVerifiesGoodSignature(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	prevHost := updateBaseURL
-	updateBaseURL = srv.URL
-	t.Cleanup(func() { updateBaseURL = prevHost })
+	withReleaseHost(t, srv.URL)
 
 	if err := verifyChecksumsSignature(context.Background(), "0.0.0", checksumsBody); err != nil {
 		t.Fatalf("verifyChecksumsSignature(good) = %v, want nil", err)
@@ -92,9 +100,7 @@ func TestSignatureRejectsBadSignature(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	prevHost := updateBaseURL
-	updateBaseURL = srv.URL
-	t.Cleanup(func() { updateBaseURL = prevHost })
+	withReleaseHost(t, srv.URL)
 
 	err = verifyChecksumsSignature(context.Background(), "0.0.0", body)
 	if err == nil || !strings.Contains(err.Error(), "verification failed") {
@@ -110,9 +116,7 @@ func TestSignatureMissingFile(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	prevHost := updateBaseURL
-	updateBaseURL = srv.URL
-	t.Cleanup(func() { updateBaseURL = prevHost })
+	withReleaseHost(t, srv.URL)
 
 	err := verifyChecksumsSignature(context.Background(), "0.0.0", []byte("body"))
 	if !errors.Is(err, ErrMissingSignature) {
