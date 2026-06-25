@@ -1,0 +1,69 @@
+name: desktop
+
+# Builds the unarr-desktop system-tray companion on each OS. It is a SEPARATE
+# binary from the headless `unarr` daemon (which ships via the self-hosted
+# `make ship` pipeline, CGO_ENABLED=0). The tray's systray backend is pure-Go on
+# Linux (DBus) and Windows (syscall) but needs CGO on macOS (Cocoa), so it cannot
+# cross-compile from one box — hence this per-OS matrix.
+#
+# Runs on the GitHub mirror (origin). Forgejo Actions also picks up
+# .github/workflows/ if runners are configured on git.torrentclaw.com.
+
+on:
+  push:
+    branches: [main, feat/agent-desktop-tray]
+    paths:
+      - "cmd/unarr-desktop/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/desktop.yml"
+    tags: ["desktop-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, goos: linux, goarch: amd64, cgo: "0", ext: "" }
+          - { runner: macos-13, goos: darwin, goarch: amd64, cgo: "1", ext: "" }
+          - { runner: macos-latest, goos: darwin, goarch: arm64, cgo: "1", ext: "" }
+          - { runner: windows-latest, goos: windows, goarch: amd64, cgo: "0", ext: ".exe" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build unarr-desktop
+        shell: bash
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -trimpath -ldflags "-s -w" \
+            -o "unarr-desktop${{ matrix.ext }}" ./cmd/unarr-desktop
+          ls -la "unarr-desktop${{ matrix.ext }}"
+
+      - name: Vet
+        shell: bash
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go vet ./cmd/unarr-desktop
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unarr-desktop-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: unarr-desktop${{ matrix.ext }}
+          if-no-files-found: error
