@@ -5,11 +5,10 @@ debrid, and usenet engines. Stream, transcode, and organize your library from
 one terminal — or run it as a headless daemon with a web dashboard, WireGuard
 split-tunnel, and Cloudflare Funnel remote access.
 
-**[Website & docs](https://torrentclaw.com/unarr)** · **[Install guide](https://torrentclaw.com/cli)** · **[Get an API key](https://torrentclaw.com)**
+**[Website & docs](https://unarr.app)** · **[Install guide](https://unarr.app/cli)** · **[Get an API key](https://unarr.app)**
 
-> Powered by [TorrentClaw](https://torrentclaw.com) — an aggregator that unifies
-> YTS, EZTV, Knaben, Torrentio, Bitmagnet and more, enriched with TMDB metadata
-> and a 0–100 quality score per release.
+> unarr unifies multiple torrent, debrid, and usenet sources, enriched with
+> TMDB metadata and a 0–100 quality score per release.
 
 ---
 
@@ -20,11 +19,11 @@ split-tunnel, and Cloudflare Funnel remote access.
 ```bash
 docker run -it --rm \
   -v ~/.config/unarr:/config \
-  torrentclaw/unarr setup
+  unarr/cli setup
 ```
 
-The wizard asks for your TorrentClaw API key (free at
-[torrentclaw.com](https://torrentclaw.com)) and your download directory.
+The wizard asks for your unarr API key (free at
+[unarr.app](https://unarr.app)) and your download directory.
 
 ### 2. Run the daemon
 
@@ -35,7 +34,7 @@ docker run -d --name unarr \
   --read-only --memory 512m \
   -v ~/.config/unarr:/config \
   -v ~/Media:/downloads \
-  torrentclaw/unarr
+  unarr/cli
 ```
 
 That's it — `unarr` now runs headless, watching for jobs and managing downloads.
@@ -47,7 +46,7 @@ That's it — `unarr` now runs headless, watching for jobs and managing download
 ```yaml
 services:
   unarr:
-    image: torrentclaw/unarr:latest
+    image: unarr/cli:latest
     container_name: unarr
     restart: unless-stopped
     user: "1000:1000"
@@ -92,7 +91,7 @@ docker compose up -d                   # start the daemon
 | Variable               | Description                          | Default                   |
 |------------------------|--------------------------------------|---------------------------|
 | `UNARR_API_KEY`        | TorrentClaw API key                  | from config               |
-| `UNARR_API_URL`        | API endpoint                         | `https://torrentclaw.com` |
+| `UNARR_API_URL`        | API endpoint                         | `https://unarr.app` |
 | `UNARR_DOWNLOAD_DIR`   | Download directory                   | `/downloads`              |
 | `UNARR_CONFIG_DIR`     | Config directory                     | `/config`                 |
 | `UNARR_COUNTRY`        | Country code (ISO 3166)              | `US`                      |
@@ -137,7 +136,7 @@ docker exec unarr unarr doctor      # diagnose config / connectivity
 | `X.Y.Z`  | Exact version (e.g. `0.9.0`)                      |
 | `X.Y`    | Latest patch within a minor (e.g. `0.9`)         |
 
-Pin a tag in production (`torrentclaw/unarr:0.9.0`) for reproducible deploys.
+Pin a tag in production (`unarr/cli:0.9.0`) for reproducible deploys.
 
 ## Supported architectures
 
@@ -164,13 +163,13 @@ Not using Docker? Install the native binary instead:
 
 ```bash
 # Linux / macOS
-curl -fsSL https://torrentclaw.com/install.sh | sh
+curl -fsSL https://unarr.app/install.sh | sh
 
 # Windows (PowerShell)
-irm https://torrentclaw.com/install.ps1 | iex
+irm https://unarr.app/install.ps1 | iex
 
 # Go toolchain
-go install github.com/torrentclaw/unarr/cmd/unarr@latest
+go install github.com/Unarr-app/unarr-cli/cmd/unarr@latest
 ```
 
 ## Mirrors
@@ -181,8 +180,7 @@ self-contained (it serves its own binaries — no cross-domain dependency):
 
 | Mirror | Install command |
 |--------|-----------------|
-| `torrentclaw.com` (primary) | `curl -fsSL https://torrentclaw.com/install.sh \| sh` |
-| `torrentclaw.to` | `curl -fsSL https://torrentclaw.to/install.sh \| sh` |
+| `unarr.app` (primary) | `curl -fsSL https://unarr.app/install.sh \| sh` |
 | Tor (`.onion`) | `torsocks sh -c "$(curl http://torrentf3aifidcsaaanmnmuhv2s53r6hqsl3zkmfidiaxainkeqk5id.onion/install.sh)"` |
 
 The Tor address routes everything (install script + binaries) through the hidden
@@ -190,10 +188,10 @@ service, so no clearnet exit is needed.
 
 ## Links
 
-- **Website & docs:** https://torrentclaw.com/unarr
-- **CLI install guide:** https://torrentclaw.com/cli
-- **API & account:** https://torrentclaw.com
-- **Mirror status:** https://torrentclaw.com/mirrors
+- **Website & docs:** https://unarr.app
+- **CLI install guide:** https://unarr.app/cli
+- **API & account:** https://unarr.app
+- **Mirror status:** https://unarr.app/mirrors
 
 ## License
 

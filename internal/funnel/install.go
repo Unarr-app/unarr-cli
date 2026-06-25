@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
 // pinnedCloudflaredVersion is the exact cloudflared release the auto-downloader

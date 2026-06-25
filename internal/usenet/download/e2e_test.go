@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/usenet/download"
-	"github.com/torrentclaw/unarr/internal/usenet/nntp"
-	"github.com/torrentclaw/unarr/internal/usenet/nzb"
-	"github.com/torrentclaw/unarr/internal/usenet/postprocess"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/download"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nntp"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nzb"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/postprocess"
 )
 
 // TestE2EDownload is a real end-to-end test that downloads from Usenet.

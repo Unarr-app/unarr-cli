@@ -8,8 +8,8 @@ import (
 	"os/exec"
 	"strconv"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/fatih/color"
-	"github.com/torrentclaw/unarr/internal/agent"
 )
 
 // ReloadableConfig holds a reference to the daemon for hot-reload.

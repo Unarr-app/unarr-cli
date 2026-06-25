@@ -12,7 +12,7 @@ import (
 )
 
 // dsn is injected at build time via ldflags. If empty, Sentry is disabled.
-// Set via: -ldflags "-X github.com/torrentclaw/unarr/internal/sentry.dsn=..."
+// Set via: -ldflags "-X github.com/Unarr-app/unarr-cli/internal/sentry.dsn=..."
 var dsn string
 
 const flushTimeout = 2 * time.Second

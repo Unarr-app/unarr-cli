@@ -13,18 +13,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/acme"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/engine"
+	"github.com/Unarr-app/unarr-cli/internal/funnel"
+	"github.com/Unarr-app/unarr-cli/internal/library"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/download"
+	"github.com/Unarr-app/unarr-cli/internal/vpn"
 	"github.com/fatih/color"
 	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/acme"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/engine"
-	"github.com/torrentclaw/unarr/internal/funnel"
-	"github.com/torrentclaw/unarr/internal/library"
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
-	"github.com/torrentclaw/unarr/internal/usenet/download"
-	"github.com/torrentclaw/unarr/internal/vpn"
 )
 
 // newStartCmd creates the top-level `unarr start` command.
@@ -314,7 +314,7 @@ func runDaemonStart() error {
 		var fe *vpn.FetchError
 		switch {
 		case ferr != nil && errors.As(ferr, &fe) && fe.Code == vpn.ErrSlotOnDevice:
-			log.Printf("[vpn] the single WireGuard slot is already held by another unarr agent — this one downloads in the clear. To protect this machine too, set up OpenVPN on it (1 agent uses WireGuard, the rest use OpenVPN — up to 10). See https://torrentclaw.com/vpn")
+			log.Printf("[vpn] the single WireGuard slot is already held by another unarr agent — this one downloads in the clear. To protect this machine too, set up OpenVPN on it (1 agent uses WireGuard, the rest use OpenVPN — up to 10). See https://unarr.app/vpn")
 		case ferr != nil:
 			log.Printf("[vpn] could not enable VPN (%v) — downloading in the clear", ferr)
 		default:

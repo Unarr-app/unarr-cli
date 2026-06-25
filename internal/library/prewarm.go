@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 )
 
 // Thumbnail sampling — kept in lockstep with the web's src/lib/stream/thumbnails.ts

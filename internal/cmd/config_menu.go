@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/charmbracelet/huh"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/config"
 )
 
 var configCategories = []string{"downloads", "organization", "library", "notifications", "device", "region", "connection", "advanced"}

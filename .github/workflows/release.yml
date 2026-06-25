@@ -78,6 +78,6 @@ jobs:
           build-args: |
             VERSION=${{ steps.meta.outputs.tag }}
           tags: |
-            torrentclaw/unarr:${{ steps.meta.outputs.version }}
-            torrentclaw/unarr:${{ steps.meta.outputs.minor }}
-            torrentclaw/unarr:latest
+            unarr/cli:${{ steps.meta.outputs.version }}
+            unarr/cli:${{ steps.meta.outputs.minor }}
+            unarr/cli:latest

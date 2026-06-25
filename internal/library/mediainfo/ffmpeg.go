@@ -63,7 +63,7 @@ func ResolveFFmpeg(explicit string) (string, error) {
 		return "", fmt.Errorf(
 			"ffmpeg not found and auto-download failed (read-only filesystem?).\n" +
 				"Options:\n" +
-				"  • Use the official image: torrentclaw/unarr (includes ffmpeg)\n" +
+				"  • Use the official image: unarr/cli (includes ffmpeg)\n" +
 				"  • Set FFMPEG_PATH env var to point to a pre-installed ffmpeg binary\n" +
 				"  • Add to config.toml: [library]\\nffmpeg_path = \"/path/to/ffmpeg\"",
 		)

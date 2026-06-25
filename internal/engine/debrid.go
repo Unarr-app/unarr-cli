@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 // httpClient is used for debrid HTTPS downloads with a reasonable header timeout.

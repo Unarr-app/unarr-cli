@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 // InsufficientDiskError is returned by CheckDiskSpace when a download's expected

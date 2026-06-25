@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	tc "github.com/torrentclaw/go-client"
 
-	"github.com/torrentclaw/unarr/internal/ui"
+	"github.com/Unarr-app/unarr-cli/internal/ui"
 )
 
 func newSearchCmd() *cobra.Command {

@@ -6,13 +6,13 @@ import (
 	"os"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/sentry"
+	"github.com/Unarr-app/unarr-cli/internal/upgrade"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	tc "github.com/torrentclaw/go-client"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/sentry"
-	"github.com/torrentclaw/unarr/internal/upgrade"
 )
 
 var (
@@ -44,8 +44,8 @@ Get started:
   unarr download <magnet|hash>         Grab a torrent one-shot
   unarr start                          Start the download daemon
 
-Documentation:  https://torrentclaw.com/cli
-Source:         https://github.com/torrentclaw/unarr`,
+Documentation:  https://unarr.app/cli
+Source:         https://github.com/Unarr-app/unarr-cli`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			if noColor || os.Getenv("NO_COLOR") != "" {
 				color.NoColor = true

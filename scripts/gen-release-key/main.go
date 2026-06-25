@@ -6,7 +6,7 @@
 //
 // The public key is injected into the binary at build time via the
 // goreleaser ldflags entry that resolves
-// `github.com/torrentclaw/unarr/internal/upgrade.releasePubKeyBase64`.
+// `github.com/Unarr-app/unarr-cli/internal/upgrade.releasePubKeyBase64`.
 // The private key is used by the workflow's "Sign checksums.txt" step.
 //
 // Build and run:

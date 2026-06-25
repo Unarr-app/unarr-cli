@@ -1,4 +1,4 @@
-module github.com/torrentclaw/unarr
+module github.com/Unarr-app/unarr-cli
 
 go 1.25.0
 

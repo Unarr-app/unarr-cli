@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/usenet/download"
-	"github.com/torrentclaw/unarr/internal/usenet/nntp"
-	"github.com/torrentclaw/unarr/internal/usenet/nzb"
-	"github.com/torrentclaw/unarr/internal/usenet/postprocess"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/download"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nntp"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nzb"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/postprocess"
 )
 
 // activeDownload holds the state for a single in-progress usenet download.

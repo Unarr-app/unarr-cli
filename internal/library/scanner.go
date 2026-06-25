@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
-	"github.com/torrentclaw/unarr/internal/parser"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/parser"
 )
 
 // videoExts are file extensions considered as video files.

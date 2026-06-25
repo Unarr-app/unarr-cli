@@ -23,7 +23,7 @@ Thank you for your interest in contributing! This guide will help you get starte
    ```
 5. **Make your changes**, write tests, and ensure everything passes
 6. **Commit** with a clear message (see [Commit Messages](#commit-messages))
-7. **Push** to your fork and [open a Pull Request](https://github.com/torrentclaw/unarr/compare)
+7. **Push** to your fork and [open a Pull Request](https://github.com/Unarr-app/unarr-cli/compare)
 
 ## Development Setup
 
@@ -176,7 +176,7 @@ chore: update CI matrix to Go 1.24
 
 ## Reporting Bugs
 
-[Open an issue](https://github.com/torrentclaw/unarr/issues/new?labels=bug) with:
+[Open an issue](https://github.com/Unarr-app/unarr-cli/issues/new?labels=bug) with:
 
 - **Description** — what went wrong
 - **Steps to reproduce** — minimal commands to trigger the bug

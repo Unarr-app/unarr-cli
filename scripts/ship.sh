@@ -29,7 +29,7 @@
 # Env knobs:
 #   SENTRY_DSN              telemetry DSN injected at build time
 #   RELEASE_SIGNING_PUBKEY  ed25519 pubkey (base64) for self-update signature check
-#   DOCKER_IMAGE            default torrentclaw/unarr
+#   DOCKER_IMAGE            default unarr/cli
 #   PUBLISH_SCRIPT          default ../torrentclaw-web/scripts/publish-cli-release.sh
 #   SKIP_DOCKER=1           skip Docker build/push
 #   SKIP_HETZNER=1          skip Hetzner publish
@@ -44,7 +44,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 
-DOCKER_IMAGE="${DOCKER_IMAGE:-torrentclaw/unarr}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-unarr/cli}"
 PUBLISH_SCRIPT="${PUBLISH_SCRIPT:-$REPO_DIR/../torrentclaw-web/scripts/publish-cli-release.sh}"
 SKIP_DOCKER="${SKIP_DOCKER:-0}"
 SKIP_HETZNER="${SKIP_HETZNER:-0}"
