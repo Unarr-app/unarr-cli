@@ -89,7 +89,7 @@ func onReady() {
 	mStop := systray.AddMenuItem("Stop", "Stop the agent")
 	mRestart := systray.AddMenuItem("Restart", "Restart the agent")
 	systray.AddSeparator()
-	mOpen := systray.AddMenuItem("Open unarr", "Open the unarr web app")
+	mOpen := systray.AddMenuItem("Open unarr.app", "Open the unarr web app")
 	mManage := systray.AddMenuItem("Manage agent (web)", "Status, paths, codecs, hardware — on the web")
 	mEdit := systray.AddMenuItem("Edit config.toml", "Open the agent config file")
 	mLogs := systray.AddMenuItem("View logs", "Open the agent log file")
