@@ -80,15 +80,21 @@ func onReady() {
 		}
 	}()
 
-	for {
-		select {
-		case <-mOpen.ClickedCh:
-			if err := browser.OpenURL(webURL()); err != nil {
-				fmt.Fprintln(os.Stderr, "unarr-desktop: open url:", err)
+	// Handle clicks in a goroutine — onReady MUST return so the systray backend
+	// can finish exporting the menu. On the Linux DBus/StatusNotifierItem backend
+	// a blocking onReady leaves the com.canonical.dbusmenu unexported, which the
+	// host renders as an EMPTY menu (icon shows, but no items).
+	go func() {
+		for {
+			select {
+			case <-mOpen.ClickedCh:
+				if err := browser.OpenURL(webURL()); err != nil {
+					fmt.Fprintln(os.Stderr, "unarr-desktop: open url:", err)
+				}
+			case <-mQuit.ClickedCh:
+				systray.Quit()
+				return
 			}
-		case <-mQuit.ClickedCh:
-			systray.Quit()
-			return
 		}
-	}
+	}()
 }
