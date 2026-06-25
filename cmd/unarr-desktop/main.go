@@ -1,21 +1,20 @@
 // Command unarr-desktop is a minimal system-tray companion for the unarr agent.
 //
 // It is a SEPARATE binary from the headless `unarr` daemon on purpose: the tray
-// needs CGO (fyne.io/systray binds GTK/AppIndicator on Linux, Cocoa on macOS,
-// Win32 on Windows), whereas the daemon ships with CGO_ENABLED=0 so it
-// cross-compiles cleanly and signs in a single pass. goreleaser builds only
-// ./cmd/unarr, so this package never enters that pipeline — the desktop app gets
-// its own per-OS build (see docs: Vía B).
+// uses fyne.io/systray, which on Linux speaks DBus/StatusNotifierItem (pure Go,
+// CGO_ENABLED=0 — no GTK/AppIndicator dev libs). goreleaser builds only
+// ./cmd/unarr, so this package never enters the daemon's signed cross-compile
+// pipeline; the desktop app gets its own per-OS build (see docs: Vía B).
 //
-// Scope (spike): tray icon + menu (status / open unarr / quit). The rich UI is
-// the existing web app, opened in the default browser — no native window to
-// build or maintain.
+// Scope: tray icon + menu — agent status, start/stop/restart, open the web app,
+// manage the agent on the web (paths/codecs/hardware — the same data the web
+// shows), edit config.toml, view logs, docs. The rich UI is the web app opened
+// in the browser; there is no native window to build or maintain.
 package main
 
 import (
 	_ "embed"
 	"fmt"
-	"net"
 	"os"
 	"time"
 
@@ -26,31 +25,40 @@ import (
 //go:embed icon.png
 var trayIcon []byte
 
-const (
-	// streamAddr is where the running agent binds its local stream server
-	// (downloads.stream_port default). Used as a cheap liveness probe.
-	streamAddr   = "127.0.0.1:11818"
-	statusPeriod = 5 * time.Second
-)
+const statusPeriod = 5 * time.Second
 
-// webURL is where "Open unarr" points. Override with UNARR_API_URL (the same var
-// the agent already honors); defaults to the public app.
-func webURL() string {
+// webBase is where "Open unarr" points. Override with UNARR_API_URL (the same
+// var the agent already honors); defaults to the public app.
+func webBase() string {
 	if v := os.Getenv("UNARR_API_URL"); v != "" {
 		return v
 	}
 	return "https://unarr.app"
 }
 
-// daemonRunning reports whether the local agent's stream server is listening —
-// a cheap proxy for "the agent is up" without coupling to the daemon's internals.
-func daemonRunning() bool {
-	conn, err := net.DialTimeout("tcp", streamAddr, 400*time.Millisecond)
-	if err != nil {
-		return false
+// hubURL is the in-app agents hub: status, paths, codecs, hardware + config — the
+// authoritative view, so "Manage agent" can never drift from what the web shows.
+func hubURL() string  { return webBase() + "/profile?tab=agents" }
+func docsURL() string { return webBase() + "/docs" }
+
+func openURL(url string) {
+	if err := browser.OpenURL(url); err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: open url:", err)
 	}
-	_ = conn.Close()
-	return true
+}
+
+func openFile(path string) {
+	if path == "" {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: no path to open")
+		return
+	}
+	if _, err := os.Stat(path); err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: not found:", path)
+		return
+	}
+	if err := openPath(path); err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: open file:", err)
+	}
 }
 
 func main() {
@@ -64,33 +72,79 @@ func onReady() {
 
 	mStatus := systray.AddMenuItem("Checking…", "Agent status")
 	mStatus.Disable()
+	systray.AddSeparator()
+	mStart := systray.AddMenuItem("Start", "Start the agent")
+	mStop := systray.AddMenuItem("Stop", "Stop the agent")
+	mRestart := systray.AddMenuItem("Restart", "Restart the agent")
+	systray.AddSeparator()
 	mOpen := systray.AddMenuItem("Open unarr", "Open the unarr web app")
+	mManage := systray.AddMenuItem("Manage agent (web)", "Status, paths, codecs, hardware — on the web")
+	mEdit := systray.AddMenuItem("Edit config.toml", "Open the agent config file")
+	mLogs := systray.AddMenuItem("View logs", "Open the agent log file")
+	mDocs := systray.AddMenuItem("Documentation", "Open the unarr docs")
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Close the tray (the agent keeps running)")
 
-	// Reflect daemon liveness in the (disabled) status row.
-	go func() {
-		for {
-			if daemonRunning() {
-				mStatus.SetTitle("Agent: running")
-			} else {
-				mStatus.SetTitle("Agent: stopped")
+	// refresh reflects daemon state into the status row + start/stop/restart
+	// enablement. Read from the same state file `unarr status` uses (no drift).
+	refresh := func() {
+		s := readStatus()
+		if s.running {
+			title := fmt.Sprintf("Agent: running (PID %d)", s.pid)
+			if s.tasks > 0 {
+				title += fmt.Sprintf(" · %d task(s)", s.tasks)
 			}
-			time.Sleep(statusPeriod)
+			mStatus.SetTitle(title)
+			mStart.Disable()
+			mStop.Enable()
+			mRestart.Enable()
+		} else {
+			mStatus.SetTitle("Agent: stopped")
+			mStart.Enable()
+			mStop.Disable()
+			mRestart.Disable()
+		}
+	}
+	refresh()
+
+	// control execs a daemon command, surfaces spawn errors, and nudges a refresh
+	// shortly after (the state file updates asynchronously) on top of the ticker.
+	control := func(args ...string) {
+		if err := runUnarr(args...); err != nil {
+			fmt.Fprintln(os.Stderr, "unarr-desktop: control:", err)
+		}
+		time.AfterFunc(1500*time.Millisecond, refresh)
+	}
+
+	go func() {
+		t := time.NewTicker(statusPeriod)
+		defer t.Stop()
+		for range t.C {
+			refresh()
 		}
 	}()
 
-	// Handle clicks in a goroutine — onReady MUST return so the systray backend
-	// can finish exporting the menu. On the Linux DBus/StatusNotifierItem backend
-	// a blocking onReady leaves the com.canonical.dbusmenu unexported, which the
-	// host renders as an EMPTY menu (icon shows, but no items).
+	// onReady MUST return so the Linux DBus backend exports the menu — handle
+	// clicks in a goroutine, never block here.
 	go func() {
 		for {
 			select {
+			case <-mStart.ClickedCh:
+				control("start")
+			case <-mStop.ClickedCh:
+				control("stop")
+			case <-mRestart.ClickedCh:
+				control("daemon", "restart")
 			case <-mOpen.ClickedCh:
-				if err := browser.OpenURL(webURL()); err != nil {
-					fmt.Fprintln(os.Stderr, "unarr-desktop: open url:", err)
-				}
+				openURL(webBase())
+			case <-mManage.ClickedCh:
+				openURL(hubURL())
+			case <-mEdit.ClickedCh:
+				openFile(configPath())
+			case <-mLogs.ClickedCh:
+				openFile(logFilePath())
+			case <-mDocs.ClickedCh:
+				openURL(docsURL())
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return
