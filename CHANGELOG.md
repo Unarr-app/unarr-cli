@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3-beta] - 2026-06-25
+
+
+### Documentation
+
+- **readme**: point repo references at Unarr-app/unarr-cli
+
+### Fixed
+
+- **upgrade**: pin one mirror per update, never mix checksums across hosts
+
+### Build
+
+- reproducible release builds (trimpath + mod_timestamp + pinned toolchain)
 ## [1.2.2-beta] - 2026-06-25
 
 
@@ -31,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 
 - **lint**: clear pre-existing golangci v2.11.4 findings for CI green
+- **release**: 1.2.2-beta
 ## [1.2.1-beta] - 2026-06-23
 
 
@@ -939,6 +954,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.2.3-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.2-beta...v1.2.3-beta
 [1.2.2-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.1-beta...v1.2.2-beta
 [1.2.1-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.0-beta...v1.2.1-beta
 [1.2.0-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.1.7-beta...v1.2.0-beta
