@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/torrentclaw/unarr/internal/engine"
+	"github.com/Unarr-app/unarr-cli/internal/engine"
 )
 
 // --- Tests de validación de entrada para runStream ---

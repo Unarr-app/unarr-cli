@@ -4,10 +4,10 @@
 
 [![CI](https://github.com/Unarr-app/unarr-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/Unarr-app/unarr-cli/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/Unarr-app/unarr-cli)](https://github.com/Unarr-app/unarr-cli/releases)
-[![Go Report Card](https://goreportcard.com/badge/github.com/torrentclaw/unarr)](https://goreportcard.com/report/github.com/torrentclaw/unarr)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Unarr-app/unarr-cli)](https://goreportcard.com/report/github.com/Unarr-app/unarr-cli)
 [![Coverage](https://img.shields.io/codecov/c/github/Unarr-app/unarr-cli)](https://codecov.io/gh/Unarr-app/unarr-cli)
 [![VirusTotal](https://img.shields.io/badge/VirusTotal-scanned-brightgreen?logo=virustotal)](https://github.com/Unarr-app/unarr-cli/releases)
-[![Docker Pulls](https://img.shields.io/docker/pulls/torrentclaw/unarr)](https://hub.docker.com/r/torrentclaw/unarr)
+[![Docker Pulls](https://img.shields.io/docker/pulls/unarr/cli)](https://hub.docker.com/r/unarr/cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Unarr-app/unarr-cli)](go.mod)
 
@@ -45,23 +45,23 @@ docker run -d --name unarr \
   --restart unless-stopped \
   --network host \
   --read-only --memory 512m \
-  -v ~/.config/torrentclaw:/config \
+  -v ~/.config/unarr:/config \
   -v ~/Media:/downloads \
-  torrentclaw/unarr
+  unarr/cli
 ```
 
 Run setup first to configure your API key:
 
 ```bash
 docker run -it --rm \
-  -v ~/.config/torrentclaw:/config \
-  torrentclaw/unarr setup
+  -v ~/.config/unarr:/config \
+  unarr/cli setup
 ```
 
 ### Docker Compose
 
 ```bash
-mkdir -p torrentclaw && cd torrentclaw
+mkdir -p unarr && cd unarr
 curl -fsSL https://raw.githubusercontent.com/Unarr-app/unarr-cli/main/docker-compose.yml -o docker-compose.yml
 docker compose up -d
 ```
@@ -72,7 +72,7 @@ docker compose up -d
 ```yaml
 services:
   unarr:
-    image: torrentclaw/unarr:latest
+    image: unarr/cli:latest
     container_name: unarr
     restart: unless-stopped
     user: "1000:1000"
@@ -107,7 +107,7 @@ volumes:
 ### Go install
 
 ```bash
-go install github.com/torrentclaw/unarr/cmd/unarr@latest
+go install github.com/Unarr-app/unarr-cli/cmd/unarr@latest
 ```
 
 ### GitHub Releases
@@ -367,8 +367,9 @@ unarr self-update --allow-unsigned # accept releases without checksum signature
 ```
 
 The CLI downloads the new release archive over HTTPS (from
-`torrentclaw.com/releases/download/v<ver>/`), verifies SHA-256, swaps the
-binary in place (`.backup` kept next to it), and restarts the systemd
+GitHub Releases at `github.com/Unarr-app/unarr-cli/releases/download/v<ver>/`,
+falling back to the web origin if GitHub is unreachable), verifies SHA-256,
+swaps the binary in place (`.backup` kept next to it), and restarts the systemd
 user unit if the daemon is running.
 
 **2. Auto-apply on server signal (default, since 0.9.6).**
@@ -399,7 +400,7 @@ you're ready.
 **3. Docker auto-restart with a new tag.**
 
 ```bash
-docker pull torrentclaw/unarr:latest
+docker pull unarr/cli:latest
 docker compose up -d
 ```
 
@@ -466,7 +467,7 @@ Location: `~/.config/unarr/config.toml`
 ```toml
 [auth]
 api_key = "tc_your_api_key_here"
-api_url = "https://torrentclaw.com"
+api_url = "https://unarr.app"
 
 [agent]
 id = "auto-generated-uuid"
@@ -506,7 +507,7 @@ country = "US"
 
 ### Streaming reference
 
-The in-browser player on torrentclaw.com streams from the daemon over HLS
+The in-browser player on unarr.app streams from the daemon over HLS
 (HTTP fragments + ffmpeg transcode for codecs the browser can't decode
 natively). Enabled by default — a fresh install "just works" without editing
 the TOML.
@@ -595,7 +596,7 @@ enabled = false   # off by default
 
 **What it does.** Without a tunnel, the daemon is reachable on `localhost`,
 your LAN, and (if installed) Tailscale. That covers the same-machine and
-Tailscale-connected cases, but the **browser-based player on torrentclaw.com
+Tailscale-connected cases, but the **browser-based player on unarr.app
 fails on any other network** because HTTPS pages can't fetch HTTP resources
 ("mixed content"). Enabling the funnel gives the daemon a public
 `https://<random>.trycloudflare.com` hostname so the web player picks it up
@@ -646,7 +647,7 @@ Environment variables override config file values:
 
 ```bash
 export UNARR_API_KEY=tc_your_api_key
-export UNARR_API_URL=https://torrentclaw.com
+export UNARR_API_URL=https://unarr.app
 export UNARR_COUNTRY=ES
 export UNARR_DOWNLOAD_DIR=~/Media
 ```

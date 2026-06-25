@@ -2,7 +2,7 @@
 
 BINARY = unarr
 SENTRY_DSN ?=
-LDFLAGS = -s -w -X github.com/torrentclaw/unarr/internal/sentry.dsn=$(SENTRY_DSN)
+LDFLAGS = -s -w -X github.com/Unarr-app/unarr-cli/internal/sentry.dsn=$(SENTRY_DSN)
 
 all: fmt vet lint arch test build
 

@@ -10,12 +10,12 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/library"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/library"
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
 )
 
 func newScanCmd() *cobra.Command {
@@ -32,7 +32,7 @@ func newScanCmd() *cobra.Command {
 		Long: `Walk a folder recursively, analyze each video file with ffprobe,
 and sync the results to your TorrentClaw account.
 
-After scanning, visit your Library page at torrentclaw.com/library
+After scanning, visit your Library page at unarr.app/library
 to see available quality upgrades.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

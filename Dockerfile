@@ -18,7 +18,7 @@ COPY . .
 ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w -X github.com/torrentclaw/unarr/internal/cmd.Version=${VERSION}" -trimpath -o /unarr ./cmd/unarr/
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w -X github.com/Unarr-app/unarr-cli/internal/cmd.Version=${VERSION}" -trimpath -o /unarr ./cmd/unarr/
 
 # ---- Runtime stage ----
 # glibc base (not Alpine/musl). NVIDIA's userspace — nvidia-smi and the

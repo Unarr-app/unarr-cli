@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 // maxSubtitleBytes caps a downloaded subtitle (sane: even a long film SRT is

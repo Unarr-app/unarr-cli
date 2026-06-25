@@ -9,9 +9,9 @@ PARENT_DIR="$(dirname "$SCRIPT_DIR")"
 # Build from parent dir so both unarr/ and go-client/ are in context
 docker build \
     -f "$SCRIPT_DIR/Dockerfile" \
-    -t torrentclaw/unarr:latest \
+    -t unarr/cli:latest \
     "$PARENT_DIR"
 
 echo ""
-echo "✓ Built: torrentclaw/unarr:latest"
-docker images torrentclaw/unarr:latest --format "  Size: {{.Size}}"
+echo "✓ Built: unarr/cli:latest"
+docker images unarr/cli:latest --format "  Size: {{.Size}}"

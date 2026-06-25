@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 // errorMockDownloader siempre falla en Download para simular fallo de método.

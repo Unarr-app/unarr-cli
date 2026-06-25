@@ -327,9 +327,12 @@ func Default() Config {
 			APIURL: "https://torrentclaw.com",
 			// Default mirror list. Kept in sync with src/lib/mirrors-config.ts
 			// on the server. Users can override with `unarr mirrors update`,
-			// which pulls the live list from /api/v1/mirrors.
+			// which pulls the live list from /api/v1/mirrors. unarr.app is the
+			// unarr-brand deployment (shares the same API + account table), so it
+			// works as a failover origin when the primary domain is unreachable.
 			Mirrors: []string{
 				"https://torrentclaw.to",
+				"https://unarr.app",
 			},
 		},
 		Download: DownloadConfig{
@@ -437,7 +440,7 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 		cfg.Auth.APIURL = "https://torrentclaw.com"
 	}
 	if !meta.IsDefined("auth", "mirrors") {
-		cfg.Auth.Mirrors = []string{"https://torrentclaw.to"}
+		cfg.Auth.Mirrors = []string{"https://torrentclaw.to", "https://unarr.app"}
 	}
 	if !meta.IsDefined("downloads", "preferred_method") {
 		cfg.Download.PreferredMethod = "auto"

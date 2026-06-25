@@ -9,14 +9,14 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/arr"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/mediaserver"
 	"github.com/charmbracelet/huh"
 	"github.com/fatih/color"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/arr"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/mediaserver"
 )
 
 func newInitCmd() *cobra.Command {

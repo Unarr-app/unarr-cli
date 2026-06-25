@@ -34,8 +34,8 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/torrentclaw/unarr/internal/cmd.Version={{.Version}}
-      - -X github.com/torrentclaw/unarr/internal/sentry.dsn={{ .Env.SENTRY_DSN }}
+      - -X github.com/Unarr-app/unarr-cli/internal/cmd.Version={{.Version}}
+      - -X github.com/Unarr-app/unarr-cli/internal/sentry.dsn={{ .Env.SENTRY_DSN }}
       # The release-signing PUBLIC key is compiled in as the canonical default
       # in internal/upgrade/signature.go (it's public — committing it removes
       # the "empty env var → unsigned binary" footgun). No ldflag override:
@@ -99,14 +99,14 @@ release:
   prerelease: auto
 
 # Homebrew tap — requires PAT with repo scope (not GITHUB_TOKEN)
-# Enable when torrentclaw/homebrew-tap PAT is configured as HOMEBREW_TAP_TOKEN
+# Enable when unarr-app/homebrew-tap PAT is configured as HOMEBREW_TAP_TOKEN
 # brews:
 #   - repository:
-#       owner: torrentclaw
+#       owner: unarr-app
 #       name: homebrew-tap
 #       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
 #     name: unarr
-#     homepage: https://github.com/torrentclaw/unarr
+#     homepage: https://github.com/Unarr-app/unarr-cli
 #     description: "unarr — replaces the entire *arr stack"
 #     license: MIT
 #     install: |

@@ -33,7 +33,7 @@ func TestGenerateState(t *testing.T) {
 }
 
 func TestCallbackHTML(t *testing.T) {
-	if !strings.Contains(callbackHTML, "Connected to torrentclaw") {
+	if !strings.Contains(callbackHTML, "Connected to unarr") {
 		t.Error("missing success message")
 	}
 	if !strings.Contains(callbackHTML, "close this tab") {

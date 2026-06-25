@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/upgrade"
+	"github.com/Unarr-app/unarr-cli/internal/upgrade"
 )
 
 // DaemonConfig holds daemon runtime settings.

@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/torrentclaw/unarr/internal/ui"
+	"github.com/Unarr-app/unarr-cli/internal/ui"
 )
 
 func newStatsCmd() *cobra.Command {

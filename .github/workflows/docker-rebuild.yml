@@ -40,4 +40,4 @@ jobs:
           no-cache: true # fresh base pull so apk upgrade picks up new patches
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
-          tags: torrentclaw/unarr:latest
+          tags: unarr/cli:latest

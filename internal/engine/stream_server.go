@@ -21,8 +21,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 	"github.com/anacrolix/torrent"
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
 )
 
 // StreamURLs holds all available stream URLs keyed by network type.

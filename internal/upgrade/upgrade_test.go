@@ -152,7 +152,7 @@ func TestVerifyChecksum(t *testing.T) {
 	t.Run("valid checksum", func(t *testing.T) {
 		// Create a mock server that returns checksums.txt
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/torrentclaw/unarr/releases/download/v1.0.0/checksums.txt" {
+			if r.URL.Path == "/Unarr-app/unarr-cli/releases/download/v1.0.0/checksums.txt" {
 				fmt.Fprintf(w, "%s  unarr_1.0.0_linux_amd64.tar.gz\n", expectedHash)
 				fmt.Fprintf(w, "0000000000000000000000000000000000000000000000000000000000000000  unarr_1.0.0_darwin_amd64.tar.gz\n")
 			} else {

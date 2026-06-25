@@ -1,6 +1,6 @@
 # unarr — Windows installer (PowerShell 5.1+)
 # Usage: irm https://unarr.app/install.ps1 | iex
-#    or: irm https://raw.githubusercontent.com/torrentclaw/unarr/main/install.ps1 | iex
+#    or: irm https://raw.githubusercontent.com/Unarr-app/unarr-cli/main/install.ps1 | iex
 #
 # Options (env vars):
 #   $env:INSTALL_DIR = "C:\path"  — where to place the binary
@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "torrentclaw/unarr"
+$Repo = "Unarr-app/unarr-cli"
 $Binary = "unarr.exe"
 
 # ---- Helpers ----
@@ -129,9 +129,9 @@ function Install-Docker {
         Write-Err "Docker not found. Install Docker Desktop: https://docs.docker.com/desktop/install/windows/"
     }
 
-    Write-Info "Pulling torrentclaw/unarr:latest..."
+    Write-Info "Pulling unarr/cli:latest..."
     try {
-        docker pull torrentclaw/unarr:latest 2>$null
+        docker pull unarr/cli:latest 2>$null
     } catch {
         Write-Info "Image not on Docker Hub, building from source..."
         $gitCmd = Get-Command git -ErrorAction SilentlyContinue
@@ -140,11 +140,11 @@ function Install-Docker {
         }
         $tmpDir = Join-Path $env:TEMP "unarr-build-$(Get-Random)"
         git clone --depth 1 "https://github.com/$Repo.git" $tmpDir
-        docker build -t torrentclaw/unarr:latest $tmpDir
+        docker build -t unarr/cli:latest $tmpDir
         Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
     }
 
-    Write-Ok "Docker image ready: torrentclaw/unarr:latest"
+    Write-Ok "Docker image ready: unarr/cli:latest"
 
     Write-Host ""
     Write-Host "Quick start:" -ForegroundColor White
@@ -153,14 +153,14 @@ function Install-Docker {
     Write-Host "  mkdir `$env:APPDATA\unarr"
     Write-Host ""
     Write-Host "  # 2. Run setup (interactive)"
-    Write-Host "  docker run -it --rm -v `$env:APPDATA\unarr:/config torrentclaw/unarr init"
+    Write-Host "  docker run -it --rm -v `$env:APPDATA\unarr:/config unarr/cli init"
     Write-Host ""
     Write-Host "  # 3. Start daemon"
     Write-Host "  docker run -d --name unarr --restart unless-stopped ``"
     Write-Host "    --read-only --memory 512m ``"
     Write-Host "    -v `$env:APPDATA\unarr:/config ``"
     Write-Host "    -v `$HOME\Media:/downloads ``"
-    Write-Host "    torrentclaw/unarr"
+    Write-Host "    unarr/cli"
     Write-Host ""
 }
 
@@ -185,7 +185,7 @@ function Uninstall-Unarr {
     $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
     if ($dockerCmd) {
         docker rm -f unarr 2>$null | Out-Null
-        docker rmi torrentclaw/unarr:latest 2>$null | Out-Null
+        docker rmi unarr/cli:latest 2>$null | Out-Null
         Write-Ok "Removed Docker container and image"
     }
 

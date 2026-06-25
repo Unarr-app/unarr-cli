@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 // SyncOptions describes ONE library sync session — a set of batches sharing a

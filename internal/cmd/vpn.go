@@ -6,11 +6,11 @@ import (
 	"net"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/vpn"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/vpn"
 )
 
 func newVPNCmd() *cobra.Command {
@@ -27,7 +27,7 @@ This is split-tunnel: your browser and other apps keep using your real IP. Only
 your downloads are hidden behind the VPN server.
 
 The VPN requires a PRO+ plan with the VPN add-on. Set it up at
-https://torrentclaw.com/vpn and configure your other devices (phone, laptop) with
+https://unarr.app/vpn and configure your other devices (phone, laptop) with
 the OpenVPN credentials from your profile — those don't share the agent's tunnel.`,
 		Example: `  unarr vpn status      # is the tunnel up? which server?
   unarr vpn enable      # turn the managed VPN on
@@ -99,7 +99,7 @@ func runVPNStatus(check bool) error {
 	case alive:
 		yellow.Println("  ⚠  Daemon is running but the tunnel is NOT up — downloads go in the clear.")
 		dim.Println("     Check `unarr daemon logs` for a [vpn] line. Common cause: no active")
-		dim.Println("     VPN on your account (set it up at https://torrentclaw.com/vpn).")
+		dim.Println("     VPN on your account (set it up at https://unarr.app/vpn).")
 	default:
 		dim.Println("  Daemon not running — start it (`unarr start`) to bring the tunnel up.")
 	}

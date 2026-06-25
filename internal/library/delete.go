@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 // DeleteFiles deletes the given library items from disk and cleans up empty

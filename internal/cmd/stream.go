@@ -11,11 +11,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/engine"
+	"github.com/Unarr-app/unarr-cli/internal/parser"
+	"github.com/Unarr-app/unarr-cli/internal/ui"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/engine"
-	"github.com/torrentclaw/unarr/internal/parser"
-	"github.com/torrentclaw/unarr/internal/ui"
 )
 
 // streamDeps agrupa las funciones constructoras usadas por runStream.

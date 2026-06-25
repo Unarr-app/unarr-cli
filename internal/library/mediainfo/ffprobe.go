@@ -320,7 +320,7 @@ func ResolveFFprobe(explicit string) (string, error) {
 		return "", fmt.Errorf(
 			"ffprobe not found and auto-download failed (read-only filesystem?).\n" +
 				"Options:\n" +
-				"  • Use the official image: torrentclaw/unarr (includes ffprobe)\n" +
+				"  • Use the official image: unarr/cli (includes ffprobe)\n" +
 				"  • Set FFPROBE_PATH env var to point to a pre-installed ffprobe binary\n" +
 				"  • Add to config.toml: [library]\\nffprobe_path = \"/path/to/ffprobe\"",
 		)

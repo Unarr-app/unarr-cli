@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 // fakePersister is an in-memory taskPersister for asserting manager↔store calls
