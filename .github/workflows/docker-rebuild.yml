@@ -1,0 +1,43 @@
+name: Docker rebuild
+
+# Rebuilds and re-pushes the `latest` image without a version bump so newly
+# fixed Alpine / ffmpeg / Go patches land between tagged releases. Versioned
+# tags are immutable and never touched here. Weekly + on demand.
+#
+# Required secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN.
+
+on:
+  schedule:
+    # Mondays 04:17 UTC (off the hour to avoid the scheduler rush)
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need tags for git describe
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Resolve version
+        id: ver
+        run: echo "version=$(git describe --tags --abbrev=0 2>/dev/null || echo dev)" >> "$GITHUB_OUTPUT"
+      - name: Build + push (refresh latest only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          no-cache: true # fresh base pull so apk upgrade picks up new patches
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+          tags: torrentclaw/unarr:latest

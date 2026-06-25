@@ -1,0 +1,89 @@
+name: CI
+
+# Ported from the old Forgejo CI: test (race), vet, golangci-lint, a
+# cross-compile matrix, and a coverage floor on engine+agent. Runs on
+# GitHub-hosted runners (free for public repos).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race -count=1 ./...
+
+  vet:
+    name: Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.11.4
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -o /dev/null ./cmd/unarr/
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Threshold applies only to engine + agent — cmd is interactive UI
+      # (config menus, daemon, auth browser) that is not unit-testable.
+      - name: Test with coverage (engine + agent), enforce 50% floor
+        run: |
+          go test -race -coverprofile=coverage-core.out -covermode=atomic \
+            ./internal/engine/... \
+            ./internal/agent/...
+          COVERAGE=$(go tool cover -func=coverage-core.out | grep ^total | awk '{print $3}' | tr -d '%')
+          echo "Coverage on engine+agent: ${COVERAGE}%"
+          awk -v c="$COVERAGE" 'BEGIN { if (c+0 < 50.0) { printf "ERROR: %.1f%% < 50%% floor\n", c+0; exit 1 } printf "OK: %.1f%% meets floor\n", c+0 }'
