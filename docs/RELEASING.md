@@ -50,10 +50,18 @@ SKIP_DOCKER=1 make ship
   artifacts happen to be byte-identical.
 - Signature: ed25519 over `checksums.txt`; the public key is compiled in
   (`internal/upgrade/signature.go`), the private key is `RELEASE_SIGNING_KEY`.
-  The two builds (GitHub Actions + local `make ship`) ARE byte-identical anyway —
-  reproducible via `-trimpath` + `mod_timestamp` + a Go toolchain pinned from
-  `go.mod` (`release.yml` and `ship.sh` derive the same `GOTOOLCHAIN`), so anyone
-  can rebuild a tag and confirm the published checksums.
+- **Mirrors are independent — they do NOT need to match.** GitHub is the source
+  of truth; Hetzner is a standalone backup so a GitHub account takedown (it has
+  happened) can't strand deployed agents. They are built separately (Actions vs
+  local `make ship`), so their archive checksums differ — and that's fine: each
+  mirror's `checksums.txt.sig` signs its OWN `checksums.txt`, and the updater
+  pins one mirror per update (see above), so it never crosses them. Verify each
+  in isolation.
+- **The `unarr` binary itself IS reproducible** (`-trimpath` + `mod_timestamp` +
+  a Go toolchain pinned from `go.mod` — `release.yml` and `ship.sh` derive the
+  same `GOTOOLCHAIN`), so anyone can rebuild a tag and get the byte-identical
+  executable. Only the archive wrapper (bundled ffmpeg mtimes, tar/gzip metadata)
+  differs between mirrors, which is why the per-mirror checksums differ.
 
 ## CI
 
