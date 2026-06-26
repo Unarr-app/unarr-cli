@@ -59,6 +59,21 @@ func (u *Upgrader) log(msg string) {
 	log.Printf("[upgrade] %s", msg)
 }
 
+// verifyArchive checks the downloaded archive against the release checksum
+// (and ed25519 signature when configured). If the release is unsigned and the
+// caller passed --allow-unsigned, it falls back to SHA256-only verification.
+func (u *Upgrader) verifyArchive(ctx context.Context, targetVersion, archivePath, base string) error {
+	err := verifyChecksum(ctx, targetVersion, archivePath, base)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrMissingSignature) || !u.AllowUnsigned {
+		return err
+	}
+	u.log("WARNING: release is unsigned and --allow-unsigned was passed; continuing with SHA256-only verification")
+	return verifyChecksumOnly(ctx, targetVersion, archivePath, base)
+}
+
 // Execute performs a full upgrade to the target version.
 func (u *Upgrader) Execute(ctx context.Context, targetVersion string) Result {
 	targetVersion = strings.TrimPrefix(targetVersion, "v")
@@ -104,15 +119,8 @@ func (u *Upgrader) Execute(ctx context.Context, targetVersion string) Result {
 	} else {
 		u.log("Verifying checksum (release signature verification not configured for this build)...")
 	}
-	if err := verifyChecksum(ctx, targetVersion, archivePath, base); err != nil {
-		if errors.Is(err, ErrMissingSignature) && u.AllowUnsigned {
-			u.log("WARNING: release is unsigned and --allow-unsigned was passed; continuing with SHA256-only verification")
-			if err := verifyChecksumOnly(ctx, targetVersion, archivePath, base); err != nil {
-				return u.fail("checksum: %v", err)
-			}
-		} else {
-			return u.fail("checksum: %v", err)
-		}
+	if err := u.verifyArchive(ctx, targetVersion, archivePath, base); err != nil {
+		return u.fail("checksum: %v", err)
 	}
 
 	// 6. Extract binary
