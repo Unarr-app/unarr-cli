@@ -159,8 +159,23 @@ fi
 
 # 3. Docker
 if [ "$SKIP_DOCKER" != "1" ]; then
+  # Ensure the buildx builder runs on the HOST network. BuildKit's default CNI
+  # sandbox can't reach the GitHub release CDN on some hosts, so the Dockerfile's
+  # in-build ffmpeg (BtbN) + cloudflared fetches fail with `wget ... exit 4` even
+  # though the host (and plain bridge containers) download them fine. A builder
+  # created with `--driver-opt network=host` egresses via the host and fixes it.
+  # Recreate when missing OR when an existing builder isn't host-networked.
+  BUILDER="${BUILDX_BUILDER:-tcbuilder}"
+  if ! docker buildx inspect "$BUILDER" >/dev/null 2>&1 || \
+     [ "$(docker inspect "buildx_buildkit_${BUILDER}0" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null)" != "host" ]; then
+    info "creating buildx builder '$BUILDER' on host network (BuildKit CDN egress fix)"
+    docker buildx rm "$BUILDER" >/dev/null 2>&1 || true
+    docker buildx create --name "$BUILDER" --driver docker-container \
+      --driver-opt network=host --bootstrap >/dev/null
+  fi
   info "docker buildx multi-arch push ($DOCKER_IMAGE:$VERSION, :$MINOR, :latest)"
   docker buildx build \
+    --builder "$BUILDER" \
     --platform linux/amd64,linux/arm64 \
     --build-arg VERSION="$TAG" \
     -t "$DOCKER_IMAGE:$VERSION" \
