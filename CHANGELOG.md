@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0-beta] - 2026-06-26
+
+
+### Added
+
+- **agent**: `unarr up --auth-key` redeems a short-lived key for a durable credential
+- **hls**: remote COPY-VOD — full duration + seek-anywhere for connector/IPTV
+
+### CI/CD
+
+- **deps**: bump goreleaser/goreleaser-action from 6 to 7 (#5)
+- **deps**: bump docker/build-push-action from 6 to 7 (#4)
+- **deps**: bump actions/checkout from 4 to 7 (#3)
+- **deps**: bump docker/setup-qemu-action from 3 to 4 (#2)
+- **deps**: bump docker/setup-buildx-action from 3 to 4 (#1)
+
+### Changed
+
+- **engine**: extract COPY-VOD segment generation into its own file
+- **upgrade**: extract verifyArchive to flatten checksum nesting
+
+### Fixed
+
+- **cmd**: make merged up.go build & pass the gate after rebrand
 ## [1.2.4-beta] - 2026-06-25
 
 
@@ -15,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 
 - **rebrand**: migrate to Unarr-app/unarr-cli + unarr Docker org
+- **release**: 1.2.4-beta
 ## [1.2.3-beta] - 2026-06-25
 
 
@@ -968,6 +993,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.3.0-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.4-beta...v1.3.0-beta
 [1.2.4-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.3-beta...v1.2.4-beta
 [1.2.3-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.2-beta...v1.2.3-beta
 [1.2.2-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.1-beta...v1.2.2-beta
