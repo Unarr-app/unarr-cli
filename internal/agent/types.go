@@ -8,6 +8,25 @@ import (
 	"time"
 )
 
+// ExchangeAuthKeyRequest is sent (unauthenticated) to redeem a single-use
+// auth-key for a durable per-agent API credential. The field names match the
+// FIXED web contract at POST /api/internal/agent/authkey/exchange.
+type ExchangeAuthKeyRequest struct {
+	AuthKey  string `json:"authKey"`
+	AgentID  string `json:"agentId"`
+	Hostname string `json:"hostname,omitempty"`
+	Platform string `json:"platform,omitempty"` // "<os>/<arch>", e.g. "linux/amd64"
+}
+
+// ExchangeAuthKeyResponse is the 200 body of a successful auth-key exchange.
+// APIURL is optional — when set the agent persists it so a key minted against
+// a specific host (staging, a mirror) sticks.
+type ExchangeAuthKeyResponse struct {
+	APIKey string `json:"apiKey"`
+	UserID string `json:"userId"`
+	APIURL string `json:"apiUrl,omitempty"`
+}
+
 // RegisterRequest is sent by the CLI on startup to register itself.
 type RegisterRequest struct {
 	AgentID        string `json:"agentId"`

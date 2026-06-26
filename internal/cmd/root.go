@@ -106,6 +106,8 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 	streamCmd.GroupID = "download"
 
 	// Daemon Management
+	upCmd := newUpCmd()
+	upCmd.GroupID = "daemon"
 	startCmd := newStartCmd()
 	startCmd.GroupID = "daemon"
 	stopCmd := newStopCmd()
@@ -157,6 +159,7 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 		downloadCmd,
 		streamCmd,
 		// Daemon Management
+		upCmd,
 		startCmd,
 		stopCmd,
 		statusCmd,
