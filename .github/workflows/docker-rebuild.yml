@@ -32,7 +32,7 @@ jobs:
         id: ver
         run: echo "version=$(git describe --tags --abbrev=0 2>/dev/null || echo dev)" >> "$GITHUB_OUTPUT"
       - name: Build + push (refresh latest only)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
