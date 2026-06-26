@@ -8,11 +8,11 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/fatih/color"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
 )
 
 // newUpCmd creates the top-level `unarr up` command — the unattended-bootstrap
@@ -84,7 +84,7 @@ func runUp(authKey string, force bool) error {
 	}
 
 	if !isValidAuthKeyFormat(authKey) {
-		return fmt.Errorf("invalid auth-key format %q — expected unarr-authkey-...", redactAuthKey(authKey))
+		return fmt.Errorf("invalid auth-key format %q (expected prefix unarr-authkey-)", redactAuthKey(authKey))
 	}
 
 	// Ensure a stable agent identity exists and is persisted BEFORE the exchange,

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 func TestIsValidAuthKeyFormat(t *testing.T) {
@@ -53,9 +53,9 @@ func TestAuthKeyErrorToken(t *testing.T) {
 		{"used", "used"},
 		{"revoked", "revoked"},
 		{"invalid", "invalid"},
-		{"EXPIRED", "expired"},                              // case-insensitive
-		{"auth-key has expired", "expired"},                 // substring
-		{"this key was already used", "used"},               // substring
+		{"EXPIRED", "expired"},                               // case-insensitive
+		{"auth-key has expired", "expired"},                  // substring
+		{"this key was already used", "used"},                // substring
 		{"the auth-key was revoked by the owner", "revoked"}, // substring
 		{"something else entirely", ""},
 		{"", ""},
