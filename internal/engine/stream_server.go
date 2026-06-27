@@ -295,10 +295,13 @@ func (ss *StreamServer) writeCORSHeaders(w http.ResponseWriter, r *http.Request,
 		return false
 	}
 	w.Header().Add("Vary", "Origin")
-	if _, ok := ss.corsAllowlist[origin]; !ok {
+	_, exact := ss.corsAllowlist[origin]
+	if !exact && !originAllowedByWildcard(origin) {
 		// Unknown origin — do not emit CORS headers so the browser blocks
 		// the response. Still return without short-circuiting so a non-CORS
-		// caller (e.g. curl) keeps working.
+		// caller (e.g. curl) keeps working. Wildcard suffixes
+		// (.agent.unarr.app, .trycloudflare.com) are matched in addition to
+		// the exact allowlist; see originAllowedByWildcard.
 		return false
 	}
 	w.Header().Set("Access-Control-Allow-Origin", origin)

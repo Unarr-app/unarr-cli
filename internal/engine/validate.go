@@ -3,7 +3,10 @@
 // file so a future reviewer can audit the trust boundary in one place.
 package engine
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // validSessionID restricts session IDs to characters safe for use as a single
 // filesystem path component. Server-issued UUIDs and hex strings match this;
@@ -47,6 +50,14 @@ var defaultCORSAllowedOrigins = []string{
 	// sync by hand. Daemon also dynamically merges /api/mirrors at startup
 	// (see daemon.go) so a new key doesn't need a CLI rebuild.
 	"http://torrentf3aifidcsaaanmnmuhv2s53r6hqsl3zkmfidiaxainkeqk5id.onion",
+	// Google Cast Default Media Receiver. When a <castable-video> casts an HLS
+	// stream, the receiver app (running ON the TV) fetches the playlist +
+	// segments via MSE fetch(), which sends `Origin: https://www.gstatic.com`
+	// (the cast_sender.js origin). Without this the browser-side receiver drops
+	// every /hls response for "missing ACAO" and playback stalls on the cast
+	// logo. Progressive <video src> casts send no Origin and aren't gated, but
+	// our streams are HLS, so this is required for Cast-to-TV.
+	"https://www.gstatic.com",
 	"http://localhost:3030",
 	"http://127.0.0.1:3030",
 	// unarr brand dev server (`pnpm dev:unarr`, port 3029). The unarr web player
@@ -54,6 +65,52 @@ var defaultCORSAllowedOrigins = []string{
 	// response and playback fails on the unarr dev page (mirrors the 3030 pair).
 	"http://localhost:3029",
 	"http://127.0.0.1:3029",
+}
+
+// defaultCORSWildcardSuffixes lists host suffixes whose https origins are
+// allowed without an exact allowlist entry:
+//   - .agent.unarr.app — the agent's OWN per-agent direct-TLS host
+//     (<dashed-ip>.<hash>.agent.unarr.app, plex.direct style). A page served
+//     from that host can reach the agent without a per-instance entry.
+//   - .trycloudflare.com — any cloudflared quick tunnel. Covers the agent's own
+//     funnel and a self-hosted unarr web served behind a quick tunnel (so a
+//     self-hoster's tunnelled UI can talk to their agent without hand-editing
+//     cors_extra_origins).
+//
+// SECURITY NOTE: trycloudflare.com is a SHARED third-party domain, so this lets
+// ANY https://*.trycloudflare.com page send credentialless CORS requests to the
+// agent. Content stays protected — /hls and /stream are gated by the per-session
+// path token, so a matched-but-tokenless origin only ever reads /health-class
+// metadata. We deliberately do NOT wildcard any first-party app domain here;
+// those stay exact entries in defaultCORSAllowedOrigins.
+var defaultCORSWildcardSuffixes = []string{
+	".agent.unarr.app",
+	".trycloudflare.com",
+}
+
+// originAllowedByWildcard reports whether an Origin header value is an https://
+// origin whose host ends in one of defaultCORSWildcardSuffixes. Origin values
+// have no path; we still strip any port and a defensive trailing path before
+// the suffix test, and require at least one label before the suffix so a bare
+// "https://agent.unarr.app" (no subdomain) does not match.
+func originAllowedByWildcard(origin string) bool {
+	const scheme = "https://"
+	if !strings.HasPrefix(origin, scheme) {
+		return false
+	}
+	host := origin[len(scheme):]
+	if i := strings.IndexByte(host, '/'); i >= 0 {
+		host = host[:i]
+	}
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	for _, suf := range defaultCORSWildcardSuffixes {
+		if len(host) > len(suf) && strings.HasSuffix(host, suf) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildCORSAllowlist merges the default origins with any extras supplied by
