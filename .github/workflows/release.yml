@@ -39,7 +39,7 @@ jobs:
           # aborts with "tag X was not made against commit <HEAD>". On tag push,
           # inputs.tag is empty → github.ref (the tag) is used.
           ref: ${{ github.event.inputs.tag || github.ref }}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
