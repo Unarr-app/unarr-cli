@@ -1,14 +1,15 @@
 # unarr
 
-**The single binary that replaces your whole *arr stack.** Built-in torrent,
-debrid, and usenet engines. Stream, transcode, and organize your library from
-one terminal — or run it as a headless daemon with a web dashboard, WireGuard
+**Your self-hosted media agent in a single binary.** Organize your library,
+stream and transcode to any device on your network, and connect your debrid
+account — all from one headless daemon with a web dashboard, WireGuard
 split-tunnel, and Cloudflare Funnel remote access.
 
 **[Website & docs](https://unarr.app)** · **[Install guide](https://unarr.app/cli)** · **[Get an API key](https://unarr.app)**
 
-> unarr unifies multiple torrent, debrid, and usenet sources, enriched with
-> TMDB metadata and a 0–100 quality score per release.
+> Pairs with the **[unarr.app](https://unarr.app)** web app: rich metadata from
+> TMDB, a 0–100 quality score per release, and one-tap play to your TV, phone, or
+> browser.
 
 ---
 
@@ -22,8 +23,8 @@ docker run -it --rm \
   unarr/cli setup
 ```
 
-The wizard asks for your unarr API key (free at
-[unarr.app](https://unarr.app)) and your download directory.
+The wizard asks for your unarr API key (free at [unarr.app](https://unarr.app),
+under **Profile → API keys**) and your media directory.
 
 ### 2. Run the daemon
 
@@ -31,13 +32,14 @@ The wizard asks for your unarr API key (free at
 docker run -d --name unarr \
   --restart unless-stopped \
   --network host \
-  --read-only --memory 512m \
   -v ~/.config/unarr:/config \
   -v ~/Media:/downloads \
+  -v unarr-data:/data \
   unarr/cli
 ```
 
-That's it — `unarr` now runs headless, watching for jobs and managing downloads.
+That's it — `unarr` now runs headless, ready to stream and manage your library.
+`--network host` lets it reach your TV, phone, and Chromecast on the LAN.
 
 ---
 
@@ -47,25 +49,17 @@ That's it — `unarr` now runs headless, watching for jobs and managing download
 services:
   unarr:
     image: unarr/cli:latest
+    pull_policy: always
     container_name: unarr
     restart: unless-stopped
-    user: "1000:1000"
-    read_only: true
-    tmpfs:
-      - /tmp:size=64m,mode=1777
-    volumes:
-      - ./config:/config
-      - ~/Media:/downloads
-      - unarr-data:/data
+    network_mode: host        # recommended — reaches devices on your LAN
     environment:
       - TZ=UTC
-      # - UNARR_API_KEY=tc_your_key_here
-    network_mode: host        # recommended for full P2P performance
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "2.0"
+      # - UNARR_API_KEY=your_key_here
+    volumes:
+      - ~/.config/unarr:/config
+      - ~/Media:/downloads
+      - unarr-data:/data
 
 volumes:
   unarr-data:
@@ -80,48 +74,51 @@ docker compose up -d                   # start the daemon
 
 ## Volumes
 
-| Path         | Purpose                                          |
-|--------------|--------------------------------------------------|
-| `/config`    | Configuration file (`config.toml`)               |
-| `/downloads` | Finished media downloads                         |
-| `/data`      | Internal state: torrent metadata, cache          |
+| Path         | Purpose                                   |
+|--------------|-------------------------------------------|
+| `/config`    | Configuration file (`config.toml`)        |
+| `/downloads` | Your media library                        |
+| `/data`      | Internal state & cache                     |
 
 ## Environment variables
 
-| Variable               | Description                          | Default                   |
-|------------------------|--------------------------------------|---------------------------|
-| `UNARR_API_KEY`        | TorrentClaw API key                  | from config               |
-| `UNARR_API_URL`        | API endpoint                         | `https://unarr.app` |
-| `UNARR_DOWNLOAD_DIR`   | Download directory                   | `/downloads`              |
-| `UNARR_CONFIG_DIR`     | Config directory                     | `/config`                 |
-| `UNARR_COUNTRY`        | Country code (ISO 3166)              | `US`                      |
-| `TZ`                   | Timezone                             | `UTC`                     |
+| Variable             | Description                  | Default             |
+|----------------------|------------------------------|---------------------|
+| `UNARR_API_KEY`      | unarr API key                | from config         |
+| `UNARR_API_URL`      | API endpoint                 | `https://unarr.app` |
+| `UNARR_DOWNLOAD_DIR` | Media directory              | `/downloads`        |
+| `UNARR_CONFIG_DIR`   | Config directory             | `/config`           |
+| `UNARR_COUNTRY`      | Country code (ISO 3166)      | `US`                |
+| `TZ`                 | Timezone                     | `UTC`               |
 
 Any config value can be overridden by its matching `UNARR_*` environment variable.
 
 ## Networking
 
-**Host mode (recommended)** — full P2P performance, no port mapping:
+**Host mode (recommended)** — `--network host` / `network_mode: host`. Lets the
+agent reach your TV, phone, and Chromecast directly on the LAN for local
+streaming, with no port mapping.
 
-```yaml
-network_mode: host
-```
-
-**Bridge mode** — more isolated, but you must expose the BitTorrent ports:
+**Bridge mode** — more isolated; map the agent's stream/control ports yourself:
 
 ```yaml
 ports:
-  - "6881-6889:6881-6889/tcp"
-  - "6881-6889:6881-6889/udp"
+  - "11818:11818"
+  - "11819:11819"
 ```
+
+## Hardware transcode
+
+The image ships the NVIDIA runtime env, so GPU transcode works out of the box:
+
+- **NVIDIA:** add `--gpus all`
+- **Intel QSV / VA-API:** pass `--device /dev/dri`
 
 ## Running commands
 
 Use `docker exec` for one-off commands while the daemon is running:
 
 ```bash
-docker exec unarr unarr search "inception" --quality 1080p
-docker exec unarr unarr popular --limit 10
 docker exec unarr unarr status
 docker exec unarr unarr doctor      # diagnose config / connectivity
 ```
@@ -130,13 +127,13 @@ docker exec unarr unarr doctor      # diagnose config / connectivity
 
 ## Tags
 
-| Tag      | Description                                      |
-|----------|--------------------------------------------------|
-| `latest` | Latest stable release                            |
-| `X.Y.Z`  | Exact version (e.g. `0.9.0`)                      |
-| `X.Y`    | Latest patch within a minor (e.g. `0.9`)         |
+| Tag        | Description                                  |
+|------------|----------------------------------------------|
+| `latest`   | Latest release                               |
+| `X.Y.Z`    | Exact version (e.g. `1.3.0-beta`)            |
+| `X.Y`      | Latest patch within a minor (e.g. `1.3`)     |
 
-Pin a tag in production (`unarr/cli:0.9.0`) for reproducible deploys.
+Pin a tag in production (`unarr/cli:1.3`) for reproducible deploys.
 
 ## Supported architectures
 
@@ -147,13 +144,11 @@ Multi-arch image — Docker pulls the right one automatically:
 
 ## Image details
 
-- **Base:** Alpine 3.22 (minimal, regularly patched)
 - **User:** `unarr` (UID 1000, GID 1000) — runs as **non-root**
 - **Entrypoint:** `unarr start` (daemon mode)
-- **Read-only rootfs** — only mounted volumes are writable
-- **Bundled `ffmpeg` / `ffprobe`** for media inspection — nothing else to install
-- **Self-contained updates** — binaries are served from TorrentClaw's own
-  infrastructure, no third-party registry dependency
+- **Bundled `ffmpeg` / `ffprobe`** for transcode & inspection — nothing else to install
+- **Signed releases** — binaries are published as **[GitHub Releases](https://github.com/Unarr-app/unarr-cli/releases)**;
+  `checksums.txt` is ed25519-signed and the self-updater verifies it before applying
 
 ---
 
@@ -165,6 +160,9 @@ Not using Docker? Install the native binary instead:
 # Linux / macOS
 curl -fsSL https://unarr.app/install.sh | sh
 
+# macOS (Homebrew)
+brew install unarr-app/tap/unarr
+
 # Windows (PowerShell)
 irm https://unarr.app/install.ps1 | iex
 
@@ -172,26 +170,12 @@ irm https://unarr.app/install.ps1 | iex
 go install github.com/Unarr-app/unarr-cli/cmd/unarr@latest
 ```
 
-## Mirrors
-
-The installer and release binaries are served from every TorrentClaw mirror, so
-you can install even if one domain is blocked in your region. Each mirror is
-self-contained (it serves its own binaries — no cross-domain dependency):
-
-| Mirror | Install command |
-|--------|-----------------|
-| `unarr.app` (primary) | `curl -fsSL https://unarr.app/install.sh \| sh` |
-| Tor (`.onion`) | `torsocks sh -c "$(curl http://torrentf3aifidcsaaanmnmuhv2s53r6hqsl3zkmfidiaxainkeqk5id.onion/install.sh)"` |
-
-The Tor address routes everything (install script + binaries) through the hidden
-service, so no clearnet exit is needed.
-
 ## Links
 
 - **Website & docs:** https://unarr.app
 - **CLI install guide:** https://unarr.app/cli
-- **API & account:** https://unarr.app
-- **Mirror status:** https://unarr.app/mirrors
+- **Source:** https://github.com/Unarr-app/unarr-cli
+- **Releases:** https://github.com/Unarr-app/unarr-cli/releases
 
 ## License
 
