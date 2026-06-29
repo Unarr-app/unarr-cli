@@ -12,6 +12,8 @@ name: release
 #   RELEASE_SIGNING_KEY  ed25519 private key (base64) — signing FAILS the build if absent
 #   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN  Docker Hub push creds
 #   SENTRY_DSN           telemetry DSN baked at build time (optional; empty = Sentry off)
+#   HOMEBREW_TAP_TOKEN   PAT (repo scope) on Unarr-app/homebrew-tap — optional; when
+#                        empty the goreleaser brew step skips upload (see .goreleaser.yml)
 
 on:
   push:
@@ -49,6 +51,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          # Always defined (empty when the secret is unset) so .goreleaser.yml's
+          # skip_upload guard can no-op the brew step instead of erroring.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   docker:
     runs-on: ubuntu-latest

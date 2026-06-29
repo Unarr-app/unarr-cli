@@ -98,24 +98,32 @@ release:
   draft: false
   prerelease: auto
 
-# Homebrew tap — auto-updates unarr-app/homebrew-tap on every release.
-# Repo already exists (public). To ENABLE: (1) create a PAT with `repo` scope on
-# unarr-app/homebrew-tap, add it as the `HOMEBREW_TAP_TOKEN` secret in this repo's
-# GitHub Actions (GITHUB_TOKEN can't push to a different repo), then (2) uncomment
-# the block below. Until then the formula is hand-maintained in the tap.
-# brews:
-#   - repository:
-#       owner: unarr-app
-#       name: homebrew-tap
-#       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-#     name: unarr
-#     homepage: https://unarr.app
-#     description: "Self-hosted media manager, player and debrid agent CLI"
-#     license: MIT
-#     # Release archive bundles unarr + pinned ffmpeg/ffprobe — keep them together
-#     # in libexec and expose only `unarr` on PATH (resolves ffmpeg as a sibling).
-#     install: |
-#       libexec.install "unarr", "ffmpeg", "ffprobe"
-#       bin.install_symlink libexec/"unarr"
-#     test: |
-#       assert_match "version", shell_output("#{bin}/unarr version")
+# Homebrew tap — auto-updates Unarr-app/homebrew-tap (Formula/unarr.rb) on every
+# release. `skip_upload` is gated on HOMEBREW_TAP_TOKEN: until that secret exists
+# the formula is generated but NOT pushed (no-op, never fails a release); once the
+# secret is set the formula is committed automatically. To activate, create a PAT
+# with `repo` scope (or fine-grained Contents:rw) on Unarr-app/homebrew-tap and add
+# it as the `HOMEBREW_TAP_TOKEN` secret here (GITHUB_TOKEN can't push to another
+# repo). release.yml passes the secret as env, so .Env.HOMEBREW_TAP_TOKEN is always
+# defined (empty when unset). ship.sh runs `--skip=publish`, so this never runs locally.
+brews:
+  - repository:
+      owner: Unarr-app
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    skip_upload: '{{ if .Env.HOMEBREW_TAP_TOKEN }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: unarr-release-bot
+      email: ops@unarr.app
+    name: unarr
+    homepage: https://unarr.app
+    description: "Self-hosted media manager, player and debrid agent CLI"
+    license: MIT
+    # Release archive bundles unarr + pinned ffmpeg/ffprobe — keep them together
+    # in libexec and expose only `unarr` on PATH (resolves ffmpeg as a sibling).
+    install: |
+      libexec.install "unarr", "ffmpeg", "ffprobe"
+      bin.install_symlink libexec/"unarr"
+    test: |
+      assert_match "version", shell_output("#{bin}/unarr version")

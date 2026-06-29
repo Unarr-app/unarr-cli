@@ -17,8 +17,7 @@
 #   3. Rsync to Hetzner via web/scripts/publish-cli-release.sh
 #   4. Multi-arch Docker build + push (amd64 + arm64) to Docker Hub
 #   5. Smoke checks (torrentclaw.com/version + docker run image version)
-#   6. Prune Forgejo releases older than FORGEJO_PRUNE_DAYS (default 90)
-#   7. Optional `git push --follow-tags`
+#   6. Optional `git push --follow-tags`
 #
 # Usage:
 #   scripts/ship.sh                  Detect version from internal/cmd/version.go
@@ -34,10 +33,6 @@
 #   SKIP_DOCKER=1           skip Docker build/push
 #   SKIP_HETZNER=1          skip Hetzner publish
 #   SKIP_SMOKE=1            skip smoke checks
-#   SKIP_FORGEJO_PRUNE=1    skip Forgejo retention prune
-#   FORGEJO_TOKEN           PAT with write:repository for prune (no token = skip + warn)
-#   FORGEJO_PRUNE_DAYS      retention window, default 90 days
-#   FORGEJO_REPO            default torrentclaw/unarr
 #
 set -euo pipefail
 
@@ -49,10 +44,6 @@ PUBLISH_SCRIPT="${PUBLISH_SCRIPT:-$REPO_DIR/../torrentclaw-web/scripts/publish-c
 SKIP_DOCKER="${SKIP_DOCKER:-0}"
 SKIP_HETZNER="${SKIP_HETZNER:-0}"
 SKIP_SMOKE="${SKIP_SMOKE:-0}"
-SKIP_FORGEJO_PRUNE="${SKIP_FORGEJO_PRUNE:-0}"
-FORGEJO_PRUNE_DAYS="${FORGEJO_PRUNE_DAYS:-90}"
-FORGEJO_REPO="${FORGEJO_REPO:-torrentclaw/unarr}"
-FORGEJO_BASE="${FORGEJO_BASE:-https://git.torrentclaw.com}"
 
 DRY_RUN=false
 PUSH_TAG=false
@@ -209,48 +200,7 @@ if [ "$SKIP_SMOKE" != "1" ]; then
   fi
 fi
 
-# 6. Forgejo retention prune
-if [ "$SKIP_FORGEJO_PRUNE" != "1" ]; then
-  if [ -z "${FORGEJO_TOKEN:-}" ]; then
-    warn "FORGEJO_TOKEN not set — skipping Forgejo prune (set it to enable >${FORGEJO_PRUNE_DAYS}-day cleanup)"
-  else
-    info "pruning Forgejo releases older than $FORGEJO_PRUNE_DAYS days"
-    FORGEJO_API="$FORGEJO_BASE/api/v1/repos/$FORGEJO_REPO/releases"
-    RELEASES_JSON="$(curl -fsSL -H "Authorization: token $FORGEJO_TOKEN" "$FORGEJO_API?limit=50" || echo '[]')"
-    PRUNE_IDS="$(echo "$RELEASES_JSON" | python3 -c "
-import json, sys
-from datetime import datetime, timedelta, timezone
-days = int('${FORGEJO_PRUNE_DAYS}')
-cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-for r in json.load(sys.stdin):
-    created = datetime.fromisoformat(r['created_at'].replace('Z', '+00:00'))
-    if created < cutoff:
-        print(f\"{r['id']}\t{r['tag_name']}\t{r['created_at']}\")
-" 2>/dev/null || true)"
-    DELETED=0
-    FAILED=0
-    if [ -n "$PRUNE_IDS" ]; then
-      while IFS=$'\t' read -r REL_ID REL_TAG REL_CREATED; do
-        [ -z "$REL_ID" ] && continue
-        CODE="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: token $FORGEJO_TOKEN" "$FORGEJO_API/$REL_ID")"
-        if [ "$CODE" = "204" ]; then
-          echo "    deleted $REL_TAG (created $REL_CREATED)"
-          DELETED=$((DELETED + 1))
-        else
-          warn "    failed to delete $REL_TAG (id=$REL_ID, http=$CODE)"
-          FAILED=$((FAILED + 1))
-        fi
-      done <<< "$PRUNE_IDS"
-    fi
-    if [ "$FAILED" -gt 0 ]; then
-      warn "Forgejo prune: $DELETED removed, $FAILED failed"
-    else
-      ok "Forgejo prune: $DELETED release(s) removed (>${FORGEJO_PRUNE_DAYS} days old)"
-    fi
-  fi
-fi
-
-# 7. Optional push
+# 6. Optional push
 if [ "$PUSH_TAG" = true ]; then
   info "git push origin main --follow-tags"
   git push origin main --follow-tags
