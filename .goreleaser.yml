@@ -98,32 +98,39 @@ release:
   draft: false
   prerelease: auto
 
-# Homebrew tap — auto-updates Unarr-app/homebrew-tap (Formula/unarr.rb) on every
-# release. `skip_upload` is gated on HOMEBREW_TAP_TOKEN: until that secret exists
-# the formula is generated but NOT pushed (no-op, never fails a release); once the
-# secret is set the formula is committed automatically. To activate, create a PAT
-# with `repo` scope (or fine-grained Contents:rw) on Unarr-app/homebrew-tap and add
-# it as the `HOMEBREW_TAP_TOKEN` secret here (GITHUB_TOKEN can't push to another
-# repo). release.yml passes the secret as env, so .Env.HOMEBREW_TAP_TOKEN is always
-# defined (empty when unset). ship.sh runs `--skip=publish`, so this never runs locally.
-brews:
+# Homebrew cask — auto-updates Unarr-app/homebrew-tap (Casks/unarr.rb) on every
+# release. `homebrew_casks` is goreleaser's current mechanism (the old `brews`
+# formula generator is deprecated). Casks are macOS-only; Linux users install via
+# https://unarr.app/install.sh or Docker.
+#
+# `skip_upload` is gated on HOMEBREW_TAP_TOKEN: until that secret exists the cask is
+# generated but NOT pushed (no-op, never fails a release); once set it's committed
+# automatically. To activate, create a PAT with `repo` scope (or fine-grained
+# Contents:rw) on Unarr-app/homebrew-tap and add it as the `HOMEBREW_TAP_TOKEN`
+# secret here (GITHUB_TOKEN can't push to another repo). release.yml passes the
+# secret as env, so .Env.HOMEBREW_TAP_TOKEN is always defined (empty when unset).
+# ship.sh runs `--skip=publish`, so this never runs locally.
+homebrew_casks:
   - repository:
       owner: Unarr-app
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    directory: Formula
+    directory: Casks
     skip_upload: '{{ if .Env.HOMEBREW_TAP_TOKEN }}false{{ else }}true{{ end }}'
     commit_author:
       name: unarr-release-bot
       email: ops@unarr.app
     name: unarr
+    binaries:
+      - unarr
     homepage: https://unarr.app
     description: "Self-hosted media manager, player and debrid agent CLI"
-    license: MIT
-    # Release archive bundles unarr + pinned ffmpeg/ffprobe — keep them together
-    # in libexec and expose only `unarr` on PATH (resolves ffmpeg as a sibling).
-    install: |
-      libexec.install "unarr", "ffmpeg", "ffprobe"
-      bin.install_symlink libexec/"unarr"
-    test: |
-      assert_match "version", shell_output("#{bin}/unarr version")
+    # The CLI binary isn't notarized, so strip the quarantine xattr after staging
+    # (covers the bundled ffmpeg/ffprobe that sit alongside unarr in the archive,
+    # which it resolves as siblings of its own executable path).
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}"]
+          end
