@@ -1001,6 +1001,7 @@ func runDaemonStart() error {
 				// already supports VideoCopy + SourceURL; this branch just never
 				// passed the flag, so every debrid HLS session re-encoded video.
 				VideoCopy:         sess.VideoCopy,
+				Fmp4Only:          sess.Fmp4Only,
 				FileName:          sess.FileName,
 				Quality:           sess.Quality,
 				AudioIndex:        sess.AudioIndex,
@@ -1112,6 +1113,7 @@ func runDaemonStart() error {
 			StartSec:          sess.StartSec,
 			Prewarm:           sess.Prewarm,
 			VideoCopy:         sess.VideoCopy,
+			Fmp4Only:          sess.Fmp4Only,
 			Transcode:         tcRuntime,
 			Cache:             hlsCache,
 		}, hlsCtx, hlsCancel)

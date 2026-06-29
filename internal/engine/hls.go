@@ -217,6 +217,10 @@ type HLSSessionConfig struct {
 	//     speed); an offset EVENT playlist breaks iOS's native HLS parser.
 	// See docs/plans/hls-copy-remux-replacement.md (web repo).
 	VideoCopy bool
+	// Fmp4Only: skip the MPEG-TS on-demand copy-vod path, use the fMP4 EVENT-copy
+	// path instead (Cast Default Media Receiver plays fMP4 HLS, not mpegts). See
+	// startCopyVOD.
+	Fmp4Only bool
 }
 
 // copyPlaylistName is the on-disk media playlist ffmpeg owns in VideoCopy
@@ -284,6 +288,15 @@ type HLSSession struct {
 	ffmpegSegStart int // index of the first segment the current ffmpeg writes
 	restartCount   int // bounded auto-restart counter (resets on Close)
 	lastRestartAt  time.Time
+	// copyFellBack latches once a VideoCopy session has fallen back to transcode
+	// (copy → transcode AUTO-FALLBACK): a -c:v copy run that exits non-zero, or
+	// hangs producing 0 kB (the fMP4 muxer rejects damaged/non-monotonic DTS),
+	// is relaunched ONCE as a re-encode (the transcode path's -fps_mode cfr fixes
+	// those sources). Guarded by s.mu, checked-and-set atomically so the two
+	// triggers (ffmpeg exit + the seg-0 watchdog kill) can only fall back once —
+	// after that the run is an ordinary transcode using the normal auto-restart
+	// machinery, never flipping back to copy (no copy↔transcode loop).
+	copyFellBack bool
 	// liveURL is the mutable debrid source URL (hueco #2 / 2c). Initialised to
 	// cfg.SourceURL; refreshed in place by waitFFmpeg when the link expires.
 	// Guarded by mu because restartFromSegment reads it from BOTH the supervisor
@@ -819,6 +832,18 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	go s.waitFFmpeg()
 	go s.pollSegments(ffCtx)
 
+	// copy → transcode AUTO-FALLBACK, trigger b: an EVENT-copy ffmpeg (we only
+	// reach here for VideoCopy when startCopyVOD returned false — remote URL /
+	// keyframe-index failure) that hangs on a damaged source produces 0 kB and
+	// never exits, so the exit-nonzero hook in waitFFmpeg can't fire. The
+	// watchdog kills it if no seg-0 appears within copyWatchdogTimeout; the kill
+	// then drives the same fallbackToTranscode path. Healthy copy emits seg-0
+	// sub-second, so the watchdog stands down immediately. Encode-mode sessions
+	// don't need it (a stuck encode surfaces via the transcode telemetry/restart).
+	if cfg.VideoCopy {
+		go s.watchCopyFirstSegment(ffCtx, cmd)
+	}
+
 	// Subtitles are no longer extracted per-session: the web player fetches each
 	// text track on demand as WebVTT from the /sub endpoint (subtitleHandler).
 	// The old per-session extraction wrote subs/sub-N.vtt that nothing requests
@@ -1173,12 +1198,27 @@ func (s *HLSSession) waitFFmpeg() {
 	}
 	log.Printf("[hls %s] ffmpeg exited: %v", shortHLSID(s.cfg.SessionID), err)
 
-	// Copy mode: no auto-restart. restartFromSegment's `-ss segmentStartSec(N)`
-	// math assumes uniform 2s segments, which copy mode doesn't have — a
-	// restart would corrupt the timeline. A failed copy surfaces through the
-	// player's probe deadline / fallback chain instead.
+	// Copy mode: a failed -c:v copy run (ffmpeg exited non-zero, OR the seg-0
+	// watchdog killed a 0 kB hang) gets ONE automatic copy → transcode fallback
+	// (trigger a). The fMP4/mp4 muxer is strict about monotonic DTS, so damaged
+	// sources (broken timestamps, "Packet duration: -32 / dts ... out of range")
+	// either exit or hang at size=0kB under copy; the transcode path re-encodes
+	// with -fps_mode cfr and handles them. We do NOT plain auto-restart copy:
+	// restartFromSegment's `-ss segmentStartSec(N)` math assumes uniform 2s
+	// segments, which copy mode doesn't have — a same-mode restart would corrupt
+	// the timeline. fallbackToTranscode flips the session to encode mode FIRST
+	// (re-renders the uniform playlists), so the relaunch is a legal transcode.
+	// The one-shot copyFellBack guard means whichever trigger fires second
+	// (e.g. the watchdog kill unblocks this cmd.Wait) is a no-op.
 	if s.cfg.VideoCopy {
-		log.Printf("[hls %s] copy session failed — not restarting (player falls back)", shortHLSID(s.cfg.SessionID))
+		// fallbackToTranscode latches copyFellBack: returns true if THIS call
+		// relaunched as transcode, false if the other trigger (the watchdog
+		// kill, whose Kill() unblocked this very cmd.Wait) already did. Either
+		// way the relaunch is owned by exactly one goroutine — this stale copy
+		// supervisor is done. We never fall through to the transcode
+		// auto-restart below from a copy run (that path's -ss math is wrong for
+		// copy, and the relaunched transcode has its OWN waitFFmpeg goroutine).
+		s.fallbackToTranscode("ffmpeg exited non-zero")
 		return
 	}
 
@@ -1249,6 +1289,119 @@ func (s *HLSSession) segmentFileName(i int) string {
 		return fmt.Sprintf("seg-%d%s", i, copyVODSegExt)
 	}
 	return fmt.Sprintf("seg-%d.m4s", i)
+}
+
+// copyWatchdogTimeout bounds how long a freshly-spawned VideoCopy ffmpeg may run
+// without producing its FIRST media segment (video/seg-0.m4s). A clean source
+// copies at I/O speed and emits seg-0 sub-second; a damaged source whose broken
+// timestamps the fMP4 muxer rejects HANGS at size=0kB/speed=N/A and never exits
+// on its own. 12 s is generous headroom over the sub-second healthy case (slow
+// NAS / remote read) yet catches the 0 kB hang quickly. See watchCopyFirstSegment.
+const copyWatchdogTimeout = 12 * time.Second
+
+// watchCopyFirstSegment is the seg-0 startup watchdog for an EVENT-copy ffmpeg
+// (trigger b of the copy → transcode AUTO-FALLBACK). Damaged sources hang under
+// `-c:v copy` rather than exiting, so the exit-nonzero hook in waitFFmpeg never
+// fires — this goroutine detects "no seg-0 within copyWatchdogTimeout" and KILLS
+// the stuck ffmpeg. The kill unblocks waitFFmpeg's cmd.Wait(), which then runs
+// the SAME fallbackToTranscode path the exit-nonzero trigger uses — so the
+// fallback is always performed by the single waitFFmpeg goroutine (this watchdog
+// never relaunches ffmpeg itself, avoiding a concurrent restart race).
+//
+// It is cancelled the instant seg-0 appears (healthy copy → no false trip), the
+// session is closed, ffmpeg exits on its own, or ffCtx is cancelled. cmd is
+// captured by the caller and passed in so a relaunch reassigning s.cmd can't
+// make the watchdog kill the wrong (new) process.
+func (s *HLSSession) watchCopyFirstSegment(ffCtx context.Context, cmd *exec.Cmd) {
+	seg0 := filepath.Join(s.tmpDir, "video", "seg-0.m4s")
+	deadline := time.Now().Add(copyWatchdogTimeout)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		// seg-0 present → copy is healthy, stand down (the common case).
+		if fi, err := os.Stat(seg0); err == nil && fi.Size() > 0 {
+			return
+		}
+		// ffmpeg already exited (clean or crash) → waitFFmpeg owns the outcome;
+		// nothing for the watchdog to kill.
+		s.readyMu.Lock()
+		exited := s.exited
+		s.readyMu.Unlock()
+		if exited || s.isClosed() {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Printf("[hls %s] copy produced no segment within %s — killing stuck ffmpeg (0 kB hang)",
+				shortHLSID(s.cfg.SessionID), copyWatchdogTimeout)
+			// Kill the SPECIFIC process we were spawned to watch. waitFFmpeg's
+			// cmd.Wait() then returns non-nil → fallbackToTranscode (trigger a).
+			if cmd != nil && cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			return
+		}
+		select {
+		case <-ffCtx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// fallbackToTranscode performs the ONE copy → transcode auto-fallback for this
+// session and relaunches ffmpeg as a re-encode. Returns true iff THIS call did
+// the fallback; false if it was already done (the copyFellBack one-shot guard)
+// or the session is closed. Both triggers — ffmpeg exiting non-zero and the
+// watchdog kill — funnel here; the guard makes the second a no-op so there is no
+// copy↔transcode loop and no double relaunch.
+//
+// Sequence (order matters for the concurrent readers of s.cfg.VideoCopy):
+//  1. latch copyFellBack under s.mu (atomic check-and-set);
+//  2. render the encode-mode uniform playlists into s.manifestVideo/Root;
+//  3. flip s.cfg.VideoCopy=false so ServeVideoPlaylist switches from the copy
+//     EVENT playlist to the in-memory uniform one (the player re-polls the
+//     no-cache media playlist and transitions in place — both modes write fMP4
+//     to video/seg-%d.m4s + init.mp4, and both masters point at video/index.m3u8,
+//     so the already-loaded master keeps routing correctly);
+//  4. reset the restart budget so the fallback itself isn't immediately charged
+//     against the "giving up after N auto-restarts" cap;
+//  5. relaunch from segment 0 via restartFromSegment (now legal: VideoCopy=false,
+//     so its uniform -ss math applies). Copy may have left partial/garbage
+//     seg-*.m4s; transcode-from-0 overwrites them and resets readyMax=0.
+//
+// Note: Fmp4Only is intentionally left as-is — the transcode path already emits
+// fMP4, so a Cast (Default Media Receiver) session stays Cast-compatible.
+func (s *HLSSession) fallbackToTranscode(reason string) bool {
+	s.mu.Lock()
+	if s.closed || s.copyFellBack {
+		s.mu.Unlock()
+		return false
+	}
+	s.copyFellBack = true
+	// Render encode playlists BEFORE flipping the flag: a concurrent
+	// ServeVideoPlaylist still on the copy branch ignores s.manifestVideo, so
+	// staging it early is safe and closes the window where the flag is false
+	// but the manifest is stale.
+	s.manifestVideo = renderVideoPlaylist(s.durationSec, s.segmentCount)
+	s.manifestRoot = renderMasterPlaylist(s.probe, s.cfg.Quality)
+	// Single bit true→false, written once under s.mu. A few readers
+	// (IsVideoCopy, ServeVideoPlaylist) sample it lock-free; a transient stale
+	// `true` only serves the copy playlist for one more ~no-cache poll before
+	// the encode manifest takes over — acceptable, and not flagged by `go vet`.
+	s.cfg.VideoCopy = false
+	s.restartCount = 0
+	s.lastRestartAt = time.Time{}
+	s.mu.Unlock()
+
+	log.Printf("[hls %s] copy failed (%s) — falling back to transcode", shortHLSID(s.cfg.SessionID), reason)
+
+	// Relaunch as a re-encode from the start. restartFromSegment kills the old
+	// (failed/killed) copy ffmpeg, waits for it to reap, then spawns the encode
+	// ffmpeg with its own waitFFmpeg + pollSegments supervisors.
+	if rerr := s.restartFromSegment(0); rerr != nil {
+		log.Printf("[hls %s] transcode fallback relaunch failed: %v", shortHLSID(s.cfg.SessionID), rerr)
+	}
+	return true
 }
 
 // pollSegments watches the video tmpdir for newly-finished segment files and
