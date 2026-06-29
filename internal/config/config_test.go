@@ -9,8 +9,8 @@ import (
 func TestDefault(t *testing.T) {
 	cfg := Default()
 
-	if cfg.Auth.APIURL != "https://torrentclaw.com" {
-		t.Errorf("default APIURL = %q, want https://torrentclaw.com", cfg.Auth.APIURL)
+	if cfg.Auth.APIURL != "https://unarr.app" {
+		t.Errorf("default APIURL = %q, want https://unarr.app", cfg.Auth.APIURL)
 	}
 	if cfg.Download.PreferredMethod != "auto" {
 		t.Errorf("default PreferredMethod = %q, want auto", cfg.Download.PreferredMethod)
@@ -34,7 +34,7 @@ func TestLoadMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load nonexistent should return defaults, got err: %v", err)
 	}
-	if cfg.Auth.APIURL != "https://torrentclaw.com" {
+	if cfg.Auth.APIURL != "https://unarr.app" {
 		t.Errorf("missing file should return default APIURL, got %q", cfg.Auth.APIURL)
 	}
 }
@@ -109,7 +109,7 @@ api_key = "tc_partial"
 		t.Errorf("APIKey = %q, want tc_partial", cfg.Auth.APIKey)
 	}
 	// Defaults should be preserved for missing sections
-	if cfg.Auth.APIURL != "https://torrentclaw.com" {
+	if cfg.Auth.APIURL != "https://unarr.app" {
 		t.Errorf("APIURL should default, got %q", cfg.Auth.APIURL)
 	}
 	if cfg.Download.MaxConcurrent != 3 {

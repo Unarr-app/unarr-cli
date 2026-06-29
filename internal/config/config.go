@@ -324,15 +324,17 @@ func contains(s []string, v string) bool {
 func Default() Config {
 	return Config{
 		Auth: AuthConfig{
-			APIURL: "https://torrentclaw.com",
-			// Default mirror list. Kept in sync with src/lib/mirrors-config.ts
-			// on the server. Users can override with `unarr mirrors update`,
-			// which pulls the live list from /api/v1/mirrors. unarr.app is the
-			// unarr-brand deployment (shares the same API + account table), so it
-			// works as a failover origin when the primary domain is unreachable.
+			APIURL: "https://unarr.app",
+			// Default mirror list (failover order). Primary is unarr.app — the
+			// unarr brand's own deployment. Kept in sync with the brand-aware list
+			// in src/lib/mirrors-config.ts; `unarr mirrors update` pulls the live
+			// list from /api/v1/mirrors. torrentclaw.to is the non-CF (direct-to-
+			// proxy) hop that survives a Cloudflare-anycast block (e.g. Spain
+			// LaLiga); torrentclaw.com is a generic clearnet backup. All share the
+			// same API + account table.
 			Mirrors: []string{
 				"https://torrentclaw.to",
-				"https://unarr.app",
+				"https://torrentclaw.com",
 			},
 		},
 		Download: DownloadConfig{
@@ -437,10 +439,10 @@ func Load(path string) (Config, error) {
 // edit the TOML, while still letting power users disable features.
 func applyDefaults(cfg *Config, meta toml.MetaData) {
 	if !meta.IsDefined("auth", "api_url") {
-		cfg.Auth.APIURL = "https://torrentclaw.com"
+		cfg.Auth.APIURL = "https://unarr.app"
 	}
 	if !meta.IsDefined("auth", "mirrors") {
-		cfg.Auth.Mirrors = []string{"https://torrentclaw.to", "https://unarr.app"}
+		cfg.Auth.Mirrors = []string{"https://torrentclaw.to", "https://torrentclaw.com"}
 	}
 	if !meta.IsDefined("downloads", "preferred_method") {
 		cfg.Download.PreferredMethod = "auto"
