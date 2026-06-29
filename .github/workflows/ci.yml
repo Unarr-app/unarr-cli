@@ -47,7 +47,7 @@ jobs:
           cache: true
       # v7 is required for golangci-lint v2.x; action v6 only speaks the v1 line
       # ("invalid version string 'v2.x', golangci-lint v2 is not supported").
-      - uses: golangci/golangci-lint-action@v7
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.11.4
 
