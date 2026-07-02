@@ -77,9 +77,11 @@ func TestBuildCSR(t *testing.T) {
 }
 
 func TestNeedsIssue(t *testing.T) {
+	const hash = "x"
+	const base = "agent.unarr.app"
 	dir := t.TempDir()
 	// Missing cert → needs issue.
-	if !NeedsIssue(dir) {
+	if !NeedsIssue(dir, hash, base) {
 		t.Error("missing cert should need issue")
 	}
 
@@ -88,11 +90,14 @@ func TestNeedsIssue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	writeSelfSigned := func(notAfter time.Time) {
+	// writeSelfSigned writes a cert whose wildcard SAN covers *.<h>.agent.unarr.app.
+	writeSelfSigned := func(h string, notAfter time.Time) {
 		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		wildcard := "*." + h + ".agent.unarr.app"
 		tmpl := &x509.Certificate{
 			SerialNumber: big.NewInt(1),
-			Subject:      pkix.Name{CommonName: "*.x.agent.unarr.app"},
+			Subject:      pkix.Name{CommonName: wildcard},
+			DNSNames:     []string{wildcard, h + ".agent.unarr.app"},
 			NotBefore:    time.Now().Add(-time.Hour),
 			NotAfter:     notAfter,
 		}
@@ -103,21 +108,34 @@ func TestNeedsIssue(t *testing.T) {
 		}
 	}
 
-	// Fresh cert (90d) → no issue needed.
-	writeSelfSigned(time.Now().Add(90 * 24 * time.Hour))
-	if NeedsIssue(dir) {
+	// Fresh cert (90d) for the current hash → no issue needed.
+	writeSelfSigned(hash, time.Now().Add(90*24*time.Hour))
+	if NeedsIssue(dir, hash, base) {
 		t.Error("fresh cert should not need issue")
 	}
 
+	// Fresh cert but issued for a DIFFERENT hash (agent_hash was regenerated) →
+	// needs issue, else direct-TLS stays silently broken until the stale cert
+	// expires. Regression guard for the fleet-wide direct-TLS outage.
+	if !NeedsIssue(dir, "y", base) {
+		t.Error("cert for a stale hash should need re-issue")
+	}
+
+	// Empty hash (direct-TLS not configured) → pure expiry semantics, no re-issue
+	// for a fresh cert.
+	if NeedsIssue(dir, "", "") {
+		t.Error("empty hash should keep expiry-only semantics (fresh cert, no issue)")
+	}
+
 	// Within renew window (10d left) → needs issue.
-	writeSelfSigned(time.Now().Add(10 * 24 * time.Hour))
-	if !NeedsIssue(dir) {
+	writeSelfSigned(hash, time.Now().Add(10*24*time.Hour))
+	if !NeedsIssue(dir, hash, base) {
 		t.Error("near-expiry cert should need issue")
 	}
 
 	// Garbage → needs issue.
 	_ = os.WriteFile(certPath, []byte("not a cert"), 0o644)
-	if !NeedsIssue(dir) {
+	if !NeedsIssue(dir, hash, base) {
 		t.Error("unparseable cert should need issue")
 	}
 }

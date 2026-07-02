@@ -555,7 +555,7 @@ func runDaemonStart() error {
 				case <-ctx.Done():
 					return
 				case <-t.C:
-					if !acme.NeedsIssue(config.DataDir()) {
+					if !acme.NeedsIssue(config.DataDir(), cfg.Agent.Hash, agentTLSBaseDomain()) {
 						continue
 					}
 					fetchAgentCert(ctx, agentClient, cfg.Agent.Hash)
@@ -1751,10 +1751,10 @@ func agentTLSBaseDomain() string {
 // HTTP listener + CloudFlare funnel keep serving.
 func fetchAgentCert(ctx context.Context, client *agent.Client, hash string) {
 	dataDir := config.DataDir()
-	if !acme.NeedsIssue(dataDir) {
+	base := agentTLSBaseDomain()
+	if !acme.NeedsIssue(dataDir, hash, base) {
 		return
 	}
-	base := agentTLSBaseDomain()
 	csr, err := acme.BuildCSR(dataDir, hash, base)
 	if err != nil {
 		log.Printf("[acme] build CSR failed: %v", err)

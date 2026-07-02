@@ -117,8 +117,20 @@ func WriteCert(dataDir, certPEM string) error {
 const renewBefore = 30 * 24 * time.Hour
 
 // NeedsIssue reports whether we should (re)request a cert: true when the cert is
-// missing, unparseable, expired, or within renewBefore of expiry.
-func NeedsIssue(dataDir string) bool {
+// missing, unparseable, expired, within renewBefore of expiry, OR issued for a
+// hash other than the current agent hash.
+//
+// The hash-mismatch case is load-bearing: agent_hash can be regenerated (config
+// reset / identity migration) while the OLD cert — for *.<oldHash>.<base>, not
+// yet expired — stays on disk. The web then encodes every direct-TLS hostname
+// under the NEW hash (<ip>.<newHash>.<base>), so the browser is served a cert
+// whose CN/SAN don't match → TLS validation fails → direct-TLS is silently dead
+// for up to the cert's ~90-day lifetime, forcing every remote https:// browser
+// onto the (flaky) cloudflared funnel. Re-issuing whenever the on-disk cert
+// doesn't cover the wildcard for the CURRENT hash makes direct-TLS self-heal on
+// the next renewal tick. hash/baseDomain empty (direct-TLS not configured) skips
+// the check and keeps the pure expiry semantics.
+func NeedsIssue(dataDir, hash, baseDomain string) bool {
 	_, certPath := Paths(dataDir)
 	data, err := os.ReadFile(certPath)
 	if err != nil {
@@ -132,5 +144,19 @@ func NeedsIssue(dataDir string) bool {
 	if err != nil {
 		return true
 	}
-	return time.Now().Add(renewBefore).After(cert.NotAfter)
+	if time.Now().Add(renewBefore).After(cert.NotAfter) {
+		return true
+	}
+	if hash != "" && baseDomain != "" {
+		// BuildCSR requests *.<hash>.<base>, so that exact SAN must be present
+		// on a cert that still matches the current identity.
+		want := "*." + hash + "." + baseDomain
+		for _, n := range cert.DNSNames {
+			if n == want {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
