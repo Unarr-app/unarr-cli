@@ -136,7 +136,13 @@ fi
 # installs the same go.mod version via setup-go. Single source of truth = go.mod.
 GO_PIN="go$(awk '/^go /{print $2; exit}' go.mod)"
 info "goreleaser build + sign ($TAG, GOTOOLCHAIN=$GO_PIN)"
+# HOMEBREW_TAP_TOKEN must be DEFINED (empty is fine) — the homebrew_casks
+# skip_upload template reads .Env.HOMEBREW_TAP_TOKEN and goreleaser hard-fails
+# on an undefined key ("map has no entry"). CI (release.yml) always passes it;
+# a local ship without the secret exports it empty → cask generated, not
+# pushed, exactly the documented no-op.
 GOTOOLCHAIN="$GO_PIN" SENTRY_DSN="${SENTRY_DSN:-}" RELEASE_SIGNING_KEY="$RELEASE_SIGNING_KEY" \
+  HOMEBREW_TAP_TOKEN="${HOMEBREW_TAP_TOKEN:-}" \
   goreleaser release --clean --skip=publish
 [ -f dist/checksums.txt.sig ] || die "checksums.txt.sig not produced — signing step did not run"
 ok "dist/ ready (checksums.txt + checksums.txt.sig)"
