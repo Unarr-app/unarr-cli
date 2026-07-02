@@ -90,20 +90,28 @@ func TestNeedsIssue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// writeSelfSigned writes a cert whose wildcard SAN covers *.<h>.agent.unarr.app.
-	writeSelfSigned := func(h string, notAfter time.Time) {
+	// selfSigned returns a PEM cert. wildcard=true covers *.<h>.agent.unarr.app
+	// (via the same WildcardName helper production uses); false emits a CA-ish
+	// cert with no agent SANs (stands in for a chain intermediate).
+	selfSigned := func(h string, wildcard bool, notAfter time.Time) []byte {
 		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		wildcard := "*." + h + ".agent.unarr.app"
 		tmpl := &x509.Certificate{
 			SerialNumber: big.NewInt(1),
-			Subject:      pkix.Name{CommonName: wildcard},
-			DNSNames:     []string{wildcard, h + ".agent.unarr.app"},
 			NotBefore:    time.Now().Add(-time.Hour),
 			NotAfter:     notAfter,
 		}
+		if wildcard {
+			w := WildcardName(h, "agent.unarr.app")
+			tmpl.Subject = pkix.Name{CommonName: w}
+			tmpl.DNSNames = []string{w, h + ".agent.unarr.app"}
+		} else {
+			tmpl.Subject = pkix.Name{CommonName: "Fake Intermediate CA"}
+		}
 		der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-		if err := os.WriteFile(certPath, pemBytes, 0o644); err != nil {
+		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	}
+	writeSelfSigned := func(h string, notAfter time.Time) {
+		if err := os.WriteFile(certPath, selfSigned(h, true, notAfter), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -125,6 +133,25 @@ func TestNeedsIssue(t *testing.T) {
 	// for a fresh cert.
 	if NeedsIssue(dir, "", "") {
 		t.Error("empty hash should keep expiry-only semantics (fresh cert, no issue)")
+	}
+
+	// CHAIN with the intermediate FIRST and the leaf second → still recognized
+	// (the SAN check must walk every PEM block, not just block[0] — an
+	// intermediate-first chain used to trigger a perpetual re-issue loop).
+	fresh := time.Now().Add(90 * 24 * time.Hour)
+	chain := append(selfSigned(hash, false, fresh), selfSigned(hash, true, fresh)...)
+	if err := os.WriteFile(certPath, chain, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if NeedsIssue(dir, hash, base) {
+		t.Error("intermediate-first chain with a fresh matching leaf should not need issue")
+	}
+
+	// Case-insensitive SAN match: Let's Encrypt lowercases SANs, so a
+	// mixed-case configured base domain must still match the on-disk cert.
+	writeSelfSigned(hash, fresh)
+	if NeedsIssue(dir, hash, "Agent.Unarr.App") {
+		t.Error("mixed-case base domain should match the lowercased SAN (EqualFold)")
 	}
 
 	// Within renew window (10d left) → needs issue.

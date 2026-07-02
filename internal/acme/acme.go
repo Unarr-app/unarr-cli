@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -72,6 +73,14 @@ func loadOrCreateKey(keyPath string) (*ecdsa.PrivateKey, error) {
 	return key, nil
 }
 
+// WildcardName is THE identity→SAN mapping for the per-agent cert: the
+// wildcard name BuildCSR requests and NeedsIssue asserts on the issued cert.
+// Single source so the two sides (request vs verify) can never drift — a
+// silent drift would make NeedsIssue re-issue on every renewal tick forever.
+func WildcardName(hash, baseDomain string) string {
+	return "*." + hash + "." + baseDomain
+}
+
 // BuildCSR ensures the persistent key exists and returns a PEM CSR requesting
 // the wildcard *.<hash>.<baseDomain> (plus the bare <hash>.<baseDomain> so a
 // future non-wildcard use still validates). baseDomain e.g. "agent.unarr.app".
@@ -81,7 +90,7 @@ func BuildCSR(dataDir, hash, baseDomain string) (csrPEM string, err error) {
 	if err != nil {
 		return "", err
 	}
-	wildcard := "*." + hash + "." + baseDomain
+	wildcard := WildcardName(hash, baseDomain)
 	base := hash + "." + baseDomain
 	tmpl := &x509.CertificateRequest{
 		Subject:            pkix.Name{CommonName: wildcard},
@@ -136,27 +145,42 @@ func NeedsIssue(dataDir, hash, baseDomain string) bool {
 	if err != nil {
 		return true
 	}
-	block, _ := pem.Decode(data)
-	if block == nil {
+	// agent.crt is a CHAIN — walk every PEM block instead of assuming the leaf
+	// comes first. Anchoring on block[0] made chain ordering load-bearing: an
+	// intermediate-first chain would fail the SAN check below on every renewal
+	// tick and re-issue forever (Let's Encrypt rate-limit burn).
+	var certs []*x509.Certificate
+	for rest := data; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if c, perr := x509.ParseCertificate(block.Bytes); perr == nil {
+			certs = append(certs, c)
+		}
+	}
+	if len(certs) == 0 {
 		return true
 	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return true
-	}
-	if time.Now().Add(renewBefore).After(cert.NotAfter) {
-		return true
-	}
+
 	if hash != "" && baseDomain != "" {
-		// BuildCSR requests *.<hash>.<base>, so that exact SAN must be present
-		// on a cert that still matches the current identity.
-		want := "*." + hash + "." + baseDomain
-		for _, n := range cert.DNSNames {
-			if n == want {
-				return false
+		// BuildCSR requests WildcardName(hash, base); that SAN must be present
+		// on a still-fresh cert in the chain for the current identity to hold.
+		// EqualFold: DNS names are case-insensitive and Let's Encrypt lowercases
+		// SANs on issue — an exact compare against a mixed-case configured base
+		// would re-issue on every tick despite a perfectly valid cert.
+		want := WildcardName(hash, baseDomain)
+		for _, c := range certs {
+			for _, n := range c.DNSNames {
+				if strings.EqualFold(n, want) {
+					return time.Now().Add(renewBefore).After(c.NotAfter)
+				}
 			}
 		}
 		return true
 	}
-	return false
+	// Direct-TLS not configured → pure expiry semantics on the first
+	// (conventionally the leaf) certificate, as before.
+	return time.Now().Add(renewBefore).After(certs[0].NotAfter)
 }

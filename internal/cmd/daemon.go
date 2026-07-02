@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -555,10 +556,14 @@ func runDaemonStart() error {
 				case <-ctx.Done():
 					return
 				case <-t.C:
-					if !acme.NeedsIssue(config.DataDir(), cfg.Agent.Hash, agentTLSBaseDomain()) {
+					// fetchAgentCert owns the NeedsIssue gate and reports whether a
+					// fresh cert was actually persisted. Hot-swap ONLY then — the old
+					// unconditional reload logged "renewed cert hot-swapped" every 6h
+					// even when issuance was being rejected, masking a permanent
+					// direct-TLS outage as a healthy renewal.
+					if !fetchAgentCert(ctx, agentClient, cfg.Agent.Hash) {
 						continue
 					}
-					fetchAgentCert(ctx, agentClient, cfg.Agent.Hash)
 					keyPath, certPath := acme.Paths(config.DataDir())
 					if err := streamSrv.LoadTLSCertificateFromFiles(certPath, keyPath); err != nil {
 						log.Printf("[acme] hot-swap after renewal failed: %v", err)
@@ -1542,8 +1547,21 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 // exponential backoff so we don't hammer cloudflared into a tight loop when
 // it can't reach the CF edge.
 func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
-	backoff := 2 * time.Second
+	const initialBackoff = 2 * time.Second
 	const maxBackoff = 5 * time.Minute
+	// A tunnel that stayed up this long AND actually published a URL was
+	// HEALTHY — its exit is CF's routine ~6h quick-tunnel rotation (or a
+	// one-off blip), not a crash loop. Without this reset the backoff only
+	// ever grew: a few flaky restarts early in the daemon's life ratcheted it
+	// toward 5 min, and then EVERY later rotation of a perfectly healthy
+	// tunnel cost remote viewers up to 5 minutes of funnel downtime, forever.
+	// Healthy exit → fast respawn; only consecutive unhealthy runs keep
+	// escalating. The URL requirement matters: a cloudflared that connects
+	// but never provisions (regional CF incident) idles past any lifetime
+	// threshold before dying — lifetime alone would classify that as healthy
+	// and churn max-frequency restarts through the whole incident.
+	const healthyRun = 5 * time.Minute
+	backoff := initialBackoff
 	for ctx.Err() == nil {
 		t, err := funnel.Start(ctx, funnel.Config{Port: port})
 		if err != nil {
@@ -1556,6 +1574,8 @@ func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
 			backoff = min(backoff*2, maxBackoff)
 			continue
 		}
+		startedAt := time.Now()
+		var gotURL atomic.Bool
 		log.Printf("[funnel] cloudflared started, waiting for public URL...")
 		go func() {
 			url, werr := t.WaitURL(45 * time.Second)
@@ -1564,6 +1584,7 @@ func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
 				return
 			}
 			log.Printf("[funnel] public URL: %s", url)
+			gotURL.Store(true)
 			d.SetFunnelURL(url)
 		}()
 		// Block until cloudflared exits (CF rotation, crash, or shutdown).
@@ -1572,6 +1593,9 @@ func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
 		d.SetFunnelURL("")
 		if ctx.Err() != nil {
 			return
+		}
+		if gotURL.Load() && time.Since(startedAt) >= healthyRun {
+			backoff = initialBackoff
 		}
 		if exitErr != nil {
 			log.Printf("[funnel] cloudflared exited: %v — restarting in %s", exitErr, backoff)
@@ -1749,29 +1773,36 @@ func agentTLSBaseDomain() string {
 // and writes it to the agent state dir. The agent's private key never leaves the
 // machine — only a CSR is sent. Failure is non-fatal: HTTPS stays off and the
 // HTTP listener + CloudFlare funnel keep serving.
-func fetchAgentCert(ctx context.Context, client *agent.Client, hash string) {
+//
+// Returns true ONLY when a fresh cert was actually issued AND persisted — it is
+// the single owner of the NeedsIssue gate, so callers must not re-check it (the
+// old ticker did, then hot-swapped + logged "renewed" unconditionally: on a
+// persistently-rejected issuance it reloaded the same stale cert and printed a
+// success line every 6h, masking the failure for months).
+func fetchAgentCert(ctx context.Context, client *agent.Client, hash string) bool {
 	dataDir := config.DataDir()
 	base := agentTLSBaseDomain()
 	if !acme.NeedsIssue(dataDir, hash, base) {
-		return
+		return false
 	}
 	csr, err := acme.BuildCSR(dataDir, hash, base)
 	if err != nil {
 		log.Printf("[acme] build CSR failed: %v", err)
-		return
+		return false
 	}
 	cctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	cert, err := client.IssueCert(cctx, csr)
 	if err != nil {
 		log.Printf("[acme] cert issuance failed (HTTPS stays off, funnel still works): %v", err)
-		return
+		return false
 	}
 	if err := acme.WriteCert(dataDir, cert); err != nil {
 		log.Printf("[acme] write cert failed: %v", err)
-		return
+		return false
 	}
-	log.Printf("[acme] installed cert for *.%s.%s", hash, base)
+	log.Printf("[acme] installed cert for %s", acme.WildcardName(hash, base))
+	return true
 }
 
 // monitorSessionHealth keeps re-posting the live transcode health for the
