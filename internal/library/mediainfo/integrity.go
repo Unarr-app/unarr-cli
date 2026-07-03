@@ -91,11 +91,11 @@ func AssessTruncation(ctx context.Context, ffprobePath, ffmpegPath, filePath str
 // truncationVerdict is the pure decision core (no I/O), factored out so the
 // A/B/C thresholds are unit-testable without invoking ffprobe/ffmpeg.
 //
-//   headerDur  — container's claimed duration (s)
-//   lastPTS    — max presentation timestamp found in the tail demux (s)
-//   bitRate    — header overall bit_rate (bits/s), 0 when the container omits it
-//   fileSize   — file size in bytes
-//   decodeFail — check C: reports whether a tail decode fails; nil = unavailable
+//	headerDur  — container's claimed duration (s)
+//	lastPTS    — max presentation timestamp found in the tail demux (s)
+//	bitRate    — header overall bit_rate (bits/s), 0 when the container omits it
+//	fileSize   — file size in bytes
+//	decodeFail — check C: reports whether a tail decode fails; nil = unavailable
 func truncationVerdict(headerDur, lastPTS float64, bitRate, fileSize int64, decodeFail func() bool) *IntegrityInfo {
 	gap := headerDur - lastPTS
 	gapThreshold := math.Max(truncGapFloorSec, truncGapFrac*headerDur)
