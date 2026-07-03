@@ -34,6 +34,7 @@ const minFileSize = 100 * 1024 * 1024 // 100MB minimum
 type ScanOptions struct {
 	Workers     int    // concurrent ffprobe processes (default 8)
 	FFprobePath string // explicit path, or auto-resolve
+	FFmpegPath  string // explicit path, or auto-resolve; "" disables the decode-confirm (C)
 	Incremental bool   // skip unchanged files (mtime+size match cache)
 	OnProgress  func(scanned, total int, current string)
 }
@@ -48,6 +49,13 @@ func Scan(ctx context.Context, dirPath string, existing *LibraryCache, opts Scan
 	ffprobePath, err := mediainfo.ResolveFFprobe(opts.FFprobePath)
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe: %w", err)
+	}
+
+	// Resolve ffmpeg best-effort — it only powers the tail decode-confirm (check
+	// C). When absent the truncation checks still run on ffprobe alone (A + B).
+	ffmpegPath, ffmpegErr := mediainfo.ResolveFFmpeg(opts.FFmpegPath)
+	if ffmpegErr != nil {
+		ffmpegPath = ""
 	}
 
 	// Discover video files
@@ -90,7 +98,7 @@ func Scan(ctx context.Context, dirPath string, existing *LibraryCache, opts Scan
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			item := scanSingleFile(ctx, ffprobePath, fp, cacheIdx, existing, opts.Incremental)
+			item := scanSingleFile(ctx, ffprobePath, ffmpegPath, fp, cacheIdx, existing, opts.Incremental)
 
 			mu.Lock()
 			items = append(items, item)
@@ -113,7 +121,7 @@ func Scan(ctx context.Context, dirPath string, existing *LibraryCache, opts Scan
 	}, nil
 }
 
-func scanSingleFile(ctx context.Context, ffprobePath, filePath string, cacheIdx map[string]int, existing *LibraryCache, incremental bool) LibraryItem {
+func scanSingleFile(ctx context.Context, ffprobePath, ffmpegPath, filePath string, cacheIdx map[string]int, existing *LibraryCache, incremental bool) LibraryItem {
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return LibraryItem{
@@ -181,6 +189,17 @@ func scanSingleFile(ctx context.Context, ffprobePath, filePath string, cacheIdx 
 	if err != nil {
 		item.ScanError = err.Error()
 		return item
+	}
+
+	// Deep truncation checks (A/B/C): the header probe above can't see a
+	// truncated download whose start-of-file duration is intact. Only when the
+	// header itself flagged nothing — a more specific verdict (moov_missing,
+	// ebml_corrupt, no_duration) is never overwritten — and we have a real video
+	// duration to compare the tail against.
+	if mi.Integrity == nil && mi.Video != nil && mi.Video.Duration > 0 {
+		if integ := mediainfo.AssessTruncation(ctx, ffprobePath, ffmpegPath, filePath, mi.Video.Duration); integ != nil {
+			mi.Integrity = integ
+		}
 	}
 	item.MediaInfo = mi
 

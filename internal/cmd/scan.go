@@ -137,6 +137,7 @@ func runScan(ctx context.Context, cfg config.Config, dirPath string, workers int
 	cache, err := library.Scan(ctx, dirPath, existing, library.ScanOptions{
 		Workers:     workers,
 		FFprobePath: ffprobePath,
+		FFmpegPath:  cfg.Library.FFmpegPath,
 		Incremental: existing != nil,
 		OnProgress: func(scanned, total int, current string) {
 			// Truncate filename for display
