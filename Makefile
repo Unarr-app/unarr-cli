@@ -78,17 +78,34 @@ release-dry:
 	@test -n "$(V)" || { echo "Usage: make release-dry V=patch|minor|major|0.5.0"; exit 1; }
 	@./scripts/release.sh --dry-run $(V)
 
-## Ship a release end-to-end (goreleaser + Hetzner + Docker Hub). Standalone backup for GH Actions.
-## Reads version from internal/cmd/version.go unless V= is provided.
+## DEPRECATED — releases run on GitHub Actions (.github/workflows/release.yml).
+## The web reads the latest version from the GitHub Releases API and the self-updater
+## fetches binaries from GitHub Releases, so the old ship.sh path (goreleaser + Hetzner
+## version.txt + Docker Hub) is redundant: Hetzner version.txt is only a fallback for a
+## GitHub outage. New flow:
+##   1) make release V=x.y.z        # bump internal/cmd/version.go + CHANGELOG + tag vX
+##   2) git push <github-remote> main --follow-tags   # tag push triggers the release workflow
+## ship.sh stays on disk as an emergency fallback ONLY (GH Actions down); run it
+## explicitly with LEGACY_SHIP=1.
+define SHIP_DEPRECATED
+	echo "make $@ is DEPRECATED — releases run on GitHub Actions now."; \
+	echo "  1) make release V=x.y.z                            (bump version + tag)"; \
+	echo "  2) git push <github-remote> main --follow-tags     (tag push runs .github/workflows/release.yml)"; \
+	echo ""; \
+	echo "Emergency local fallback only (GH Actions unavailable): LEGACY_SHIP=1 make $@"; \
+	exit 2
+endef
+
 ship:
+	@if [ "$(LEGACY_SHIP)" != "1" ]; then $(SHIP_DEPRECATED); fi
 	@./scripts/ship.sh $(V)
 
-## Ship + git push tag to GH afterwards
 ship-push:
+	@if [ "$(LEGACY_SHIP)" != "1" ]; then $(SHIP_DEPRECATED); fi
 	@./scripts/ship.sh --push $(V)
 
-## Preview ship steps without executing
 ship-dry:
+	@if [ "$(LEGACY_SHIP)" != "1" ]; then $(SHIP_DEPRECATED); fi
 	@./scripts/ship.sh --dry-run $(V)
 
 ## Remove generated files
