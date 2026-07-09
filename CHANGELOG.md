@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.6-beta] - 2026-07-09
+
+
+### Fixed
+
+- **hls**: wait for subtitle sidecar first byte instead of instant 404
 ## [1.3.5-beta] - 2026-07-09
 
 
@@ -16,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- **release**: 1.3.5-beta
 - **release**: deprecate make ship — releases run on GitHub Actions
 
 ### Performance
@@ -1075,6 +1082,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.3.6-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.5-beta...v1.3.6-beta
 [1.3.5-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.4-beta...v1.3.5-beta
 [1.3.4-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.3-beta...v1.3.4-beta
 [1.3.3-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.2-beta...v1.3.3-beta
