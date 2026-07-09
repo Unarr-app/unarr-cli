@@ -58,8 +58,15 @@ type keyframeSidecar struct {
 // faster than `-skip_frame nokey` (which decodes each keyframe). Still a full
 // demux of the container, hence local-file only. Errors if no keyframes are found.
 func IndexKeyframes(ctx context.Context, ffprobePath, mediaPath string) ([]float64, error) {
-	ctx, cancel := context.WithTimeout(ctx, copyKeyframeIndexTimeout)
-	defer cancel()
+	// Only impose the default ceiling when the caller set no deadline. The
+	// playback path (no deadline) gets the tight 45s cap so a stuck index can't
+	// strand the player; the scan-time prewarm passes its own longer budget
+	// (a huge cold remux may need minutes) and that must win, not be clamped.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, copyKeyframeIndexTimeout)
+		defer cancel()
+	}
 	cmd := exec.CommandContext(ctx, ffprobePath,
 		"-v", "error",
 		"-select_streams", "v:0",

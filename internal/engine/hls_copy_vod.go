@@ -355,10 +355,17 @@ const copyVODPassMaxRestarts = 2
 // handlers block on readyMax exactly like encode mode.
 func launchCopyVODPass(s *HLSSession) bool {
 	src := s.cfg.sourceRef()
-	var srcSize int64
-	if fi, err := os.Stat(src); err == nil {
-		srcSize = fi.Size()
+	fi, err := os.Stat(src)
+	if err != nil {
+		// Can't size the source → can't run the disk guard (CheckDiskSpace with
+		// needBytes<=0 no-ops, defeating it) and segmentWaitTimeout would fall to
+		// the 60s encode default instead of the size-derived ceiling. Fall back to
+		// lazy per-segment generation, which stat-verifies each segment itself.
+		log.Printf("[hls %s] copy-vod pass skipped (stat source: %v) — lazy per-segment",
+			shortHLSID(s.cfg.SessionID), err)
+		return false
 	}
+	srcSize := fi.Size()
 	if err := CheckDiskSpace(s.tmpDir, srcSize, copyVODPassDiskReserve); err != nil {
 		log.Printf("[hls %s] copy-vod pass skipped (%v) — lazy per-segment",
 			shortHLSID(s.cfg.SessionID), err)
