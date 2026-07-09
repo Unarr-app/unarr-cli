@@ -50,6 +50,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -272,18 +273,30 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	s.segmentCount = len(starts) - 1
 	s.manifestVideo = renderVideoPlaylistCopyVOD(starts)
 	s.manifestRoot = renderMasterPlaylistCopy(s.probe)
-	// No live encoder: every segment is generated on demand. Mark the session
-	// "ready" (readyMax past the writer start) so watchSessionReady flips the
-	// "Preparando…" overlay immediately and the player starts fetching.
-	s.readyMu.Lock()
-	s.readyMax = s.segmentCount
-	s.exited = true
-	s.readyMu.Unlock()
-	mode := "local/keyframe"
-	if s.cfg.SourceURL != "" {
-		mode = "remote/uniform"
+
+	// LOCAL files run a single background segment-muxer PASS: it reads the file
+	// linearly (never seeks) and cuts at the exact keyframe boundaries, so
+	// segments are contiguous with zero overlap — the echo-free path. Handlers
+	// then wait on readyMax like encode mode.
+	//
+	// REMOTE/uniform sources, and a local file without disk headroom for the
+	// whole-file .ts materialisation, stay LAZY: each segment is generated on
+	// demand by a per-index `-ss` spawn (GOP-overlap echo present on scene-cut
+	// sources, but it plays and doesn't download the whole remote file).
+	mode := "remote/uniform lazy"
+	if s.cfg.SourcePath != "" && launchCopyVODPass(s) {
+		mode = "local/keyframe pass"
+	} else {
+		s.copyLazy = true
+		// No background writer → mark every segment "ready" immediately so the
+		// "Preparando…" overlay flips and the player fetches; each fetch then
+		// generates its segment on demand.
+		s.readyMu.Lock()
+		s.readyMax = s.segmentCount
+		s.exited = true
+		s.readyMu.Unlock()
 	}
-	log.Printf("[hls %s] copy-vod: %d segments, %.1fs (on-demand -c:v copy, mpegts, %s)",
+	log.Printf("[hls %s] copy-vod: %d segments, %.1fs (%s)",
 		shortHLSID(s.cfg.SessionID), s.segmentCount, s.durationSec, mode)
 	return true
 }
@@ -388,4 +401,101 @@ func startCopyVODSubtitles(s *HLSSession) {
 			log.Printf("[hls %s] copy-vod subtitle sidecars complete", shortHLSID(s.cfg.SessionID))
 		}
 	}()
+}
+
+// copyVODPassDiskReserve is the free space to keep AFTER the background pass
+// materialises every segment (~source size) into the session tmpdir. Below it,
+// startCopyVOD degrades to lazy per-segment generation rather than risk a full disk.
+const copyVODPassDiskReserve = 512 * 1024 * 1024
+
+// copyVODPassMaxRestarts bounds restart-from-0 attempts when the pass ffmpeg dies
+// unexpectedly. The pass is deterministic and the segment muxer overwrites the
+// same seg-N.ts filenames, so a restart re-produces byte-identical segments.
+const copyVODPassMaxRestarts = 2
+
+// launchCopyVODPass starts the background segment-muxer pass for a LOCAL source.
+// It returns false (caller falls back to lazy per-segment generation) when the
+// source can't be stat'd or the disk can't hold the materialised segments. On
+// success it resets readyMax=0/exited=false and spawns the pass + poller, so
+// handlers block on readyMax exactly like encode mode.
+func launchCopyVODPass(s *HLSSession) bool {
+	src := s.cfg.sourceRef()
+	var srcSize int64
+	if fi, err := os.Stat(src); err == nil {
+		srcSize = fi.Size()
+	}
+	if err := CheckDiskSpace(s.tmpDir, srcSize, copyVODPassDiskReserve); err != nil {
+		log.Printf("[hls %s] copy-vod pass skipped (%v) — lazy per-segment",
+			shortHLSID(s.cfg.SessionID), err)
+		return false
+	}
+
+	args := buildCopyVODPassArgs(s.cfg, s.probe, s.copySegStarts, s.tmpDir)
+	ffCtx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
+	errBuf := &bytes.Buffer{}
+	cmd.Stderr = errBuf
+	if err := cmd.Start(); err != nil {
+		cancel()
+		log.Printf("[hls %s] copy-vod pass start failed (%v) — lazy per-segment",
+			shortHLSID(s.cfg.SessionID), err)
+		return false
+	}
+
+	// Construction-time (session not yet registered / no handlers): plain writes.
+	s.cancel = cancel
+	s.srcSizeBytes = srcSize
+	s.readyMu.Lock()
+	s.readyMax = 0
+	s.exited = false
+	s.readyMu.Unlock()
+
+	go s.waitCopyPass(cmd, ffCtx, errBuf)
+	go s.pollSegments(ffCtx)
+	return true
+}
+
+// waitCopyPass reaps the background segment-muxer pass. On an unexpected failure
+// (not a Close-triggered cancel) it restarts from 0 a bounded number of times —
+// the pass is deterministic, so a restart re-produces identical segments. When it
+// finally stops it marks the session exited so waitForSegment unblocks (nil on a
+// clean finish, error on give-up); pollSegments then seals the final segment.
+func (s *HLSSession) waitCopyPass(cmd *exec.Cmd, ffCtx context.Context, errBuf *bytes.Buffer) {
+	err := cmd.Wait()
+	for attempt := 1; err != nil && ffCtx.Err() == nil && attempt <= copyVODPassMaxRestarts; attempt++ {
+		log.Printf("[hls %s] copy-vod pass failed (%v: %s) — restart %d/%d from 0",
+			shortHLSID(s.cfg.SessionID), err, strings.TrimSpace(errBuf.String()), attempt, copyVODPassMaxRestarts)
+		errBuf.Reset()
+		args := buildCopyVODPassArgs(s.cfg, s.probe, s.copySegStarts, s.tmpDir)
+		cmd = exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
+		cmd.Stderr = errBuf
+		if serr := cmd.Start(); serr != nil {
+			err = serr
+			break
+		}
+		err = cmd.Wait()
+	}
+
+	clean := err == nil && ffCtx.Err() == nil
+	s.readyMu.Lock()
+	s.exited = true
+	if clean {
+		// The pass wrote every segment (`-segment_times` yields exactly
+		// segmentCount files). Advance readyMax to the full count HERE, before
+		// unblocking waiters: otherwise a handler woken by the readyCh close could
+		// race ahead of the 250ms pollSegments tick that seals the LAST segment
+		// and wrongly see "exited before segment ready".
+		s.readyMax = s.segmentCount
+	} else if err != nil && ffCtx.Err() == nil {
+		s.exitErr = fmt.Errorf("copy-vod pass: %w (%s)", err, strings.TrimSpace(errBuf.String()))
+	}
+	if s.readyCh != nil {
+		close(s.readyCh)
+		s.readyCh = nil
+	}
+	s.readyMu.Unlock()
+
+	if clean {
+		log.Printf("[hls %s] copy-vod pass complete", shortHLSID(s.cfg.SessionID))
+	}
 }

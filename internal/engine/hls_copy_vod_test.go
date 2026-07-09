@@ -155,3 +155,84 @@ func TestRenderVideoPlaylistCopyVOD(t *testing.T) {
 		t.Errorf("expected TARGETDURATION:7\n%s", m)
 	}
 }
+
+// argsHasPair reports whether args contains flag immediately followed by val.
+func argsHasPair(args []string, flag, val string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == val {
+			return true
+		}
+	}
+	return false
+}
+
+func argValue(args []string, flag string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// TestBuildCopyVODPassArgs locks in the echo-free segment-muxer pass invocation:
+// linear read (no -ss), keyframe-boundary cuts via -segment_times, absolute PTS
+// (mpegts_copyts=1), and the mandatory Annex-B bitstream filter.
+func TestBuildCopyVODPassArgs(t *testing.T) {
+	cfg := HLSSessionConfig{SourcePath: "/movies/x.mp4", AudioIndex: -1}
+	probe := &StreamProbe{VideoCodec: "h264", AudioCodec: "aac",
+		AudioTracks: []ProbeAudioTrack{{Codec: "aac", Channels: 2, Default: true}}}
+	starts := []float64{0, 6.0, 12.5, 18.0}
+	args := buildCopyVODPassArgs(cfg, probe, starts, "/tmp/sess")
+
+	// No input seek — the whole point (a mid-file -ss mislands on VBR sources).
+	if argValue(args, "-ss") != "" {
+		t.Errorf("pass must not use -ss (input seek mislands → echo): %v", args)
+	}
+	if !argsHasPair(args, "-c:v", "copy") {
+		t.Error("video must be copied")
+	}
+	if !argsHasPair(args, "-bsf:v", "h264_mp4toannexb") {
+		t.Error("missing h264_mp4toannexb (mp4 segments are undecodable without it)")
+	}
+	if !argsHasPair(args, "-f", "segment") {
+		t.Error("must use the segment muxer")
+	}
+	if !argsHasPair(args, "-reset_timestamps", "0") {
+		t.Error("must keep absolute timestamps across segments")
+	}
+	if !argsHasPair(args, "-segment_format_options", "mpegts_copyts=1") {
+		t.Error("missing mpegts_copyts=1 (absolute PTS, no +1.4s TS base offset)")
+	}
+	// Interior boundaries only: starts[1:len-1] == 6.0,12.5 (not 0, not 18.0).
+	if got := argValue(args, "-segment_times"); got != "6.000000,12.500000" {
+		t.Errorf("-segment_times = %q, want interior boundaries 6.000000,12.500000", got)
+	}
+	if last := args[len(args)-1]; !strings.HasSuffix(last, "seg-%d.ts") {
+		t.Errorf("output pattern = %q, want .../seg-%%d.ts", last)
+	}
+}
+
+// TestBuildCopyVODPassArgsSingleSegment: a source with no interior boundaries
+// (starts=[0,dur]) must omit -segment_times (empty list is invalid).
+func TestBuildCopyVODPassArgsSingleSegment(t *testing.T) {
+	cfg := HLSSessionConfig{SourcePath: "/movies/x.mkv", AudioIndex: -1}
+	probe := &StreamProbe{VideoCodec: "h264", AudioCodec: "aac",
+		AudioTracks: []ProbeAudioTrack{{Codec: "aac", Channels: 2}}}
+	args := buildCopyVODPassArgs(cfg, probe, []float64{0, 9.0}, "/tmp/sess")
+	if argValue(args, "-segment_times") != "" {
+		t.Errorf("single-segment source must omit -segment_times: %v", args)
+	}
+}
+
+// TestBuildCopyVODSegmentArgsHasBSF: the lazy per-segment path (remote/uniform)
+// also needs the Annex-B filter, else remote mp4 sources serve undecodable TS.
+func TestBuildCopyVODSegmentArgsHasBSF(t *testing.T) {
+	cfg := HLSSessionConfig{SourceURL: "http://panel/x.mp4", AudioIndex: -1}
+	probe := &StreamProbe{VideoCodec: "h264", AudioCodec: "aac",
+		AudioTracks: []ProbeAudioTrack{{Codec: "aac", Channels: 2}}}
+	args := buildCopyVODSegmentArgs(cfg, probe, "/tmp/seg.ts", 6.0, 12.0)
+	if !argsHasPair(args, "-bsf:v", "h264_mp4toannexb") {
+		t.Errorf("lazy per-segment path missing h264_mp4toannexb: %v", args)
+	}
+}

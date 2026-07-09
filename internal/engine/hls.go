@@ -336,6 +336,13 @@ type HLSSession struct {
 	copySegStarts []float64
 	copyGenMu     sync.Mutex
 	copyGen       map[int]*sync.Mutex // per-index gate single-flighting segment gen
+	// copyLazy=true means this COPY-VOD session generates segments lazily per
+	// request via `-ss` (remote/uniform sources, or a local file with too little
+	// disk for the background pass). copyLazy=false means a single background
+	// segment-muxer pass writes every seg-N.ts sequentially and handlers wait on
+	// readyMax (like encode mode) — the echo-free path for local files.
+	copyLazy     bool
+	srcSizeBytes int64 // source size in bytes; sizes the copy-pass segment-wait deadline
 }
 
 // hlsSeekAhead is how many segments past the writer's current position the
@@ -1210,11 +1217,21 @@ func (s *HLSSession) waitFFmpeg() {
 	}
 }
 
-// pollSegments watches the video tmpdir for newly-finished .m4s files and
-// advances readyMax. ffmpeg writes a segment by first creating an empty
-// file, then closing+renaming on completion (atomic-replace), so we use
-// stat size > 0 + presence of the *next* segment as proof the previous one
-// is done. For the last segment, ffmpeg's exit terminates the wait.
+// segmentFileName is the on-disk basename of segment i. Encode mode writes
+// fMP4 (.m4s); COPY-VOD writes MPEG-TS (.ts). pollSegments/ServeSegment use
+// this so the watermark poller watches the files the writer actually produces.
+func (s *HLSSession) segmentFileName(i int) string {
+	if s.copyVOD {
+		return fmt.Sprintf("seg-%d%s", i, copyVODSegExt)
+	}
+	return fmt.Sprintf("seg-%d.m4s", i)
+}
+
+// pollSegments watches the video tmpdir for newly-finished segment files and
+// advances readyMax. The writer produces a segment by opening the next file
+// only after closing the current one (fMP4 temp_file rename in encode mode; the
+// segment muxer's avio_close→open in COPY-VOD pass mode), so "seg-(i+1) exists"
+// proves seg-i is fully written. For the last segment, ffmpeg's exit ends the wait.
 func (s *HLSSession) pollSegments(ctx context.Context) {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
@@ -1234,8 +1251,8 @@ func (s *HLSSession) pollSegments(ctx context.Context) {
 
 		highest := start
 		for i := start; i < s.segmentCount; i++ {
-			cur := filepath.Join(videoDir, fmt.Sprintf("seg-%d.m4s", i))
-			next := filepath.Join(videoDir, fmt.Sprintf("seg-%d.m4s", i+1))
+			cur := filepath.Join(videoDir, s.segmentFileName(i))
+			next := filepath.Join(videoDir, s.segmentFileName(i+1))
 			ci, err := os.Stat(cur)
 			if err != nil || ci.Size() == 0 {
 				break
@@ -1285,11 +1302,28 @@ func (s *HLSSession) pollSegments(ctx context.Context) {
 	}
 }
 
+// segmentWaitTimeout bounds how long waitForSegment blocks. Encode mode caps at
+// 60s (ffmpeg keeps pace with playback). A COPY-VOD background pass writes
+// segments sequentially, so a deep cold seek waits for the pass to READ that far
+// into the file — up to a full-file read. Size the ceiling by an assumed floor
+// read speed (8 MB/s: slow NAS over WAN) so a large-file deep seek still
+// completes, while a genuinely stuck pass can't hang a handler forever.
+func (s *HLSSession) segmentWaitTimeout() time.Duration {
+	if s.copyVOD && !s.copyLazy && s.srcSizeBytes > 0 {
+		secs := s.srcSizeBytes / (8 * 1024 * 1024)
+		if d := time.Duration(secs) * time.Second; d > 120*time.Second {
+			return d
+		}
+		return 120 * time.Second
+	}
+	return 60 * time.Second
+}
+
 // waitForSegment blocks until segment idx has been fully written, ffmpeg
 // has exited, or ctx is cancelled. Returns nil iff the segment file is
 // safe to read at return time.
 func (s *HLSSession) waitForSegment(ctx context.Context, idx int) error {
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(s.segmentWaitTimeout())
 	for {
 		s.readyMu.Lock()
 		ready := idx < s.readyMax
