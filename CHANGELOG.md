@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.5-beta] - 2026-07-09
+
+
+### Fixed
+
+- **hls**: harden copy-vod pass — stat-guard fallback + honor prewarm index budget
+- **hls**: reset copy-vod watermark on pass restart + dedup codec check
+- **hls**: kill copy-vod echo via segment-muxer pass + mp4 annexb bsf
+
+### Other
+
+- **release**: deprecate make ship — releases run on GitHub Actions
+
+### Performance
+
+- **hls**: cache copy-vod keyframe index as a scan-time sidecar
 ## [1.3.4-beta] - 2026-07-07
 
 
@@ -15,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **docker**: bundle Intel QSV runtime so h264_qsv doesn't core-dump
+
+### Other
+
+- **release**: 1.3.4-beta
 ## [1.3.3-beta] - 2026-07-03
 
 
@@ -1055,6 +1075,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.3.5-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.4-beta...v1.3.5-beta
 [1.3.4-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.3-beta...v1.3.4-beta
 [1.3.3-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.2-beta...v1.3.3-beta
 [1.3.2-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.1-beta...v1.3.2-beta
