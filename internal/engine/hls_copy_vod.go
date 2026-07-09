@@ -68,17 +68,6 @@ const copyVODTargetSec = 6.0
 // MPEG-TS (.ts), not fMP4 (.m4s) — see the package comment.
 const copyVODSegExt = ".ts"
 
-// copyVODEligibleCodec reports whether a source video codec can ride COPY-VOD's
-// MPEG-TS transport. H.264 only: TS carries it universally; HEVC needs fMP4
-// (Apple HLS) and AV1 isn't a TS codec, so both fall back to legacy EVENT copy.
-func copyVODEligibleCodec(videoCodec string) bool {
-	switch strings.ToLower(videoCodec) {
-	case "h264", "avc", "avc1":
-		return true
-	}
-	return false
-}
-
 // planCopySegments turns a sorted keyframe list + total duration into the
 // segment boundary table: starts[i]..starts[i+1] is segment i. starts[0] is
 // always 0 and the final element is always duration, so len(starts)-1 ==
@@ -152,7 +141,7 @@ func renderVideoPlaylistCopyVOD(starts []float64) string {
 func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	// MPEG-TS transport carries H.264 universally but not HEVC/AV1 (see package
 	// comment). Non-H.264 copy → legacy EVENT path (no regression).
-	if !copyVODEligibleCodec(s.probe.VideoCodec) {
+	if !mediainfo.CopyVODEligibleCodec(s.probe.VideoCodec) {
 		log.Printf("[hls %s] copy-vod skipped: codec %q not TS-eligible — using EVENT copy",
 			shortHLSID(s.cfg.SessionID), s.probe.VideoCodec)
 		return false
@@ -411,6 +400,13 @@ func (s *HLSSession) waitCopyPass(cmd *exec.Cmd, ffCtx context.Context, errBuf *
 	for attempt := 1; err != nil && ffCtx.Err() == nil && attempt <= copyVODPassMaxRestarts; attempt++ {
 		log.Printf("[hls %s] copy-vod pass failed (%v: %s) — restart %d/%d from 0",
 			shortHLSID(s.cfg.SessionID), err, strings.TrimSpace(errBuf.String()), attempt, copyVODPassMaxRestarts)
+		// Restart-from-0 truncates+rewrites every seg-N.ts IN PLACE (segment
+		// muxer, no .tmp+rename). Roll the watermark back to 0 so no handler
+		// serves a segment the restarted pass is overwriting; pollSegments
+		// re-advances it as the segments reappear. Mirrors restartFromSegment.
+		s.readyMu.Lock()
+		s.readyMax = 0
+		s.readyMu.Unlock()
 		errBuf.Reset()
 		args := buildCopyVODPassArgs(s.cfg, s.probe, s.copySegStarts, s.tmpDir)
 		cmd = exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)

@@ -72,3 +72,15 @@ func TestWriteCachedKeyframesRejectsEmpty(t *testing.T) {
 		t.Error("writing an empty keyframe index must error, not cache garbage")
 	}
 }
+
+func TestCopyVODEligibleCodec(t *testing.T) {
+	cases := map[string]bool{
+		"h264": true, "avc": true, "avc1": true, "H264": true, " h264 ": true,
+		"hevc": false, "h265": false, "av1": false, "vp9": false, "": false,
+	}
+	for codec, want := range cases {
+		if got := CopyVODEligibleCodec(codec); got != want {
+			t.Errorf("CopyVODEligibleCodec(%q)=%v want %v", codec, got, want)
+		}
+	}
+}

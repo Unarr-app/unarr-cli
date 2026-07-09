@@ -23,6 +23,19 @@ import (
 // — lets the scan-time prewarm pay that read ONCE and every later play start
 // instantly instead of re-demuxing the file. Invalidated by mtime like the others.
 
+// CopyVODEligibleCodec reports whether a video codec can ride COPY-VOD's MPEG-TS
+// transport (H.264 only): TS carries it universally; HEVC needs fMP4 (Apple HLS)
+// and AV1 isn't a TS codec. Placed in this leaf package so the stream engine
+// (segment planning) and the scan-time prewarm (which items to keyframe-index)
+// classify codecs identically — same rationale as IsTextSubtitleCodec.
+func CopyVODEligibleCodec(videoCodec string) bool {
+	switch strings.ToLower(strings.TrimSpace(videoCodec)) {
+	case "h264", "avc", "avc1":
+		return true
+	}
+	return false
+}
+
 // copyKeyframeIndexTimeout bounds the demux-only keyframe scan. A local 2 h film
 // indexes in a few seconds off warm cache; past this ceiling the caller falls
 // back rather than stranding the player.

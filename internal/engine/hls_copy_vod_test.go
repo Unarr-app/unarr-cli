@@ -6,18 +6,6 @@ import (
 	"testing"
 )
 
-func TestCopyVODEligibleCodec(t *testing.T) {
-	cases := map[string]bool{
-		"h264": true, "avc": true, "avc1": true, "H264": true,
-		"hevc": false, "h265": false, "av1": false, "vp9": false, "": false,
-	}
-	for codec, want := range cases {
-		if got := copyVODEligibleCodec(codec); got != want {
-			t.Errorf("copyVODEligibleCodec(%q)=%v want %v", codec, got, want)
-		}
-	}
-}
-
 func TestPlanCopySegments(t *testing.T) {
 	// Keyframes every 2.002s (the common WEB-DL cadence), 30s duration.
 	kfs := []float64{}

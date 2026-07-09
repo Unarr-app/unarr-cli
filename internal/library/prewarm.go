@@ -6,7 +6,6 @@ import (
 	"log"
 	"math"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -291,7 +290,7 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 			}
 			// COPY-VOD keyframe index — only H.264 rides that MPEG-TS path.
 			if opts.Keyframes && opts.FFprobePath != "" && item.MediaInfo.Video != nil &&
-				copyVODEligibleVideoCodec(item.MediaInfo.Video.Codec) {
+				mediainfo.CopyVODEligibleCodec(item.MediaInfo.Video.Codec) {
 				select {
 				case jobs <- prewarmJob{path: item.FilePath, keyframe: true}:
 				case <-ctx.Done():
@@ -309,17 +308,6 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 			log.Printf("[prewarm] %d subtitles, %d thumbnails, %d trickplay, %d keyframes cached, %d failed", subCached, thumbCached, trickCached, kfCached, failed)
 		}
 	}
-}
-
-// copyVODEligibleVideoCodec reports whether a codec rides COPY-VOD's MPEG-TS
-// transport (H.264 only). Mirrors engine.copyVODEligibleCodec — kept local to
-// avoid a library→engine import; the two must stay in sync.
-func copyVODEligibleVideoCodec(codec string) bool {
-	switch strings.ToLower(strings.TrimSpace(codec)) {
-	case "h264", "avc", "avc1":
-		return true
-	}
-	return false
 }
 
 // prewarmLoadWaitCap bounds how long the load gate DEFERS a trickplay job. It's a
