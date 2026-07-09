@@ -1464,13 +1464,33 @@ func (s *HLSSession) ServeInit(w http.ResponseWriter, r *http.Request) {
 //
 // The file fills as ffmpeg reads the (remote) input, so a client fetching it
 // mid-transcode gets cues only up to the read position — accepted for this MVP.
-// 404 until the first byte exists rather than blocking, mirroring ServeInit.
+//
+// On a FRESH session the sidecar extractor has only just started, so the file
+// doesn't exist for the first few seconds. Returning 404 immediately there is
+// a footgun for the web player: a <track> whose fetch 404s once sticks in a
+// terminal ERROR state in Chromium (flipping TextTrack.mode never re-fetches),
+// so subtitles go permanently blank after a pause/tab-switch session
+// re-bootstrap until a full reload. We instead wait briefly for the first byte
+// (mirroring ServeInit) so the initial fetch resolves to a 200 with real cues.
 func (s *HLSSession) ServeSubtitleVTT(w http.ResponseWriter, r *http.Request, idx int) {
 	s.Touch()
 	path := filepath.Join(s.tmpDir, "subs", fmt.Sprintf("s%d.vtt", idx))
-	if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
-		http.Error(w, "subtitle track unavailable", http.StatusNotFound)
-		return
+	// Wait up to 15s for the extractor to write the first cue bytes. Bail early
+	// if the session closes or the client goes away.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
+			break
+		}
+		if s.isClosed() || time.Now().After(deadline) {
+			http.Error(w, "subtitle track unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(150 * time.Millisecond):
+		}
 	}
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
