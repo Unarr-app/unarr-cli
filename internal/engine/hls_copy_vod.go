@@ -43,20 +43,18 @@
 package engine
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 )
 
 // copyVODTargetSec is the nominal segment length for COPY-VOD. Larger than the
@@ -70,11 +68,6 @@ const copyVODTargetSec = 6.0
 // MPEG-TS (.ts), not fMP4 (.m4s) — see the package comment.
 const copyVODSegExt = ".ts"
 
-// copyKeyframeIndexTimeout bounds the one-shot keyframe scan. A local 2 h film
-// indexes in a few seconds; past this ceiling we give up and fall back to the
-// legacy EVENT path rather than stranding the player on "Preparando sesión".
-const copyKeyframeIndexTimeout = 45 * time.Second
-
 // copyVODEligibleCodec reports whether a source video codec can ride COPY-VOD's
 // MPEG-TS transport. H.264 only: TS carries it universally; HEVC needs fMP4
 // (Apple HLS) and AV1 isn't a TS codec, so both fall back to legacy EVENT copy.
@@ -84,67 +77,6 @@ func copyVODEligibleCodec(videoCodec string) bool {
 		return true
 	}
 	return false
-}
-
-// indexKeyframes returns the sorted presentation timestamps (seconds) of every
-// video keyframe in src.
-//
-// It reads PACKET headers (`-show_entries packet=pts_time,flags`) and keeps the
-// ones flagged keyframe ("K") — a demux-only pass, NOT a decode. This is ~40×
-// faster than `-skip_frame nokey` (which actually decodes each keyframe): a
-// 24-min H.264 file indexes in ~0.3 s vs ~13 s, so even a 2-h film stays well
-// under copyKeyframeIndexTimeout. Still a full demux of the container, hence
-// local-file only. Returns an error if no usable keyframes are found.
-func indexKeyframes(ctx context.Context, ffprobePath, src string) ([]float64, error) {
-	ctx, cancel := context.WithTimeout(ctx, copyKeyframeIndexTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, ffprobePath,
-		"-v", "error",
-		"-select_streams", "v:0",
-		"-show_entries", "packet=pts_time,flags",
-		"-of", "csv=p=0",
-		src,
-	)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("keyframe index: %w (%s)", err, strings.TrimSpace(errBuf.String()))
-	}
-	kfs := make([]float64, 0, 1024)
-	sc := bufio.NewScanner(&out)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		// Each line is "pts_time,flags", e.g. "6.006000,K__". The flags field
-		// carries "K" for a keyframe (RAP). Keep only those.
-		line := strings.TrimSpace(sc.Text())
-		comma := strings.IndexByte(line, ',')
-		if comma < 0 {
-			continue
-		}
-		ptsStr := strings.TrimSpace(line[:comma])
-		flags := line[comma+1:]
-		if !strings.Contains(flags, "K") {
-			continue
-		}
-		if ptsStr == "" || ptsStr == "N/A" {
-			continue
-		}
-		v, err := strconv.ParseFloat(ptsStr, 64)
-		if err != nil || v < 0 {
-			continue
-		}
-		kfs = append(kfs, v)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("keyframe index scan: %w", err)
-	}
-	if len(kfs) == 0 {
-		return nil, errors.New("keyframe index: no keyframes found")
-	}
-	sort.Float64s(kfs)
-	return kfs, nil
 }
 
 // planCopySegments turns a sorted keyframe list + total duration into the
@@ -250,13 +182,27 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 		// ride a separate one-shot pass that fills subs/ progressively.
 		startCopyVODSubtitles(s)
 	case s.cfg.SourcePath != "":
-		// LOCAL: a fast demux-only keyframe scan gives exact keyframe boundaries
-		// (frame-accurate seek, no GOP rounding).
-		kfs, err := indexKeyframes(ctx, s.cfg.Transcode.FFprobePath, s.cfg.sourceRef())
-		if err != nil {
-			log.Printf("[hls %s] copy-vod keyframe index failed (%v) — using EVENT copy",
-				shortHLSID(s.cfg.SessionID), err)
-			return false
+		// LOCAL: exact keyframe boundaries (frame-accurate seek, no GOP rounding).
+		// Prefer the scan-time sidecar (.unarr/<file>.copyseg.json) so playback
+		// skips the full demux read; on a miss, index now AND warm the sidecar so
+		// the next play (and a re-scan) is instant.
+		src := s.cfg.sourceRef()
+		kfs, ok := mediainfo.ReadCachedKeyframes(src)
+		if ok {
+			log.Printf("[hls %s] copy-vod keyframe index: sidecar hit (%d keyframes)",
+				shortHLSID(s.cfg.SessionID), len(kfs))
+		} else {
+			var err error
+			kfs, err = mediainfo.IndexKeyframes(ctx, s.cfg.Transcode.FFprobePath, src)
+			if err != nil {
+				log.Printf("[hls %s] copy-vod keyframe index failed (%v) — using EVENT copy",
+					shortHLSID(s.cfg.SessionID), err)
+				return false
+			}
+			if werr := mediainfo.WriteCachedKeyframes(src, kfs); werr != nil {
+				log.Printf("[hls %s] copy-vod keyframe sidecar write skipped: %v",
+					shortHLSID(s.cfg.SessionID), werr)
+			}
 		}
 		starts = planCopySegments(kfs, s.durationSec)
 	default:

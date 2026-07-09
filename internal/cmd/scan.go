@@ -182,14 +182,19 @@ func runScan(ctx context.Context, cfg config.Config, dirPath string, workers int
 	if cfg.Library.CacheSubtitles || cfg.Library.CacheThumbnails || cfg.Library.Trickplay.Enabled {
 		if ff, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err == nil {
 			fmt.Fprintf(os.Stderr, "  Pre-extracting subtitles + thumbnails to cache… (Ctrl-C to skip)\n")
+			// ffprobe powers the COPY-VOD keyframe-index sidecar; if it can't be
+			// resolved, keyframe prewarm is skipped (playback self-warms it).
+			ffprobe, _ := mediainfo.ResolveFFprobe(ffprobePath)
 			library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
 				FFmpegPath:           ff,
+				FFprobePath:          ffprobe,
 				CacheSubtitles:       cfg.Library.CacheSubtitles,
 				CacheThumbnails:      cfg.Library.CacheThumbnails,
 				Workers:              2,
 				Trickplay:            cfg.Library.Trickplay.Enabled,
 				TrickplayIntervalSec: cfg.Library.Trickplay.IntervalSeconds(),
 				TrickplayWidth:       cfg.Library.Trickplay.Width,
+				Keyframes:            ffprobe != "",
 				MaxLoadRatio:         cfg.Library.PrewarmMaxLoadRatio,
 			})
 		} else {
