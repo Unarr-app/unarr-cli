@@ -7,8 +7,10 @@ local pipeline and no self-hosted mirror step anymore.
 
 > The old self-hosted Hetzner backup (`make ship` → `scripts/ship.sh` +
 > `torrentclaw-web/scripts/publish-cli-release.sh` → `/opt/torrentclaw/releases` +
-> `version.txt`) was **removed 2026-07-11**. `ship.sh` and the web `/version` &
-> `/releases/download` routes no longer exist — GitHub Releases is the single source.
+> `version.txt`) was **removed 2026-07-11** — GitHub Releases is the single source, no
+> disk mirror. `ship.sh` is gone; the web `/version` & `/releases/download` routes are
+> KEPT as thin **GitHub redirects** (deployed agents' self-updaters fetch them → 302 /
+> version-text → GitHub).
 
 ## The release ritual
 
@@ -37,11 +39,13 @@ gh auth setup-git`); it is the only account allowed to push to the repo.
 - Signature: ed25519 over `checksums.txt`; the public key is compiled in
   (`internal/upgrade/signature.go`), the private key is the `RELEASE_SIGNING_KEY`
   CI secret (+ Bitwarden backup).
-- **Compiled-in `fallbackBaseURL` (`cfg.Auth.APIURL`, → the web origin) is now a
-  DEAD endpoint** for already-deployed agents: the web mirror routes it pointed at
-  (`/version`, `/releases/download`) were removed on 2026-07-11. A GitHub outage no
-  longer has a failover (accepted tradeoff of going GitHub-only). Dropping the
-  fallback from the binary is a future, separate release.
+- **Compiled-in `fallbackBaseURL` (`cfg.Auth.APIURL` → the web origin)** resolves again:
+  `/version` + `/releases/download/*` were restored as thin **GitHub redirects**
+  (2026-07-11), so a deployed agent's fallback path 302s to GitHub instead of 404ing
+  (the disk mirror they briefly deleted broke old-agent self-update — see
+  [[reference_cli_release]]). Caveat: this forwards to GitHub, it is NOT an independent
+  mirror — a full GitHub outage still has no alternate source. Common case (web-origin
+  fallback path, GitHub up) works.
 
 ## CI
 
