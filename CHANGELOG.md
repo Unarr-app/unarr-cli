@@ -5,12 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.7-beta] - 2026-07-12
+
+
+### Documentation
+
+- /version + /releases/download kept as GitHub redirects, not removed
+
+### Fixed
+
+- **hls**: report source_unreachable for remote probe failures + explicit ffprobe timeout
+
+### Other
+
+- **release**: remove self-hosted ship pipeline; GitHub Actions is the only path
 ## [1.3.6-beta] - 2026-07-09
 
 
 ### Fixed
 
 - **hls**: wait for subtitle sidecar first byte instead of instant 404
+
+### Other
+
+- **release**: 1.3.6-beta
 ## [1.3.5-beta] - 2026-07-09
 
 
@@ -1082,6 +1100,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.3.7-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.6-beta...v1.3.7-beta
 [1.3.6-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.5-beta...v1.3.6-beta
 [1.3.5-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.4-beta...v1.3.5-beta
 [1.3.4-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.3-beta...v1.3.4-beta
