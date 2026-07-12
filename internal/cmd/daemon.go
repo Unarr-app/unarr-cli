@@ -876,7 +876,15 @@ func runDaemonStart() error {
 				if err != nil {
 					playerSessionRegistry.remove(hlsCfg.SessionID)
 					hlsCancel()
-					failSession(hlsCfg.SessionID, sessErrStartFailed, err.Error())
+					// A remote debrid/URL source that wouldn't probe is the user's
+					// provider link, not our agent — report source_unreachable so
+					// the web's streaming-health watchdog doesn't false-page it as
+					// a transcode/HW ("QSV-class") regression.
+					code := sessErrStartFailed
+					if errors.Is(err, engine.ErrSourceUnreachable) {
+						code = sessErrSourceUnreachable
+					}
+					failSession(hlsCfg.SessionID, code, err.Error())
 					return
 				}
 				if prewarm {
@@ -916,7 +924,10 @@ func runDaemonStart() error {
 				provider, perr := engine.NewDebridFileProvider(bctx, sess.DirectURL, sess.FileName, sess.FileSize, refresh)
 				if perr != nil {
 					playerSessionRegistry.remove(sess.SessionID)
-					failSession(sess.SessionID, sessErrStartFailed, fmt.Sprintf("debrid provider: %v", perr))
+					// Provider setup does a HEAD against the debrid link — a
+					// failure here means the remote source is unreachable (expired
+					// link / dead CDN node), not a local agent fault.
+					failSession(sess.SessionID, sessErrSourceUnreachable, fmt.Sprintf("debrid provider: %v", perr))
 					return
 				}
 				streamSrv.SetFile(provider, sess.TaskID)
@@ -1285,7 +1296,13 @@ const (
 	pathErrMissing       = "file_missing"
 	pathErrNoVideo       = "no_video_file"
 	sessErrFfmpegMissing = "ffmpeg_unavailable"
-	sessErrStartFailed   = "start_failed"
+	// sessErrSourceUnreachable: a REMOTE source (debrid HLS-from-URL / direct
+	// link) could not be probed or reached — the provider link timed out, 4xx'd,
+	// or the CDN node never delivered bytes. Kept distinct from start_failed so
+	// the web's streaming-health watchdog does NOT count the user's dead debrid
+	// link as an agent transcode/HW ("QSV-class") regression.
+	sessErrSourceUnreachable = "source_unreachable"
+	sessErrStartFailed       = "start_failed"
 )
 
 // resolvePlayableFile validates and self-heals a web-provided source path into

@@ -35,6 +35,13 @@ import (
 	"time"
 )
 
+// ErrSourceUnreachable marks a probe failure on a REMOTE source (debrid
+// HLS-from-URL / direct link): the provider link timed out, 4xx'd, or the CDN
+// node never delivered probeable bytes. The daemon maps it to the
+// "source_unreachable" session-error code so the web's streaming-health
+// watchdog doesn't count the user's dead debrid link as an agent HW regression.
+var ErrSourceUnreachable = errors.New("source unreachable")
+
 // hlsSegmentDuration is the target seconds per HLS fragment.
 //
 // We use 2 seconds (not the more common 4-6 s). Trade-off: 2× more segments
@@ -588,14 +595,31 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		return nil, errors.New("hls: ffmpeg/ffprobe not available")
 	}
 
-	// Probe gets a 15 s ceiling. ffprobe on a 50 GB MKV over a slow remote
-	// fs can hang indefinitely; without a deadline the daemon would block
-	// the goroutine that started the session forever and the user would
-	// see the player phase stuck on "Preparando sesión".
-	probeCtx, cancelProbe := context.WithTimeout(ctx, 15*time.Second)
+	// Probe gets a deadline so ffprobe can't hang the session-start goroutine
+	// forever (else the player sticks on "Preparando sesión"). A REMOTE source
+	// (debrid HLS-from-URL) gets a longer ceiling: a cold tb-cdn.io /dld node
+	// can take >15 s just to start delivering bytes, and killing ffprobe early
+	// surfaces an empty-stderr "start_failed" that (a) mislabels the user's slow
+	// debrid link as an agent HW fault and (b) gives zero diagnostics. Local
+	// files keep the tighter 15 s (a local disk that slow IS a real problem).
+	probeTimeout := 15 * time.Second
+	if cfg.SourceURL != "" {
+		probeTimeout = 30 * time.Second
+	}
+	probeCtx, cancelProbe := context.WithTimeout(ctx, probeTimeout)
 	probe, err := ProbeFile(probeCtx, cfg.Transcode.FFprobePath, cfg.sourceRef())
 	cancelProbe()
 	if err != nil {
+		// A probe failure on a remote source is treated as "the provider link is
+		// unreachable" (timeout / 4xx / dead CDN node), not a local agent fault.
+		// Tag it so the daemon reports "source_unreachable" instead of
+		// "start_failed". Deliberate trade-off: rare agent-side probe faults on
+		// remote inputs (e.g. an ffmpeg build without TLS → "Protocol not
+		// found") get the same tag — distinguishing them would need brittle
+		// stderr string-matching, and the error message keeps the detail.
+		if cfg.SourceURL != "" {
+			return nil, fmt.Errorf("hls: probe: %w: %w", ErrSourceUnreachable, err)
+		}
 		return nil, fmt.Errorf("hls: probe: %w", err)
 	}
 	if probe.DurationSec <= 0 {
