@@ -242,8 +242,14 @@ func getClient() *tc.Client {
 
 	var opts []tc.Option
 
-	if cfg.Auth.APIURL != "" {
-		opts = append(opts, tc.WithBaseURL(cfg.Auth.APIURL))
+	// Discovery (search/stats/popular/recent/inspect/watch) lives on the
+	// TorrentClaw hosts. The unarr.app primary brand-blocks those endpoints with
+	// a 404 (not transient → the pool won't fail over past it), so route the
+	// discovery client to the TorrentClaw entries of [api_url]+mirrors instead of
+	// the raw api_url. See discoveryHosts() for the full rationale.
+	discoveryBase, discoveryMirrors := discoveryHosts(cfg.Auth.APIURL, cfg.Auth.Mirrors)
+	if discoveryBase != "" {
+		opts = append(opts, tc.WithBaseURL(discoveryBase))
 	}
 
 	apiKey := apiKeyFlag
@@ -258,13 +264,13 @@ func getClient() *tc.Client {
 
 	// Mirror failover for the public-API client, matching the agent control-plane
 	// client's resilience: wrap the transport so search/popular/etc. rotate across
-	// cfg.Auth.Mirrors on a primary takedown, using the same MirrorPool TYPE +
+	// the discovery hosts on a primary takedown, using the same MirrorPool TYPE +
 	// IsTransient policy the agent client uses (a fresh pool instance — the two
 	// clients fail over independently). WithRetry(0) disables the go-client's own
 	// retry loop so the transport owns failover exclusively (no nested
 	// retry×backoff on an outage). WithTimeout(30s) is set idiomatically and gives
 	// room for a couple of mirror attempts (go-client's bare default is 15s).
-	pool := agent.NewMirrorPool(cfg.Auth.APIURL, cfg.Auth.Mirrors)
+	pool := agent.NewMirrorPool(discoveryBase, discoveryMirrors)
 	opts = append(opts,
 		tc.WithHTTPClient(&http.Client{Transport: agent.NewMirrorRoundTripper(pool, nil)}),
 		tc.WithTimeout(30*time.Second),
