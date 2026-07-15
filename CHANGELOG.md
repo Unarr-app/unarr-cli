@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.8-beta] - 2026-07-15
+
+
+### Added
+
+- **doctor**: add --fix self-repair for common misconfigurations
+
+### Fixed
+
+- **discovery**: route search/stats to TorrentClaw hosts, not unarr.app
 ## [1.3.7-beta] - 2026-07-12
 
 
@@ -18,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- **release**: 1.3.7-beta
 - **release**: remove self-hosted ship pipeline; GitHub Actions is the only path
 ## [1.3.6-beta] - 2026-07-09
 
@@ -1100,6 +1111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.3.8-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.7-beta...v1.3.8-beta
 [1.3.7-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.6-beta...v1.3.7-beta
 [1.3.6-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.5-beta...v1.3.6-beta
 [1.3.5-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.4-beta...v1.3.5-beta
