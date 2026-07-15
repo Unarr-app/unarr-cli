@@ -9,23 +9,26 @@ import (
 
 	"github.com/spf13/cobra"
 	tc "github.com/torrentclaw/go-client"
+	"golang.org/x/term"
 
 	"github.com/Unarr-app/unarr-cli/internal/ui"
 )
 
 func newSearchCmd() *cobra.Command {
 	var (
-		contentType string
-		quality     string
-		lang        string
-		genre       string
-		yearMin     int
-		yearMax     int
-		minRating   float64
-		sort        string
-		limit       int
-		page        int
-		country     string
+		contentType   string
+		quality       string
+		lang          string
+		genre         string
+		yearMin       int
+		yearMax       int
+		minRating     float64
+		sort          string
+		limit         int
+		page          int
+		country       string
+		stream        bool
+		noInteractive bool
 	)
 
 	cmd := &cobra.Command{
@@ -34,12 +37,16 @@ func newSearchCmd() *cobra.Command {
 		Long: `Search the catalog for movies and TV shows with advanced filters.
 
 Results include torrent quality scores (0-100), seed health, resolution, codec,
-audio, and metadata aggregated from 30+ sources. Use --json for machine-readable
-output that can be piped to jq or other tools.`,
+audio, and metadata aggregated from 30+ sources.
+
+On a terminal, results open an interactive picker: choose a title, choose a
+release, then stream it, copy its magnet, or show its info hash. Use --stream to
+jump straight to playback, --no-interactive for the static table, or --json for
+machine-readable output that can be piped to jq or other tools.`,
 		Example: `  unarr search "breaking bad" --type show --quality 1080p
-  unarr search "oppenheimer" --sort seeders --limit 5
+  unarr search "oppenheimer" --sort seeders --stream
   unarr search "inception" --lang es --min-rating 7
-  unarr search "matrix" --json | jq '.results[].title'`,
+  unarr search "matrix" --json | jq -r '.results[0].torrents[0].infoHash'`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := getClient()
@@ -70,6 +77,26 @@ output that can be piped to jq or other tools.`,
 				return enc.Encode(resp)
 			}
 
+			// huh reads from stdin, so both stdout AND stdin must be a terminal
+			// for the interactive picker; otherwise fall back to the table/auto-pick.
+			interactive := !noInteractive &&
+				term.IsTerminal(int(os.Stdout.Fd())) &&
+				term.IsTerminal(int(os.Stdin.Fd()))
+
+			// --stream on a non-interactive stdout (piped or --no-interactive):
+			// auto-pick the best playable release and stream it.
+			if stream && !interactive {
+				tor, ok := firstStreamable(resp.Results)
+				if !ok {
+					return fmt.Errorf("no streamable release found for %q", strings.Join(args, " "))
+				}
+				return streamTorrent(tor)
+			}
+
+			if interactive {
+				return runSearchInteractive(resp, stream)
+			}
+
 			ui.PrintSearchResults(resp)
 			return nil
 		},
@@ -86,6 +113,8 @@ output that can be piped to jq or other tools.`,
 	cmd.Flags().IntVar(&limit, "limit", 0, "results per page (1-50)")
 	cmd.Flags().IntVar(&page, "page", 0, "page number")
 	cmd.Flags().StringVar(&country, "country", "", "country code for streaming availability (e.g. US, ES)")
+	cmd.Flags().BoolVar(&stream, "stream", false, "pick a release and stream it (auto-picks the best on a non-interactive stdout)")
+	cmd.Flags().BoolVar(&noInteractive, "no-interactive", false, "print the static results table instead of the interactive picker")
 
 	// Shell completion for flags with known values
 	cmd.RegisterFlagCompletionFunc("type", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
