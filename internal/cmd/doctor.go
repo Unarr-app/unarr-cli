@@ -8,13 +8,13 @@ import (
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
-	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
 func newDoctorCmd() *cobra.Command {
-	return &cobra.Command{
+	var fix, dryRun, yes bool
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Diagnose configuration and connectivity",
 		Long: `Run diagnostic checks to verify that unarr is correctly configured.
@@ -23,20 +23,39 @@ Checks performed:
   - Config file exists and is readable
   - API key is configured
   - API server is reachable (with latency)
+  - Discovery API (search/stats) is reachable
   - Agent is registered with the server
   - Download directory exists and is writable
   - Disk space is sufficient (warns below 10 GB)
   - Current unarr version
 
+Pass --fix to auto-repair the common misconfigurations: malformed api_url,
+empty mirror list, missing download directory, config file permissions,
+an unregistered agent (when an API key exists), and a corrupt config.toml
+(always asks first, even with --yes). --fix backs up config.toml before
+writing anything; use --dry-run to preview.
+
 Use this command to troubleshoot connection issues or verify setup.`,
-		Example: `  unarr doctor`,
+		Example: `  unarr doctor
+  unarr doctor --fix
+  unarr doctor --fix --dry-run`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDoctor()
+			return runDoctor(doctorOpts{fix: fix, dryRun: dryRun, yes: yes})
 		},
 	}
+	cmd.Flags().BoolVar(&fix, "fix", false, "auto-repair common misconfigurations (safe, reversible)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "with --fix, show what would change without writing")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "with --fix, skip confirmation prompts")
+	return cmd
 }
 
-func runDoctor() error {
+type doctorOpts struct {
+	fix    bool
+	dryRun bool
+	yes    bool
+}
+
+func runDoctor(opts doctorOpts) error {
 	bold := color.New(color.Bold)
 	green := color.New(color.FgGreen)
 	red := color.New(color.FgRed)
@@ -79,21 +98,18 @@ func runDoctor() error {
 	cfg := loadConfig()
 
 	check("Config file", func() (string, error) {
-		path := config.FilePath()
-		if cfgFile != "" {
-			path = cfgFile
-		}
+		path := resolvedConfigPath()
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			return path + " (not found, run unarr init)", fmt.Errorf("missing")
+		}
+		if configFileBroken(path) {
+			return path + " (unreadable or invalid TOML — run `unarr doctor --fix`)", fmt.Errorf("corrupt")
 		}
 		return path, nil
 	})
 
 	check("API key configured", func() (string, error) {
-		key := apiKeyFlag
-		if key == "" {
-			key = cfg.Auth.APIKey
-		}
+		key := effectiveAPIKey(&cfg)
 		if key == "" {
 			return "run unarr init to configure", fmt.Errorf("missing")
 		}
@@ -106,7 +122,12 @@ func runDoctor() error {
 	fmt.Println()
 	bold.Println("  Connectivity")
 
-	// API connectivity
+	// API connectivity. getClient routes through the discovery pool (see
+	// discoveryHosts), so label the host actually probed — printing the raw
+	// api_url here would blame unarr.app for a torrentclaw.to failure (and
+	// vice versa). The configured api_url itself is exercised by the "Agent
+	// registration" check below.
+	discoveryBase, _ := discoveryHosts(cfg.Auth.APIURL, cfg.Auth.Mirrors)
 	check("API reachable", func() (string, error) {
 		client := getClient()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -115,22 +136,36 @@ func runDoctor() error {
 		_, err := client.Health(ctx)
 		elapsed := time.Since(start)
 		if err != nil {
-			return cfg.Auth.APIURL, err
+			return discoveryBase, err
 		}
-		return fmt.Sprintf("%s (%dms)", cfg.Auth.APIURL, elapsed.Milliseconds()), nil
+		return fmt.Sprintf("%s (%dms)", discoveryBase, elapsed.Milliseconds()), nil
 	})
 
-	// Agent registration
-	check("Agent registration", func() (string, error) {
-		key := apiKeyFlag
-		if key == "" {
-			key = cfg.Auth.APIKey
+	// Discovery API reachability. The plain "API reachable" check above hits
+	// /api/health, which the unarr.app brand deployment serves (200) even though
+	// it brand-blocks search/stats (404). Probing an actual discovery endpoint is
+	// the only way doctor catches a primary that answers health but 404s the
+	// catalog — the exact failure `unarr search`/`stats` would hit.
+	check("Discovery API (search/stats)", func() (string, error) {
+		client := getClient()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := client.Stats(ctx); err != nil {
+			return "run `unarr doctor --fix` (routes discovery to a working mirror)", err
 		}
+		return "reachable", nil
+	})
+
+	// Agent registration. Doubles as the API-key validity probe: a 401/403
+	// from Register means the key itself was rejected (classifyAuthError maps
+	// it to the `unarr login` remedy), distinct from "no key" above.
+	check("Agent registration", func() (string, error) {
+		key := effectiveAPIKey(&cfg)
 		if key == "" {
 			return "no API key", fmt.Errorf("skipped")
 		}
 		if cfg.Agent.ID == "" {
-			return "no agent ID, run unarr init", fmt.Errorf("not registered")
+			return "no agent ID — run `unarr doctor --fix` (or unarr init)", fmt.Errorf("not registered")
 		}
 
 		ac := agent.NewClient(cfg.Auth.APIURL, key, "unarr/"+Version)
@@ -144,7 +179,7 @@ func runDoctor() error {
 			Version: Version,
 		})
 		if err != nil {
-			return "", err
+			return "", classifyAuthError(err)
 		}
 		return fmt.Sprintf("%s (%s) [%s]", resp.User.Name, resp.User.Email, resp.User.Plan), nil
 	})
@@ -207,6 +242,15 @@ func runDoctor() error {
 		red.Printf("  %d passed, %d failed, %d warnings\n", pass, fail, warn)
 	}
 	fmt.Println()
+
+	if opts.fix {
+		return runDoctorRepairs(&cfg, opts)
+	}
+	if fail > 0 {
+		dim := color.New(color.Faint)
+		dim.Println("  Tip: run `unarr doctor --fix` to auto-repair common issues.")
+		fmt.Println()
+	}
 
 	return nil
 }
