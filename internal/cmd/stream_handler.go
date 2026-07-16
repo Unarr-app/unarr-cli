@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/Unarr-app/unarr-cli/internal/engine"
 	"github.com/Unarr-app/unarr-cli/internal/ui"
+	"github.com/Unarr-app/unarr-cli/internal/vpn"
 )
 
 const streamIdleTimeout = 30 * time.Minute
@@ -95,7 +97,7 @@ func cancelStreamTask(taskID string) {
 // handleStreamTask manages a streaming task lifecycle for active torrent downloads.
 // It creates a StreamEngine, buffers, sets the file on the persistent server,
 // and reports progress until the task is cancelled or the download completes.
-func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client, srv *engine.StreamServer, onStateChange func()) {
+func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client, srv *engine.StreamServer, vpnTunnel *vpn.Tunnel, onStateChange func()) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
@@ -170,13 +172,24 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		return
 	}
 
-	// 1. Create StreamEngine
+	// 1. Create StreamEngine. The VPN kill-switch is threaded in: with
+	// [downloads.vpn] required=true and no healthy tunnel, NewStreamEngine returns
+	// ErrVPNRequired so a torrent-only (non-debrid) title is NEVER streamed in the
+	// clear — the daemon is the trust boundary and self-protects regardless of what
+	// the web sent. Debrid direct-play (at.DirectURL) returned above and is unaffected.
 	eng, err := engine.NewStreamEngine(engine.StreamConfig{
 		DataDir:     cfg.Download.Dir,
 		MetaTimeout: 60 * time.Second,
+		VPNTunnel:   vpnTunnel,
+		VPNRequired: cfg.Download.VPN.Required,
 	})
 	if err != nil {
-		task.ErrorMessage = "create stream engine: " + err.Error()
+		if errors.Is(err, engine.ErrVPNRequired) {
+			task.ErrorMessage = "VPN required: tunnel down — P2P streaming disabled (debrid still works)"
+			log.Printf("[%s] stream refused: VPN required but tunnel down — not joining the swarm in the clear", at.ID[:8])
+		} else {
+			task.ErrorMessage = "create stream engine: " + err.Error()
+		}
 		task.Transition(engine.StatusFailed)
 		return
 	}
@@ -234,6 +247,18 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 			return
 
 		case <-progressTicker.C:
+			// Kill-switch: a mid-stream tunnel drop while still fetching must stop the
+			// P2P stream so no pieces are pulled over the real IP. The engine's dials
+			// already fail closed (tunnel-routed), but tear the session down
+			// explicitly rather than serve a stalled stream. Once completed there is
+			// nothing left to fetch, so a later drop can't leak.
+			if !completed && !eng.VPNStillHealthy() {
+				task.ErrorMessage = "VPN tunnel down — P2P streaming stopped (no clear-net leak)"
+				task.Transition(engine.StatusFailed)
+				log.Printf("[%s] VPN tunnel went down mid-stream — stopping P2P (partial kept, P2P disabled)", at.ID[:8])
+				return
+			}
+
 			p := eng.Progress()
 			task.UpdateProgress(engine.Progress{
 				DownloadedBytes: p.DownloadedBytes,

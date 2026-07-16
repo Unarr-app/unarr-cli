@@ -22,7 +22,6 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/library"
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 	"github.com/Unarr-app/unarr-cli/internal/usenet/download"
-	"github.com/Unarr-app/unarr-cli/internal/vpn"
 	"github.com/fatih/color"
 	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
@@ -288,54 +287,32 @@ func runDaemonStart() error {
 	reporter := engine.NewProgressReporter(agentClient, statusInterval)
 	reporter.SetWatchingFunc(func() bool { return d.Watching.Load() })
 
-	// Managed-VPN add-on: bring up the in-process WireGuard split-tunnel before
-	// the torrent client so peer + tracker traffic routes through it. Failure is
-	// non-fatal — log and download in the clear (better than refusing to run).
-	var vpnTunnel *vpn.Tunnel
-	if cfg.Download.VPN.ConfigFile != "" {
-		// Self-hosted / personal-VPN mode: read a local .conf directly.
-		raw, rerr := os.ReadFile(cfg.Download.VPN.ConfigFile)
-		if rerr != nil {
-			log.Printf("[vpn] could not read config_file %q (%v) — downloading in the clear", cfg.Download.VPN.ConfigFile, rerr)
-		} else if t, uerr := vpn.Up(string(raw)); uerr != nil {
-			log.Printf("[vpn] tunnel failed to start from config_file (%v) — downloading in the clear", uerr)
-		} else {
-			vpnTunnel = t
-			defer vpnTunnel.Close()
-			log.Printf("[vpn] managed VPN active (local config_file) — torrent traffic split-tunnelled through WireGuard")
-		}
-	} else if cfg.Download.VPN.Enabled {
-		apiURL := cfg.Auth.APIURL
-		if apiURL == "" {
-			apiURL = "https://torrentclaw.com"
-		}
-		fetchCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-		conf, ferr := vpn.FetchConfig(fetchCtx, apiURL, cfg.Auth.APIKey, "unarr/"+Version, cfg.Agent.ID, false)
-		cancel()
-		var fe *vpn.FetchError
-		switch {
-		case ferr != nil && errors.As(ferr, &fe) && fe.Code == vpn.ErrSlotOnDevice:
-			log.Printf("[vpn] the single WireGuard slot is already held by another unarr agent — this one downloads in the clear. To protect this machine too, set up OpenVPN on it (1 agent uses WireGuard, the rest use OpenVPN — up to 10). See https://unarr.app/vpn")
-		case ferr != nil:
-			log.Printf("[vpn] could not enable VPN (%v) — downloading in the clear", ferr)
-		default:
-			if t, uerr := vpn.Up(conf); uerr != nil {
-				log.Printf("[vpn] tunnel failed to start (%v) — downloading in the clear", uerr)
-			} else {
-				vpnTunnel = t
-				defer vpnTunnel.Close()
-				log.Printf("[vpn] managed VPN active — torrent traffic split-tunnelled through WireGuard")
-			}
-		}
+	// Managed-VPN add-on: bring up the in-process WireGuard split-tunnel before the
+	// torrent client so peer + tracker traffic routes through it (see daemon_vpn.go).
+	// With [downloads.vpn] required=false (default) a failed tunnel is non-fatal —
+	// download in the clear. With required=true it is a fail-CLOSED kill-switch:
+	// torrent/P2P is DISABLED without a live tunnel (debrid/usenet keep working).
+	vpnRequired := cfg.Download.VPN.Required
+	vpnTunnel, vpnModeLabel := bringUpVPN(cfg, vpnRequired)
+	if vpnTunnel != nil {
+		defer vpnTunnel.Close()
 	}
 
-	// Record VPN split-tunnel state for `unarr vpn status`.
-	if vpnTunnel != nil {
-		mode := "managed"
-		if cfg.Download.VPN.ConfigFile != "" {
-			mode = "self-hosted"
-		}
-		d.SetVPNState(true, mode, vpnTunnel.Endpoint)
+	// Record VPN state UNCONDITIONALLY when required, so a nil/failed tunnel is
+	// surfaced as BLOCKING to `unarr vpn status` + doctor (not silently off).
+	// Report active by real HEALTH, not mere presence: a device-less tunnel
+	// (bring-up failed but returned a non-nil object) must not read as
+	// "protected" for ~15s until the supervisor's first tick — a privacy feature
+	// erring toward "safe" must never claim protection it doesn't have yet.
+	// Healthy() is nil-safe.
+	if vpnRequired || vpnTunnel != nil {
+		d.SetVPNState(vpnTunnel.Healthy(), vpnRequired, vpnModeLabel, vpnEndpoint(vpnTunnel))
+	}
+
+	// Kill-switch auto-heal: when required and a tunnel was attempted, watch health
+	// and reconnect with backoff so a mid-session tunnel death self-recovers.
+	if vpnRequired && (cfg.Download.VPN.Enabled || cfg.Download.VPN.ConfigFile != "") {
+		go superviseVPNTunnel(ctx, d, vpnTunnel, cfg, vpnModeLabel)
 	}
 
 	// Create torrent downloader
@@ -352,6 +329,7 @@ func runDaemonStart() error {
 		SeedRatio:          cfg.Download.SeedRatio,
 		SeedTime:           seedTime,
 		VPNTunnel:          vpnTunnel,
+		VPNRequired:        vpnRequired,
 	})
 	if err != nil {
 		return fmt.Errorf("create torrent downloader: %w", err)
@@ -628,7 +606,7 @@ func runDaemonStart() error {
 				streamRegistry.mu.Lock()
 				streamRegistry.cancels[t.ID] = streamCancel
 				streamRegistry.mu.Unlock()
-				go handleStreamTask(streamCtx, t, reporter, cfg, agentClient, streamSrv, func() { d.TriggerSync() })
+				go handleStreamTask(streamCtx, t, reporter, cfg, agentClient, streamSrv, vpnTunnel, func() { d.TriggerSync() })
 			} else {
 				manager.Submit(ctx, t)
 			}

@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -225,6 +227,12 @@ func runDoctor(opts doctorOpts) error {
 		return checkDiskSpace(dir)
 	})
 
+	// Managed-VPN P2P kill-switch: when [downloads.vpn] required=true, torrent must
+	// have a live tunnel — otherwise it's disabled (safe) and this flags it.
+	check("Managed VPN (P2P kill-switch)", func() (string, error) {
+		return checkManagedVPN(cfg)
+	})
+
 	fmt.Println()
 	bold.Println("  Version")
 
@@ -253,4 +261,63 @@ func runDoctor(opts doctorOpts) error {
 	}
 
 	return nil
+}
+
+// errVPNKillSwitch marks the doctor "Managed VPN" check as FAILED. The message the
+// user sees comes from the returned string; the error's only job is to make
+// runDoctor's check() render a red ✗.
+var errVPNKillSwitch = errors.New("vpn kill-switch requirement not met")
+
+// vpnDoctorInput is the pure input to the managed-VPN doctor decision: config
+// knobs + the live daemon state. Grouped in a struct to stay within the
+// argument-limit and to keep evaluateVPNDoctor unit-testable.
+type vpnDoctorInput struct {
+	required      bool // [downloads.vpn] required
+	enabled       bool // [downloads.vpn] enabled (managed)
+	hasConfigFile bool // [downloads.vpn] config_file set (self-hosted)
+	daemonAlive   bool
+	vpnActive     bool
+	vpnBlocking   bool
+}
+
+// evaluateVPNDoctor is the pure decision for the doctor "Managed VPN" check. It
+// returns a (message, error) pair in the check() convention: non-nil error → FAIL,
+// a leading '!' in the message → WARN, otherwise PASS. No I/O, so it's testable.
+func evaluateVPNDoctor(in vpnDoctorInput) (string, error) {
+	if !in.required {
+		if in.enabled || in.hasConfigFile {
+			return "configured (kill-switch off — a failed tunnel falls back to clear-net)", nil
+		}
+		return "off (not required)", nil
+	}
+	if !in.enabled && !in.hasConfigFile {
+		return "required=true but the VPN is OFF — torrent/P2P disabled. Run `unarr vpn enable`, set a config_file, or set [downloads.vpn] required=false", errVPNKillSwitch
+	}
+	if !in.daemonAlive {
+		return "!required — daemon not running; start it (`unarr start`) to bring the tunnel up (torrent stays disabled until it is healthy)", nil
+	}
+	if in.vpnBlocking {
+		return "required but tunnel DOWN — P2P disabled (safe, no leak). Check `unarr daemon logs` for [vpn]; verify the add-on at https://unarr.app/vpn", errVPNKillSwitch
+	}
+	if in.vpnActive {
+		return "required and tunnel ACTIVE — P2P protected", nil
+	}
+	return "!required — tunnel not yet active; the agent is bringing it up", nil
+}
+
+// checkManagedVPN reads the live daemon state and runs the pure decision. It is the
+// thin I/O wrapper the doctor check() closure calls.
+func checkManagedVPN(cfg config.Config) (string, error) {
+	state := agent.ReadState()
+	in := vpnDoctorInput{
+		required:      cfg.Download.VPN.Required,
+		enabled:       cfg.Download.VPN.Enabled,
+		hasConfigFile: cfg.Download.VPN.ConfigFile != "",
+		daemonAlive:   state != nil && isDaemonAlive(state),
+	}
+	if state != nil {
+		in.vpnActive = state.VPNActive
+		in.vpnBlocking = state.VPNBlocking
+	}
+	return evaluateVPNDoctor(in)
 }

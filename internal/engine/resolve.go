@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 )
@@ -48,6 +49,11 @@ func effectiveOrder(task *Task, configMethods []string) []DownloadMethod {
 func resolveMethod(ctx context.Context, task *Task, downloaders map[DownloadMethod]Downloader, configMethods []string) (DownloadMethod, error) {
 	order := effectiveOrder(task, configMethods)
 
+	// gateReason remembers a safety gate (e.g. the VPN kill-switch) that made an
+	// otherwise-eligible method unavailable, so that when NOTHING resolves we can
+	// return the actionable reason instead of the generic "no method" message.
+	var gateReason error
+
 	for _, method := range order {
 		// Skip already-tried methods
 		tried := false
@@ -73,6 +79,9 @@ func resolveMethod(ctx context.Context, task *Task, downloaders map[DownloadMeth
 				taskID = taskID[:8]
 			}
 			log.Printf("[%s] %s availability check failed: %v", taskID, method, err)
+			if errors.Is(err, ErrVPNRequired) {
+				gateReason = err
+			}
 			continue
 		}
 		if available {
@@ -80,6 +89,9 @@ func resolveMethod(ctx context.Context, task *Task, downloaders map[DownloadMeth
 		}
 	}
 
+	if gateReason != nil {
+		return "", fmt.Errorf("no download method available: %w", gateReason)
+	}
 	return "", fmt.Errorf("no download method available (order: %v, tried: %v)", order, task.TriedMethods)
 }
 

@@ -340,6 +340,32 @@ seed_time = "24h"
 	}
 }
 
+// TestLoadVPNRequired locks in the kill-switch default-behavior invariant:
+// [downloads.vpn] required round-trips when set, and an omitted key stays false
+// (so an existing config that predates the key changes nothing).
+func TestLoadVPNRequired(t *testing.T) {
+	tmp := t.TempDir()
+
+	on := filepath.Join(tmp, "on.toml")
+	os.WriteFile(on, []byte("[downloads.vpn]\nrequired = true\n"), 0o644)
+	cfg, err := Load(on)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Download.VPN.Required {
+		t.Error("VPN.Required = false, want true (explicitly set)")
+	}
+
+	off := filepath.Join(tmp, "off.toml")
+	os.WriteFile(off, []byte("[downloads]\ndir = \"/tmp/dl\"\n"), 0o644)
+	if cfg, err = Load(off); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Download.VPN.Required {
+		t.Error("VPN.Required (key absent) = true, want false (default = current behavior)")
+	}
+}
+
 func TestLoadInvalidTOML(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "config.toml")

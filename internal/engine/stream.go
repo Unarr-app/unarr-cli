@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/vpn"
 	alog "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
 )
@@ -22,6 +23,18 @@ type StreamConfig struct {
 	MetaTimeout time.Duration
 	NoOpen      bool
 	PlayerCmd   string
+
+	// VPNTunnel, when set, split-tunnels the P2P stream client's peer + tracker +
+	// DHT traffic through the in-process WireGuard tunnel — identical wiring to the
+	// download client (see applyVPNTunnel). nil = streams in the clear.
+	VPNTunnel *vpn.Tunnel
+	// VPNRequired turns the tunnel into a fail-CLOSED kill-switch for P2P streaming:
+	// when true, NewStreamEngine refuses (ErrVPNRequired) unless a healthy tunnel is
+	// up, and a mid-stream tunnel drop stops the stream — so streaming a torrent
+	// never exposes the user's IP to peers/trackers. Debrid direct-play (HTTPS) is
+	// unaffected and is handled before the P2P engine is ever created. Fed from
+	// config.toml `[downloads.vpn] required`.
+	VPNRequired bool
 }
 
 // StreamStatus represents the current state of the streaming session.
@@ -61,11 +74,21 @@ type StreamEngine struct {
 	lastBytes      int64
 	lastTime       time.Time
 	speedBps       int64
-	downloadPaused bool // true when the greedy background fetch is deprioritized (idle stream)
+	downloadPaused bool      // true when the greedy background fetch is deprioritized (idle stream)
+	lastVPNCheck   time.Time // last mid-stream tunnel-health probe (throttles vpnStillHealthy)
 }
 
 // NewStreamEngine creates a streaming engine with its own torrent client.
 func NewStreamEngine(cfg StreamConfig) (*StreamEngine, error) {
+	// P2P kill-switch: refuse to build the swarm client at all when the VPN is
+	// required but no healthy tunnel is up, so streaming a torrent NEVER announces
+	// the info hash or dials peers over the user's real IP. The caller falls back to
+	// a debrid direct-play link, or fails the stream with a clear reason. Healthy()
+	// is nil-safe, so required=true with no tunnel fails closed.
+	if cfg.VPNRequired && !cfg.VPNTunnel.Healthy() {
+		return nil, ErrVPNRequired
+	}
+
 	if cfg.MetaTimeout == 0 {
 		cfg.MetaTimeout = 60 * time.Second
 	}
@@ -81,9 +104,20 @@ func NewStreamEngine(cfg StreamConfig) (*StreamEngine, error) {
 	tcfg.ListenPort = 0
 	tcfg.Logger = alog.Default.FilterLevel(alog.Disabled)
 
+	// Route peer + tracker + DHT traffic through the tunnel and disable every
+	// clear-net leak (same wiring as the download client). Applied BEFORE NewClient;
+	// the peer dialer is added AFTER (see below).
+	if cfg.VPNTunnel != nil {
+		applyVPNTunnel(tcfg, cfg.VPNTunnel)
+	}
+
 	client, err := torrent.NewClient(tcfg)
 	if err != nil {
 		return nil, fmt.Errorf("create torrent client: %w", err)
+	}
+
+	if cfg.VPNTunnel != nil {
+		addVPNDialer(client, cfg.VPNTunnel)
 	}
 
 	return &StreamEngine{
@@ -91,6 +125,27 @@ func NewStreamEngine(cfg StreamConfig) (*StreamEngine, error) {
 		cfg:    cfg,
 		status: StreamStatusMetadata,
 	}, nil
+}
+
+// VPNStillHealthy is the throttled mid-stream kill-switch check, mirroring the
+// download path's TorrentDownloader.vpnStillHealthy. When the VPN is required it
+// re-verifies tunnel health at most once per vpnHealthCheckInterval; a down tunnel
+// returns false so the caller stops the stream before any piece is fetched in the
+// clear. Always true when the kill-switch is off. Exported because the stream's
+// progress loop (which owns the task lifecycle) lives in the cmd layer.
+func (s *StreamEngine) VPNStillHealthy() bool {
+	if !s.cfg.VPNRequired {
+		return true
+	}
+	now := time.Now()
+	s.mu.Lock()
+	if now.Sub(s.lastVPNCheck) < vpnHealthCheckInterval {
+		s.mu.Unlock()
+		return true
+	}
+	s.lastVPNCheck = now
+	s.mu.Unlock()
+	return s.cfg.VPNTunnel.Healthy()
 }
 
 // Start adds the torrent, waits for metadata, selects the video file,
@@ -124,6 +179,7 @@ func (s *StreamEngine) Start(ctx context.Context, magnetOrHash string) error {
 	s.fileName = filepath.Base(s.file.DisplayPath())
 	s.bufferTarget = s.calculateBufferTarget()
 	s.lastTime = time.Now()
+	s.lastVPNCheck = time.Now() // grace before the first mid-stream tunnel probe
 
 	s.mu.Lock()
 	s.status = StreamStatusBuffering
