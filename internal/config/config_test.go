@@ -376,3 +376,72 @@ func TestLoadInvalidTOML(t *testing.T) {
 		t.Error("expected error for invalid TOML, got nil")
 	}
 }
+
+// TestSaveLoadVPNRoundTrip locks the full [downloads.vpn] block through a
+// Save→Load cycle: enabled, required (the fail-closed kill-switch flag), and
+// config_file (self-hosted mode) must all survive a marshal/unmarshal. A drop
+// here would silently disable the kill-switch or lose the self-hosted source.
+func TestSaveLoadVPNRoundTrip(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+
+	cfg := Default()
+	cfg.Download.VPN.Enabled = true
+	cfg.Download.VPN.Required = true
+	cfg.Download.VPN.ConfigFile = "/etc/wireguard/wg0.conf"
+
+	if err := Save(cfg, path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !loaded.Download.VPN.Enabled {
+		t.Error("VPN.Enabled did not survive the Save→Load round-trip")
+	}
+	if !loaded.Download.VPN.Required {
+		t.Error("VPN.Required (kill-switch flag) did not survive the Save→Load round-trip")
+	}
+	if loaded.Download.VPN.ConfigFile != "/etc/wireguard/wg0.conf" {
+		t.Errorf("VPN.ConfigFile = %q, want /etc/wireguard/wg0.conf", loaded.Download.VPN.ConfigFile)
+	}
+}
+
+// TestLoadVPNSelfHostedPrecedenceAndRequired: a self-hosted config (config_file
+// set) is the daemon's preferred source over a managed fetch, so config_file must
+// load intact; Required (the flag the whole kill-switch keys off) must survive a
+// partial TOML that touches ONLY the VPN block; and unrelated defaults must still
+// be applied by the merge.
+func TestLoadVPNSelfHostedPrecedenceAndRequired(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+	os.WriteFile(path, []byte(`[downloads.vpn]
+config_file = "/home/me/wg-personal.conf"
+required = true
+`), 0o644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Self-hosted source present (daemon prefers it over a managed fetch).
+	if cfg.Download.VPN.ConfigFile != "/home/me/wg-personal.conf" {
+		t.Errorf("VPN.ConfigFile = %q, want the self-hosted path", cfg.Download.VPN.ConfigFile)
+	}
+	// Kill-switch flag survives a partial-TOML load...
+	if !cfg.Download.VPN.Required {
+		t.Error("VPN.Required dropped by a partial-TOML Load — the kill-switch would silently disable")
+	}
+	// ...Enabled defaults to false when its key is absent (self-hosted needs no managed fetch)...
+	if cfg.Download.VPN.Enabled {
+		t.Error("VPN.Enabled = true, want false when the key is absent")
+	}
+	// ...and unrelated defaults are still applied (the merge didn't clobber them).
+	if cfg.Download.MaxConcurrent != 3 {
+		t.Errorf("MaxConcurrent = %d, want default 3 (partial load must preserve defaults)", cfg.Download.MaxConcurrent)
+	}
+	if cfg.Auth.APIURL != "https://unarr.app" {
+		t.Errorf("APIURL = %q, want default https://unarr.app", cfg.Auth.APIURL)
+	}
+}

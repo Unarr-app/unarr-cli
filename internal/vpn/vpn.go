@@ -236,6 +236,12 @@ func (t *Tunnel) Close() {
 	}
 }
 
+// ipcGet reads a device's WireGuard UAPI state. It is a package-level seam (in
+// the same spirit as the repo's other function-var seams) so tests can drive
+// Healthy's IpcGet-error fail-closed branch without a live WireGuard device.
+// Production wiring is dev.IpcGet verbatim.
+var ipcGet = func(dev *device.Device) (string, error) { return dev.IpcGet() }
+
 // Healthy reports whether the tunnel is up AND its peer handshaked recently. A
 // nil/closed tunnel is unhealthy (fail-closed). Used by the torrent kill-switch
 // gate and by the daemon's reconnect supervisor.
@@ -244,7 +250,7 @@ func (t *Tunnel) Healthy() bool {
 	if in == nil {
 		return false
 	}
-	ipc, err := in.dev.IpcGet()
+	ipc, err := ipcGet(in.dev)
 	if err != nil {
 		// A live device that cannot report its own state is treated as down so
 		// the gate fails closed; log it rather than swallowing the error.
