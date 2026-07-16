@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/postprocess"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -225,6 +227,13 @@ func runDoctor(opts doctorOpts) error {
 		return checkDiskSpace(dir)
 	})
 
+	// par2 is only exercised by the usenet method — a missing binary there
+	// means deliveries can't be verified or repaired (they ship UNVERIFIED),
+	// so surface it as a warning, not a failure.
+	check("par2 (usenet verify/repair)", func() (string, error) {
+		return par2CheckResult(cfg)
+	})
+
 	fmt.Println()
 	bold.Println("  Version")
 
@@ -253,4 +262,28 @@ func runDoctor(opts doctorOpts) error {
 	}
 
 	return nil
+}
+
+// par2CheckResult reports whether par2 is available when the usenet method is
+// enabled. Uses the canonical MethodOrder() resolver so it honors the list vs
+// legacy-singular precedence, "auto", casing and whitespace — a hand-rolled
+// scan would false-"not needed" on preferred_methods=["Usenet"] and hide that
+// usenet ships UNVERIFIED. Returns a "!"-prefixed warning message (not an
+// error) when the binary is missing — a missing par2 degrades verification but
+// isn't a hard failure.
+func par2CheckResult(cfg config.Config) (string, error) {
+	usenetEnabled := false
+	for _, m := range cfg.Download.MethodOrder() {
+		if m == "usenet" {
+			usenetEnabled = true
+			break
+		}
+	}
+	if !usenetEnabled {
+		return "not needed (usenet not in preferred_methods)", nil
+	}
+	if postprocess.Par2Available() {
+		return "installed", nil
+	}
+	return "!not installed — usenet downloads are delivered UNVERIFIED (install: apt install par2 / brew install par2)", nil
 }

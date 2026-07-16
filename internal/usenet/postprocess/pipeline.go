@@ -35,7 +35,23 @@ type Result struct {
 type Options struct {
 	Password string // password for encrypted archives (empty = none)
 	Cleanup  bool   // remove intermediate files after extraction
+	// FetchParity downloads the par2 recovery volumes into the task dir when
+	// verification detects damage — the index alone carries checksums but no
+	// recovery blocks, so "repair is not possible" against index-only parity
+	// just means the blocks aren't local yet, NOT that the release is beyond
+	// saving. par2 discovers the volumes by name next to the index, so the
+	// pipeline only needs the call to succeed. nil = no more parity available;
+	// verification runs with what's on disk.
+	FetchParity func() (map[string]string, error)
 }
+
+// par2VerifyFn/par2RepairFn are indirections over Par2Verify/Par2Repair so the
+// fetch-retry logic is testable without a real par2 binary (same pattern as
+// par2Lookup).
+var (
+	par2VerifyFn = Par2Verify
+	par2RepairFn = Par2Repair
+)
 
 // Process runs the full post-processing pipeline on downloaded usenet files.
 // Steps: par2 verify → par2 repair → extract archives → cleanup → find main file.
@@ -48,46 +64,7 @@ func Process(dir string, downloadedFiles map[string]string, opts Options) (*Resu
 	// unverified file as if it had passed.
 	par2File := findPar2File(downloadedFiles)
 	if par2File != "" {
-		var repairable *Par2RepairableError
-		err := Par2Verify(par2File)
-		switch {
-		case err == nil:
-			// Verified OK — nothing to surface.
-		case errors.Is(err, ErrPar2NotInstalled):
-			result.VerifyNote = "par2 parity present but `par2` is not installed — delivered UNVERIFIED (install par2cmdline to enable verification/repair)"
-			log.Printf("[usenet] WARNING: %s", result.VerifyNote)
-		case errors.As(err, &repairable):
-			log.Printf("[usenet] par2: corruption detected, attempting repair...")
-			repairErr := Par2Repair(par2File)
-			switch {
-			case repairErr == nil:
-				result.Repaired = true
-				log.Printf("[usenet] par2: repair successful")
-			case errors.Is(repairErr, ErrPar2NotInstalled):
-				// Damage confirmed by parity, but no binary to repair it — the
-				// delivered file IS corrupt. Mark it so the engine re-downloads.
-				result.Corrupt = true
-				result.VerifyNote = "par2 corruption detected but `par2` is not installed — cannot repair, file is CORRUPT"
-				log.Printf("[usenet] WARNING: %s", result.VerifyNote)
-			default:
-				// Repair attempted and failed — the data is damaged beyond recovery.
-				result.Corrupt = true
-				result.VerifyNote = fmt.Sprintf("par2 repair failed — file is corrupt: %v", repairErr)
-				log.Printf("[usenet] WARNING: %s", result.VerifyNote)
-			}
-		case errors.Is(err, ErrPar2Unrepairable):
-			// Parity confirmed the data is damaged and unrepairable — definitively
-			// corrupt (NOT a transient probe error). Engine re-downloads.
-			result.Corrupt = true
-			result.VerifyNote = fmt.Sprintf("par2: file is corrupt and cannot be repaired: %v", err)
-			log.Printf("[usenet] WARNING: %s", result.VerifyNote)
-		default:
-			// A transient par2 probe/exec error (binary crash, I/O hiccup) — can't
-			// confirm corruption, so deliver UNVERIFIED with a loud note rather than
-			// nuking a possibly-good file.
-			result.VerifyNote = fmt.Sprintf("par2 verification error — file unverified: %v", err)
-			log.Printf("[usenet] WARNING: %s", result.VerifyNote)
-		}
+		runPar2Step(par2File, downloadedFiles, opts, result)
 	}
 
 	// Step 2: Find and extract archives
@@ -116,10 +93,37 @@ func Process(dir string, downloadedFiles map[string]string, opts Options) (*Resu
 			Cleanup(dir)
 		}
 	} else {
-		// No archives — content files are the final files
+		// No archives — content files are the final files. Skip paths that no
+		// longer exist: par2 repair renames misnamed/obfuscated files, so the
+		// original map entries can go stale; their renamed forms are picked up
+		// from a directory scan below.
+		seen := make(map[string]bool)
 		for _, path := range downloadedFiles {
-			if !isCleanupTarget(filepath.Base(path)) {
-				result.Files = append(result.Files, path)
+			if isCleanupTarget(filepath.Base(path)) {
+				continue
+			}
+			if _, statErr := os.Stat(path); statErr != nil {
+				continue
+			}
+			result.Files = append(result.Files, path)
+			seen[path] = true
+		}
+		if result.Repaired {
+			if entries, readErr := os.ReadDir(dir); readErr == nil {
+				for _, entry := range entries {
+					if entry.IsDir() {
+						continue
+					}
+					name := entry.Name()
+					// par2 renames the damaged original aside as "<name>.1"
+					if isCleanupTarget(name) || strings.HasSuffix(name, ".1") {
+						continue
+					}
+					p := filepath.Join(dir, name)
+					if !seen[p] {
+						result.Files = append(result.Files, p)
+					}
+				}
 			}
 		}
 
@@ -144,6 +148,94 @@ func Process(dir string, downloadedFiles map[string]string, opts Options) (*Resu
 	}
 
 	return result, nil
+}
+
+// runPar2Step verifies (and if needed repairs) the delivery against par2
+// parity. With lazy volumes, damage detected against an index-only set first
+// triggers ONE opts.FetchParity round (downloads the recovery volumes next to
+// the index) and a re-verify; only after full parity is local does a failure
+// classify as Corrupt. Fetched volumes are merged into downloadedFiles so the
+// cleanup step removes them. par2 repair also renames misnamed/obfuscated
+// files back to their original names as a side effect.
+func runPar2Step(par2File string, downloadedFiles map[string]string, opts Options, result *Result) {
+	err := par2VerifyFn(par2File)
+	if err == nil {
+		return
+	}
+
+	var repairable *Par2RepairableError
+	damaged := errors.As(err, &repairable) || errors.Is(err, ErrPar2Unrepairable)
+	// Only an "insufficient recovery blocks" verdict (Unrepairable against the
+	// index-only set) warrants downloading the volumes. A Repairable verdict
+	// already has enough local parity — repair directly instead of fetching the
+	// (potentially 10-20% of payload) volumes for nothing.
+	needMoreBlocks := errors.Is(err, ErrPar2Unrepairable)
+	if needMoreBlocks && opts.FetchParity != nil {
+		log.Printf("[usenet] par2: insufficient recovery blocks, fetching volumes...")
+		fetched, ferr := opts.FetchParity()
+		if ferr != nil {
+			// Damage is confirmed by the index checksums, and the blocks to fix
+			// it can't be fetched — the delivery is corrupt, not "unverified".
+			result.Corrupt = true
+			result.VerifyNote = fmt.Sprintf("par2 detected damage but recovery volumes could not be downloaded: %v", ferr)
+			log.Printf("[usenet] WARNING: %s", result.VerifyNote)
+			return
+		}
+		for name, path := range fetched {
+			downloadedFiles[name] = path
+		}
+		err = par2VerifyFn(par2File)
+		if err == nil {
+			return
+		}
+	}
+
+	repairable = nil
+	switch {
+	case errors.Is(err, ErrPar2NotInstalled):
+		result.VerifyNote = "par2 parity present but `par2` is not installed — delivered UNVERIFIED (install par2cmdline to enable verification/repair)"
+		log.Printf("[usenet] WARNING: %s", result.VerifyNote)
+	case errors.As(err, &repairable):
+		log.Printf("[usenet] par2: corruption detected, attempting repair...")
+		repairErr := par2RepairFn(par2File)
+		switch {
+		case repairErr == nil:
+			result.Repaired = true // Par2Repair already logged the success
+		case errors.Is(repairErr, ErrPar2NotInstalled):
+			// Damage confirmed by parity, but no binary to repair it — the
+			// delivered file IS corrupt. Mark it so the engine re-downloads.
+			result.Corrupt = true
+			result.VerifyNote = "par2 corruption detected but `par2` is not installed — cannot repair, file is CORRUPT"
+			log.Printf("[usenet] WARNING: %s", result.VerifyNote)
+		default:
+			// Repair attempted and failed — the data is damaged beyond recovery.
+			result.Corrupt = true
+			result.VerifyNote = fmt.Sprintf("par2 repair failed — file is corrupt: %v", repairErr)
+			log.Printf("[usenet] WARNING: %s", result.VerifyNote)
+		}
+	case errors.Is(err, ErrPar2Unrepairable):
+		// Parity confirmed the data is damaged and unrepairable — definitively
+		// corrupt (NOT a transient probe error). Engine re-downloads.
+		result.Corrupt = true
+		result.VerifyNote = fmt.Sprintf("par2: file is corrupt and cannot be repaired: %v", err)
+		log.Printf("[usenet] WARNING: %s", result.VerifyNote)
+	default:
+		if damaged {
+			// verify #1 already PROVED the content is damaged; a transient
+			// failure of the post-fetch re-verify (binary crash, I/O hiccup, a
+			// truncated volume) must NOT downgrade a confirmed-corrupt delivery
+			// to "unverified" — that would ship the broken file and skip the
+			// re-download. Treat it as corrupt.
+			result.Corrupt = true
+			result.VerifyNote = fmt.Sprintf("par2 confirmed damage but the re-verify failed after fetching parity — treated as corrupt: %v", err)
+		} else {
+			// A transient par2 probe/exec error on the FIRST verify — can't
+			// confirm corruption, so deliver UNVERIFIED with a loud note rather
+			// than nuking a possibly-good file.
+			result.VerifyNote = fmt.Sprintf("par2 verification error — file unverified: %v", err)
+		}
+		log.Printf("[usenet] WARNING: %s", result.VerifyNote)
+	}
 }
 
 // findPar2File returns the path of the main .par2 file (not volume sets).

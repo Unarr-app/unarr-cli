@@ -188,6 +188,55 @@ func (n *NZB) Par2Files() []File {
 	return result
 }
 
+// par2VolRe matches par2 recovery-volume names like "release.vol000+01.par2".
+var par2VolRe = regexp.MustCompile(`(?i)\.vol\d+\+\d+\.par2$`)
+
+// Par2IndexFile returns the main .par2 index file — the small one carrying the
+// file checksums (little/no recovery data), downloaded up front so the delivery
+// can be verified cheaply. Prefers a non-volume name ("release.par2"); when the
+// NZB only ships volume-named par2s, falls back to the smallest. Returns nil
+// when the NZB carries no parity.
+func (n *NZB) Par2IndexFile() *File {
+	var index, smallestVol *File
+	for i := range n.Files {
+		f := &n.Files[i]
+		name := f.Filename()
+		if strings.ToLower(filepath.Ext(name)) != ".par2" {
+			continue
+		}
+		if !par2VolRe.MatchString(name) {
+			if index == nil || f.TotalBytes() < index.TotalBytes() {
+				index = f
+			}
+			continue
+		}
+		if smallestVol == nil || f.TotalBytes() < smallestVol.TotalBytes() {
+			smallestVol = f
+		}
+	}
+	if index != nil {
+		return index
+	}
+	return smallestVol
+}
+
+// Par2VolumeFiles returns every par2 file except the index — the recovery
+// volumes, fetched lazily only when verification detects damage.
+func (n *NZB) Par2VolumeFiles() []File {
+	index := n.Par2IndexFile()
+	var result []File
+	for _, f := range n.Files {
+		if strings.ToLower(filepath.Ext(f.Filename())) != ".par2" {
+			continue
+		}
+		if index != nil && f.Subject == index.Subject {
+			continue
+		}
+		result = append(result, f)
+	}
+	return result
+}
+
 // RarFiles returns rar archive files (.rar, .rNN, .NNN).
 func (n *NZB) RarFiles() []File {
 	var result []File
@@ -222,13 +271,18 @@ func (n *NZB) IsObfuscated() bool {
 		if name == "" {
 			continue
 		}
-		base := strings.TrimSuffix(name, filepath.Ext(name))
-		// Check if base name is mostly hex/random chars (obfuscated)
-		if len(base) > 10 && isHexLike(base) {
+		if IsObfuscatedName(name) {
 			return true
 		}
 	}
 	return false
+}
+
+// IsObfuscatedName reports whether a single filename looks obfuscated (a long
+// mostly-hex base instead of a meaningful release name).
+func IsObfuscatedName(name string) bool {
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	return len(base) > 10 && isHexLike(base)
 }
 
 // HasRars returns true if the NZB contains rar archive files.

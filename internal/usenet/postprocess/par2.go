@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -31,6 +32,17 @@ var par2Lookup = func() bool {
 // Par2Available checks if par2cmdline is installed.
 func Par2Available() bool { return par2Lookup() }
 
+// par2Command builds a par2 invocation forced to the C locale. The result
+// classification below matches English stdout literals ("Repair is possible" /
+// "Repair is not possible"); a localized par2 (non-C LANG/LC_ALL) would emit
+// translated strings, so NONE would match and every verdict would collapse to
+// the generic-error branch (deliver UNVERIFIED). LC_ALL=C pins the wording.
+func par2Command(args ...string) *exec.Cmd {
+	cmd := exec.Command("par2", args...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	return cmd
+}
+
 // Par2Verify verifies files using a par2 file. Returns nil on success,
 // ErrPar2NotInstalled when the binary is missing (parity present but unchecked —
 // the caller must surface it, NOT treat it as verified), a *Par2RepairableError
@@ -40,7 +52,7 @@ func Par2Verify(par2File string) error {
 		return ErrPar2NotInstalled
 	}
 
-	cmd := exec.Command("par2", "verify", par2File)
+	cmd := par2Command("verify", par2File)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		outStr := string(output)
@@ -64,7 +76,7 @@ func Par2Repair(par2File string) error {
 		return ErrPar2NotInstalled
 	}
 
-	cmd := exec.Command("par2", "repair", par2File)
+	cmd := par2Command("repair", par2File)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("par2 repair: %w\n%s", err, output)
