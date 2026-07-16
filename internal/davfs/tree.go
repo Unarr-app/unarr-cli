@@ -63,6 +63,15 @@ var excludeNamePatterns = []string{
 // solves with its own marker regex.
 var episodeMarker = regexp.MustCompile(`(?i)\b(S\d{1,2}\s*E\d{1,4}|\d{1,2}x\d{2})\b`)
 
+// seasonPackMarker matches a TRAILING bare season token — "S" + 1-2 digits or
+// "Season N" with NO episode number (episodeMarker already peels off SxxEyy). A
+// season pack packed as a single file parses to Title "Show S01" (CleanTitle
+// keeps the season token), which would otherwise give the show its own
+// "Show S01" folder instead of grouping every season under "Show". Anchored at
+// the end and requiring leading whitespace so it never eats a title that merely
+// ends in a letter+digits (e.g. the show "The 100").
+var seasonPackMarker = regexp.MustCompile(`(?i)\s+(S\d{1,2}|Season\s+\d{1,2})$`)
+
 // buildTree constructs the organized virtual root from the scanned items.
 // Hidden items (scan errors, damaged files, samples) are skipped.
 func buildTree(items []library.LibraryItem) *node {
@@ -153,6 +162,9 @@ func showFolder(item library.LibraryItem) string {
 func showTitle(item library.LibraryItem) string {
 	t := strings.TrimSpace(item.Title)
 	if loc := episodeMarker.FindStringIndex(t); loc != nil {
+		t = strings.TrimSpace(t[:loc[0]])
+	}
+	if loc := seasonPackMarker.FindStringIndex(t); loc != nil {
 		t = strings.TrimSpace(t[:loc[0]])
 	}
 	return t

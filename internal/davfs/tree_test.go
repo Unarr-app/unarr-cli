@@ -45,6 +45,29 @@ func TestShowFolderFallbacks(t *testing.T) {
 	}
 }
 
+// TestShowTitleSeasonPack: a season pack packed as a single file parses to a
+// Title carrying a trailing bare season token ("Show S01" / "Show Season 2"),
+// which must be stripped so every season groups under one show folder instead
+// of spawning a "Show S01" folder. The control cases guard against the stripper
+// eating a legitimate title — an episode marker is peeled first (leaving the
+// real series name, digits and all), and a title that merely ends in digits is
+// left untouched.
+func TestShowTitleSeasonPack(t *testing.T) {
+	cases := []struct{ title, want string }{
+		{"Show S01", "Show"},                      // season pack (S + digits)
+		{"Show Name S1", "Show Name"},             // single-digit season
+		{"Breaking Bad Season 2", "Breaking Bad"}, // "Season N" word form
+		{"The 100 S02E05", "The 100"},             // control: episode marker only → trailing digits kept
+		{"The 100", "The 100"},                    // control: title ending in digits, not a season token
+		{"Money Heist", "Money Heist"},            // control: plain title untouched
+	}
+	for _, c := range cases {
+		if got := showTitle(library.LibraryItem{Title: c.title}); got != c.want {
+			t.Errorf("showTitle(title=%q) = %q, want %q", c.title, got, c.want)
+		}
+	}
+}
+
 // TestSeasonFolder: season 0 or negative → "Specials"; otherwise zero-padded.
 func TestSeasonFolder(t *testing.T) {
 	cases := []struct {
