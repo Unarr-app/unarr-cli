@@ -16,6 +16,14 @@ import (
 
 const streamIdleTimeout = 30 * time.Minute
 
+// streamDownloadIdlePause is how long a P2P stream can have zero active player
+// connections before the agent pauses its greedy background download. Short
+// enough to stop caching a title the user abandoned; long enough to survive a
+// seek (which briefly reopens the /stream connection) and to act as a small
+// cache-ahead grace after playback stops. The download resumes instantly when a
+// player reconnects, and downloaded pieces stay on disk regardless.
+const streamDownloadIdlePause = 30 * time.Second
+
 // startIdleGuard monitors the persistent stream server and clears the file after inactivity.
 func startIdleGuard(ctx context.Context, srv *engine.StreamServer) {
 	ticker := time.NewTicker(60 * time.Second)
@@ -236,13 +244,50 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 				FileName:        p.FileName,
 			})
 
+			pct := 0
+			if p.TotalBytes > 0 {
+				pct = int(float64(p.DownloadedBytes) / float64(p.TotalBytes) * 100)
+			}
+
 			// Terminal progress
 			if !completed && p.TotalBytes > 0 {
-				pct := int(float64(p.DownloadedBytes) / float64(p.TotalBytes) * 100)
 				fmt.Fprintf(os.Stderr, "\r[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
 					at.ID[:8], pct,
 					ui.FormatBytes(p.DownloadedBytes), ui.FormatBytes(p.TotalBytes), ui.FormatBytes(p.SpeedBps),
 					p.Peers, p.Seeds)
+			}
+
+			// Idle guard: pause the greedy whole-file download so the agent does
+			// not cache a whole title nobody is watching. Two triggers:
+			//   1. Displaced — a newer stream took over the persistent server
+			//      (CurrentTaskID moved on); nobody can reach our file anymore, so
+			//      pause at once. (Without this, switching titles would leave the
+			//      old title downloading to 100% in the background — the single
+			//      most common abandonment.)
+			//   2. Read-idle — we are still the served file but no bytes have been
+			//      served for the grace window: player stopped, closed, or paused.
+			//      ReadIdleSince() is byte-based, so a paused player whose TCP
+			//      socket lingers still counts as idle (a plain connection count
+			//      would not).
+			// A connected reader keeps fetching its own readahead regardless of
+			// the file's base priority, so pausing never interrupts live playback;
+			// resume is instant on the next byte served. Skip once completed.
+			if !completed {
+				displaced := srv.CurrentTaskID() != at.ID
+				idle := displaced || srv.ReadIdleSince() >= streamDownloadIdlePause
+				switch {
+				case idle && !eng.IsDownloadPaused():
+					reason := "no active viewer"
+					if displaced {
+						reason = "stream replaced by a newer title"
+					}
+					eng.PauseDownload()
+					log.Printf("[%s] %s — pausing background download at %d%% (partial kept, resumes on replay)",
+						at.ID[:8], reason, pct)
+				case !idle && eng.IsDownloadPaused():
+					eng.ResumeDownload()
+					log.Printf("[%s] viewer active — resuming background download", at.ID[:8])
+				}
 			}
 
 			if !completed && p.DownloadedBytes >= p.TotalBytes && p.TotalBytes > 0 {

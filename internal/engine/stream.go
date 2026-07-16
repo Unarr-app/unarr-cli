@@ -56,11 +56,12 @@ type StreamEngine struct {
 	totalBytes   int64
 	fileName     string
 
-	mu        sync.RWMutex
-	status    StreamStatus
-	lastBytes int64
-	lastTime  time.Time
-	speedBps  int64
+	mu             sync.RWMutex
+	status         StreamStatus
+	lastBytes      int64
+	lastTime       time.Time
+	speedBps       int64
+	downloadPaused bool // true when the greedy background fetch is deprioritized (idle stream)
 }
 
 // NewStreamEngine creates a streaming engine with its own torrent client.
@@ -170,6 +171,54 @@ func (s *StreamEngine) selectFile() error {
 	}
 
 	return nil
+}
+
+// PauseDownload deprioritizes the whole selected file so anacrolix stops the
+// greedy background fetch toward 100%. This is called when a stream goes idle
+// (no player reading) so the agent doesn't download the entire title when the
+// user stopped watching. An active reader still fetches its own readahead window
+// (anacrolix reader-driven piece priority is independent of the file's base
+// priority), so pausing never interrupts live playback — it only stops caching
+// beyond what a viewer needs. Downloaded pieces stay on disk (DataDir); resume
+// is in-process and instant, no re-check. Mirrors the SetPriority(None) already
+// used for non-selected files in selectFile.
+func (s *StreamEngine) PauseDownload() {
+	s.mu.Lock()
+	if s.file == nil || s.downloadPaused {
+		s.mu.Unlock()
+		return
+	}
+	s.downloadPaused = true
+	f := s.file // immutable after selectFile; safe to use outside the lock
+	s.mu.Unlock()
+	// SetPriority walks every piece of the file and takes the anacrolix
+	// client-wide lock — do it OUTSIDE s.mu so a concurrent Progress()/1 Hz
+	// progress loop isn't blocked for the O(pieces) duration.
+	f.SetPriority(torrent.PiecePriorityNone)
+}
+
+// ResumeDownload re-marks the whole selected file wanted, resuming the greedy
+// background fetch. Mirrors selectFile's f.Download() (anacrolix: Download ==
+// SetPriority(Normal), in-process, no piece re-check). Safe to call when not
+// paused (no-op).
+func (s *StreamEngine) ResumeDownload() {
+	s.mu.Lock()
+	if s.file == nil || !s.downloadPaused {
+		s.mu.Unlock()
+		return
+	}
+	s.downloadPaused = false
+	f := s.file
+	s.mu.Unlock()
+	f.Download()
+}
+
+// IsDownloadPaused reports whether the greedy background download is currently
+// paused (deprioritized) by the idle guard.
+func (s *StreamEngine) IsDownloadPaused() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.downloadPaused
 }
 
 // IsVideoFile returns true if the selected file has a video extension.

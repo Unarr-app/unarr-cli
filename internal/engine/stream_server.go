@@ -131,15 +131,25 @@ type StreamServer struct {
 	// original web path. Read-only after Listen().
 	resolveMediaPath func(string) string
 
-	lastActivity    atomic.Int64
-	maxByteOffset   atomic.Int64 // highest sequential read position (main playback connection)
-	totalFileSize   atomic.Int64
-	bitrateBps      atomic.Int64 // video bitrate in bits/sec (from ffprobe, 0 = unknown)
-	durationSec     atomic.Int64 // video duration in seconds (from ffprobe, 0 = unknown)
-	topReaderID     atomic.Int64 // ID of the reader that set maxByteOffset (only it can advance it)
-	readerCounter   atomic.Int64 // monotonic counter for assigning reader IDs
-	speedtestActive atomic.Bool  // single-flight guard for /speedtest (unauth + public via funnel)
+	lastActivity     atomic.Int64
+	maxByteOffset    atomic.Int64 // highest sequential read position (main playback connection)
+	totalFileSize    atomic.Int64
+	bitrateBps       atomic.Int64 // video bitrate in bits/sec (from ffprobe, 0 = unknown)
+	durationSec      atomic.Int64 // video duration in seconds (from ffprobe, 0 = unknown)
+	topReaderID      atomic.Int64 // ID of the reader that set maxByteOffset (only it can advance it)
+	readerCounter    atomic.Int64 // monotonic counter for assigning reader IDs
+	activeReaders    atomic.Int64 // LIVE gauge of open /stream playback connections (inc on connect, dec on disconnect) — bounded by maxStreamReaders
+	fileGeneration   atomic.Int64 // bumped on every SetFile/SetGrowingFile/ClearFile so readers of a replaced file don't count as activity for the new one
+	lastReadUnixNano atomic.Int64 // UnixNano of the last byte served for the CURRENT file generation ("is anyone actually consuming this?")
+	speedtestActive  atomic.Bool  // single-flight guard for /speedtest (unauth + public via funnel)
 }
+
+// maxStreamReaders caps concurrent /stream playback connections. This is a
+// single-viewer personal agent (a handful of connections for one player + its
+// probe/seek requests is normal); the cap is a generous backstop that bounds
+// FD/goroutine/memory growth from a token holder flooding connections, and is
+// enforced BEFORE the activeReaders gauge is incremented.
+const maxStreamReaders = 32
 
 // NewStreamServer creates a stream server bound to the given port, allowing up
 // to maxStreamSessions concurrent in-browser HLS sessions (coerced to >= 1;
@@ -526,6 +536,12 @@ func (ss *StreamServer) SetFile(provider FileProvider, taskID string) {
 	ss.topReaderID.Store(0)
 	ss.bitrateBps.Store(0)
 	ss.durationSec.Store(0)
+	// New generation: readers of the previous file must stop counting toward
+	// this one's read-activity. Seed the read clock to "now" so a freshly-served
+	// file gets the full idle grace before the download can pause (lets a slow
+	// player attach first).
+	ss.fileGeneration.Add(1)
+	ss.lastReadUnixNano.Store(time.Now().UnixNano())
 
 	// Probe bitrate + duration synchronously so rate-limiting and duration
 	// are available before the first HTTP request arrives.
@@ -559,6 +575,8 @@ func (ss *StreamServer) SetGrowingFile(src GrowingSource, taskID string) {
 	ss.lastActivity.Store(time.Now().UnixNano())
 	ss.maxByteOffset.Store(0)
 	ss.topReaderID.Store(0)
+	ss.fileGeneration.Add(1)
+	ss.lastReadUnixNano.Store(time.Now().UnixNano())
 	// Rate-limit + bitrate tracking are for raw-file playback; the remux pump
 	// has its own pacing (ffmpeg copy is I/O-bound), so leave them at zero.
 	ss.bitrateBps.Store(0)
@@ -579,6 +597,7 @@ func (ss *StreamServer) ClearFile() {
 	ss.totalFileSize.Store(0)
 	ss.maxByteOffset.Store(0)
 	ss.topReaderID.Store(0)
+	ss.fileGeneration.Add(1) // invalidate any lingering reader's activity attribution
 	ss.bitrateBps.Store(0)
 	ss.durationSec.Store(0)
 }
@@ -645,6 +664,29 @@ func (ss *StreamServer) Port() int { return ss.port }
 // IdleSince returns how long since the last HTTP request was received.
 func (ss *StreamServer) IdleSince() time.Duration {
 	last := ss.lastActivity.Load()
+	if last == 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, last))
+}
+
+// ActiveReaders returns the number of open /stream playback connections. Used to
+// enforce the maxStreamReaders cap. NOTE: this is a connection count, not a
+// "someone is watching" signal — a paused player keeps its socket open, so the
+// idle guard uses ReadIdleSince() (bytes actually served) instead.
+func (ss *StreamServer) ActiveReaders() int64 { return ss.activeReaders.Load() }
+
+// ReadIdleSince returns how long since the last byte was served for the CURRENT
+// file generation. This is the "is anyone actually consuming this stream" signal
+// the download idle guard uses: it stays fresh while a player pulls data, goes
+// stale when the player pauses/stops/disconnects (no bytes), and — because it's
+// gated on the file generation — is NOT bumped by a lingering reader still
+// draining a file that has since been replaced. A player consuming a mode=stream
+// P2P task goes through the raw /stream trackingReader path, which is the only
+// path that bumps this; growing-remux/HLS viewers are separate task IDs that
+// displace the torrent task (handled by the idle guard's CurrentTaskID check).
+func (ss *StreamServer) ReadIdleSince() time.Duration {
+	last := ss.lastReadUnixNano.Load()
 	if last == 0 {
 		return 0
 	}
@@ -1067,11 +1109,23 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 		inner:       rawReader,
 		server:      ss,
 		id:          ss.readerCounter.Add(1),
+		gen:         ss.fileGeneration.Load(), // pin this reader to the file it's serving
 		bytesPerSec: bytesPerSec,
 		burstSize:   burstSize,
 		tokens:      burstSize,
 		lastFill:    time.Now(),
 	}
+
+	// Cap concurrent playback connections (bounds FD/goroutine/memory growth if a
+	// token holder floods /stream) and register this one in the live gauge. The
+	// atomic Add-then-check is race-free; http.ServeContent below blocks for the
+	// whole connection, so the deferred decrement fires on disconnect/stop.
+	if ss.activeReaders.Add(1) > maxStreamReaders {
+		ss.activeReaders.Add(-1)
+		http.Error(w, "too many concurrent streams", http.StatusServiceUnavailable)
+		return
+	}
+	defer ss.activeReaders.Add(-1)
 
 	w.Header().Set("Content-Type", mimeTypeFromExt(provider.FileName()))
 	// "inline" for play requests (VLC/mpv), "attachment" for download requests.
@@ -1839,6 +1893,7 @@ type trackingReader struct {
 	inner       io.ReadSeekCloser
 	server      *StreamServer
 	id          int64 // unique ID for this reader
+	gen         int64 // file generation this reader serves (see fileGeneration)
 	pos         int64 // current read position
 	bytesRead   int64 // total bytes read by THIS connection (measures sequential progress)
 	bytesPerSec int64 // 0 = unlimited (remote/torrent), >0 = throttled (local disk)
@@ -1855,6 +1910,14 @@ func (t *trackingReader) Read(p []byte) (int, error) {
 	if n > 0 {
 		t.pos += int64(n)
 		t.bytesRead += int64(n)
+
+		// Mark the stream as actively consumed — but only if we're still serving
+		// the CURRENT file. A reader draining a file that SetFile has since
+		// replaced must not keep the new file's download alive (generation gate).
+		// Cheap: two atomic loads + a store on the hot path, no mutex.
+		if t.server.fileGeneration.Load() == t.gen {
+			t.server.lastReadUnixNano.Store(time.Now().UnixNano())
+		}
 
 		// Only the reader that has read the most bytes can update progress.
 		// This prevents VLC's metadata/index requests (which read near EOF)

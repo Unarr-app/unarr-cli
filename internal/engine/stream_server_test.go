@@ -224,6 +224,134 @@ func TestStreamServer_WithFile_Returns200(t *testing.T) {
 	}
 }
 
+// TestStreamServer_ActiveReaders_BalancedAfterRequest verifica que el gauge de
+// lectores activos vuelve a 0 cuando la conexión de /stream termina — sin esto,
+// un leak dejaría el guard de idle creyendo que hay alguien viendo y nunca
+// pausaría la descarga.
+func TestStreamServer_ActiveReaders_BalancedAfterRequest(t *testing.T) {
+	srv := NewStreamServer(0, 1)
+	ctx := context.Background()
+	if err := srv.Listen(ctx); err != nil {
+		t.Fatalf("Listen() error: %v", err)
+	}
+	defer srv.Shutdown(ctx)
+
+	if got := srv.ActiveReaders(); got != 0 {
+		t.Fatalf("ActiveReaders() before any request = %d, want 0", got)
+	}
+
+	srv.SetFile(newFakeProvider("movie.mkv", []byte("fake video bytes")), "task-ar")
+
+	resp, err := http.Get(srv.URL())
+	if err != nil {
+		t.Fatalf("GET %s: %v", srv.URL(), err)
+	}
+	io.ReadAll(resp.Body) //nolint:errcheck
+	resp.Body.Close()
+
+	// The handler decrements in a defer after http.ServeContent returns, which
+	// can trail the client-side body read by a hair — poll briefly.
+	deadline := time.Now().Add(2 * time.Second)
+	for srv.ActiveReaders() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := srv.ActiveReaders(); got != 0 {
+		t.Errorf("ActiveReaders() after request completed = %d, want 0 (reader leak)", got)
+	}
+}
+
+// TestStreamEngine_DownloadPause_NilSafe verifica que las palancas de pausa de
+// descarga son seguras antes de que se seleccione un fichero (file == nil), y
+// que el estado por defecto es "no pausado".
+func TestStreamEngine_DownloadPause_NilSafe(t *testing.T) {
+	eng := &StreamEngine{} // file == nil (pre-Start)
+
+	if eng.IsDownloadPaused() {
+		t.Error("IsDownloadPaused() = true on fresh engine, want false")
+	}
+	// Must not panic and must remain unpaused (guarded on nil file).
+	eng.PauseDownload()
+	if eng.IsDownloadPaused() {
+		t.Error("IsDownloadPaused() = true after PauseDownload() with nil file, want false")
+	}
+	eng.ResumeDownload()
+	if eng.IsDownloadPaused() {
+		t.Error("IsDownloadPaused() = true after ResumeDownload(), want false")
+	}
+}
+
+// TestTrackingReader_GenerationGatesReadClock valida el fix del "reader
+// zombie": un lector que sigue drenando un fichero YA reemplazado (SetFile de
+// otra task) no debe mantener vivo el read-clock del fichero nuevo — si lo
+// hiciera, el guard de idle nunca pausaría la descarga de la task actual.
+func TestTrackingReader_GenerationGatesReadClock(t *testing.T) {
+	srv := NewStreamServer(0, 1)
+
+	// Serve file A → generation advances, read clock seeded.
+	srv.SetFile(newFakeProvider("a.mkv", []byte("aaaaaaaaaaaa")), "task-a")
+	genA := srv.fileGeneration.Load()
+
+	buf := make([]byte, 4)
+
+	// A current-generation reader bumps the read clock.
+	srv.lastReadUnixNano.Store(0)
+	rCurrent := &trackingReader{
+		inner:  &readSeekNopCloser{strings.NewReader("aaaaaaaa")},
+		server: srv,
+		gen:    genA,
+	}
+	if _, err := rCurrent.Read(buf); err != nil {
+		t.Fatalf("current read: %v", err)
+	}
+	if srv.lastReadUnixNano.Load() == 0 {
+		t.Error("current-generation read did not bump the read clock")
+	}
+
+	// File B replaces A → generation moves on. A lingering reader still pinned to
+	// genA (draining the old file) must NOT bump the (new file's) read clock.
+	srv.SetFile(newFakeProvider("b.mkv", []byte("bbbbbbbbbbbb")), "task-b")
+	srv.lastReadUnixNano.Store(0)
+	rStale := &trackingReader{
+		inner:  &readSeekNopCloser{strings.NewReader("aaaaaaaa")},
+		server: srv,
+		gen:    genA, // stale
+	}
+	if _, err := rStale.Read(buf); err != nil {
+		t.Fatalf("stale read: %v", err)
+	}
+	if srv.lastReadUnixNano.Load() != 0 {
+		t.Error("stale-generation read bumped the read clock — would pin the new file's download")
+	}
+}
+
+// TestStreamServer_ReadIdleSince_FreshAfterSetFile verifica que el read-clock se
+// siembra en SetFile (grace completo antes de poder pausar un fichero recién
+// servido) y que un /stream real lo mantiene fresco.
+func TestStreamServer_ReadIdleSince_FreshAfterSetFile(t *testing.T) {
+	srv := NewStreamServer(0, 1)
+	ctx := context.Background()
+	if err := srv.Listen(ctx); err != nil {
+		t.Fatalf("Listen() error: %v", err)
+	}
+	defer srv.Shutdown(ctx)
+
+	srv.SetFile(newFakeProvider("movie.mkv", []byte("fake video bytes")), "task-ris")
+	if idle := srv.ReadIdleSince(); idle > time.Second {
+		t.Errorf("ReadIdleSince() right after SetFile = %v, want ~0", idle)
+	}
+
+	resp, err := http.Get(srv.URL())
+	if err != nil {
+		t.Fatalf("GET %s: %v", srv.URL(), err)
+	}
+	io.ReadAll(resp.Body) //nolint:errcheck
+	resp.Body.Close()
+
+	if idle := srv.ReadIdleSince(); idle > time.Second {
+		t.Errorf("ReadIdleSince() after serving bytes = %v, want fresh", idle)
+	}
+}
+
 // TestStreamServer_Shutdown_ReleasesPort verifica que después de Shutdown()
 // el servidor no sigue respondiendo.
 func TestStreamServer_Shutdown_ReleasesPort(t *testing.T) {
