@@ -128,7 +128,9 @@ func (f *FS) openFileNode(n *node) (webdav.File, error) {
 		log.Printf("[webdav] refusing file outside allowed roots: %q", n.realPath)
 		return nil, os.ErrPermission
 	}
-	fh, err := os.Open(n.realPath) //nolint:gosec // realPath comes from the trusted library scan + AllowPath re-check
+	// realPath comes from the trusted library scan and is re-checked by AllowPath
+	// above; gosec G304 is excluded project-wide (see .golangci.yml).
+	fh, err := os.Open(n.realPath)
 	if err != nil {
 		return nil, err
 	}

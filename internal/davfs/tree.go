@@ -67,8 +67,17 @@ var episodeMarker = regexp.MustCompile(`(?i)\b(S\d{1,2}\s*E\d{1,4}|\d{1,2}x\d{2}
 // Hidden items (scan errors, damaged files, samples) are skipped.
 func buildTree(items []library.LibraryItem) *node {
 	root := newDir("")
-	for i := range items {
-		item := items[i]
+	// Sort by real path so the collision-suffix assignment (uniqueLeafName) is
+	// DETERMINISTIC across rescans. library.Items arrives in goroutine-completion
+	// order, which would otherwise flip which of two files sharing a virtual name
+	// gets " (2)", churning that file's WebDAV URL/ETag between scans and forcing
+	// clients (Infuse/Kodi) to re-download. Copy first — never mutate the caller's
+	// slice.
+	sorted := make([]library.LibraryItem, len(items))
+	copy(sorted, items)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].FilePath < sorted[j].FilePath })
+	for i := range sorted {
+		item := sorted[i]
 		if hidden(item) {
 			continue
 		}

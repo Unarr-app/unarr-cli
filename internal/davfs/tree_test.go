@@ -65,6 +65,41 @@ func TestSeasonFolder(t *testing.T) {
 	}
 }
 
+// TestCollisionSuffixDeterministic: two files sharing a virtual folder+leaf,
+// distinguished only by real path, must get the SAME suffix assignment
+// regardless of input order — otherwise a file's WebDAV URL/ETag flips between
+// rescans. The lexicographically-first real path keeps the unsuffixed name.
+func TestCollisionSuffixDeterministic(t *testing.T) {
+	a := library.LibraryItem{FilePath: "/aaa/Movie.2020.mkv", FileName: "Movie.2020.mkv", Title: "Movie", Year: "2020"}
+	b := library.LibraryItem{FilePath: "/zzz/Movie.2020.mkv", FileName: "Movie.2020.mkv", Title: "Movie", Year: "2020"}
+
+	nameFor := func(items []library.LibraryItem) map[string]string {
+		root := buildTree(items)
+		folder := root.children[movieRoot].children["Movie (2020)"]
+		if folder == nil {
+			t.Fatal("Movie (2020) folder missing")
+		}
+		out := map[string]string{}
+		for _, n := range folder.children {
+			out[n.realPath] = n.name
+		}
+		return out
+	}
+	forward := nameFor([]library.LibraryItem{a, b})
+	reverse := nameFor([]library.LibraryItem{b, a})
+
+	if forward["/aaa/Movie.2020.mkv"] != reverse["/aaa/Movie.2020.mkv"] ||
+		forward["/zzz/Movie.2020.mkv"] != reverse["/zzz/Movie.2020.mkv"] {
+		t.Errorf("collision suffix not deterministic across input order: forward=%v reverse=%v", forward, reverse)
+	}
+	if forward["/aaa/Movie.2020.mkv"] != "Movie.2020.mkv" {
+		t.Errorf("first-by-path should keep the base name, got %q", forward["/aaa/Movie.2020.mkv"])
+	}
+	if forward["/zzz/Movie.2020.mkv"] != "Movie.2020 (2).mkv" {
+		t.Errorf("second-by-path should be suffixed, got %q", forward["/zzz/Movie.2020.mkv"])
+	}
+}
+
 // TestModTimeRollup verifies finalize's ETag rollup: a directory's reported
 // ModTime equals its newest descendant leaf's, and each leaf's info ModTime
 // matches its source item. webdav keys ETag/Last-Modified on ModTime + Size.
