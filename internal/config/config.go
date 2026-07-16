@@ -86,6 +86,14 @@ type DownloadConfig struct {
 	// viewer mid-stream. Note a re-open / quality-change / audio-switch creates
 	// an extra session, so allow headroom above the raw viewer cap on a shared box.
 	MaxStreamSessions int `toml:"max_stream_sessions"`
+	// UsenetStreaming opts into on-the-fly Usenet streaming: when the web opens a
+	// stream session for a Usenet (NZB) release, the daemon tries to serve it
+	// straight from NNTP (arranca en segundos + seek) instead of downloading the
+	// whole file first. Strictly OPT-IN and OFF by default — a streamable release
+	// (plain .mkv/.mp4 or a STORE rar) plays instantly, while a non-streamable one
+	// (compressed/encrypted RAR, password) falls back CLEANLY to the batch
+	// download so playback is never blocked. Older daemons ignore the field.
+	UsenetStreaming bool `toml:"usenet_streaming"`
 	// RequireStreamToken gates remote (non-loopback) /stream + /hls requests on a
 	// signed, short-lived token embedded in the URLs the agent reports. Default
 	// true (secure by default); loopback callers (local mpv/vlc) are always exempt.

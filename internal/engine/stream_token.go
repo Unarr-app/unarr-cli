@@ -49,6 +49,13 @@ const (
 // id means a token minted for one session never validates another.
 func streamScopeHLS(sessionID string) string { return "hls:" + sessionID }
 
+// streamScopeUsenet is the token scope for a Usenet on-the-fly stream source
+// registered under an opaque id (the /usenet/<id> endpoint that ffmpeg consumes
+// as a SourceURL). Binding the id into the scope means a token minted for one
+// source never validates another — a leaked URL exposes only its own release.
+// The agent both mints and verifies this scope; the web never sees it.
+func streamScopeUsenet(id string) string { return "usenet:" + id }
+
 // streamScopeThumb is the token scope for a single-frame thumbnail of a
 // specific file (the web's "file characteristics" panel). Binding the file
 // path's SHA-256 into the scope means a token minted for one file never

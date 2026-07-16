@@ -374,6 +374,14 @@ func runDaemonStart() error {
 			break
 		}
 	}
+	// On-the-fly Usenet streaming is strictly opt-in (downloads.usenet_streaming).
+	// Log its state so the boot line makes clear whether a Usenet stream session
+	// will be served live from NNTP or always fall back to the batch download.
+	if cfg.Download.UsenetStreaming {
+		log.Printf("[usenet] on-the-fly streaming ENABLED (downloads.usenet_streaming=true) — streamable releases play live, others fall back to download")
+	} else {
+		log.Printf("[usenet] on-the-fly streaming disabled (downloads.usenet_streaming=false) — usenet stream sessions use the batch download")
+	}
 
 	// Pre-flight disk reserve: refuse a download that would leave less than this
 	// many bytes free, so a download never fills the filesystem to 0 mid-write.
@@ -880,6 +888,28 @@ func runDaemonStart() error {
 				streamSrv.HLS().Register(hsess)
 				go watchSessionReady(hlsCtx, agentClient, hsess, hlsCfg.SessionID)
 			}()
+		}
+
+		// Usenet stream (on-the-fly NNTP, hueco #3 for usenet): the source is an
+		// NZB release, not a local file or a debrid link. Try to serve it live
+		// straight from NNTP; a non-streamable release (compressed/encrypted RAR,
+		// password) OR the feature being off falls back CLEANLY to a normal Usenet
+		// download inside the handler — playback is never blocked. Runs before the
+		// debrid/filePath branches: a usenet stream session carries no DirectURL
+		// and has no local FilePath yet.
+		if sess.Usenet {
+			handleUsenetStreamSession(sess, usenetStreamDeps{
+				ctx:         ctx,
+				cfg:         cfg,
+				usenetDl:    usenetDl,
+				streamSrv:   streamSrv,
+				manager:     manager,
+				hlsCache:    hlsCache,
+				startHLS:    startHLSPlayback,
+				failSession: failSession,
+				markReady:   markReady,
+			})
+			return
 		}
 
 		// Debrid direct-play (hueco #2 / 2a): the source has no local file — the

@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,20 +70,13 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, fileIndex 
 	totalBytes := file.TotalBytes()
 	totalSegs := len(file.Segments)
 
-	// Sort segments by number
-	segments := make([]nzb.Segment, len(file.Segments))
-	copy(segments, file.Segments)
-	sort.Slice(segments, func(i, j int) bool {
-		return segments[i].Number < segments[j].Number
-	})
-
-	// Track file offsets for each segment (sequential assembly)
-	offsets := make([]int64, len(segments))
-	var offset int64
-	for i, seg := range segments {
-		offsets[i] = offset
-		offset += seg.Bytes
-	}
+	// Sort segments by number and compute each one's start offset for
+	// sequential assembly. Both steps are the shared nzb primitives the
+	// streaming OffsetIndex also builds on (extracted so the layout logic has a
+	// single tested home); behaviour here is identical to the previous inline
+	// sort + Bytes accumulation.
+	segments := nzb.SortSegmentsByNumber(file.Segments)
+	offsets := nzb.EstimatedByteOffsets(segments)
 
 	// Open output file — resume-aware
 	var outFile *os.File

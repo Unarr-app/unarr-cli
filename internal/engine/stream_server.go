@@ -97,6 +97,12 @@ type StreamServer struct {
 
 	hls *HLSSessionRegistry // HLS sessions served on /hls/<id>/...
 
+	// usenet holds on-the-fly Usenet stream sources served on /usenet/<id>. Keyed
+	// (not single-file like provider) so a remux and a direct-play can be live at
+	// once; the daemon registers a source, hands ffmpeg its tokenised loopback
+	// URL, and unregisters when the session ends. See stream_usenet.go.
+	usenet *usenetSourceRegistry
+
 	// streamSecret signs the per-URL stream tokens (see stream_token.go). In
 	// memory only; regenerated each daemon start. requireToken gates whether
 	// remote (non-loopback) /stream and /hls requests must carry a valid token.
@@ -173,6 +179,7 @@ func NewStreamServer(port, maxStreamSessions int) *StreamServer {
 	return &StreamServer{
 		port:         port,
 		hls:          NewHLSSessionRegistry(maxStreamSessions),
+		usenet:       newUsenetSourceRegistry(),
 		streamSecret: newStreamSecret(),
 		requireToken: true, // secure by default; the agent self-mints tokens
 	}
@@ -362,6 +369,7 @@ func (ss *StreamServer) Listen(ctx context.Context) error {
 	mux.HandleFunc("/speedtest", ss.speedtestHandler)
 	mux.HandleFunc("/playlist.m3u", ss.playlistHandler)
 	mux.HandleFunc("/hls/", ss.hlsHandler)
+	mux.HandleFunc("/usenet/", ss.usenetHandler)
 	mux.HandleFunc("/thumbnail", ss.thumbnailHandler)
 	mux.HandleFunc("/trickplay", ss.trickplayHandler)
 	mux.HandleFunc("/sub", ss.subtitleHandler)

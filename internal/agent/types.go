@@ -572,6 +572,22 @@ type StreamSession struct {
 	// and gates it on an agent-version floor so older daemons never receive a
 	// field they can't serve. Takes priority over FilePath when present.
 	DirectURL string `json:"directUrl,omitempty"`
+	// Usenet marks a stream session whose source is a Usenet (NZB) release rather
+	// than a local file / debrid link. When set — AND the daemon opted into
+	// downloads.usenet_streaming — the daemon tries to serve the release on the
+	// fly from NNTP via NzbID (arranca en segundos); if the release isn't
+	// streamable (compressed/encrypted RAR, password) it falls back CLEANLY to a
+	// normal Usenet download so playback is never blocked. Older daemons ignore
+	// the field and simply never Usenet-stream (they wait for the batch download).
+	Usenet bool `json:"usenet,omitempty"`
+	// NzbID is the pre-resolved NZB id for a Usenet stream session (Usenet=true).
+	// Empty is allowed — the daemon then resolves the NZB from InfoHash/title, the
+	// same way the batch Usenet downloader does.
+	NzbID string `json:"nzbId,omitempty"`
+	// NzbPassword is the archive password for a password-protected Usenet release.
+	// Its mere presence makes the release non-streamable (encrypted) → the daemon
+	// falls back to the batch download, which can extract it with the password.
+	NzbPassword string `json:"nzbPassword,omitempty"`
 }
 
 // SyncResponse is returned by the server with all pending actions for the CLI.

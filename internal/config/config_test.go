@@ -291,6 +291,36 @@ max_stream_sessions = 5
 	}
 }
 
+func TestLoadUsenetStreaming(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Absent key → OFF: on-the-fly usenet streaming is strictly opt-in, so a
+	// config predating the feature keeps the safe batch-download behaviour.
+	missing := filepath.Join(tmp, "missing.toml")
+	os.WriteFile(missing, []byte(`[auth]
+api_key = "tc_x"
+`), 0o644)
+	cfg, err := Load(missing)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Download.UsenetStreaming {
+		t.Error("UsenetStreaming (key absent) = true, want false (opt-in)")
+	}
+
+	// Explicit opt-in is honoured.
+	on := filepath.Join(tmp, "on.toml")
+	os.WriteFile(on, []byte(`[downloads]
+usenet_streaming = true
+`), 0o644)
+	if cfg, err = Load(on); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Download.UsenetStreaming {
+		t.Error("UsenetStreaming (=true) = false, want true")
+	}
+}
+
 func TestLoadSeedingDefaultsOff(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "config.toml")
