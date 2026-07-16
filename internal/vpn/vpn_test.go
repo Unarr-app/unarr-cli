@@ -39,6 +39,54 @@ func TestReconnectNilTunnel(t *testing.T) {
 	}
 }
 
+// testConf is a minimal but valid WireGuard .conf (32-zero-byte keys, literal-IP
+// endpoint so no DNS is needed) that bringUp can turn into a userspace device in a
+// unit test — no network, no root.
+func testConf(endpoint string) string {
+	const zeroKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	return "[Interface]\nPrivateKey = " + zeroKey + "\nAddress = 10.0.0.2/32\nDNS = 1.1.1.1\n\n" +
+		"[Peer]\nPublicKey = " + zeroKey + "\nEndpoint = " + endpoint + "\nAllowedIPs = 0.0.0.0/0\n"
+}
+
+// TestReconnectPopulatesEndpointWhenEmpty: a fail-closed tunnel that never started
+// (empty Endpoint) gets the resolved exit server recorded on the first successful
+// Reconnect, so `unarr vpn status` can show the "Exit server" line after healing.
+func TestReconnectPopulatesEndpointWhenEmpty(t *testing.T) {
+	tun := &Tunnel{} // device-less, no Endpoint — mirrors failedTunnel(required=true)
+	if tun.Endpoint != "" {
+		t.Fatalf("precondition: expected empty Endpoint, got %q", tun.Endpoint)
+	}
+	if err := tun.Reconnect(testConf("1.2.3.4:51820")); err != nil {
+		t.Fatalf("Reconnect: %v", err)
+	}
+	defer tun.Close()
+	if tun.Endpoint != "1.2.3.4:51820" {
+		t.Errorf("Endpoint after heal = %q, want %q", tun.Endpoint, "1.2.3.4:51820")
+	}
+}
+
+// TestReconnectKeepsExistingEndpoint: a healthy tunnel that already exits through a
+// known server keeps that Endpoint across a Reconnect (same exit server invariant) —
+// a mid-session reconnect must not rewrite or blank the displayed exit server.
+func TestReconnectKeepsExistingEndpoint(t *testing.T) {
+	tun, err := Up(testConf("1.2.3.4:51820"))
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	defer tun.Close()
+	if tun.Endpoint != "1.2.3.4:51820" {
+		t.Fatalf("Up Endpoint = %q, want %q", tun.Endpoint, "1.2.3.4:51820")
+	}
+	// Reconnect against a config pointing at a different endpoint: the already-set
+	// label survives unchanged (Up is the source of truth for the exit server).
+	if err := tun.Reconnect(testConf("5.6.7.8:51820")); err != nil {
+		t.Fatalf("Reconnect: %v", err)
+	}
+	if tun.Endpoint != "1.2.3.4:51820" {
+		t.Errorf("Endpoint after Reconnect = %q, want it unchanged %q", tun.Endpoint, "1.2.3.4:51820")
+	}
+}
+
 // TestHandshakeFresh covers the pure liveness decision without a live WireGuard
 // device: a recent handshake is live, a stale one is dead, and a not-yet-handshaked
 // tunnel is only live inside the post-Up grace window.

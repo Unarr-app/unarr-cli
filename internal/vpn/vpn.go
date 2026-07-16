@@ -146,8 +146,12 @@ type tunnelInner struct {
 type Tunnel struct {
 	inner atomic.Pointer[tunnelInner]
 	// Endpoint is the resolved ip:port of the WireGuard server this tunnel exits
-	// through — surfaced in `unarr vpn status`. Set once at Up and left unchanged
-	// by Reconnect (same exit server), so it is safe to read without locking.
+	// through — surfaced in `unarr vpn status`. Set at Up, or on the first
+	// successful Reconnect if Up never produced one (a fail-closed tunnel that
+	// failed to start has an empty Endpoint until the supervisor heals it). Once
+	// non-empty it is left unchanged (same exit server). It is only ever written on
+	// the supervisor goroutine (via Reconnect) after the startup read, so it is
+	// safe to read without locking.
 	Endpoint string
 	// mu serializes Reconnect (the bring-up + atomic swap + close-old sequence).
 	mu sync.Mutex
@@ -286,7 +290,10 @@ func handshakeFresh(ipc string, now, startedAt time.Time) bool {
 // Reconnect brings up a fresh device+netstack from confText and atomically swaps
 // it in, then closes the old device. The long-lived torrent client keeps dialing
 // through the stable Tunnel methods, so all subsequent peer/tracker dials
-// transparently use the new tunnel. The exit Endpoint label is left unchanged.
+// transparently use the new tunnel. An already-set exit Endpoint label is left
+// unchanged (same exit server); when the tunnel was created without one (a
+// fail-closed tunnel that failed to start at Up), the first successful Reconnect
+// records the resolved endpoint so `unarr vpn status` can show the exit server.
 func (t *Tunnel) Reconnect(confText string) error {
 	if t == nil {
 		return errors.New("nil tunnel")
@@ -294,9 +301,12 @@ func (t *Tunnel) Reconnect(confText string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	inner, _, err := bringUp(confText)
+	inner, endpoint, err := bringUp(confText)
 	if err != nil {
 		return err
+	}
+	if t.Endpoint == "" {
+		t.Endpoint = endpoint
 	}
 	if old := t.inner.Swap(inner); old != nil {
 		old.dev.Close()
