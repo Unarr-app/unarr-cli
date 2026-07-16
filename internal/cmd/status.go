@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/engine"
 	"github.com/Unarr-app/unarr-cli/internal/upgrade"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -167,6 +169,16 @@ func runStatus() error {
 	}
 	fmt.Println()
 
+	// ── WebDAV (read-only library) ──
+	// Gate on the SAME resolver the daemon uses to arm the mount, so status never
+	// advertises a share the daemon refused to start (enabled but no usable
+	// password → dead mount in Infuse/Kodi).
+	if cfg.Download.WebDAVEnabled {
+		if user, pass, active := engine.ResolveWebDAVCreds(cfg.Download.WebDAVUsername, cfg.Download.WebDAVPassword, cfg.Auth.APIKey); active {
+			printWebDAVStatus(cfg, user, pass)
+		}
+	}
+
 	// ── Update check (cached: instant if <1h, otherwise async 3s) ──
 	type versionResult struct {
 		version   string
@@ -198,6 +210,30 @@ func runStatus() error {
 	fmt.Println()
 
 	return nil
+}
+
+// printWebDAVStatus renders the read-only WebDAV export block: the mount URLs
+// (local/LAN/Tailscale), the Basic-auth user, and the password. user/pass are
+// already resolved by engine.ResolveWebDAVCreds (the caller gates on active), so
+// this only formats — no duplicated derivation.
+func printWebDAVStatus(cfg config.Config, user, pass string) {
+	cyan := color.New(color.FgCyan)
+	dim := color.New(color.FgHiBlack)
+
+	port := cfg.Download.StreamPort
+	cyan.Println("  WebDAV (read-only library)")
+	fmt.Printf("    Local:      http://127.0.0.1:%d/dav/\n", port)
+	if ip := engine.LanIP(); ip != "" {
+		fmt.Printf("    LAN:        http://%s:%d/dav/\n", ip, port)
+	}
+	if ts := engine.TailscaleIP(); ts != "" {
+		fmt.Printf("    Tailscale:  http://%s:%d/dav/\n", ts, port)
+	}
+	fmt.Printf("    User:       %s\n", user)
+	fmt.Printf("    Password:   %s\n", pass)
+	dim.Println("    Mount in Infuse / Kodi / VLC. Prefer LAN / Tailscale on untrusted networks.")
+	dim.Printf("    (URL uses the configured port %d; if it was busy at boot the live port may differ.)\n", port)
+	fmt.Println()
 }
 
 // isDaemonAlive checks if the daemon process from the state file is still running.

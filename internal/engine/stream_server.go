@@ -103,6 +103,14 @@ type StreamServer struct {
 	streamSecret []byte
 	requireToken bool
 
+	// Read-only WebDAV library export (see webdav.go). Armed via EnableWebDAV
+	// before Listen(); mounted at /dav/ on the same mux when webdavEnabled.
+	// Credentials are stored as SHA-256 digests for constant-time Basic auth.
+	webdavHandler  http.Handler
+	webdavUserHash [32]byte
+	webdavPassHash [32]byte
+	webdavEnabled  bool
+
 	// ffmpegPath is the resolved ffmpeg binary, used by /thumbnail to extract a
 	// single frame on demand. Empty = thumbnails disabled (503). Set once before
 	// Listen() via SetFFmpegPath; read-only thereafter so the handler needs no lock.
@@ -357,6 +365,13 @@ func (ss *StreamServer) Listen(ctx context.Context) error {
 	mux.HandleFunc("/thumbnail", ss.thumbnailHandler)
 	mux.HandleFunc("/trickplay", ss.trickplayHandler)
 	mux.HandleFunc("/sub", ss.subtitleHandler)
+	// Read-only library over WebDAV (opt-in). Mounted on the SAME mux, so it is
+	// also served by the per-agent HTTPS listener (listenTLS reuses this mux).
+	// The subtree pattern "/dav/" collides with none of the routes above.
+	if ss.webdavEnabled {
+		mux.Handle(webdavPrefix+"/", ss.webdavGuard(ss.webdavHandler))
+		log.Printf("[stream] WebDAV (read-only library) mounted at %s/ (HTTP Basic auth)", webdavPrefix)
+	}
 
 	// SO_REUSEADDR allows immediate rebind if the port is in TIME_WAIT (e.g. after agent restart)
 	lc := net.ListenConfig{

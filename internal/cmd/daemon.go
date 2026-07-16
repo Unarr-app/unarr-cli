@@ -17,6 +17,7 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/acme"
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/davfs"
 	"github.com/Unarr-app/unarr-cli/internal/engine"
 	"github.com/Unarr-app/unarr-cli/internal/funnel"
 	"github.com/Unarr-app/unarr-cli/internal/library"
@@ -538,6 +539,9 @@ func runDaemonStart() error {
 	} else {
 		log.Printf("[hls_cache] disabled by config — every play re-encodes from scratch")
 	}
+	// Read-only WebDAV library export (opt-in). Armed before Listen() so it is
+	// mounted on the same mux (and thus served by the HTTPS listener too).
+	setupWebDAV(streamSrv, cfg)
 	if err := streamSrv.Listen(ctx); err != nil {
 		return fmt.Errorf("start stream server: %w", err)
 	}
@@ -1222,6 +1226,32 @@ func reportAgentRevoked(cfg config.Config, err error) {
 func streamAllowedRoots(cfg config.Config) []string {
 	return []string{cfg.Download.Dir, cfg.Library.ScanPath,
 		cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir}
+}
+
+// setupWebDAV arms the read-only WebDAV library export when opted in via
+// downloads.webdav_enabled. Credentials default to user "unarr" + a password
+// derived from the STABLE API key (so a mounted Infuse/Kodi share survives
+// daemon restarts, unlike the per-start stream secret). The virtual FS reuses
+// the exact same allowed-roots gate as /stream. No-op (with a log line) when
+// disabled or when no usable credentials exist.
+func setupWebDAV(streamSrv *engine.StreamServer, cfg config.Config) {
+	if !cfg.Download.WebDAVEnabled {
+		log.Printf("[webdav] disabled (set downloads.webdav_enabled = true to expose the library read-only)")
+		return
+	}
+	user, pass, active := engine.ResolveWebDAVCreds(cfg.Download.WebDAVUsername, cfg.Download.WebDAVPassword, cfg.Auth.APIKey)
+	if !active {
+		log.Printf("[webdav] NOT enabled: set downloads.webdav_password (API key is empty, so no password can be derived)")
+		return
+	}
+	roots := streamAllowedRoots(cfg)
+	fs := davfs.New(davfs.Options{
+		Load:      library.LoadCache,
+		CachePath: library.CachePath(),
+		AllowPath: func(p string) bool { return isAllowedStreamPath(filepath.Clean(p), roots...) },
+	})
+	streamSrv.EnableWebDAV(fs, user, pass)
+	log.Printf("[webdav] read-only library export enabled (user %q) at :%d/dav/", user, cfg.Download.StreamPort)
 }
 
 // allowedDirs. filePath must already be cleaned (filepath.Clean) by the caller.
