@@ -90,12 +90,24 @@ type DownloadConfig struct {
 	// signed, short-lived token embedded in the URLs the agent reports. Default
 	// true (secure by default); loopback callers (local mpv/vlc) are always exempt.
 	// Set false only to debug a player that can't carry the token.
-	RequireStreamToken bool            `toml:"require_stream_token"`
-	CORSExtraOrigins   []string        `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
-	Transcode          TranscodeConfig `toml:"transcode"`
-	HLSCache           HLSCacheConfig  `toml:"hls_cache"`
-	VPN                VPNConfig       `toml:"vpn"`
-	Funnel             FunnelConfig    `toml:"funnel"`
+	RequireStreamToken bool     `toml:"require_stream_token"`
+	CORSExtraOrigins   []string `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
+	// WebDAV read-only library export (opt-in, default false). When on, the stream
+	// server also serves the ORGANIZED library over WebDAV at
+	// http://<host>:<stream_port>/dav/ so Infuse / Kodi / VLC / Apple TV can browse
+	// and play directly (no web player). READ-ONLY: only PROPFIND/GET/HEAD/OPTIONS —
+	// every write verb (PUT/DELETE/MKCOL/COPY/MOVE) returns 405. Basic auth. Prefer
+	// LAN / Tailscale, or the per-agent HTTPS listener, on untrusted networks.
+	WebDAVEnabled bool `toml:"webdav_enabled"`
+	// WebDAVUsername for Basic auth (default "unarr" when empty).
+	WebDAVUsername string `toml:"webdav_username"`
+	// WebDAVPassword for Basic auth. Empty = derive a STABLE password from the API
+	// key (survives daemon restarts; shown by `unarr status`). Set to override.
+	WebDAVPassword string          `toml:"webdav_password"`
+	Transcode      TranscodeConfig `toml:"transcode"`
+	HLSCache       HLSCacheConfig  `toml:"hls_cache"`
+	VPN            VPNConfig       `toml:"vpn"`
+	Funnel         FunnelConfig    `toml:"funnel"`
 }
 
 // HLSCacheConfig controls the persistent HLS segment cache. A completed encode

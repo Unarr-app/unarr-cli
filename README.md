@@ -487,6 +487,16 @@ preferred_methods = ["auto"]     # e.g. ["debrid"], ["debrid","usenet"], or ["au
 max_concurrent = 3
 max_download_speed = "0"         # e.g. "10MB", "500KB", "0" = unlimited
 max_upload_speed = "0"
+# Read-only WebDAV export of your organized library (Movies / TV Shows) so
+# Infuse, Kodi, VLC, etc. can browse and play it without the web player. Opt-in,
+# off by default. Only GET/HEAD/PROPFIND are served — every write verb is 405'd.
+# Basic auth: username defaults to "unarr"; password defaults to a stable value
+# derived from your API key (shown by `unarr status`) unless you set one. The
+# mount is served on the same port as streaming, at /dav/. Prefer LAN/Tailscale
+# on untrusted networks. Requires unarr >= 1.5.0-beta.
+webdav_enabled = false
+# webdav_username = "unarr"
+# webdav_password = ""           # blank = derive from the API key
 
 [organize]
 enabled = true

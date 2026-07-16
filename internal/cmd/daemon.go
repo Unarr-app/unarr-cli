@@ -17,6 +17,7 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/acme"
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/davfs"
 	"github.com/Unarr-app/unarr-cli/internal/engine"
 	"github.com/Unarr-app/unarr-cli/internal/funnel"
 	"github.com/Unarr-app/unarr-cli/internal/library"
@@ -516,6 +517,9 @@ func runDaemonStart() error {
 	} else {
 		log.Printf("[hls_cache] disabled by config — every play re-encodes from scratch")
 	}
+	// Read-only WebDAV library export (opt-in). Armed before Listen() so it is
+	// mounted on the same mux (and thus served by the HTTPS listener too).
+	setupWebDAV(streamSrv, cfg)
 	if err := streamSrv.Listen(ctx); err != nil {
 		return fmt.Errorf("start stream server: %w", err)
 	}
@@ -1202,6 +1206,46 @@ func streamAllowedRoots(cfg config.Config) []string {
 		cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir}
 }
 
+// setupWebDAV arms the read-only WebDAV library export when opted in via
+// downloads.webdav_enabled. Credentials default to user "unarr" + a password
+// derived from the STABLE API key (so a mounted Infuse/Kodi share survives
+// daemon restarts, unlike the per-start stream secret). The virtual FS reuses
+// the exact same allowed-roots gate as /stream. No-op (with a log line) when
+// disabled or when no usable credentials exist.
+func setupWebDAV(streamSrv *engine.StreamServer, cfg config.Config) {
+	if !cfg.Download.WebDAVEnabled {
+		log.Printf("[webdav] disabled (set downloads.webdav_enabled = true to expose the library read-only)")
+		return
+	}
+	user, pass, active := engine.ResolveWebDAVCreds(cfg.Download.WebDAVUsername, cfg.Download.WebDAVPassword, cfg.Auth.APIKey)
+	if !active {
+		log.Printf("[webdav] NOT enabled: set downloads.webdav_password (API key is empty, so no password can be derived)")
+		return
+	}
+	roots := streamAllowedRoots(cfg)
+	fs := davfs.New(davfs.Options{
+		Load:      library.LoadCache,
+		CachePath: library.CachePath(),
+		AllowPath: func(p string) bool { return isAllowedStreamPathResolved(filepath.Clean(p), roots...) },
+	})
+	streamSrv.EnableWebDAV(fs, user, pass)
+	log.Printf("[webdav] read-only library export enabled (user %q) at :%d/dav/", user, cfg.Download.StreamPort)
+	if webDAVOverUPnPExposed(cfg) {
+		log.Printf("[webdav] WARNING: enable_upnp is ALSO on — UPnP maps the stream port to the WAN, " +
+			"exposing /dav/ (HTTP Basic auth over cleartext) to the public internet. " +
+			"Disable enable_upnp, or keep the mount on LAN / Tailscale only.")
+	}
+}
+
+// webDAVOverUPnPExposed reports the dangerous combination where the read-only
+// WebDAV export AND UPnP/NAT-PMP WAN port-mapping are BOTH enabled: UPnP
+// publishes the stream port to the public internet, so /dav/ (served with HTTP
+// Basic auth over cleartext) becomes reachable from the WAN. Callers warn loudly
+// but do not refuse to start — the operator may have opted in deliberately.
+func webDAVOverUPnPExposed(cfg config.Config) bool {
+	return cfg.Download.WebDAVEnabled && cfg.Download.EnableUPnP
+}
+
 // allowedDirs. filePath must already be cleaned (filepath.Clean) by the caller.
 // This defends against a compromised API server sending a path traversal payload.
 func isAllowedStreamPath(filePath string, allowedDirs ...string) bool {
@@ -1211,6 +1255,40 @@ func isAllowedStreamPath(filePath string, allowedDirs ...string) bool {
 		}
 		rel, err := filepath.Rel(filepath.Clean(dir), filePath)
 		if err == nil && !strings.HasPrefix(rel, "..") {
+			return true
+		}
+	}
+	return false
+}
+
+// isAllowedStreamPathResolved is a symlink-hardened variant used by the WebDAV
+// export's per-open re-check. The lexical isAllowedStreamPath can be defeated by
+// a symlink that lives INSIDE an allowed root but points OUTSIDE it — os.Open /
+// os.Stat happily follow it out, leaking an arbitrary file. This first requires
+// the lexical gate to pass (so it can only ever DENY more, never allow a path
+// the lexical check rejects), then resolves BOTH the file and the roots with
+// EvalSymlinks and re-checks containment against the resolved roots. Resolving
+// both sides keeps a library legitimately mounted THROUGH a symlink (e.g.
+// /downloads → /mnt/nas) allowed, matching relocateUnreachable's approach. A
+// failed EvalSymlinks (e.g. a vanished file) is treated as outside the roots
+// (fail-closed) — a GET would fail on os.Open anyway.
+func isAllowedStreamPathResolved(filePath string, allowedDirs ...string) bool {
+	if !isAllowedStreamPath(filePath, allowedDirs...) {
+		return false
+	}
+	realPath, err := filepath.EvalSymlinks(filePath)
+	if err != nil {
+		return false
+	}
+	for _, dir := range allowedDirs {
+		if dir == "" {
+			continue
+		}
+		realDir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			continue
+		}
+		if isAllowedStreamPath(realPath, realDir) {
 			return true
 		}
 	}
