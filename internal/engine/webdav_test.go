@@ -132,6 +132,33 @@ func TestWebDAVReadWithAuth(t *testing.T) {
 	}
 }
 
+// TestWebDAVHeadVerb: HEAD is a permitted read verb — Infuse/Kodi/VLC probe a
+// file's size and Range support with it before streaming. Authed HEAD → 200 with
+// the real Content-Length but NO body; unauth HEAD → 401 like GET.
+func TestWebDAVHeadVerb(t *testing.T) {
+	_, h := newWebDAVServer(t)
+
+	// Unauthenticated HEAD is rejected exactly like GET.
+	if rec := davRequest(t, h, http.MethodHead, "/dav/movie.mkv", false); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no-auth HEAD → %d, want 401", rec.Code)
+	}
+
+	// Authenticated HEAD → 200, empty body, but the size is discoverable.
+	rec := davRequest(t, h, http.MethodHead, "/dav/movie.mkv", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("authed HEAD → %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); body != "" {
+		t.Errorf("HEAD body = %q, want empty (HEAD carries headers only)", body)
+	}
+	if cl := rec.Header().Get("Content-Length"); cl != fmt.Sprintf("%d", len(testDAVBody)) {
+		t.Errorf("HEAD Content-Length = %q, want %d (size probing must work)", cl, len(testDAVBody))
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("HEAD Cache-Control = %q, want no-store", cc)
+	}
+}
+
 // TestWebDAVServesOverListener proves the /dav/ subtree is actually mounted on
 // the StreamServer mux and served over a real TCP socket (the one path the
 // httptest-level tests can't cover): read-only + Basic auth end to end.
