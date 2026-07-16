@@ -60,8 +60,10 @@ func runVPNStatus(check bool) error {
 	green := color.New(color.FgGreen)
 	yellow := color.New(color.FgYellow)
 	cyan := color.New(color.FgCyan)
+	red := color.New(color.FgRed)
 
 	cfg := loadConfig()
+	required := cfg.Download.VPN.Required
 
 	fmt.Println()
 	bold.Println("  Managed VPN")
@@ -76,10 +78,24 @@ func runVPNStatus(check bool) error {
 		cyan.Println("  Mode:    managed (config fetched from your account)")
 	default:
 		dim.Println("  Mode:    off")
+		if required {
+			fmt.Println()
+			red.Println("  ✗ required=true but the VPN is OFF — torrent/P2P is DISABLED (safe).")
+			dim.Println("     Enable it (`unarr vpn enable`) or set a config_file, or set")
+			dim.Println("     [downloads.vpn] required=false to allow clear-net downloads.")
+		}
 		fmt.Println()
 		dim.Println("  Enable with `unarr vpn enable` (needs a PRO+ plan with the VPN add-on).")
 		fmt.Println()
 		return nil
+	}
+
+	// ── Kill-switch (fail-closed P2P) — config truth, so it's shown even when the
+	// daemon isn't running to report live blocking state. ──
+	if required {
+		bold.Println("  Required: yes — P2P is DISABLED unless the tunnel is up (kill-switch on)")
+	} else {
+		dim.Println("  Required: no  — a failed tunnel falls back to clear-net downloads")
 	}
 
 	// ── Live tunnel state (from the daemon state file) ──
@@ -96,6 +112,10 @@ func runVPNStatus(check bool) error {
 		if server != "" {
 			fmt.Printf("    Exit server: %s\n", server)
 		}
+	case alive && state.VPNBlocking:
+		red.Println("  ✗ Tunnel DOWN — P2P is BLOCKED, torrent disabled (SAFE: no IP leak).")
+		dim.Println("     Debrid/usenet still work. The agent is retrying the tunnel; check")
+		dim.Println("     `unarr daemon logs` for [vpn], and verify the add-on at https://unarr.app/vpn.")
 	case alive:
 		yellow.Println("  ⚠  Daemon is running but the tunnel is NOT up — downloads go in the clear.")
 		dim.Println("     Check `unarr daemon logs` for a [vpn] line. Common cause: no active")

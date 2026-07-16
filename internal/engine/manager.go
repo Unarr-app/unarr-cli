@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -227,12 +228,20 @@ func (m *Manager) TaskStates() []agent.TaskState {
 	return states
 }
 
-// recordFinished stores a completed/failed task for the next sync cycle.
+// recordFinished stores a completed/failed task for the next sync cycle and drops
+// it from the resume store (a genuine terminal). See recordFinishedKeep for the
+// resume-preserving variant.
 func (m *Manager) recordFinished(update agent.StatusUpdate) {
-	// Drop from the resume store on a genuine terminal state (completed / failed
-	// / user-cancelled). A shutdown-interrupted task is NOT removed — it stays so
-	// the daemon re-submits and resumes it on the next start.
-	if m.taskStore != nil && !m.shuttingDown.Load() {
+	m.recordFinishedKeep(update, false)
+}
+
+// recordFinishedKeep reports a task's final state to the next sync cycle. When
+// keepResume is false it also drops the resume-store entry on a genuine terminal
+// state (completed / failed / user-cancelled). A shutdown-interrupted task and a
+// VPN-paused task (keepResume=true) KEEP the entry so the daemon re-submits and
+// resumes them on the next start.
+func (m *Manager) recordFinishedKeep(update agent.StatusUpdate, keepResume bool) {
+	if m.taskStore != nil && !m.shuttingDown.Load() && !keepResume {
 		m.taskStore.Remove(update.TaskID)
 	}
 
@@ -406,6 +415,13 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 				m.failDamaged(ctx, task, err)
 				return
 			}
+			// VPN kill-switch tripped mid-download and no safe fallback completed it:
+			// PAUSE the task (keep the partial + resume-store entry) instead of
+			// hard-failing, so it resumes once the tunnel heals. See pauseForVPN.
+			if errors.Is(err, ErrVPNTunnelDown) {
+				m.pauseForVPN(ctx, task)
+				return
+			}
 			m.fail(ctx, task, err.Error())
 			return
 		}
@@ -461,12 +477,21 @@ func (m *Manager) attemptDownload(ctx context.Context, task *Task) (*Result, err
 		if IsInsufficientDisk(err) || IsIntegrity(err) {
 			return nil, err
 		}
+		// ErrVPNTunnelDown: the tunnel died mid-download (torrent dropped, partial
+		// kept). Prefer a genuinely-available SAFE fallback (debrid/usenet, HTTPS/NNTP
+		// — no swarm) if the agent has one; if none can complete it, re-surface the
+		// VPN cause so processTask PAUSES the task as resumable instead of failing it.
+		vpnDown := errors.Is(err, ErrVPNTunnelDown)
 		if tryFallback(task, m.downloaders, m.cfg.PreferredMethods) {
 			log.Printf("[%s] %s failed, trying fallback: %v", agent.ShortID(task.ID), method, err)
 			if terr := task.Transition(StatusResolving); terr != nil {
 				return nil, err
 			}
-			return m.attemptFallback(ctx, task)
+			res, ferr := m.attemptFallback(ctx, task)
+			if ferr != nil && vpnDown {
+				return nil, ErrVPNTunnelDown // no safe method available — keep the torrent resumable
+			}
+			return res, ferr
 		}
 		return nil, err
 	}
@@ -572,6 +597,37 @@ func (m *Manager) fail(ctx context.Context, task *Task, msg string) {
 		desktopNotify("Download failed", task.Title+": "+msg)
 	}
 	m.recordFinished(task.ToStatusUpdate())
+	m.reporter.ReportFinal(ctx, task)
+}
+
+// pauseForVPN handles a mid-download tunnel loss on a task with no safe fallback
+// (torrent-only, or an auto agent whose debrid/usenet couldn't complete it). The
+// kill-switch already dropped the torrent KEEPING the partial files on disk; we
+// surface it as PAUSED (StatusCancelled), not FAILED, so it stays resumable:
+//   - the resume-store entry is KEPT, so a daemon restart re-submits and resumes it
+//     from the kept pieces (anacrolix piece-completion DB);
+//   - the web sees StatusCancelled and re-creates it as pending, so a re-dispatch
+//     once the tunnel heals resumes it too (the Available() gate holds torrent off
+//     until the VPN supervisor brings the tunnel back).
+//
+// Deliberate limit (avoids coupling the manager to the VPN supervisor, which the
+// objective flagged as over-engineering): the manager does NOT itself re-queue on
+// the reconnect signal — in-session torrent-only resume relies on the web
+// re-dispatch; a daemon restart resumes unconditionally. Safety is intact: no
+// clear-net P2P and no data loss (partial kept).
+func (m *Manager) pauseForVPN(ctx context.Context, task *Task) {
+	task.mu.Lock()
+	task.ErrorMessage = "VPN tunnel down — torrent paused (partial kept); resumes when the tunnel recovers"
+	task.mu.Unlock()
+	if err := task.Transition(StatusCancelled); err != nil {
+		// The state machine rejected the pause (unexpected from downloading/resolving)
+		// — fall back to a plain fail so the task never sticks in a non-terminal state.
+		m.fail(ctx, task, "VPN tunnel down: "+err.Error())
+		return
+	}
+	log.Printf("[%s] VPN tunnel down — torrent PAUSED (partial kept, resumes when the tunnel heals): %s",
+		agent.ShortID(task.ID), task.Title)
+	m.recordFinishedKeep(task.ToStatusUpdate(), true) // report paused state; KEEP the resume-store entry
 	m.reporter.ReportFinal(ctx, task)
 }
 

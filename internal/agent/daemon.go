@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -85,9 +86,13 @@ type Daemon struct {
 
 	// Managed-VPN split-tunnel state, set by cmd/daemon.go before Run and folded
 	// into DaemonState on every write so external tools (`unarr vpn status`) see it.
-	vpnActive bool
-	vpnMode   string
-	vpnServer string
+	// vpnMu guards these because the reconnect supervisor can flip vpnActive live
+	// (tunnel down → up) from its own goroutine while the sync loop reads them.
+	vpnMu       sync.Mutex
+	vpnActive   bool
+	vpnRequired bool // config [downloads.vpn] required — the fail-closed P2P kill-switch
+	vpnMode     string
+	vpnServer   string
 
 	// CloudFlare Quick Tunnel public URL; folded into DaemonState + heartbeat
 	// so the web can prefer it over Tailscale/LAN for in-browser playback.
@@ -115,13 +120,8 @@ func NewDaemon(cfg DaemonConfig, client *Client) *Daemon {
 // SyncClient returns the sync client for external wiring.
 func (d *Daemon) SyncClient() *SyncClient { return d.sync }
 
-// SetVPNState records the managed-VPN split-tunnel state so it's reflected in the
-// daemon state file (read by `unarr vpn status`). Call before Run.
-func (d *Daemon) SetVPNState(active bool, mode, server string) {
-	d.vpnActive = active
-	d.vpnMode = mode
-	d.vpnServer = server
-}
+// SetVPNState + vpnSnapshot — the managed-VPN split-tunnel / P2P kill-switch state
+// accessors — live in daemon_vpn.go to keep this file within the size budget.
 
 // SetFunnelURL records the CloudFlare Quick Tunnel hostname so it's reflected
 // in the daemon state file (read by `unarr funnel status`) and in heartbeat
@@ -148,6 +148,7 @@ func (d *Daemon) UpdateStreamPort(port int) {
 // Register registers the agent and fetches user info + features.
 // Retries with exponential backoff on transient errors (429, 5xx, network).
 func (d *Daemon) Register(ctx context.Context) error {
+	vpnActive, vpnRequired, vpnMode, vpnServer := d.vpnSnapshot()
 	req := RegisterRequest{
 		AgentID:            d.cfg.AgentID,
 		Name:               d.cfg.AgentName,
@@ -167,9 +168,9 @@ func (d *Daemon) Register(ctx context.Context) error {
 		FFmpegPath:         d.cfg.FFmpegPath,
 		HWEncoders:         d.cfg.HWEncoders,
 		HWDevices:          d.cfg.HWDevices,
-		VPNActive:          d.vpnActive,
-		VPNMode:            d.vpnMode,
-		VPNServer:          d.vpnServer,
+		VPNActive:          vpnActive,
+		VPNMode:            vpnMode,
+		VPNServer:          vpnServer,
 		FunnelURL:          d.funnelURL,
 		IsDocker:           RunningInDocker(),
 		PreferredMethods:   d.cfg.PreferredMethods,
@@ -230,9 +231,11 @@ func (d *Daemon) Register(ctx context.Context) error {
 		PID:         os.Getpid(),
 		StartedAt:   now,
 		MethodStats: make(map[string]int),
-		VPNActive:   d.vpnActive,
-		VPNMode:     d.vpnMode,
-		VPNServer:   d.vpnServer,
+		VPNActive:   vpnActive,
+		VPNMode:     vpnMode,
+		VPNServer:   vpnServer,
+		VPNRequired: vpnRequired,
+		VPNBlocking: vpnRequired && !vpnActive,
 		FunnelURL:   d.funnelURL,
 	}
 	WriteState(&d.State)
@@ -314,7 +317,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.Watching.Store(watching)
 	}
 	d.sync.GetVPNState = func() (bool, string, string) {
-		return d.vpnActive, d.vpnMode, d.vpnServer
+		active, _, mode, server := d.vpnSnapshot()
+		return active, mode, server
 	}
 	d.sync.GetFunnelURL = func() string {
 		return d.funnelURL

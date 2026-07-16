@@ -130,6 +130,19 @@ type VPNConfig struct {
 	// point it at a peer .conf from your own WireGuard server and the torrent
 	// client split-tunnels through it with no web/provider plumbing.
 	ConfigFile string `toml:"config_file"`
+	// Required turns the split-tunnel into a fail-CLOSED kill-switch for P2P.
+	//
+	//	true  — if the WireGuard tunnel is not up (fetch failed, slot held by
+	//	        another device, config missing, or it dies mid-download) the
+	//	        torrent/BitTorrent method is DISABLED so the user's IP is never
+	//	        exposed to peers/trackers. Debrid + usenet (HTTPS/NNTP) keep
+	//	        running — they don't leak the IP to a swarm.
+	//	false — (default) current best-effort behavior: a failed tunnel logs a
+	//	        warning and downloads continue in the clear.
+	//
+	// Zero value (false) preserves the exact pre-kill-switch behavior, so an
+	// existing config that omits this key changes nothing.
+	Required bool `toml:"required"`
 }
 
 // TranscodeConfig controls real-time transcoding for the in-browser player
