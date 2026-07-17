@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-07-17
+
+
+### Fixed
+
+- **agent**: report config the server can act on, and reload for real
 ## [1.5.0] - 2026-07-17
 
 
@@ -20,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **vpn**: show exit server after a fail-closed tunnel heals
 - **webdav**: symlink-safe root check, season-pack grouping, UPnP warning
 - **webdav**: deterministic collision suffix + drop redundant nolint
+
+### Other
+
+- **release**: 1.5.0
 
 ### Merge
 
@@ -1155,6 +1165,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.5.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.9-beta...v1.4.0
 [1.3.9-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.8-beta...v1.3.9-beta
