@@ -5,12 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-07-17
+
+
+### Added
+
+- **usenet**: direct streaming from Usenet with resilient fallback
+- **usenet**: activate par2 verify/repair + de-obfuscation on the usenet path
+- **vpn**: optional P2P kill-switch (downloads.vpn.required)
+- **webdav**: read-only WebDAV export of the agent library
+
+### Fixed
+
+- **vpn**: show exit server after a fail-closed tunnel heals
+- **webdav**: symlink-safe root check, season-pack grouping, UPnP warning
+- **webdav**: deterministic collision suffix + drop redundant nolint
+
+### Merge
+
+- read-only WebDAV library export (feat/webdav-readonly)
+- VPN P2P kill-switch (feat/vpn-killswitch)
 ## [1.4.0] - 2026-07-16
 
 
 ### Added
 
 - **stream**: auto-pause P2P background download when the stream goes idle
+
+### Other
+
+- **release**: 1.4.0
 ## [1.3.9-beta] - 2026-07-15
 
 
@@ -1131,6 +1155,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.5.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.9-beta...v1.4.0
 [1.3.9-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.8-beta...v1.3.9-beta
 [1.3.8-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.7-beta...v1.3.8-beta
