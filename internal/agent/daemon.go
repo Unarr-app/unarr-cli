@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -145,10 +146,65 @@ func (d *Daemon) UpdateStreamPort(port int) {
 	d.sync.cfg.StreamPort = port
 }
 
+// directTLSWire renders the per-agent direct-TLS pair for the wire. The daemon
+// read the config, so it always reports explicitly: &0/&"" when the feature is
+// off, which tells the server to clear the columns instead of keeping a port
+// that no longer listens and a hash that squats the unique index.
+func directTLSWire(port int, hash string) (*int, *string) {
+	return &port, &hash
+}
+
+// ApplyReloadedConfig applies the settings a SIGUSR1 reload can change without a
+// restart, and reports honestly on the ones it can't. A reload that silently
+// no-ops is worse than one that refuses, because the user believes it.
+//
+// allow_delete rides the next sync (seconds), so it lands immediately.
+//
+// The method order does NOT: it is only ever sent at register time, and
+// re-registering from here is not safe — Register rewrites d.State (raced by the
+// sync/VPN goroutines) and can fire OnAgentKeyMinted, whose config.Save writes
+// the STARTUP config back to disk, clobbering the very edit that triggered this
+// reload. So we say it needs a restart instead of pretending. Restart is a real
+// fix now: the daemon reports "auto" explicitly, so the server stops enforcing a
+// stale order (it never did before — see RegisterRequest.PreferredMethods).
+func (d *Daemon) ApplyReloadedConfig(allowDelete bool, methodOrder []string) {
+	if d.sync == nil {
+		return
+	}
+	// Never advertise a capability we can't perform: without a delete handler
+	// (no scan paths at startup) the server would queue deletions we drop on the
+	// floor, and the web would spin on them forever.
+	if allowDelete && d.sync.OnDeleteFiles == nil {
+		log.Printf("[reload] allow_delete=true ignored: this daemon has no library scan paths")
+		allowDelete = false
+	}
+	d.sync.SetCanDelete(allowDelete)
+	log.Printf("[reload] allow_delete=%v (reported on next sync)", allowDelete)
+
+	if methodOrder == nil {
+		methodOrder = []string{}
+	}
+	prev := d.cfg.PreferredMethods
+	if prev == nil {
+		prev = []string{}
+	}
+	if !slices.Equal(prev, methodOrder) {
+		log.Printf("[reload] preferred method order changed (%v → %v) — RESTART REQUIRED: run 'unarr daemon restart' to apply it", prev, methodOrder)
+	}
+}
+
 // Register registers the agent and fetches user info + features.
 // Retries with exponential backoff on transient errors (429, 5xx, network).
 func (d *Daemon) Register(ctx context.Context) error {
 	vpnActive, vpnRequired, vpnMode, vpnServer := d.vpnSnapshot()
+	// The daemon read config.toml, so it always reports an explicit preference.
+	// nil means "auto" locally, but on the wire it must be [] — a missing key
+	// leaves a stale server-side list in place (see RegisterRequest).
+	methods := d.cfg.PreferredMethods
+	if methods == nil {
+		methods = []string{}
+	}
+	httpsPort, agentHash := directTLSWire(d.cfg.HTTPSStreamPort, d.cfg.AgentHash)
 	req := RegisterRequest{
 		AgentID:            d.cfg.AgentID,
 		Name:               d.cfg.AgentName,
@@ -157,8 +213,8 @@ func (d *Daemon) Register(ctx context.Context) error {
 		Version:            d.cfg.Version,
 		DownloadDir:        d.cfg.DownloadDir,
 		StreamPort:         d.cfg.StreamPort,
-		HTTPSStreamPort:    d.cfg.HTTPSStreamPort,
-		AgentHash:          d.cfg.AgentHash,
+		HTTPSStreamPort:    httpsPort,
+		AgentHash:          agentHash,
 		StreamSecret:       d.cfg.StreamSecret,
 		LanIP:              d.cfg.LanIP,
 		TailscaleIP:        d.cfg.TailscaleIP,
@@ -173,7 +229,7 @@ func (d *Daemon) Register(ctx context.Context) error {
 		VPNServer:          vpnServer,
 		FunnelURL:          d.funnelURL,
 		IsDocker:           RunningInDocker(),
-		PreferredMethods:   d.cfg.PreferredMethods,
+		PreferredMethods:   &methods,
 		MaxStreamSessions:  d.cfg.MaxStreamSessions,
 	}
 	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {

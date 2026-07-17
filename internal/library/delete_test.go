@@ -344,7 +344,27 @@ func TestDeleteFiles(t *testing.T) {
 			{ItemID: 4, FilePath: filepath.Join(root, "gone.mkv")}, // not-exist → idempotent success
 		}
 
-		confirmed := DeleteFiles(items, []string{root})
+		confirmed, failed := DeleteFiles(items, []string{root})
+
+		// A genuine failure on OUR file must be reported (item 2: not absolute).
+		// Item 3 lives outside our scan paths → another agent's file → skipped
+		// silently, so its owner still gets handed the deletion.
+		wantFailed := map[int]bool{2: true}
+		gotFailed := make(map[int]bool, len(failed))
+		for _, f := range failed {
+			gotFailed[f.ID] = true
+			if f.Error == "" {
+				t.Errorf("item %d failed with an empty reason", f.ID)
+			}
+		}
+		if len(gotFailed) != len(wantFailed) {
+			t.Errorf("failed = %v, want IDs %v", failed, wantFailed)
+		}
+		for id := range wantFailed {
+			if !gotFailed[id] {
+				t.Errorf("expected item %d to be reported as failed", id)
+			}
+		}
 
 		// Items 1 and 4 should succeed. Item 2 (relative) and 3 (outside) should fail.
 		want := map[int]bool{1: true, 4: true}
@@ -372,23 +392,56 @@ func TestDeleteFiles(t *testing.T) {
 		}
 	})
 
-	t.Run("empty scan paths returns nil", func(t *testing.T) {
+	t.Run("empty scan paths returns nil and reports every item as failed", func(t *testing.T) {
 		items := []agent.LibraryDeleteRequest{
 			{ItemID: 1, FilePath: "/some/file.mkv"},
 		}
-		confirmed := DeleteFiles(items, []string{})
+		confirmed, failed := DeleteFiles(items, []string{})
 		if confirmed != nil {
 			t.Errorf("expected nil, got %v", confirmed)
+		}
+		if len(failed) != 1 || failed[0].ID != 1 || failed[0].Error == "" {
+			t.Errorf("a misconfigured agent must report why, got %v", failed)
 		}
 	})
 
-	t.Run("all relative scan paths returns nil", func(t *testing.T) {
+	t.Run("all relative scan paths returns nil and reports failures", func(t *testing.T) {
 		items := []agent.LibraryDeleteRequest{
 			{ItemID: 1, FilePath: "/some/file.mkv"},
 		}
-		confirmed := DeleteFiles(items, []string{"relative/path", "another/relative"})
+		confirmed, failed := DeleteFiles(items, []string{"relative/path", "another/relative"})
 		if confirmed != nil {
 			t.Errorf("expected nil, got %v", confirmed)
+		}
+		if len(failed) != 1 {
+			t.Errorf("expected 1 reported failure, got %v", failed)
+		}
+	})
+
+	// A file OUTSIDE our scan paths belongs to another agent. We must neither
+	// confirm it (that would tombstone a row whose file is alive elsewhere) nor
+	// report it failed (that would clear the server's pending flag and the real
+	// owner would never be handed the deletion). Stay silent.
+	t.Run("file outside scan paths is skipped silently, not confirmed nor failed", func(t *testing.T) {
+		root := t.TempDir()
+		other := t.TempDir()
+		alive := filepath.Join(other, "someone-elses.mkv")
+		if err := os.WriteFile(alive, []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		items := []agent.LibraryDeleteRequest{
+			{ItemID: 7, FilePath: alive},
+			{ItemID: 8, FilePath: filepath.Join(other, "gone.mkv")}, // missing AND not ours
+		}
+		confirmed, failed := DeleteFiles(items, []string{root})
+		if len(confirmed) != 0 {
+			t.Errorf("must NOT confirm another agent's file, got %v", confirmed)
+		}
+		if len(failed) != 0 {
+			t.Errorf("must NOT report another agent's file as failed, got %v", failed)
+		}
+		if _, err := os.Stat(alive); err != nil {
+			t.Error("another agent's file must not be touched")
 		}
 	})
 
@@ -402,7 +455,7 @@ func TestDeleteFiles(t *testing.T) {
 		items := []agent.LibraryDeleteRequest{
 			{ItemID: 10, FilePath: file},
 		}
-		confirmed := DeleteFiles(items, []string{"relative/bad", root})
+		confirmed, _ := DeleteFiles(items, []string{"relative/bad", root})
 
 		if len(confirmed) != 1 || confirmed[0] != 10 {
 			t.Errorf("confirmed = %v, want [10]", confirmed)

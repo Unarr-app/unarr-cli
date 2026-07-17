@@ -19,8 +19,16 @@ import (
 //  3. Empty parent directories are removed up to (but not including) the
 //     scan path root and only if they are not the scan path itself.
 //
-// Returns the IDs of items successfully deleted.
-func DeleteFiles(items []agent.LibraryDeleteRequest, scanPaths []string) []int {
+// Returns the IDs successfully deleted, plus the ones that genuinely FAILED
+// (ours, but undeletable: permission, I/O). A failure MUST be reported, never
+// just logged: the server keeps re-sending an unconfirmed deletion and the web
+// shows a spinner until someone reads the agent's log.
+//
+// A path outside our scan paths is NEITHER: it is another agent's file, so we
+// stay silent and let its owner handle it. Reporting it as failed would clear the
+// server's pending flag and the owner would never be handed the deletion —
+// one agent answering for a file it was never going to touch.
+func DeleteFiles(items []agent.LibraryDeleteRequest, scanPaths []string) ([]int, []agent.LibraryDeleteError) {
 	// Sanitize scan paths: reject empty or non-absolute entries.
 	safe := make([]string, 0, len(scanPaths))
 	for _, sp := range scanPaths {
@@ -32,21 +40,35 @@ func DeleteFiles(items []agent.LibraryDeleteRequest, scanPaths []string) []int {
 	}
 	if len(safe) == 0 {
 		log.Printf("library: no valid scan paths configured — refusing to delete")
-		return nil
+		failed := make([]agent.LibraryDeleteError, 0, len(items))
+		for _, item := range items {
+			failed = append(failed, agent.LibraryDeleteError{
+				ID:    item.ItemID,
+				Error: "agent has no valid scan paths configured",
+			})
+		}
+		return nil, failed
 	}
 
 	confirmed := make([]int, 0, len(items))
+	failed := make([]agent.LibraryDeleteError, 0)
 
 	for _, item := range items {
+		// Not our file → say nothing, so the owning agent still gets it.
+		if filepath.IsAbs(item.FilePath) && !isWithinScanPaths(filepath.Clean(item.FilePath), safe) {
+			log.Printf("library: skipping item %d (%q): not within this agent's scan paths", item.ItemID, item.FilePath)
+			continue
+		}
 		if err := deleteOne(item.FilePath, safe); err != nil {
 			log.Printf("library: delete item %d (%q): %v", item.ItemID, item.FilePath, err)
+			failed = append(failed, agent.LibraryDeleteError{ID: item.ItemID, Error: err.Error()})
 			continue
 		}
 		log.Printf("library: deleted item %d: %s", item.ItemID, item.FilePath)
 		confirmed = append(confirmed, item.ItemID)
 	}
 
-	return confirmed
+	return confirmed, failed
 }
 
 func deleteOne(filePath string, scanPaths []string) error {
@@ -60,7 +82,12 @@ func deleteOne(filePath string, scanPaths []string) error {
 	real, err := filepath.EvalSymlinks(clean)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// File already gone — idempotent success.
+			// File already gone. Only OUR missing file is an idempotent success:
+			// a path outside our scan paths is another agent's file, and
+			// confirming it would tombstone a row whose file is alive elsewhere.
+			if !isWithinScanPaths(clean, scanPaths) {
+				return fmt.Errorf("path %q is outside all configured scan paths — not this agent's file", clean)
+			}
 			pruneEmptyDirs(filepath.Dir(clean), scanPaths)
 			return nil
 		}

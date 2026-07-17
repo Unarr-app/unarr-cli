@@ -692,12 +692,33 @@ func runDaemonStart() error {
 		}
 	}
 
-	// Wire: sync receives file deletion requests from the server
-	if cfg.Library.AllowDelete && len(daemonCfg.ScanPaths) > 0 {
-		sc.OnDeleteFiles = func(items []agent.LibraryDeleteRequest) []int {
+	// Wire: sync receives file deletion requests from the server.
+	// Wired whenever we have scan paths and gated at CALL time on the live flag,
+	// not at startup: a reload that flips allow_delete on must not leave the
+	// handler unwired (we'd report canDelete=true and drop every deletion), and
+	// one that flips it off must stop deleting immediately.
+	if len(daemonCfg.ScanPaths) > 0 {
+		sc.OnDeleteFiles = func(items []agent.LibraryDeleteRequest) ([]int, []agent.LibraryDeleteError) {
+			if !sc.CanDelete() {
+				// Report rather than drop: the server thinks a deletion is pending
+				// and would re-send it every sync while the web waits on it.
+				log.Printf("[library] refusing %d deletion request(s): allow_delete is off", len(items))
+				failed := make([]agent.LibraryDeleteError, 0, len(items))
+				for _, it := range items {
+					failed = append(failed, agent.LibraryDeleteError{
+						ID:    it.ItemID,
+						Error: "file deletion is disabled on this agent (library.allow_delete)",
+					})
+				}
+				return nil, failed
+			}
 			return library.DeleteFiles(items, daemonCfg.ScanPaths)
 		}
+	} else if cfg.Library.AllowDelete {
+		log.Printf("[library] allow_delete=true but no scan paths resolved — deletion stays OFF")
+		sc.SetCanDelete(false) // never advertise what we cannot perform
 	}
+	log.Printf("[library] file deletion from web: %v", sc.CanDelete())
 
 	// Wire: sync receives on-demand subtitle-fetch jobs (write VTT sidecars).
 	// Always available (additive, no deletion) as long as we have scan paths.
