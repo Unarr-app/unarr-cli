@@ -22,6 +22,23 @@ type Config struct {
 	Notifications NotificationsConfig `toml:"notifications"`
 	General       GeneralConfig       `toml:"general"`
 	Library       LibraryConfig       `toml:"library"`
+	Desktop       DesktopConfig       `toml:"desktop,omitempty"`
+}
+
+// DesktopConfig holds settings for the unarr-desktop tray / unarr:// protocol
+// handler companion. It lives in the daemon's config.toml (one file, one
+// mental model for users) but the daemon itself never reads it. `omitempty`
+// is load-bearing: BurntSushi/toml omits zero-value structs on encode, so
+// daemon-side Load→Save round-trips (config menu, `unarr funnel off`, …)
+// neither invent an empty [desktop] section in configs that never set it nor
+// drop a user's setting.
+type DesktopConfig struct {
+	// Player forces which media player `unarr-desktop --open` dispatches to:
+	// "mpv" | "vlc" | "iina" (macOS only) | "mpc" (Windows only). Empty =
+	// autodetect (mpv > vlc > iina > mpc). The UNARR_DESKTOP_PLAYER env var
+	// overrides this — checked by the desktop binary directly, since
+	// config.Load() deliberately does not apply env overrides.
+	Player string `toml:"player,omitempty"`
 }
 
 type AuthConfig struct {

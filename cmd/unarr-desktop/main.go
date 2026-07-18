@@ -18,6 +18,7 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"fyne.io/systray"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/Unarr-app/unarr-cli/internal/notify"
 	"github.com/Unarr-app/unarr-cli/internal/sentry"
+	"github.com/Unarr-app/unarr-cli/internal/upgrade"
 )
 
 //go:embed icon.png
@@ -87,10 +89,92 @@ func openLogs() {
 	}
 }
 
+// runMode classifies argv into exactly one action. The dispatch is STRICT on
+// purpose: anything unrecognized used to fall through to systray.Run, so
+// `--help`, a typo (`--updat`), or `--version extra` silently spawned a
+// phantom tray (or hung a headless session waiting on DBus). Only a BARE
+// invocation may ever start the tray.
+type runMode int
+
+const (
+	modeTray runMode = iota
+	modeVersion
+	modeUpdate
+	modeOpen
+	modeHelp
+	modeUsageError
+)
+
+const usageText = `unarr-desktop — system-tray companion for the unarr agent
+
+Usage:
+  unarr-desktop                            start the tray (no arguments)
+  unarr-desktop --open <unarr://play?...>  hand the stream link to a local player
+  unarr-desktop --update                   self-update this binary to the latest release
+  unarr-desktop --version                  print the version
+  unarr-desktop --help                     show this help
+`
+
+// dispatchArgs maps argv (without argv[0]) to a runMode; for modeOpen it also
+// returns the raw unarr:// link. Pure — extracted from main so the strict
+// fallthrough behavior is unit-testable.
+func dispatchArgs(args []string) (runMode, string) {
+	if len(args) == 0 {
+		return modeTray, ""
+	}
+	// Protocol-handler forms first (`--open <url>`, `--open=<url>`, or a bare
+	// unarr:// argument via %u/%1). A bare `--open` with no URL still maps to
+	// modeOpen: runOpen("") prints usage and exits 2 without starting a tray.
+	if raw, ok := openArg(args); ok {
+		return modeOpen, raw
+	}
+	if len(args) == 1 {
+		switch args[0] {
+		case "--version":
+			return modeVersion, ""
+		case "--update":
+			return modeUpdate, ""
+		case "--help", "-h":
+			return modeHelp, ""
+		}
+	}
+	return modeUsageError, ""
+}
+
 func main() {
+	mode, raw := dispatchArgs(os.Args[1:])
+	switch mode {
+	case modeVersion:
+		// --version: also the self-updater's smoke test for a freshly
+		// downloaded desktop binary (a bare invocation would start a tray —
+		// never safe to exec blindly, hence a flag that can only print+exit).
+		fmt.Println("unarr-desktop v" + version)
+		return
+	case modeUpdate:
+		// --update: self-update for player-only installs (no `unarr` CLI).
+		os.Exit(runDesktopSelfUpdate())
+	case modeOpen:
+		// Protocol-handler mode: parse, hand the stream to a local player,
+		// exit. Ephemeral by design — no systray, no single-instance, no
+		// sentry init (a browser click should launch the player in
+		// milliseconds, and must never spawn a second tray).
+		os.Exit(runOpen(raw))
+	case modeHelp:
+		fmt.Print(usageText)
+		return
+	case modeUsageError:
+		fmt.Fprintf(os.Stderr, "unarr-desktop: unrecognized arguments: %s\n\n", strings.Join(os.Args[1:], " "))
+		fmt.Fprint(os.Stderr, usageText)
+		os.Exit(2)
+	}
 	sentry.Init(version)
 	defer sentry.Close()
 	defer sentry.RecoverPanic()
+	// Claim the unarr:// scheme for this executable before the tray starts
+	// (Windows-only, HKCU, idempotent; Linux/macOS registration belongs to
+	// install.sh / the future .app bundle — see register_*.go). Doing it on
+	// every start self-heals the registration when the binary moves.
+	registerURLScheme()
 	systray.Run(onReady, func() {})
 }
 
@@ -127,6 +211,11 @@ func onReady() {
 	mSendLogs := systray.AddMenuItem("Send logs to support", "Send agent logs to the developers")
 	mDocs := systray.AddMenuItem("Documentation", "Open the unarr docs")
 	systray.AddSeparator()
+	// Slots pattern: systray menus are append-only, so the update item is
+	// created up-front and Hidden — the daily check below Show()s it only
+	// when a newer release is actually known. Never auto-applies.
+	mUpdate := systray.AddMenuItem("Update desktop app", "Install the latest unarr-desktop version")
+	mUpdate.Hide()
 	mQuit := systray.AddMenuItem("Quit", "Close the tray (the agent keeps running)")
 
 	// Crash watcher state — touched only from refresh()/control() call sites
@@ -213,6 +302,26 @@ func onReady() {
 		}
 	}()
 
+	// Daily desktop-update check — same on-disk throttle state the --open
+	// mode uses, so tray + ephemeral invocations share one 24h probe and one
+	// notification budget. Re-evaluated every 6h in case the tray outlives
+	// the throttle window. Dev builds skip it (version compare meaningless).
+	// The appliedVersion guard keeps the item from re-appearing after an
+	// update was applied: this process still runs the OLD compiled-in
+	// `version` until restarted, so IsNewer alone would re-Show() forever.
+	if version != "dev" {
+		go func() {
+			for {
+				latest, st, dirty := refreshLatestVersion(trayUpdateHTTPBudget)
+				persistUpdateCheckState(st, dirty)
+				if latest != "" && upgrade.IsNewer(version, latest) && latest != loadAppliedVersion() {
+					mUpdate.Show()
+				}
+				time.Sleep(6 * time.Hour)
+			}
+		}()
+	}
+
 	// onReady MUST return so the Linux DBus backend exports the menu — handle
 	// clicks in a goroutine, never block here.
 	go func() {
@@ -239,6 +348,8 @@ func onReady() {
 				go sendLogsToSupport()
 			case <-mDocs.ClickedCh:
 				openURL(docsURL())
+			case <-mUpdate.ClickedCh:
+				go traySelfUpdate(mUpdate)
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return

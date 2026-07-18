@@ -504,6 +504,26 @@ func (d *Daemon) applyAutoUpgrade(targetVersion string) {
 	}
 	log.Printf("[upgrade] upgraded v%s → v%s; reporting result + exiting so service supervisor restarts on new binary",
 		result.OldVersion, result.NewVersion)
+	// Fleet desktops ride the SAME web-triggered signal: `unarr update` in a
+	// terminal refreshes the tray companion next to the CLI, so the daemon's
+	// auto-upgrade must too — without this, web-managed installs kept their
+	// unarr-desktop stale forever (nothing else ever updated it). Reuses the
+	// Execute ctx (10-min budget, mostly unspent — the CLI download already
+	// happened). Best-effort by design: a sibling failure must NEVER fail the
+	// daemon upgrade that already succeeded, and the version marker makes the
+	// already-current case a no-op without downloading (or executing)
+	// anything. CLI-only installs (docker/servers) have no sibling → silent.
+	if updated, derr := upgrade.UpdateDesktopSibling(ctx, result.NewVersion, func(msg string) {
+		log.Printf("[upgrade] desktop: %s", msg)
+	}); derr != nil {
+		if errors.Is(derr, upgrade.ErrNoDesktopAssets) {
+			log.Printf("[upgrade] desktop sibling skipped: release v%s ships no signed desktop assets (yet) — it will refresh on a later update", result.NewVersion)
+		} else {
+			log.Printf("[upgrade] desktop sibling update failed (CLI upgrade unaffected): %v", derr)
+		}
+	} else if updated {
+		log.Printf("[upgrade] desktop sibling updated to v%s (a running tray loads it on its next restart)", result.NewVersion)
+	}
 	ctxR, cancelR := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := d.client.ReportUpgradeResult(ctxR, d.cfg.AgentID, true, result.NewVersion, ""); err != nil {
 		log.Printf("[upgrade] report-result failed: %v", err)
