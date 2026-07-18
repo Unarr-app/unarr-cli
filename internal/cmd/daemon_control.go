@@ -270,6 +270,14 @@ func stopDaemonByPID() error {
 		}
 		return fmt.Errorf("read daemon state: %w", err)
 	}
+	if !agent.IsProcessAlive(state.PID) {
+		// Daemon already dead (crashed or fatal-exited) but left its state file
+		// behind. "Stopping" it should clean that up and succeed — this is the
+		// tray's Pause-after-crash path, not an error.
+		agent.RemoveState()
+		fmt.Println("  Daemon was not running — cleaned up stale state file.")
+		return nil
+	}
 	if err := killPID(state.PID); err != nil {
 		return err
 	}
