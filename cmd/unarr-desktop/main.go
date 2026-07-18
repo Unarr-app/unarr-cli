@@ -6,12 +6,12 @@
 // ./cmd/unarr, so this package never enters the daemon's signed cross-compile
 // pipeline; the desktop app gets its own per-OS build (see docs: Vía B).
 //
-// Scope: tray icon + menu — agent status, pause/resume/restart, open the web
-// app, configure the agent on the web (paths/codecs/hardware — the same data
-// the web shows), edit config.toml, view logs, send logs to support, and crash
-// control: if the daemon dies unexpectedly a report is generated and sent to
-// the developers (support@unarr.app). The rich UI is the web app opened in the
-// browser; there is no native window to build or maintain.
+// Scope: tray icon + menu — agent status, pause/resume/restart, account/plan
+// rows with an upgrade CTA, open the web app, configure the agent on the web,
+// edit config.toml, view logs, send logs to support, "Start at login", and
+// crash control: if the daemon dies unexpectedly a report is generated and
+// sent to the developers (support@unarr.app). The rich UI is the web app
+// opened in the browser; there is no native window to build or maintain.
 package main
 
 import (
@@ -35,6 +35,11 @@ var trayIcon []byte
 var version = "dev"
 
 const statusPeriod = 5 * time.Second
+
+// accountPeriod: the account row only changes on plan/sign-in events, so a slow
+// refresh is enough and keeps the tray from hammering the API. Out-of-band
+// kicks (CTA click, daemon start transition) cover the moments that matter.
+const accountPeriod = 30 * time.Minute
 
 // crashSuppressWindow silences crash detection right after a tray-initiated
 // stop/restart: the daemon removes its state file asynchronously, so for a few
@@ -94,157 +99,38 @@ func main() {
 	systray.Run(onReady, func() {})
 }
 
+// onReady MUST return quickly: the Linux DBus backend exports the menu only
+// after it does — every loop runs on its own goroutine.
 func onReady() {
-	icons := buildStateIcons(trayIcon)
-	systray.SetIcon(trayIcon)
-	systray.SetTitle("unarr")
-	systray.SetTooltip("unarr agent")
+	ui := newTrayUI()
+	ui.refresh()
+	go ui.statusLoop()
+	go ui.accountLoop()
+	go ui.clickLoop()
+}
 
-	// applyState swaps the tray icon + tooltip only on transitions (SetIcon on
-	// every 5s tick would spam DBus/Cocoa for nothing).
-	shown := stateUnknown
-	applyState := func(st trayState) {
-		if st == shown {
-			return
+// toggleAutostart flips "Start at login" to the opposite of the checkbox
+// state. The checkbox only changes after the per-OS backend succeeded, so the
+// menu never claims a state the OS artifact doesn't have; failures go to
+// stderr AND a desktop notification (the menu is closed by the time the
+// backend fails, so stderr alone would be invisible).
+func toggleAutostart(item *systray.MenuItem) {
+	enable := !item.Checked()
+	if err := setAutostart(enable); err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: autostart:", err)
+		verb := "enable"
+		if !enable {
+			verb = "disable"
 		}
-		shown = st
-		systray.SetIcon(icons[st])
-		systray.SetTooltip("unarr agent — " + st.label())
+		notify.Send("Start at login failed",
+			"Could not "+verb+" start at login: "+err.Error())
+		return
 	}
-
-	mStatus := systray.AddMenuItem("Checking…", "Agent status")
-	mStatus.Disable()
-	systray.AddSeparator()
-	mPause := systray.AddMenuItem("Pause agent", "Stop the agent (downloads and streams halt)")
-	mResume := systray.AddMenuItem("Resume agent", "Start the agent")
-	mRestart := systray.AddMenuItem("Restart agent", "Restart the agent")
-	systray.AddSeparator()
-	mOpen := systray.AddMenuItem("Open unarr.app", "Open the unarr web app")
-	mConfigure := systray.AddMenuItem("Configure agent (web)", "Paths, codecs, hardware — on the web")
-	mEdit := systray.AddMenuItem("Edit config.toml", "Open the agent config file")
-	systray.AddSeparator()
-	mLogs := systray.AddMenuItem("View logs", "Open the agent log file")
-	mSendLogs := systray.AddMenuItem("Send logs to support", "Send agent logs to the developers")
-	mDocs := systray.AddMenuItem("Documentation", "Open the unarr docs")
-	systray.AddSeparator()
-	mQuit := systray.AddMenuItem("Quit", "Close the tray (the agent keeps running)")
-
-	// Crash watcher state — touched only from refresh()/control() call sites
-	// below; systray delivers those on independent goroutines but never
-	// concurrently in practice (ticker + click loop), and the worst race is a
-	// duplicate notification, so plain fields are fine.
-	var suppressCrashUntil time.Time
-	var reportedCrashPID int
-	// lastStopPID: the daemon PID a tray-initiated stop/restart targeted. If
-	// that exact PID later shows up as a stale "running" state (old CLIs don't
-	// always clean up on stop), it is OUR stop, not a crash — reap, don't report.
-	var lastStopPID int
-
-	// refresh reflects daemon state into the status row + pause/resume/restart
-	// enablement. Read from the same state file `unarr status` uses (no drift).
-	refresh := func() {
-		s := readStatus()
-		if s.running && isPausedMarker() {
-			markPaused(false) // resumed outside the tray (CLI/web) — self-heal
-		}
-		if s.crashed && s.pid == lastStopPID {
-			// Tray-initiated stop that the (old) CLI didn't clean up after —
-			// reap the orphan and re-read: renders paused/stopped, never crash.
-			reapStaleState(s.pid)
-			s = readStatus()
-		}
-		st := displayState(s, isPausedMarker())
-		applyState(st)
-		switch st {
-		case stateRunning:
-			title := fmt.Sprintf("Agent: running (PID %d)", s.pid)
-			if s.tasks > 0 {
-				title += fmt.Sprintf(" · %d task(s)", s.tasks)
-			}
-			mStatus.SetTitle(title)
-			mPause.Enable()
-			mResume.Disable()
-			mRestart.Enable()
-		case stateCrashed:
-			mStatus.SetTitle("Agent: crashed")
-			mPause.Disable()
-			mResume.Enable()
-			mRestart.Disable()
-			if s.pid != reportedCrashPID && time.Now().After(suppressCrashUntil) {
-				reportedCrashPID = s.pid
-				go handleCrash(s)
-			}
-		case statePaused:
-			mStatus.SetTitle("Agent: paused")
-			mPause.Disable()
-			mResume.Enable()
-			mRestart.Disable()
-		default:
-			mStatus.SetTitle("Agent: stopped")
-			mPause.Disable()
-			mResume.Enable()
-			mRestart.Disable()
-		}
+	if enable {
+		item.Check()
+	} else {
+		item.Uncheck()
 	}
-	refresh()
-
-	// control execs a daemon command, surfaces spawn errors, and nudges a refresh
-	// shortly after (the state file updates asynchronously) on top of the ticker.
-	// Stops/restarts remember the targeted PID so a state file the old daemon
-	// failed to clean up is recognized as our stop, not a crash.
-	control := func(args ...string) {
-		if args[0] == "stop" || args[0] == "daemon" {
-			if s := readStatus(); s.running {
-				lastStopPID = s.pid
-			}
-		}
-		suppressCrashUntil = time.Now().Add(crashSuppressWindow)
-		if err := runUnarr(args...); err != nil {
-			fmt.Fprintln(os.Stderr, "unarr-desktop: control:", err)
-		}
-		time.AfterFunc(1500*time.Millisecond, refresh)
-	}
-
-	go func() {
-		t := time.NewTicker(statusPeriod)
-		defer t.Stop()
-		for range t.C {
-			refresh()
-		}
-	}()
-
-	// onReady MUST return so the Linux DBus backend exports the menu — handle
-	// clicks in a goroutine, never block here.
-	go func() {
-		for {
-			select {
-			case <-mPause.ClickedCh:
-				markPaused(true)
-				control("stop")
-			case <-mResume.ClickedCh:
-				markPaused(false)
-				control("start")
-			case <-mRestart.ClickedCh:
-				markPaused(false)
-				control("daemon", "restart")
-			case <-mOpen.ClickedCh:
-				openURL(webBase())
-			case <-mConfigure.ClickedCh:
-				openURL(hubURL())
-			case <-mEdit.ClickedCh:
-				openFile(configPath())
-			case <-mLogs.ClickedCh:
-				openLogs()
-			case <-mSendLogs.ClickedCh:
-				go sendLogsToSupport()
-			case <-mDocs.ClickedCh:
-				openURL(docsURL())
-			case <-mQuit.ClickedCh:
-				systray.Quit()
-				return
-			}
-		}
-	}()
 }
 
 // handleCrash runs when the daemon died without a clean shutdown (state file

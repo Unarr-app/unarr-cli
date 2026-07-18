@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
@@ -38,8 +40,12 @@ func runUnarr(args ...string) error {
 
 // runUnarrOutput execs `unarr <args…>` and returns its combined output —
 // for short, synchronous queries (version, log dump), never for control.
+// Bounded: a binary on a hung network mount (or blocked by AV) must not hang
+// the calling goroutine forever — the account loop would never run again.
 func runUnarrOutput(args ...string) ([]byte, error) {
-	return exec.Command(unarrBin(), args...).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, unarrBin(), args...).CombinedOutput()
 }
 
 // agentStatus is the slice of daemon state the tray surfaces — read from the

@@ -49,3 +49,18 @@ func TestReadStatusCrashSemantics(t *testing.T) {
 		t.Fatal("crashed status must not be running")
 	}
 }
+
+func TestParseUnarrVersion(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"unarr 1.5.2 (linux/amd64)", "1.5.2"},
+		{"unarr 1.3.8-beta+local-search (linux/amd64)", "1.3.8-beta+local-search"},
+		{"unarr 1.5.2", "1.5.2"},
+		{"weird output", "weird output"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := parseUnarrVersion(tt.in); got != tt.want {
+			t.Errorf("parseUnarrVersion(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

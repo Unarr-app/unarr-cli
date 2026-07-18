@@ -1,0 +1,291 @@
+package main
+
+// trayUI owns the menu items and the three loops that drive them (status
+// ticker, account refresher, click handler). Split out of onReady so each
+// responsibility stays a small, gate-passing unit — onReady itself only
+// constructs the UI and starts the loops (the Linux DBus backend exports the
+// menu only after onReady returns, so nothing here may block it).
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"sync/atomic"
+	"time"
+
+	"fyne.io/systray"
+
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+)
+
+type trayUI struct {
+	icons map[trayState][]byte
+	shown trayState
+
+	mStatus, mAccount, mVersion, mUpgrade *systray.MenuItem
+	mPause, mResume, mRestart             *systray.MenuItem
+	mOpen, mConfigure, mEdit              *systray.MenuItem
+	mLogs, mSendLogs, mDocs               *systray.MenuItem
+	mAutostart, mQuit                     *systray.MenuItem
+
+	// Crash-watcher state — touched only from refresh()/control(); systray
+	// delivers those on independent goroutines but never concurrently in
+	// practice (ticker + click loop), and the worst race is a duplicate
+	// notification, so plain fields are fine.
+	suppressCrashUntil time.Time
+	reportedCrashPID   int
+	// lastStopPID: the daemon PID a tray-initiated stop/restart targeted. If
+	// that exact PID later shows up as a stale "running" state (old CLIs don't
+	// always clean up on stop), it is OUR stop, not a crash — reap, don't report.
+	lastStopPID int
+	// prevRunning tracks daemon liveness transitions so a fresh start (the tail
+	// end of a sign-in flow) kicks an account refresh instead of waiting out
+	// the 30-min ticker.
+	prevRunning bool
+
+	// accountShown: a successful fetch has populated the account row, so
+	// transient errors keep the last good title instead of flickering to
+	// "unavailable". Touched only on the account goroutine.
+	accountShown bool
+	accountKick  chan struct{}
+	// upgradeTarget: pricing URL derived from the SAME base the account was
+	// fetched from, so the CTA never sends the user to buy on a different
+	// server than the one whose "Free" status triggered it. atomic.Value
+	// because the click loop reads it while the account goroutine writes it.
+	upgradeTarget atomic.Value // string
+}
+
+// newTrayUI builds the menu. Order matters: it is the visual layout.
+func newTrayUI() *trayUI {
+	ui := &trayUI{
+		icons:       buildStateIcons(trayIcon),
+		shown:       stateUnknown,
+		accountKick: make(chan struct{}, 1),
+	}
+	ui.upgradeTarget.Store(upgradeURL(webBase()))
+
+	systray.SetIcon(trayIcon)
+	systray.SetTitle("unarr")
+	systray.SetTooltip("unarr agent")
+
+	ui.mStatus = systray.AddMenuItem("Checking…", "Agent status")
+	ui.mStatus.Disable()
+	ui.mAccount = systray.AddMenuItem("Account: …", "Signed-in unarr account")
+	ui.mAccount.Disable()
+	ui.mVersion = systray.AddMenuItem("Version: …", "Agent and app versions")
+	ui.mVersion.Disable()
+	ui.mUpgrade = systray.AddMenuItem("Upgrade to unarr+", "See unarr+ plans")
+	ui.mUpgrade.Hide() // hidden until a successful fetch proves the account is not pro
+	systray.AddSeparator()
+	ui.mPause = systray.AddMenuItem("Pause agent", "Stop the agent (downloads and streams halt)")
+	ui.mResume = systray.AddMenuItem("Resume agent", "Start the agent")
+	ui.mRestart = systray.AddMenuItem("Restart agent", "Restart the agent")
+	systray.AddSeparator()
+	ui.mOpen = systray.AddMenuItem("Open unarr.app", "Open the unarr web app")
+	ui.mConfigure = systray.AddMenuItem("Configure agent (web)", "Paths, codecs, hardware — on the web")
+	ui.mEdit = systray.AddMenuItem("Edit config.toml", "Open the agent config file")
+	systray.AddSeparator()
+	ui.mLogs = systray.AddMenuItem("View logs", "Open the agent log file")
+	ui.mSendLogs = systray.AddMenuItem("Send logs to support", "Send agent logs to the developers")
+	ui.mDocs = systray.AddMenuItem("Documentation", "Open the unarr docs")
+	systray.AddSeparator()
+	ui.mAutostart = systray.AddMenuItemCheckbox("Start at login",
+		"Launch unarr-desktop when you sign in", false)
+	// Reflect the real on-disk state at startup; a probe error leaves the box
+	// unchecked (the safe default) but is surfaced, never swallowed.
+	if enabled, err := autostartEnabled(); err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: autostart status:", err)
+	} else if enabled {
+		ui.mAutostart.Check()
+	}
+	systray.AddSeparator()
+	ui.mQuit = systray.AddMenuItem("Quit", "Close the tray (the agent keeps running)")
+	return ui
+}
+
+// applyState swaps the tray icon + tooltip only on transitions (SetIcon on
+// every 5s tick would spam DBus/Cocoa for nothing).
+func (ui *trayUI) applyState(st trayState) {
+	if st == ui.shown {
+		return
+	}
+	ui.shown = st
+	systray.SetIcon(ui.icons[st])
+	systray.SetTooltip("unarr agent — " + st.label())
+}
+
+// refresh reflects daemon state into the status row + pause/resume/restart
+// enablement. Read from the same state file `unarr status` uses (no drift).
+func (ui *trayUI) refresh() {
+	s := readStatus()
+	if s.running && isPausedMarker() {
+		markPaused(false) // resumed outside the tray (CLI/web) — self-heal
+	}
+	if s.running && !ui.prevRunning {
+		ui.kickAccount() // daemon just came up (e.g. post-sign-in) — re-fetch
+	}
+	ui.prevRunning = s.running
+	if s.crashed && s.pid == ui.lastStopPID {
+		// Tray-initiated stop that the (old) CLI didn't clean up after —
+		// reap the orphan and re-read: renders paused/stopped, never crash.
+		reapStaleState(s.pid)
+		s = readStatus()
+	}
+	st := displayState(s, isPausedMarker())
+	ui.applyState(st)
+	switch st {
+	case stateRunning:
+		title := fmt.Sprintf("Agent: running (PID %d)", s.pid)
+		if s.tasks > 0 {
+			title += fmt.Sprintf(" · %d task(s)", s.tasks)
+		}
+		ui.mStatus.SetTitle(title)
+		ui.mPause.Enable()
+		ui.mResume.Disable()
+		ui.mRestart.Enable()
+	case stateCrashed:
+		ui.mStatus.SetTitle("Agent: crashed")
+		ui.mPause.Disable()
+		ui.mResume.Enable()
+		ui.mRestart.Disable()
+		if s.pid != ui.reportedCrashPID && time.Now().After(ui.suppressCrashUntil) {
+			ui.reportedCrashPID = s.pid
+			go handleCrash(s)
+		}
+	case statePaused:
+		ui.mStatus.SetTitle("Agent: paused")
+		ui.mPause.Disable()
+		ui.mResume.Enable()
+		ui.mRestart.Disable()
+	default:
+		ui.mStatus.SetTitle("Agent: stopped")
+		ui.mPause.Disable()
+		ui.mResume.Enable()
+		ui.mRestart.Disable()
+	}
+}
+
+// control execs a daemon command, surfaces spawn errors, and nudges a refresh
+// shortly after (the state file updates asynchronously) on top of the ticker.
+// Stops/restarts remember the targeted PID so a state file the old daemon
+// failed to clean up is recognized as our stop, not a crash.
+func (ui *trayUI) control(args ...string) {
+	if args[0] == "stop" || args[0] == "daemon" {
+		if s := readStatus(); s.running {
+			ui.lastStopPID = s.pid
+		}
+	}
+	ui.suppressCrashUntil = time.Now().Add(crashSuppressWindow)
+	if err := runUnarr(args...); err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: control:", err)
+	}
+	time.AfterFunc(1500*time.Millisecond, ui.refresh)
+}
+
+func (ui *trayUI) statusLoop() {
+	t := time.NewTicker(statusPeriod)
+	defer t.Stop()
+	for range t.C {
+		ui.refresh()
+	}
+}
+
+// kickAccount schedules an out-of-band account refresh (non-blocking; the
+// 1-slot channel coalesces bursts).
+func (ui *trayUI) kickAccount() {
+	select {
+	case ui.accountKick <- struct{}{}:
+	default:
+	}
+}
+
+func (ui *trayUI) accountLoop() {
+	ui.refreshAccount()
+	t := time.NewTicker(accountPeriod)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+		case <-ui.accountKick:
+		}
+		ui.refreshAccount()
+	}
+}
+
+// refreshAccount reflects the signed-in account + versions into their rows and
+// shows the upgrade CTA only for a fetched non-pro account. Permanent auth
+// failures (401 invalid key / 410 agent_revoked) render as signed-out — NOT as
+// a transient error — or a revoked key would freeze the old email/plan/CTA on
+// screen forever. Transient errors keep the last good title.
+func (ui *trayUI) refreshAccount() {
+	ui.mVersion.SetTitle(versionTitle(resolveAgentVersion(), version))
+	info, base, err := fetchAccount()
+	var httpErr *agent.HTTPError
+	authDead := errors.As(err, &httpErr) &&
+		(httpErr.StatusCode == 401 || httpErr.StatusCode == 410)
+	switch {
+	case errors.Is(err, errNotSignedIn) || authDead:
+		ui.mAccount.SetTitle("Account: not signed in")
+		ui.mUpgrade.Hide()
+		ui.accountShown = false
+	case err != nil:
+		fmt.Fprintln(os.Stderr, "unarr-desktop: account:", err)
+		if !ui.accountShown {
+			ui.mAccount.SetTitle("Account: unavailable")
+		}
+	default:
+		ui.accountShown = true
+		ui.upgradeTarget.Store(upgradeURL(base))
+		ui.mAccount.SetTitle(accountTitle(info))
+		if info.IsPro {
+			ui.mUpgrade.Hide()
+		} else {
+			ui.mUpgrade.Show()
+		}
+	}
+}
+
+// upgradeCTA opens the pricing page and re-checks the account shortly after —
+// a user who completes the purchase should see the row flip without waiting
+// out the 30-min ticker.
+func (ui *trayUI) upgradeCTA() {
+	target, _ := ui.upgradeTarget.Load().(string)
+	openURL(target)
+	time.AfterFunc(time.Minute, ui.kickAccount)
+	time.AfterFunc(5*time.Minute, ui.kickAccount)
+}
+
+func (ui *trayUI) clickLoop() {
+	for {
+		select {
+		case <-ui.mPause.ClickedCh:
+			markPaused(true)
+			ui.control("stop")
+		case <-ui.mResume.ClickedCh:
+			markPaused(false)
+			ui.control("start")
+		case <-ui.mRestart.ClickedCh:
+			markPaused(false)
+			ui.control("daemon", "restart")
+		case <-ui.mOpen.ClickedCh:
+			openURL(webBase())
+		case <-ui.mConfigure.ClickedCh:
+			openURL(hubURL())
+		case <-ui.mEdit.ClickedCh:
+			openFile(configPath())
+		case <-ui.mLogs.ClickedCh:
+			openLogs()
+		case <-ui.mSendLogs.ClickedCh:
+			go sendLogsToSupport()
+		case <-ui.mUpgrade.ClickedCh:
+			ui.upgradeCTA()
+		case <-ui.mDocs.ClickedCh:
+			openURL(docsURL())
+		case <-ui.mAutostart.ClickedCh:
+			toggleAutostart(ui.mAutostart)
+		case <-ui.mQuit.ClickedCh:
+			systray.Quit()
+			return
+		}
+	}
+}

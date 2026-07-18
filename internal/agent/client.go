@@ -331,6 +331,24 @@ func (c *Client) GetUsenetUsage(ctx context.Context) (*UsenetUsageResponse, erro
 	return &resp, nil
 }
 
+// AccountInfo mirrors GET /api/internal/agent/me. A 401 on a bad key
+// surfaces as *HTTPError via handleResponse.
+type AccountInfo struct {
+	Email       string `json:"email"`
+	Plan        string `json:"plan"`
+	IsPro       bool   `json:"isPro"`
+	TrialActive bool   `json:"trialActive"`
+}
+
+// Me fetches the signed-in account's email and subscription state.
+func (c *Client) Me(ctx context.Context) (*AccountInfo, error) {
+	var resp AccountInfo
+	if err := c.doGet(ctx, "/api/internal/agent/me", &resp); err != nil {
+		return nil, fmt.Errorf("me: %w", err)
+	}
+	return &resp, nil
+}
+
 // ConfigureDebrid saves a debrid provider token for the user (used by unarr init/migrate).
 func (c *Client) ConfigureDebrid(ctx context.Context, req ConfigureDebridRequest) (*ConfigureDebridResponse, error) {
 	var resp ConfigureDebridResponse
