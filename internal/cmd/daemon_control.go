@@ -270,7 +270,30 @@ func stopDaemonByPID() error {
 		}
 		return fmt.Errorf("read daemon state: %w", err)
 	}
-	return killPID(state.PID)
+	if err := killPID(state.PID); err != nil {
+		return err
+	}
+	reapStateAfterExit(state.PID)
+	return nil
+}
+
+// reapStateAfterExit waits briefly for the signaled daemon to exit, then
+// removes the orphaned state file it may have left behind. A daemon stopped in
+// its first seconds of life (signal handlers not yet installed) — and EVERY
+// Windows stop, where taskkill /f gives it no chance to clean up — dies
+// without RemoveState. The stale "running" state + dead PID would then read as
+// a CRASH to `unarr status` and to the unarr-desktop crash watcher, which
+// would email a false crash report for a user-initiated stop.
+func reapStateAfterExit(pid int) {
+	for i := 0; i < 20; i++ { // up to ~10s for a graceful drain
+		if !agent.IsProcessAlive(pid) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if st := agent.ReadState(); st != nil && st.PID == pid && !agent.IsProcessAlive(pid) {
+		agent.RemoveState()
+	}
 }
 
 func launchdPlistPath(home string) string {
