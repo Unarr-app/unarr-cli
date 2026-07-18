@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -65,6 +66,14 @@ func runSelfUpdate(force, allowUnsigned bool) error {
 	if currentClean == latest && !force {
 		fmt.Println()
 		green.Println("  ✓ Already up to date!")
+		// The CLI being current does NOT mean the desktop sibling is: the
+		// common failure is the FIRST update after a release — desktop.yml
+		// attaches its assets AFTER the release is published, so that run hits
+		// ErrNoDesktopAssets (warn + skip) and the retry lands here, where an
+		// early return used to strand the sibling on the old version forever.
+		// The version marker makes this a cheap no-op when the sibling is
+		// already current, so probing on every no-op update costs nothing.
+		updateDesktopSibling(ctx, latest, green, yellow)
 		fmt.Println()
 		return nil
 	}
@@ -95,6 +104,8 @@ func runSelfUpdate(force, allowUnsigned bool) error {
 		fmt.Printf("  Backup: %s\n", result.BackupPath)
 	}
 
+	updateDesktopSibling(ctx, latest, green, yellow)
+
 	// Auto-restart daemon if it is running, otherwise the live process keeps
 	// serving the old version (heartbeat reports old version → web gates
 	// features against the wrong version).
@@ -115,4 +126,33 @@ func runSelfUpdate(force, allowUnsigned bool) error {
 
 	fmt.Println()
 	return nil
+}
+
+// updateDesktopSibling refreshes the unarr-desktop tray companion installed
+// NEXT TO this binary (same dir — never a PATH search) to the version the CLI
+// just updated to. It runs only after a successful CLI upgrade: an old
+// desktop binary can't be version-probed safely (pre-1.6 builds treat any
+// argv as tray mode and would pop a tray window), so the sibling is refreshed
+// unconditionally alongside each CLI upgrade instead. Failures here must
+// never fail the CLI update that already succeeded — a release without signed
+// desktop assets (desktop.yml attaches them AFTER the release is published)
+// downgrades to a warning.
+//
+// The restart hint goes to stdout, not notify.Send: this command runs in a
+// terminal, and we can't reliably detect a running tray cross-platform — an
+// unconditional desktop notification would be noise on every headless update.
+func updateDesktopSibling(ctx context.Context, version string, green, yellow *color.Color) {
+	updated, err := upgrade.UpdateDesktopSibling(ctx, version, func(msg string) {
+		fmt.Printf("  %s\n", msg)
+	})
+	switch {
+	case errors.Is(err, upgrade.ErrNoDesktopAssets):
+		yellow.Println("  ! unarr-desktop is installed next to unarr, but this release has no signed desktop assets — skipped")
+	case err != nil:
+		yellow.Printf("  ! unarr-desktop update failed: %v\n", err)
+		fmt.Println("    (The unarr update itself succeeded. Retry later with: unarr-desktop --update)")
+	case updated:
+		green.Println("  ✓ unarr-desktop updated")
+		fmt.Println("    If the unarr-desktop tray is running, quit and reopen it to load the new version.")
+	}
 }

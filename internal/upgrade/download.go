@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,13 @@ import (
 	"strings"
 	"time"
 )
+
+// errAssetNotFound marks a release asset that came back HTTP 404 — the one
+// status callers need to tell apart from transport/other failures (a missing
+// desktop asset downgrades to a warning in `unarr update`; a missing desktop
+// checksums manifest becomes ErrNoDesktopAssets). Wrapped, so errors.Is works
+// through the failover loop's last-error reporting.
+var errAssetNotFound = errors.New("asset not found")
 
 var httpClient = &http.Client{Timeout: 120 * time.Second}
 
@@ -95,6 +103,9 @@ func getReleaseAssetFromBase(ctx context.Context, base, version, filename string
 		return resp, nil
 	}
 	resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("fetch %s: HTTP 404: %w", url, errAssetNotFound)
+	}
 	return nil, fmt.Errorf("fetch %s: HTTP %d", url, resp.StatusCode)
 }
 
@@ -140,38 +151,54 @@ func verifyChecksumOnly(ctx context.Context, version, archivePath, base string) 
 	return verifyChecksumWithOptions(ctx, version, archivePath, base, false)
 }
 
+// cliChecksums is goreleaser's manifest covering the CLI release archives.
+// The desktop binaries (uploaded by desktop.yml AFTER goreleaser ran) carry
+// their own manifest (desktopChecksums) — same format, same signing key,
+// different file. Each manifest's signature asset is always derived as
+// "<manifest>.sig" (sigAssetName), never named independently.
+const cliChecksums = "checksums.txt"
+
 // verifyChecksumWithOptions verifies archivePath against checksums.txt fetched
 // from `base` — the SAME mirror that served the archive (resolved by download).
 // Fetching checksums + signature from that one host guarantees they describe the
 // archive we actually downloaded, never another mirror's (possibly differently
 // built) artifacts.
 func verifyChecksumWithOptions(ctx context.Context, version, archivePath, base string, verifySignature bool) error {
-	// Download checksums.txt from the archive's mirror (no cross-host failover).
-	resp, err := getReleaseAssetFromBase(ctx, base, version, "checksums.txt")
+	return verifyAssetAgainstChecksums(ctx, version, archivePath, base, cliChecksums, archiveName(version), verifySignature)
+}
+
+// verifyAssetAgainstChecksums is the manifest-agnostic core shared by the CLI
+// and desktop update paths: fetch the given checksums manifest from `base`
+// (the mirror that served the asset — no cross-host failover), optionally
+// verify its ed25519 signature (over "<manifest>.sig", derived — the two
+// names can never drift apart), then compare the asset's SHA256 against the
+// manifest entry for expectedName.
+func verifyAssetAgainstChecksums(ctx context.Context, version, assetPath, base, manifest, expectedName string, verifySignature bool) error {
+	// Download the manifest from the asset's mirror (no cross-host failover).
+	resp, err := getReleaseAssetFromBase(ctx, base, version, manifest)
 	if err != nil {
 		return fmt.Errorf("fetch checksums: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Read the entire checksums.txt content first so we can both parse and
+	// Read the entire manifest content first so we can both parse and
 	// verify the signature over the same bytes.
 	checksumsContent, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return fmt.Errorf("read checksums: %w", err)
 	}
 
-	// Verify ed25519 signature over checksums.txt before trusting its
+	// Verify ed25519 signature over the manifest before trusting its
 	// contents. Skipped silently when no key is embedded (handled by the
 	// caller via SignatureVerificationConfigured) or when the caller
-	// explicitly opts out via --allow-unsigned.
+	// explicitly opts out via --allow-unsigned (CLI archives only).
 	if verifySignature {
-		if err := verifyChecksumsSignature(ctx, version, base, checksumsContent); err != nil {
+		if err := verifySignedChecksums(ctx, version, base, manifest, checksumsContent); err != nil {
 			return fmt.Errorf("verify signature: %w", err)
 		}
 	}
 
-	// Parse checksums.txt — format: "<sha256>  <filename>"
-	expectedName := archiveName(version)
+	// Parse the manifest — format: "<sha256>  <filename>"
 	var expectedHash string
 
 	scanner := bufio.NewScanner(bytes.NewReader(checksumsContent))
@@ -188,11 +215,11 @@ func verifyChecksumWithOptions(ctx context.Context, version, archivePath, base s
 	}
 
 	if expectedHash == "" {
-		return fmt.Errorf("no checksum found for %s in checksums.txt", expectedName)
+		return fmt.Errorf("no checksum found for %s in %s", expectedName, manifest)
 	}
 
-	// Compute SHA256 of the downloaded archive
-	f, err := os.Open(archivePath)
+	// Compute SHA256 of the downloaded asset
+	f, err := os.Open(assetPath)
 	if err != nil {
 		return err
 	}

@@ -16,6 +16,7 @@ import (
 	"fyne.io/systray"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/upgrade"
 )
 
 type trayUI struct {
@@ -26,7 +27,7 @@ type trayUI struct {
 	mPause, mResume, mRestart             *systray.MenuItem
 	mOpen, mConfigure, mEdit              *systray.MenuItem
 	mLogs, mSendLogs, mDocs               *systray.MenuItem
-	mAutostart, mQuit                     *systray.MenuItem
+	mAutostart, mUpdate, mQuit            *systray.MenuItem
 
 	// Crash-watcher state — touched only from refresh()/control(); systray
 	// delivers those on independent goroutines but never concurrently in
@@ -99,6 +100,11 @@ func newTrayUI() *trayUI {
 		ui.mAutostart.Check()
 	}
 	systray.AddSeparator()
+	// Slots pattern: systray menus are append-only, so the update item is
+	// created up-front and Hidden — updateLoop Show()s it only when a newer
+	// release is actually known. Never auto-applies.
+	ui.mUpdate = systray.AddMenuItem("Update desktop app", "Install the latest unarr-desktop version")
+	ui.mUpdate.Hide()
 	ui.mQuit = systray.AddMenuItem("Quit", "Close the tray (the agent keeps running)")
 	return ui
 }
@@ -187,6 +193,27 @@ func (ui *trayUI) statusLoop() {
 	defer t.Stop()
 	for range t.C {
 		ui.refresh()
+	}
+}
+
+// updateLoop is the daily desktop-update check — same on-disk throttle state
+// the --open mode uses, so tray + ephemeral invocations share one 24h probe
+// and one notification budget. Re-evaluated every 6h in case the tray outlives
+// the throttle window. Dev builds skip it (version compare meaningless).
+// The appliedVersion guard keeps the item from re-appearing after an update
+// was applied: this process still runs the OLD compiled-in `version` until
+// restarted, so IsNewer alone would re-Show() forever.
+func (ui *trayUI) updateLoop() {
+	if version == "dev" {
+		return
+	}
+	for {
+		latest, st, dirty := refreshLatestVersion(trayUpdateHTTPBudget)
+		persistUpdateCheckState(st, dirty)
+		if latest != "" && upgrade.IsNewer(version, latest) && latest != loadAppliedVersion() {
+			ui.mUpdate.Show()
+		}
+		time.Sleep(6 * time.Hour)
 	}
 }
 
@@ -283,6 +310,8 @@ func (ui *trayUI) clickLoop() {
 			openURL(docsURL())
 		case <-ui.mAutostart.ClickedCh:
 			toggleAutostart(ui.mAutostart)
+		case <-ui.mUpdate.ClickedCh:
+			go traySelfUpdate(ui.mUpdate)
 		case <-ui.mQuit.ClickedCh:
 			systray.Quit()
 			return

@@ -18,6 +18,7 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"fyne.io/systray"
@@ -92,10 +93,92 @@ func openLogs() {
 	}
 }
 
+// runMode classifies argv into exactly one action. The dispatch is STRICT on
+// purpose: anything unrecognized used to fall through to systray.Run, so
+// `--help`, a typo (`--updat`), or `--version extra` silently spawned a
+// phantom tray (or hung a headless session waiting on DBus). Only a BARE
+// invocation may ever start the tray.
+type runMode int
+
+const (
+	modeTray runMode = iota
+	modeVersion
+	modeUpdate
+	modeOpen
+	modeHelp
+	modeUsageError
+)
+
+const usageText = `unarr-desktop — system-tray companion for the unarr agent
+
+Usage:
+  unarr-desktop                            start the tray (no arguments)
+  unarr-desktop --open <unarr://play?...>  hand the stream link to a local player
+  unarr-desktop --update                   self-update this binary to the latest release
+  unarr-desktop --version                  print the version
+  unarr-desktop --help                     show this help
+`
+
+// dispatchArgs maps argv (without argv[0]) to a runMode; for modeOpen it also
+// returns the raw unarr:// link. Pure — extracted from main so the strict
+// fallthrough behavior is unit-testable.
+func dispatchArgs(args []string) (runMode, string) {
+	if len(args) == 0 {
+		return modeTray, ""
+	}
+	// Protocol-handler forms first (`--open <url>`, `--open=<url>`, or a bare
+	// unarr:// argument via %u/%1). A bare `--open` with no URL still maps to
+	// modeOpen: runOpen("") prints usage and exits 2 without starting a tray.
+	if raw, ok := openArg(args); ok {
+		return modeOpen, raw
+	}
+	if len(args) == 1 {
+		switch args[0] {
+		case "--version":
+			return modeVersion, ""
+		case "--update":
+			return modeUpdate, ""
+		case "--help", "-h":
+			return modeHelp, ""
+		}
+	}
+	return modeUsageError, ""
+}
+
 func main() {
+	mode, raw := dispatchArgs(os.Args[1:])
+	switch mode {
+	case modeVersion:
+		// --version: also the self-updater's smoke test for a freshly
+		// downloaded desktop binary (a bare invocation would start a tray —
+		// never safe to exec blindly, hence a flag that can only print+exit).
+		fmt.Println("unarr-desktop v" + version)
+		return
+	case modeUpdate:
+		// --update: self-update for player-only installs (no `unarr` CLI).
+		os.Exit(runDesktopSelfUpdate())
+	case modeOpen:
+		// Protocol-handler mode: parse, hand the stream to a local player,
+		// exit. Ephemeral by design — no systray, no single-instance, no
+		// sentry init (a browser click should launch the player in
+		// milliseconds, and must never spawn a second tray).
+		os.Exit(runOpen(raw))
+	case modeHelp:
+		fmt.Print(usageText)
+		return
+	case modeUsageError:
+		fmt.Fprintf(os.Stderr, "unarr-desktop: unrecognized arguments: %s\n\n", strings.Join(os.Args[1:], " "))
+		fmt.Fprint(os.Stderr, usageText)
+		os.Exit(2)
+	}
 	sentry.Init(version)
 	defer sentry.Close()
 	defer sentry.RecoverPanic()
+	// Claim the unarr:// scheme for this executable before the tray starts
+	// (Windows-only, HKCU, idempotent; Linux/macOS registration belongs to
+	// install.sh / the future .app bundle — see register_*.go). Doing it on
+	// every start self-heals the registration when the binary moves.
+	registerURLScheme()
 	systray.Run(onReady, func() {})
 }
 
@@ -106,6 +189,7 @@ func onReady() {
 	ui.refresh()
 	go ui.statusLoop()
 	go ui.accountLoop()
+	go ui.updateLoop()
 	go ui.clickLoop()
 }
 

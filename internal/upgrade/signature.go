@@ -31,11 +31,22 @@ var releasePubKeyBase64 = "X7EJVwAiIILs4EGaqp+YBsa4Q6HnKBB2J5FI4MIt+w0="
 // though signature verification is required by an embedded public key.
 var ErrMissingSignature = errors.New("release signature file is missing")
 
-// verifyChecksumsSignature downloads `checksums.txt.sig` (raw 64-byte ed25519
-// signature over the checksums.txt content) and verifies it with the embedded
-// public key. Returns nil if verification succeeds or if no public key has
-// been embedded yet (caller is expected to surface a warning in that case).
-func verifyChecksumsSignature(ctx context.Context, version, base string, checksumsContent []byte) error {
+// sigAssetName derives a manifest's signature asset name. The ".sig" suffix
+// is a release-pipeline invariant (scripts/sign-checksums and desktop.yml both
+// emit "<manifest>.sig"), so deriving it here — instead of naming the two
+// files independently at every call site — makes a manifest/sig mismatch
+// unrepresentable.
+func sigAssetName(manifest string) string {
+	return manifest + ".sig"
+}
+
+// verifySignedChecksums is the manifest-agnostic core of the signature check:
+// the CLI verifies checksums.txt, the desktop updater checksums-desktop.txt —
+// each against its derived "<manifest>.sig" (sigAssetName) — both with the
+// SAME compiled-in release public key, so one signing secret in CI covers
+// every artifact class. Returns nil if verification succeeds or if no public
+// key has been embedded (caller is expected to surface a warning then).
+func verifySignedChecksums(ctx context.Context, version, base, manifest string, checksumsContent []byte) error {
 	pubKey, err := loadReleasePubKey()
 	if err != nil {
 		return fmt.Errorf("load release pubkey: %w", err)
@@ -45,7 +56,7 @@ func verifyChecksumsSignature(ctx context.Context, version, base string, checksu
 		return nil
 	}
 
-	rawSig, err := fetchSignature(ctx, version, base)
+	rawSig, err := fetchSignature(ctx, version, base, sigAssetName(manifest))
 	if err != nil {
 		return err
 	}
@@ -62,16 +73,17 @@ func verifyChecksumsSignature(ctx context.Context, version, base string, checksu
 	return nil
 }
 
-// fetchSignature downloads checksums.txt.sig (base64(signature)\n — small and
-// bounded) from `base`: the SAME mirror that served the archive + checksums.txt
-// (resolved by download). Fetching all three from one host is what keeps
-// verification sound — the two builds (GitHub Actions and local ship) are not
-// guaranteed byte-identical, so a signature from one mirror would NOT verify a
-// checksums.txt from another. A 404 means the release on this mirror genuinely
-// ships no signature → ErrMissingSignature (the --allow-unsigned path); other
-// non-200s and transport errors surface as-is.
-func fetchSignature(ctx context.Context, version, base string) ([]byte, error) {
-	url := releaseURL(base, version, "checksums.txt.sig")
+// fetchSignature downloads a signature asset (base64(signature)\n — small and
+// bounded) from `base`: the SAME mirror that served the archive + checksums
+// manifest (resolved by download). Fetching all three from one host is what
+// keeps verification sound — the two builds (GitHub Actions and local ship)
+// are not guaranteed byte-identical, so a signature from one mirror would NOT
+// verify a checksums manifest from another. A 404 means the release on this
+// mirror genuinely ships no signature → ErrMissingSignature (the CLI's
+// --allow-unsigned path; a HARD error for desktop assets); other non-200s and
+// transport errors surface as-is.
+func fetchSignature(ctx context.Context, version, base, sigAsset string) ([]byte, error) {
+	url := releaseURL(base, version, sigAsset)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

@@ -14,6 +14,15 @@ name: desktop
 # "latest release" logic they already use for the CLI. Older releases simply
 # lack the assets — the installers warn and skip, never fail.
 #
+# SIGNING: goreleaser's checksums.txt only covers the CLI archives — these
+# desktop assets are uploaded afterwards and would otherwise be unauthenticated.
+# The `sign` job below therefore builds a desktop-specific manifest
+# (checksums-desktop.txt + checksums-desktop.txt.sig, ed25519 with the SAME
+# RELEASE_SIGNING_KEY secret goreleaser uses) and attaches it to the release.
+# internal/upgrade verifies desktop binaries against that manifest with the
+# compiled-in public key and refuses to install without it. Same invariant as
+# the CLI: a missing secret FAILS the job — an unsigned release cannot ship.
+#
 # Push/PR runs (branch work) only upload workflow artifacts, no release touch.
 
 on:
@@ -110,3 +119,63 @@ jobs:
           name: unarr-desktop-${{ matrix.goos }}-${{ matrix.goarch }}
           path: unarr-desktop_*
           if-no-files-found: error
+
+  sign:
+    name: sign desktop checksums
+    # Release publishes only: hash the four freshly built binaries into
+    # checksums-desktop.txt, sign it with the release ed25519 key (reusing
+    # scripts/sign-checksums — it is artifact-agnostic: -key/-in/-out), and
+    # attach both files to the same release. The artifacts hashed here are the
+    # exact bytes the build jobs uploaded to the release (same files from the
+    # same job), so manifest and assets can never drift.
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Require signing key
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          # Same invariant as goreleaser's `signs:` block: an unsigned release
+          # must not ship. Fail loudly here instead of publishing desktop
+          # assets the self-updater would refuse to install.
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::error::RELEASE_SIGNING_KEY secret is missing — refusing to publish unsigned desktop assets"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: unarr-desktop-*
+          path: assets
+          merge-multiple: true
+
+      - name: Generate and sign checksums-desktop.txt
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          # "<sha256>  <filename>" — the same format as goreleaser's
+          # checksums.txt, parsed by internal/upgrade.
+          (cd assets && sha256sum unarr-desktop_* > checksums-desktop.txt && cat checksums-desktop.txt)
+          go run ./scripts/sign-checksums \
+            -key "$RELEASE_SIGNING_KEY" \
+            -in assets/checksums-desktop.txt \
+            -out assets/checksums-desktop.txt.sig
+
+      - name: Attach manifest to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            assets/checksums-desktop.txt \
+            assets/checksums-desktop.txt.sig \
+            --clobber
