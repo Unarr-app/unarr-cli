@@ -6,12 +6,12 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/pkg/browser"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
-	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/Unarr-app/unarr-cli/internal/notify"
 )
 
@@ -27,36 +27,24 @@ const (
 // server, which emails it to the developers. Fails with a descriptive error
 // when the agent has no API credentials yet (never registered / logged out).
 func sendReport(kind, message string) error {
-	cfg, err := config.Load(config.FilePath())
+	client, _, err := newAgentClient()
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	cfg.ApplyEnvOverrides() // honor UNARR_API_URL / UNARR_API_KEY like the daemon does
-	if cfg.Auth.APIKey == "" {
-		return fmt.Errorf("agent has no API key (not logged in)")
-	}
-	base := cfg.Auth.APIURL
-	if base == "" {
-		base = webBase()
+		return err
 	}
 
 	report := agent.SupportReport{
 		Kind:           kind,
 		Message:        message,
 		Logs:           string(tailBytes(collectLogs(), maxReportLogBytes)),
-		AgentVersion:   agentVersionBestEffort(),
+		AgentVersion:   resolveAgentVersion(),
 		DesktopVersion: version,
 		OS:             runtime.GOOS,
 		Arch:           runtime.GOARCH,
 	}
 	if st := agent.ReadState(); st != nil {
 		report.AgentID = st.AgentID
-		if st.Version != "" {
-			report.AgentVersion = st.Version
-		}
 	}
 
-	client := agent.NewClient(base, cfg.Auth.APIKey, "unarr-desktop/"+version)
 	ctx, cancel := context.WithTimeout(context.Background(), reportTimeout)
 	defer cancel()
 	return client.SendSupportReport(ctx, report)
@@ -69,7 +57,18 @@ func agentVersionBestEffort() string {
 	if err != nil || len(out) == 0 {
 		return "unknown"
 	}
-	return firstLine(string(out))
+	return parseUnarrVersion(firstLine(string(out)))
+}
+
+// parseUnarrVersion extracts the bare version token from an `unarr version`
+// banner line ("unarr 1.5.2 (linux/amd64)" → "1.5.2"); menu rows and reports
+// want the number, not the banner. Unknown shapes pass through untouched.
+func parseUnarrVersion(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) >= 2 && fields[0] == "unarr" {
+		return fields[1]
+	}
+	return line
 }
 
 // mailFallback: the API path failed (no key, server unreachable). Dump the logs

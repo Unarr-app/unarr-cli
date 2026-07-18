@@ -47,6 +47,14 @@ type ProgressTracker struct {
 	dirty     bool
 	lastFlush time.Time
 	markCount int // marks since last flush
+
+	// flushMu serializes ENTIRE flushes (snapshot + write + rename). Clearing
+	// dirty under mu alone is not enough: two overlapping Flush calls snapshot
+	// in order but can RENAME out of order, so a stale snapshot lands last and
+	// silently loses completed segments on reload (a resumed download would
+	// re-fetch them). Held across I/O on purpose; MarkDone's hot path only
+	// takes mu, so marking never blocks on disk.
+	flushMu sync.Mutex
 }
 
 // Fingerprint computes a SHA-256 hash from all message-IDs in the NZB.
@@ -198,8 +206,20 @@ func (p *ProgressTracker) MarkDone(fileIndex, segIndex int) {
 	p.mu.Unlock()
 
 	if shouldFlush {
-		p.Flush()
+		p.tryFlush()
 	}
+}
+
+// tryFlush is the cadence-triggered flush for the download-worker hot path:
+// if another flush is already mid-I/O it SKIPS instead of parking the worker
+// behind a disk write (dirty stays set, so the next cadence or the final
+// explicit Flush persists the state — same durability window, no convoy).
+func (p *ProgressTracker) tryFlush() {
+	if !p.flushMu.TryLock() {
+		return
+	}
+	defer p.flushMu.Unlock()
+	p.flushLocked()
 }
 
 // IsDone returns whether a specific segment has been completed.
@@ -257,19 +277,29 @@ func (p *ProgressTracker) TotalCompleted() int {
 	return total
 }
 
-// Flush writes the current progress state to disk atomically (tmp + rename).
-// dirty is cleared before I/O to prevent concurrent Flush calls from racing
-// on the same tmp file. If I/O fails, the next MarkDone will re-set dirty.
+// Flush writes the current progress state to disk atomically (tmp + rename),
+// BLOCKING until any in-flight flush finishes — flushMu (not the dirty flag)
+// is what serializes snapshot+write+rename so a stale snapshot can never land
+// last. Use for explicit end-of-download/cancel persistence; the MarkDone hot
+// path goes through tryFlush instead. If I/O fails, dirty is re-set by the
+// next MarkDone.
 func (p *ProgressTracker) Flush() error {
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
+	return p.flushLocked()
+}
+
+// flushLocked does the snapshot + atomic write. Caller MUST hold flushMu.
+func (p *ProgressTracker) flushLocked() error {
 	p.mu.Lock()
 	if !p.dirty {
 		p.mu.Unlock()
 		return nil
 	}
 
-	// Snapshot state and clear dirty while holding the lock.
-	// This serializes flushes: a concurrent MarkDone will set dirty=true
-	// again, but won't trigger a competing Flush on the same tmp file.
+	// Snapshot state and clear dirty while holding the lock. Serialization
+	// against other flushes is flushMu's job (held by our caller); clearing
+	// dirty here only marks the snapshotted work as persisted-in-progress.
 	size := headerSize
 	for i := range p.files {
 		size += 4 + (p.files[i].segCount+7)/8
@@ -319,7 +349,16 @@ func (p *ProgressTracker) Flush() error {
 }
 
 // Remove deletes both the progress file and cached NZB file (best-effort).
+// It waits for any in-flight flush (flushMu) and clears dirty first —
+// otherwise a cancel-path Flush racing Remove could re-write the progress
+// file AFTER deletion, and a re-added task would resume from segments whose
+// partial data files no longer exist.
 func (p *ProgressTracker) Remove() {
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
+	p.mu.Lock()
+	p.dirty = false
+	p.mu.Unlock()
 	os.Remove(p.progressPath())
 	os.Remove(p.nzbPath())
 	os.Remove(p.progressPath() + ".tmp")
