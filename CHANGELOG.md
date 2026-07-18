@@ -5,12 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-07-18
+
+
+### Added
+
+- **desktop**: stateful tray icon, pause marker, and support/crash reporting
+
+### Changed
+
+- **notify**: move desktop notifications to shared internal/notify
+
+### Fixed
+
+- **ci**: darwin/amd64 desktop build on macos-15-intel
+- **daemon**: unarr stop cleans up the stale state a dead daemon left
+- **daemon**: reap orphaned state file after stop
+- **desktop**: reap tray-initiated stop orphans regardless of CLI version
+- **desktop**: build the Windows tray with the GUI subsystem
 ## [1.5.1] - 2026-07-17
 
 
 ### Fixed
 
 - **agent**: report config the server can act on, and reload for real
+
+### Other
+
+- **release**: 1.5.1
 ## [1.5.0] - 2026-07-17
 
 
@@ -235,11 +257,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **desktop**: real unarr logo icon + logs via `unarr daemon logs`
+- **desktop**: agent control + manage/config/logs/docs in the tray menu
+- **desktop**: minimal system-tray companion (unarr-desktop) — spike
 - **upgrade**: fail over to the web origin (Hetzner) when GitHub is unreachable
 - **upgrade**: pull self-update releases directly from GitHub
 
 ### CI/CD
 
+- **desktop**: GitHub Actions matrix to build unarr-desktop on linux/macOS/windows
 - **github**: bump golangci-lint-action to v7 for golangci-lint v2
 - **github**: migrate release + CI from forgejo/Hetzner to GitHub Actions
 
@@ -250,6 +276,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **changelog**: point cliff remote_url at Unarr-app/unarr-cli
+- **desktop**: label 'Open unarr.app' (clearer than 'Open unarr')
+- **desktop**: run click loop in a goroutine so onReady returns (empty-menu bug)
 - **engine**: guard task.ResolvedMethod with the task mutex (data race)
 - **upgrade**: pick latest release by max semver, not the API's first
 
@@ -1165,6 +1193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.5.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.9-beta...v1.4.0
