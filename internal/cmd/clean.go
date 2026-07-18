@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/ui"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/ui"
 )
 
 func newCleanCmd() *cobra.Command {

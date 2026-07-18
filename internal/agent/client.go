@@ -79,6 +79,29 @@ func (c *Client) Register(ctx context.Context, req RegisterRequest) (*RegisterRe
 	return &resp, nil
 }
 
+// ExchangeAuthKey redeems a single-use, short-lived auth-key (issued in the
+// web UI, format unarr-authkey-XXXX) for a durable per-agent API credential.
+// This is the unattended-bootstrap path (Tailscale-style): the user never
+// pastes a tc_ key — they hand the agent an auth-key and it self-provisions.
+//
+// The endpoint is PUBLIC (no session, no prior api key). The client's apiKey
+// is therefore irrelevant here; an empty Bearer header is fine — the server
+// authenticates purely on the auth-key in the body.
+//
+// On a 4xx the server returns { "error": "invalid"|"expired"|"used"|"revoked" },
+// surfaced as *HTTPError whose Message carries that token — callers map it to a
+// human-actionable message (see cmd/up.go).
+func (c *Client) ExchangeAuthKey(ctx context.Context, req ExchangeAuthKeyRequest) (*ExchangeAuthKeyResponse, error) {
+	var resp ExchangeAuthKeyResponse
+	if err := c.doPost(ctx, "/api/internal/agent/authkey/exchange", req, &resp); err != nil {
+		return nil, fmt.Errorf("authkey exchange: %w", err)
+	}
+	if resp.APIKey == "" {
+		return nil, fmt.Errorf("authkey exchange: server returned an empty api key")
+	}
+	return &resp, nil
+}
+
 // IssueCert sends a CSR to the web-side ACME broker and returns the signed
 // certificate chain (PEM). The agent's private key never leaves the machine —
 // only the CSR is sent. Used by the per-agent direct-TLS feature.

@@ -86,16 +86,36 @@ type DownloadConfig struct {
 	// viewer mid-stream. Note a re-open / quality-change / audio-switch creates
 	// an extra session, so allow headroom above the raw viewer cap on a shared box.
 	MaxStreamSessions int `toml:"max_stream_sessions"`
+	// UsenetStreaming opts into on-the-fly Usenet streaming: when the web opens a
+	// stream session for a Usenet (NZB) release, the daemon tries to serve it
+	// straight from NNTP (arranca en segundos + seek) instead of downloading the
+	// whole file first. Strictly OPT-IN and OFF by default — a streamable release
+	// (plain .mkv/.mp4 or a STORE rar) plays instantly, while a non-streamable one
+	// (compressed/encrypted RAR, password) falls back CLEANLY to the batch
+	// download so playback is never blocked. Older daemons ignore the field.
+	UsenetStreaming bool `toml:"usenet_streaming"`
 	// RequireStreamToken gates remote (non-loopback) /stream + /hls requests on a
 	// signed, short-lived token embedded in the URLs the agent reports. Default
 	// true (secure by default); loopback callers (local mpv/vlc) are always exempt.
 	// Set false only to debug a player that can't carry the token.
-	RequireStreamToken bool            `toml:"require_stream_token"`
-	CORSExtraOrigins   []string        `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
-	Transcode          TranscodeConfig `toml:"transcode"`
-	HLSCache           HLSCacheConfig  `toml:"hls_cache"`
-	VPN                VPNConfig       `toml:"vpn"`
-	Funnel             FunnelConfig    `toml:"funnel"`
+	RequireStreamToken bool     `toml:"require_stream_token"`
+	CORSExtraOrigins   []string `toml:"cors_extra_origins"` // extra browser origins added on top of the baked-in allowlist (torrentclaw.com, app.torrentclaw.com, localhost:3030)
+	// WebDAV read-only library export (opt-in, default false). When on, the stream
+	// server also serves the ORGANIZED library over WebDAV at
+	// http://<host>:<stream_port>/dav/ so Infuse / Kodi / VLC / Apple TV can browse
+	// and play directly (no web player). READ-ONLY: only PROPFIND/GET/HEAD/OPTIONS —
+	// every write verb (PUT/DELETE/MKCOL/COPY/MOVE) returns 405. Basic auth. Prefer
+	// LAN / Tailscale, or the per-agent HTTPS listener, on untrusted networks.
+	WebDAVEnabled bool `toml:"webdav_enabled"`
+	// WebDAVUsername for Basic auth (default "unarr" when empty).
+	WebDAVUsername string `toml:"webdav_username"`
+	// WebDAVPassword for Basic auth. Empty = derive a STABLE password from the API
+	// key (survives daemon restarts; shown by `unarr status`). Set to override.
+	WebDAVPassword string          `toml:"webdav_password"`
+	Transcode      TranscodeConfig `toml:"transcode"`
+	HLSCache       HLSCacheConfig  `toml:"hls_cache"`
+	VPN            VPNConfig       `toml:"vpn"`
+	Funnel         FunnelConfig    `toml:"funnel"`
 }
 
 // HLSCacheConfig controls the persistent HLS segment cache. A completed encode
@@ -130,6 +150,19 @@ type VPNConfig struct {
 	// point it at a peer .conf from your own WireGuard server and the torrent
 	// client split-tunnels through it with no web/provider plumbing.
 	ConfigFile string `toml:"config_file"`
+	// Required turns the split-tunnel into a fail-CLOSED kill-switch for P2P.
+	//
+	//	true  — if the WireGuard tunnel is not up (fetch failed, slot held by
+	//	        another device, config missing, or it dies mid-download) the
+	//	        torrent/BitTorrent method is DISABLED so the user's IP is never
+	//	        exposed to peers/trackers. Debrid + usenet (HTTPS/NNTP) keep
+	//	        running — they don't leak the IP to a swarm.
+	//	false — (default) current best-effort behavior: a failed tunnel logs a
+	//	        warning and downloads continue in the clear.
+	//
+	// Zero value (false) preserves the exact pre-kill-switch behavior, so an
+	// existing config that omits this key changes nothing.
+	Required bool `toml:"required"`
 }
 
 // TranscodeConfig controls real-time transcoding for the in-browser player
@@ -324,12 +357,17 @@ func contains(s []string, v string) bool {
 func Default() Config {
 	return Config{
 		Auth: AuthConfig{
-			APIURL: "https://torrentclaw.com",
-			// Default mirror list. Kept in sync with src/lib/mirrors-config.ts
-			// on the server. Users can override with `unarr mirrors update`,
-			// which pulls the live list from /api/v1/mirrors.
+			APIURL: "https://unarr.app",
+			// Default mirror list (failover order). Primary is unarr.app — the
+			// unarr brand's own deployment. Kept in sync with the brand-aware list
+			// in src/lib/mirrors-config.ts; `unarr mirrors update` pulls the live
+			// list from /api/v1/mirrors. torrentclaw.to is the non-CF (direct-to-
+			// proxy) hop that survives a Cloudflare-anycast block (e.g. Spain
+			// LaLiga); torrentclaw.com is a generic clearnet backup. All share the
+			// same API + account table.
 			Mirrors: []string{
 				"https://torrentclaw.to",
+				"https://torrentclaw.com",
 			},
 		},
 		Download: DownloadConfig{
@@ -434,10 +472,10 @@ func Load(path string) (Config, error) {
 // edit the TOML, while still letting power users disable features.
 func applyDefaults(cfg *Config, meta toml.MetaData) {
 	if !meta.IsDefined("auth", "api_url") {
-		cfg.Auth.APIURL = "https://torrentclaw.com"
+		cfg.Auth.APIURL = "https://unarr.app"
 	}
 	if !meta.IsDefined("auth", "mirrors") {
-		cfg.Auth.Mirrors = []string{"https://torrentclaw.to"}
+		cfg.Auth.Mirrors = []string{"https://torrentclaw.to", "https://torrentclaw.com"}
 	}
 	if !meta.IsDefined("downloads", "preferred_method") {
 		cfg.Download.PreferredMethod = "auto"

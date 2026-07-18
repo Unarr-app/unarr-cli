@@ -1,7 +1,7 @@
 #!/bin/sh
 # unarr — cross-platform installer (Linux / macOS)
 # Usage: curl -fsSL https://unarr.app/install.sh | sh
-#    or: curl -fsSL https://raw.githubusercontent.com/torrentclaw/unarr/main/install.sh | sh
+#    or: curl -fsSL https://raw.githubusercontent.com/Unarr-app/unarr-cli/main/install.sh | sh
 #
 # Options (env vars):
 #   INSTALL_DIR=/usr/local/bin  — where to place the binary (default: /usr/local/bin or ~/.local/bin)
@@ -9,7 +9,7 @@
 #   METHOD=binary|docker        — force install method (default: auto-detect)
 set -e
 
-REPO="torrentclaw/unarr"
+REPO="Unarr-app/unarr-cli"
 BINARY="unarr"
 
 # ---- Colors (only if terminal) ----
@@ -178,14 +178,14 @@ install_docker() {
         error "Docker not found. Install Docker first: https://docs.docker.com/get-docker/"
     fi
 
-    info "Pulling torrentclaw/unarr:latest..."
-    docker pull torrentclaw/unarr:latest 2>/dev/null || {
+    info "Pulling unarr/cli:latest..."
+    docker pull unarr/cli:latest 2>/dev/null || {
         info "Image not on Docker Hub yet, building from source..."
         tmpdir=$(mktemp -d)
 
         if has git; then
             git clone --depth 1 "https://github.com/$REPO.git" "$tmpdir/unarr"
-            docker build -t torrentclaw/unarr:latest "$tmpdir/unarr"
+            docker build -t unarr/cli:latest "$tmpdir/unarr"
             rm -rf "$tmpdir"
         else
             rm -rf "$tmpdir"
@@ -193,7 +193,7 @@ install_docker() {
         fi
     }
 
-    ok "Docker image ready: torrentclaw/unarr:latest"
+    ok "Docker image ready: unarr/cli:latest"
 
     printf "\n${BOLD}Quick start:${RESET}\n"
     cat <<'DOCKER_USAGE'
@@ -204,7 +204,7 @@ install_docker() {
   # 2. Run setup (interactive)
   docker run -it --rm \
     -v ~/.config/unarr:/config \
-    torrentclaw/unarr init
+    unarr/cli init
 
   # 3. Start daemon
   docker run -d --name unarr \
@@ -214,10 +214,10 @@ install_docker() {
     --memory 512m \
     -v ~/.config/unarr:/config \
     -v ~/Media:/downloads \
-    torrentclaw/unarr
+    unarr/cli
 
   # Or use the provided docker-compose.yml:
-  # curl -fsSL https://raw.githubusercontent.com/torrentclaw/unarr/main/docker-compose.yml > docker-compose.yml
+  # curl -fsSL https://raw.githubusercontent.com/Unarr-app/unarr-cli/main/docker-compose.yml > docker-compose.yml
   # docker compose up -d
 
 DOCKER_USAGE
@@ -242,7 +242,7 @@ uninstall() {
     # Remove Docker
     if has docker; then
         docker rm -f unarr 2>/dev/null && ok "Removed Docker container 'unarr'"
-        docker rmi torrentclaw/unarr:latest 2>/dev/null && ok "Removed Docker image"
+        docker rmi unarr/cli:latest 2>/dev/null && ok "Removed Docker image"
     fi
 
     ok "Uninstalled. Config remains at ~/.config/unarr/ (delete manually if desired)."
@@ -263,7 +263,7 @@ interactive_menu() {
     printf "    ${BOLD}2)${RESET} Docker — sandboxed, isolated filesystem access ${GREEN}(recommended)${RESET}\n"
 
     if [ "$OS" = "darwin" ] || has brew; then
-        printf "    ${BOLD}3)${RESET} Homebrew — brew install torrentclaw/tap/unarr\n"
+        printf "    ${BOLD}3)${RESET} Homebrew — brew install unarr-app/tap/unarr\n"
     fi
 
     printf "    ${BOLD}u)${RESET} Uninstall\n"
@@ -320,7 +320,7 @@ main() {
                 error "Homebrew not found. Install it first: https://brew.sh"
             fi
             info "Installing via Homebrew..."
-            brew install torrentclaw/tap/unarr
+            brew install unarr-app/tap/unarr
             ok "Installed via Homebrew"
             printf "\n  Run ${BOLD}unarr init${RESET} to get started.\n\n"
             ;;

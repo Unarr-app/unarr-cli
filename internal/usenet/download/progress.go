@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/usenet/nzb"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nzb"
 )
 
 // Binary progress file format:

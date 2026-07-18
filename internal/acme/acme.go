@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -72,6 +73,14 @@ func loadOrCreateKey(keyPath string) (*ecdsa.PrivateKey, error) {
 	return key, nil
 }
 
+// WildcardName is THE identity→SAN mapping for the per-agent cert: the
+// wildcard name BuildCSR requests and NeedsIssue asserts on the issued cert.
+// Single source so the two sides (request vs verify) can never drift — a
+// silent drift would make NeedsIssue re-issue on every renewal tick forever.
+func WildcardName(hash, baseDomain string) string {
+	return "*." + hash + "." + baseDomain
+}
+
 // BuildCSR ensures the persistent key exists and returns a PEM CSR requesting
 // the wildcard *.<hash>.<baseDomain> (plus the bare <hash>.<baseDomain> so a
 // future non-wildcard use still validates). baseDomain e.g. "agent.unarr.app".
@@ -81,7 +90,7 @@ func BuildCSR(dataDir, hash, baseDomain string) (csrPEM string, err error) {
 	if err != nil {
 		return "", err
 	}
-	wildcard := "*." + hash + "." + baseDomain
+	wildcard := WildcardName(hash, baseDomain)
 	base := hash + "." + baseDomain
 	tmpl := &x509.CertificateRequest{
 		Subject:            pkix.Name{CommonName: wildcard},
@@ -117,20 +126,61 @@ func WriteCert(dataDir, certPEM string) error {
 const renewBefore = 30 * 24 * time.Hour
 
 // NeedsIssue reports whether we should (re)request a cert: true when the cert is
-// missing, unparseable, expired, or within renewBefore of expiry.
-func NeedsIssue(dataDir string) bool {
+// missing, unparseable, expired, within renewBefore of expiry, OR issued for a
+// hash other than the current agent hash.
+//
+// The hash-mismatch case is load-bearing: agent_hash can be regenerated (config
+// reset / identity migration) while the OLD cert — for *.<oldHash>.<base>, not
+// yet expired — stays on disk. The web then encodes every direct-TLS hostname
+// under the NEW hash (<ip>.<newHash>.<base>), so the browser is served a cert
+// whose CN/SAN don't match → TLS validation fails → direct-TLS is silently dead
+// for up to the cert's ~90-day lifetime, forcing every remote https:// browser
+// onto the (flaky) cloudflared funnel. Re-issuing whenever the on-disk cert
+// doesn't cover the wildcard for the CURRENT hash makes direct-TLS self-heal on
+// the next renewal tick. hash/baseDomain empty (direct-TLS not configured) skips
+// the check and keeps the pure expiry semantics.
+func NeedsIssue(dataDir, hash, baseDomain string) bool {
 	_, certPath := Paths(dataDir)
 	data, err := os.ReadFile(certPath)
 	if err != nil {
 		return true
 	}
-	block, _ := pem.Decode(data)
-	if block == nil {
+	// agent.crt is a CHAIN — walk every PEM block instead of assuming the leaf
+	// comes first. Anchoring on block[0] made chain ordering load-bearing: an
+	// intermediate-first chain would fail the SAN check below on every renewal
+	// tick and re-issue forever (Let's Encrypt rate-limit burn).
+	var certs []*x509.Certificate
+	for rest := data; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if c, perr := x509.ParseCertificate(block.Bytes); perr == nil {
+			certs = append(certs, c)
+		}
+	}
+	if len(certs) == 0 {
 		return true
 	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
+
+	if hash != "" && baseDomain != "" {
+		// BuildCSR requests WildcardName(hash, base); that SAN must be present
+		// on a still-fresh cert in the chain for the current identity to hold.
+		// EqualFold: DNS names are case-insensitive and Let's Encrypt lowercases
+		// SANs on issue — an exact compare against a mixed-case configured base
+		// would re-issue on every tick despite a perfectly valid cert.
+		want := WildcardName(hash, baseDomain)
+		for _, c := range certs {
+			for _, n := range c.DNSNames {
+				if strings.EqualFold(n, want) {
+					return time.Now().Add(renewBefore).After(c.NotAfter)
+				}
+			}
+		}
 		return true
 	}
-	return time.Now().Add(renewBefore).After(cert.NotAfter)
+	// Direct-TLS not configured → pure expiry semantics on the first
+	// (conventionally the leaf) certificate, as before.
+	return time.Now().Add(renewBefore).After(certs[0].NotAfter)
 }

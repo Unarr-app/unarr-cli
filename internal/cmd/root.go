@@ -6,13 +6,13 @@ import (
 	"os"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/sentry"
+	"github.com/Unarr-app/unarr-cli/internal/upgrade"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	tc "github.com/torrentclaw/go-client"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/sentry"
-	"github.com/torrentclaw/unarr/internal/upgrade"
 )
 
 var (
@@ -44,16 +44,20 @@ Get started:
   unarr download <magnet|hash>         Grab a torrent one-shot
   unarr start                          Start the download daemon
 
-Documentation:  https://torrentclaw.com/cli
-Source:         https://github.com/torrentclaw/unarr`,
+Documentation:  https://unarr.app/cli
+Source:         https://github.com/Unarr-app/unarr-cli`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			if noColor || os.Getenv("NO_COLOR") != "" {
 				color.NoColor = true
 			}
-			// Self-updater fetches releases from the configured host (default
-			// torrentclaw.com), not GitHub — so mirrors / onion / staging /
-			// UNARR_API_URL all route updates correctly.
-			upgrade.SetBaseURL(loadConfig().Auth.APIURL)
+			// Self-updater pulls signed releases primarily from the project's
+			// public GitHub Releases, with the agent's API host (which proxies the
+			// Hetzner mirror) as an automatic fallback — so a GitHub account
+			// takedown can't strand the agent. UNARR_UPDATE_BASE overrides the
+			// PRIMARY origin for staging/tests; empty keeps GitHub.
+			cfg := loadConfig()
+			upgrade.SetBaseURL(os.Getenv("UNARR_UPDATE_BASE"))
+			upgrade.SetFallbackBaseURL(cfg.Auth.APIURL)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -102,6 +106,8 @@ Source:         https://github.com/torrentclaw/unarr`,
 	streamCmd.GroupID = "download"
 
 	// Daemon Management
+	upCmd := newUpCmd()
+	upCmd.GroupID = "daemon"
 	startCmd := newStartCmd()
 	startCmd.GroupID = "daemon"
 	stopCmd := newStopCmd()
@@ -153,6 +159,7 @@ Source:         https://github.com/torrentclaw/unarr`,
 		downloadCmd,
 		streamCmd,
 		// Daemon Management
+		upCmd,
 		startCmd,
 		stopCmd,
 		statusCmd,
@@ -235,8 +242,14 @@ func getClient() *tc.Client {
 
 	var opts []tc.Option
 
-	if cfg.Auth.APIURL != "" {
-		opts = append(opts, tc.WithBaseURL(cfg.Auth.APIURL))
+	// Discovery (search/stats/popular/recent/inspect/watch) lives on the
+	// TorrentClaw hosts. The unarr.app primary brand-blocks those endpoints with
+	// a 404 (not transient → the pool won't fail over past it), so route the
+	// discovery client to the TorrentClaw entries of [api_url]+mirrors instead of
+	// the raw api_url. See discoveryHosts() for the full rationale.
+	discoveryBase, discoveryMirrors := discoveryHosts(cfg.Auth.APIURL, cfg.Auth.Mirrors)
+	if discoveryBase != "" {
+		opts = append(opts, tc.WithBaseURL(discoveryBase))
 	}
 
 	apiKey := apiKeyFlag
@@ -251,13 +264,13 @@ func getClient() *tc.Client {
 
 	// Mirror failover for the public-API client, matching the agent control-plane
 	// client's resilience: wrap the transport so search/popular/etc. rotate across
-	// cfg.Auth.Mirrors on a primary takedown, using the same MirrorPool TYPE +
+	// the discovery hosts on a primary takedown, using the same MirrorPool TYPE +
 	// IsTransient policy the agent client uses (a fresh pool instance — the two
 	// clients fail over independently). WithRetry(0) disables the go-client's own
 	// retry loop so the transport owns failover exclusively (no nested
 	// retry×backoff on an outage). WithTimeout(30s) is set idiomatically and gives
 	// room for a couple of mirror attempts (go-client's bare default is 15s).
-	pool := agent.NewMirrorPool(cfg.Auth.APIURL, cfg.Auth.Mirrors)
+	pool := agent.NewMirrorPool(discoveryBase, discoveryMirrors)
 	opts = append(opts,
 		tc.WithHTTPClient(&http.Client{Transport: agent.NewMirrorRoundTripper(pool, nil)}),
 		tc.WithTimeout(30*time.Second),

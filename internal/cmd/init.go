@@ -9,14 +9,13 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/arr"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/mediaserver"
 	"github.com/charmbracelet/huh"
 	"github.com/fatih/color"
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/arr"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/mediaserver"
 )
 
 func newInitCmd() *cobra.Command {
@@ -76,10 +75,12 @@ func runInit(apiURLOverride string) error {
 	apiKey := cfg.Auth.APIKey
 
 	// Resolve the agentId up front so browser-authorize can bind the minted
-	// per-machine key to it.
-	agentID := cfg.Agent.ID
-	if agentID == "" {
-		agentID = uuid.New().String()
+	// per-machine key to it. ensureAgentID generates + persists a UUID when none
+	// exists — shared with `unarr up` so both entry points mint identity the
+	// same way.
+	agentID, err := ensureAgentID(&cfg)
+	if err != nil {
+		return err
 	}
 
 	if apiKey == "" {

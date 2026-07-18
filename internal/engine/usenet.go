@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/usenet/download"
-	"github.com/torrentclaw/unarr/internal/usenet/nntp"
-	"github.com/torrentclaw/unarr/internal/usenet/nzb"
-	"github.com/torrentclaw/unarr/internal/usenet/postprocess"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/download"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nntp"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nzb"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/postprocess"
 )
 
 // activeDownload holds the state for a single in-progress usenet download.
@@ -241,6 +241,14 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	}()
 
 	downloadedFiles, err := segDl.DownloadNZB(dlCtx, nzbFile, taskDir, tracker, dlProgressCh)
+
+	// Step 6.5: parity index — fetch the main .par2 up front (small: file
+	// checksums, no recovery data) so post-processing can actually verify the
+	// delivery. Recovery volumes stay lazy behind Options.FetchParity and are
+	// only fetched when verification detects damage.
+	if err == nil {
+		downloadPar2Index(dlCtx, segDl, nzbFile, taskDir, downloadedFiles)
+	}
 	close(dlProgressCh)
 
 	if err != nil {
@@ -261,6 +269,15 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	ppResult, err := postprocess.Process(taskDir, downloadedFiles, postprocess.Options{
 		Password: password,
 		Cleanup:  true,
+		// Lazy parity: the recovery volumes are only downloaded when the index
+		// verify detects damage — the happy path costs one small .par2.
+		FetchParity: func() (map[string]string, error) {
+			vols := nzbFile.Par2VolumeFiles()
+			if len(vols) == 0 {
+				return nil, fmt.Errorf("NZB ships no par2 recovery volumes")
+			}
+			return segDl.DownloadPar2Files(dlCtx, vols, taskDir, nil)
+		},
 	})
 	if err != nil {
 		// Password error is special — report clearly
@@ -293,6 +310,12 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		// Fallback: use the task directory
 		finalPath = taskDir
 	}
+
+	// Step 7.5: de-obfuscation fallback. par2 repair already renames misnamed
+	// files when parity ships and repair ran; when it didn't (no parity, verify
+	// OK on an intact-but-hex-named post, extraction produced a hex name), fall
+	// back to the release title so organize/library get a meaningful filename.
+	finalPath = maybeDeobfuscate(finalPath, nzbTitle, task.Title)
 
 	// Force the delivered file(s) to durable storage before reporting success.
 	// Symmetric with the debrid path (2026-06-15 NFS incident): the prod download
@@ -507,6 +530,67 @@ func (u *UsenetDownloader) getOrCreateNNTP(ctx context.Context, creds *agent.Use
 
 	u.nntpClient = client
 	return client, nil
+}
+
+// downloadPar2Index fetches the main .par2 (small: checksums only, no recovery
+// data) next to the content so post-processing can verify the delivery. A
+// failure degrades to an unverified delivery (logged loudly), never an error —
+// parity is optional. No-op when the NZB ships no parity.
+func downloadPar2Index(ctx context.Context, segDl *download.Downloader, nzbFile *nzb.NZB, taskDir string, downloadedFiles map[string]string) {
+	idx := nzbFile.Par2IndexFile()
+	if idx == nil {
+		return
+	}
+	par2Files, err := segDl.DownloadPar2Files(ctx, []nzb.File{*idx}, taskDir, nil)
+	if err != nil {
+		log.Printf("[usenet] WARNING: par2 index download failed — delivery will be UNVERIFIED: %v", err)
+		return
+	}
+	for name, path := range par2Files {
+		downloadedFiles[name] = path
+	}
+}
+
+// maybeDeobfuscate renames an obfuscated main file (long hex-like base —
+// common on usenet posts dodging takedowns) to the release title, keeping the
+// extension. Returns the (possibly new) path; on any conflict or error the
+// original path is kept — a working obfuscated file beats a failed rename.
+func maybeDeobfuscate(path, releaseTitle, taskTitle string) string {
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return path
+	}
+	base := filepath.Base(path)
+	if !nzb.IsObfuscatedName(base) {
+		return path
+	}
+	title := releaseTitle
+	if title == "" {
+		title = taskTitle
+	}
+	ext := filepath.Ext(base)
+	// Avoid "Title.mkv.mkv" when the release title already carries the extension.
+	if strings.EqualFold(filepath.Ext(title), ext) {
+		title = strings.TrimSuffix(title, filepath.Ext(title))
+	}
+	title = sanitizeDir(title)
+	if title == "" || title == "usenet_download" {
+		return path
+	}
+	newPath := filepath.Join(filepath.Dir(path), title+ext)
+	if newPath == path {
+		return path
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		// Target exists — don't clobber.
+		return path
+	}
+	if err := os.Rename(path, newPath); err != nil {
+		log.Printf("[usenet] de-obfuscation rename failed (keeping %s): %v", base, err)
+		return path
+	}
+	log.Printf("[usenet] de-obfuscated %s -> %s", base, filepath.Base(newPath))
+	return newPath
 }
 
 func sanitizeDir(name string) string {

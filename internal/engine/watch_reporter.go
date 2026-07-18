@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 // WatchReporter periodically sends watch progress to the API based on

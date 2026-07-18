@@ -9,8 +9,8 @@ import (
 func TestDefault(t *testing.T) {
 	cfg := Default()
 
-	if cfg.Auth.APIURL != "https://torrentclaw.com" {
-		t.Errorf("default APIURL = %q, want https://torrentclaw.com", cfg.Auth.APIURL)
+	if cfg.Auth.APIURL != "https://unarr.app" {
+		t.Errorf("default APIURL = %q, want https://unarr.app", cfg.Auth.APIURL)
 	}
 	if cfg.Download.PreferredMethod != "auto" {
 		t.Errorf("default PreferredMethod = %q, want auto", cfg.Download.PreferredMethod)
@@ -34,7 +34,7 @@ func TestLoadMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load nonexistent should return defaults, got err: %v", err)
 	}
-	if cfg.Auth.APIURL != "https://torrentclaw.com" {
+	if cfg.Auth.APIURL != "https://unarr.app" {
 		t.Errorf("missing file should return default APIURL, got %q", cfg.Auth.APIURL)
 	}
 }
@@ -109,7 +109,7 @@ api_key = "tc_partial"
 		t.Errorf("APIKey = %q, want tc_partial", cfg.Auth.APIKey)
 	}
 	// Defaults should be preserved for missing sections
-	if cfg.Auth.APIURL != "https://torrentclaw.com" {
+	if cfg.Auth.APIURL != "https://unarr.app" {
 		t.Errorf("APIURL should default, got %q", cfg.Auth.APIURL)
 	}
 	if cfg.Download.MaxConcurrent != 3 {
@@ -291,6 +291,36 @@ max_stream_sessions = 5
 	}
 }
 
+func TestLoadUsenetStreaming(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Absent key → OFF: on-the-fly usenet streaming is strictly opt-in, so a
+	// config predating the feature keeps the safe batch-download behaviour.
+	missing := filepath.Join(tmp, "missing.toml")
+	os.WriteFile(missing, []byte(`[auth]
+api_key = "tc_x"
+`), 0o644)
+	cfg, err := Load(missing)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Download.UsenetStreaming {
+		t.Error("UsenetStreaming (key absent) = true, want false (opt-in)")
+	}
+
+	// Explicit opt-in is honoured.
+	on := filepath.Join(tmp, "on.toml")
+	os.WriteFile(on, []byte(`[downloads]
+usenet_streaming = true
+`), 0o644)
+	if cfg, err = Load(on); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Download.UsenetStreaming {
+		t.Error("UsenetStreaming (=true) = false, want true")
+	}
+}
+
 func TestLoadSeedingDefaultsOff(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "config.toml")
@@ -340,6 +370,32 @@ seed_time = "24h"
 	}
 }
 
+// TestLoadVPNRequired locks in the kill-switch default-behavior invariant:
+// [downloads.vpn] required round-trips when set, and an omitted key stays false
+// (so an existing config that predates the key changes nothing).
+func TestLoadVPNRequired(t *testing.T) {
+	tmp := t.TempDir()
+
+	on := filepath.Join(tmp, "on.toml")
+	os.WriteFile(on, []byte("[downloads.vpn]\nrequired = true\n"), 0o644)
+	cfg, err := Load(on)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.Download.VPN.Required {
+		t.Error("VPN.Required = false, want true (explicitly set)")
+	}
+
+	off := filepath.Join(tmp, "off.toml")
+	os.WriteFile(off, []byte("[downloads]\ndir = \"/tmp/dl\"\n"), 0o644)
+	if cfg, err = Load(off); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Download.VPN.Required {
+		t.Error("VPN.Required (key absent) = true, want false (default = current behavior)")
+	}
+}
+
 func TestLoadInvalidTOML(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "config.toml")
@@ -348,5 +404,74 @@ func TestLoadInvalidTOML(t *testing.T) {
 	_, err := Load(path)
 	if err == nil {
 		t.Error("expected error for invalid TOML, got nil")
+	}
+}
+
+// TestSaveLoadVPNRoundTrip locks the full [downloads.vpn] block through a
+// Save→Load cycle: enabled, required (the fail-closed kill-switch flag), and
+// config_file (self-hosted mode) must all survive a marshal/unmarshal. A drop
+// here would silently disable the kill-switch or lose the self-hosted source.
+func TestSaveLoadVPNRoundTrip(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+
+	cfg := Default()
+	cfg.Download.VPN.Enabled = true
+	cfg.Download.VPN.Required = true
+	cfg.Download.VPN.ConfigFile = "/etc/wireguard/wg0.conf"
+
+	if err := Save(cfg, path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !loaded.Download.VPN.Enabled {
+		t.Error("VPN.Enabled did not survive the Save→Load round-trip")
+	}
+	if !loaded.Download.VPN.Required {
+		t.Error("VPN.Required (kill-switch flag) did not survive the Save→Load round-trip")
+	}
+	if loaded.Download.VPN.ConfigFile != "/etc/wireguard/wg0.conf" {
+		t.Errorf("VPN.ConfigFile = %q, want /etc/wireguard/wg0.conf", loaded.Download.VPN.ConfigFile)
+	}
+}
+
+// TestLoadVPNSelfHostedPrecedenceAndRequired: a self-hosted config (config_file
+// set) is the daemon's preferred source over a managed fetch, so config_file must
+// load intact; Required (the flag the whole kill-switch keys off) must survive a
+// partial TOML that touches ONLY the VPN block; and unrelated defaults must still
+// be applied by the merge.
+func TestLoadVPNSelfHostedPrecedenceAndRequired(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "config.toml")
+	os.WriteFile(path, []byte(`[downloads.vpn]
+config_file = "/home/me/wg-personal.conf"
+required = true
+`), 0o644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Self-hosted source present (daemon prefers it over a managed fetch).
+	if cfg.Download.VPN.ConfigFile != "/home/me/wg-personal.conf" {
+		t.Errorf("VPN.ConfigFile = %q, want the self-hosted path", cfg.Download.VPN.ConfigFile)
+	}
+	// Kill-switch flag survives a partial-TOML load...
+	if !cfg.Download.VPN.Required {
+		t.Error("VPN.Required dropped by a partial-TOML Load — the kill-switch would silently disable")
+	}
+	// ...Enabled defaults to false when its key is absent (self-hosted needs no managed fetch)...
+	if cfg.Download.VPN.Enabled {
+		t.Error("VPN.Enabled = true, want false when the key is absent")
+	}
+	// ...and unrelated defaults are still applied (the merge didn't clobber them).
+	if cfg.Download.MaxConcurrent != 3 {
+		t.Errorf("MaxConcurrent = %d, want default 3 (partial load must preserve defaults)", cfg.Download.MaxConcurrent)
+	}
+	if cfg.Auth.APIURL != "https://unarr.app" {
+		t.Errorf("APIURL = %q, want default https://unarr.app", cfg.Auth.APIURL)
 	}
 }

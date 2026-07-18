@@ -1,8 +1,8 @@
-.PHONY: all build test lint arch coverage clean fmt vet check install-hooks changelog release release-patch release-minor release-major release-dry ship ship-dry ship-push
+.PHONY: all build test lint arch coverage clean fmt vet check install-hooks changelog release release-patch release-minor release-major release-dry
 
 BINARY = unarr
 SENTRY_DSN ?=
-LDFLAGS = -s -w -X github.com/torrentclaw/unarr/internal/sentry.dsn=$(SENTRY_DSN)
+LDFLAGS = -s -w -X github.com/Unarr-app/unarr-cli/internal/sentry.dsn=$(SENTRY_DSN)
 
 all: fmt vet lint arch test build
 
@@ -78,18 +78,15 @@ release-dry:
 	@test -n "$(V)" || { echo "Usage: make release-dry V=patch|minor|major|0.5.0"; exit 1; }
 	@./scripts/release.sh --dry-run $(V)
 
-## Ship a release end-to-end (goreleaser + Hetzner + Docker Hub). Standalone backup for GH Actions.
-## Reads version from internal/cmd/version.go unless V= is provided.
-ship:
-	@./scripts/ship.sh $(V)
-
-## Ship + git push tag to GH afterwards
-ship-push:
-	@./scripts/ship.sh --push $(V)
-
-## Preview ship steps without executing
-ship-dry:
-	@./scripts/ship.sh --dry-run $(V)
+# Releases run entirely on GitHub Actions (.github/workflows/release.yml): a
+# vX.Y.Z tag push triggers goreleaser (cross-compile + ffmpeg bundle + ed25519
+# sign + GitHub Release upload) and the multi-arch Docker Hub push. The web reads
+# the latest version from the GitHub Releases API and the self-updater fetches
+# signed binaries from GitHub Releases directly. Release flow:
+#   1) make release V=x.y.z        # bump internal/cmd/version.go + CHANGELOG + tag vX
+#   2) git push <github-remote> main --follow-tags   # tag push runs release.yml
+# The old self-hosted ship pipeline (goreleaser + Hetzner version.txt mirror +
+# Docker push via scripts/ship.sh) was removed once CI became the single path.
 
 ## Remove generated files
 clean:

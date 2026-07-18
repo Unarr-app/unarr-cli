@@ -8,7 +8,7 @@ import (
 
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/usenet/nzb"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nzb"
 )
 
 var fixedPast = time.Now().Add(-30 * 24 * time.Hour)

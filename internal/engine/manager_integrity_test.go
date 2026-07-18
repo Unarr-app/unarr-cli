@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 // truncatingMockDownloader writes a SHORT file (failing the on-disk verify) until

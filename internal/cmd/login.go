@@ -9,12 +9,12 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/charmbracelet/huh"
 	"github.com/fatih/color"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
 )
 
 // clearRevokedIdentity wipes the stored credential (api key + agentId) after the
@@ -37,8 +37,8 @@ func newLoginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "login",
 		Aliases: []string{"auth"},
-		Short:   "Authenticate with your torrentclaw account",
-		Long: `Log in to your torrentclaw account by opening the browser or pasting
+		Short:   "Authenticate with your unarr account",
+		Long: `Log in to your unarr account by opening the browser or pasting
 your API key manually. Use this when your API key has expired, been
 revoked, or you want to switch to a different account.
 

@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/charmbracelet/huh"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/config"
 )
 
 var configCategories = []string{"downloads", "organization", "library", "notifications", "device", "region", "connection", "advanced"}
@@ -413,6 +414,30 @@ func saveIfChanged(cfg, original config.Config, green, dim *color.Color) error {
 
 	fmt.Println()
 	green.Printf("  ✓ Configuration saved to %s\n", configPath)
-	fmt.Println()
+
+	// Saving is not applying: the daemon snapshots config at startup. Users
+	// toggled allow_delete / preferred method here, saw "✓ saved", and the daemon
+	// kept reporting the old values to the web indefinitely. Signal it ourselves
+	// rather than making the user know `unarr daemon reload` exists.
+	daemonRunning := true
+	if err := sendReloadSignal(); err != nil {
+		daemonRunning = false
+		if errors.Is(err, agent.ErrDaemonNotRunning) {
+			dim.Println("  Daemon isn't running — the new settings apply when it starts.")
+		} else {
+			color.New(color.FgYellow).Printf("  ⚠  Couldn't notify the running daemon: %v\n", err)
+			fmt.Println("  Run 'unarr daemon restart' to apply.")
+		}
+		fmt.Println()
+	}
+
+	// The reload applies allow_delete only. The method order is sent to the server
+	// at register time, so it needs a real restart — say so rather than let the
+	// user believe "✓ saved" meant "applied" (it didn't, for years).
+	if daemonRunning &&
+		!reflect.DeepEqual(cfg.Download.MethodOrder(), original.Download.MethodOrder()) {
+		color.New(color.FgYellow).Println("  ⚠  Preferred method changed — run 'unarr daemon restart' to apply it.")
+		fmt.Println()
+	}
 	return nil
 }

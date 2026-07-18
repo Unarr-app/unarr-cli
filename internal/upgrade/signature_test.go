@@ -22,13 +22,23 @@ func withReleasePubKey(t *testing.T, encoded string) {
 	t.Cleanup(func() { releasePubKeyBase64 = prev })
 }
 
+// withReleaseHost points BOTH the primary and fallback asset bases at one test
+// server, so the updater's GitHub→Hetzner failover never escapes to a real
+// network during unit tests (assetBases de-dups the two equal bases to one).
+func withReleaseHost(t *testing.T, url string) {
+	t.Helper()
+	prevPrimary, prevFallback := updateBaseURL, fallbackBaseURL
+	updateBaseURL, fallbackBaseURL = url, url
+	t.Cleanup(func() { updateBaseURL, fallbackBaseURL = prevPrimary, prevFallback })
+}
+
 func TestSignatureVerificationDisabledByDefault(t *testing.T) {
 	withReleasePubKey(t, "")
 	if SignatureVerificationConfigured() {
 		t.Fatal("expected SignatureVerificationConfigured() to be false when pubkey is empty")
 	}
 	// verifyChecksumsSignature should be a no-op when no key is embedded.
-	if err := verifyChecksumsSignature(context.Background(), "0.0.0", []byte("anything")); err != nil {
+	if err := verifyChecksumsSignature(context.Background(), "0.0.0", updateBaseURL, []byte("anything")); err != nil {
 		t.Fatalf("expected nil when pubkey is empty, got %v", err)
 	}
 }
@@ -66,11 +76,9 @@ func TestSignatureVerifiesGoodSignature(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	prevHost := updateBaseURL
-	updateBaseURL = srv.URL
-	t.Cleanup(func() { updateBaseURL = prevHost })
+	withReleaseHost(t, srv.URL)
 
-	if err := verifyChecksumsSignature(context.Background(), "0.0.0", checksumsBody); err != nil {
+	if err := verifyChecksumsSignature(context.Background(), "0.0.0", updateBaseURL, checksumsBody); err != nil {
 		t.Fatalf("verifyChecksumsSignature(good) = %v, want nil", err)
 	}
 }
@@ -92,11 +100,9 @@ func TestSignatureRejectsBadSignature(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	prevHost := updateBaseURL
-	updateBaseURL = srv.URL
-	t.Cleanup(func() { updateBaseURL = prevHost })
+	withReleaseHost(t, srv.URL)
 
-	err = verifyChecksumsSignature(context.Background(), "0.0.0", body)
+	err = verifyChecksumsSignature(context.Background(), "0.0.0", updateBaseURL, body)
 	if err == nil || !strings.Contains(err.Error(), "verification failed") {
 		t.Fatalf("expected verification failure, got %v", err)
 	}
@@ -110,11 +116,9 @@ func TestSignatureMissingFile(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
-	prevHost := updateBaseURL
-	updateBaseURL = srv.URL
-	t.Cleanup(func() { updateBaseURL = prevHost })
+	withReleaseHost(t, srv.URL)
 
-	err := verifyChecksumsSignature(context.Background(), "0.0.0", []byte("body"))
+	err := verifyChecksumsSignature(context.Background(), "0.0.0", updateBaseURL, []byte("body"))
 	if !errors.Is(err, ErrMissingSignature) {
 		t.Fatalf("expected ErrMissingSignature, got %v", err)
 	}

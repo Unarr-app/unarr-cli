@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
 // ErrDaemonNotRunning is returned when no daemon state file exists on disk.
@@ -38,6 +38,12 @@ type DaemonState struct {
 	VPNActive bool   `json:"vpnActive,omitempty"`
 	VPNMode   string `json:"vpnMode,omitempty"`   // managed | self-hosted
 	VPNServer string `json:"vpnServer,omitempty"` // WireGuard endpoint (ip:port)
+	// VPNRequired mirrors config [downloads.vpn] required — the fail-closed P2P
+	// kill-switch. VPNBlocking is true when the kill-switch is on but no healthy
+	// tunnel is up, so torrent is currently DISABLED (safe, not a leak). Read by
+	// `unarr vpn status` and `unarr doctor` to show whether P2P is blocked.
+	VPNRequired bool `json:"vpnRequired,omitempty"`
+	VPNBlocking bool `json:"vpnBlocking,omitempty"`
 
 	// CloudFlare Quick Tunnel state, so `unarr funnel status` can report the
 	// HTTPS hostname the daemon is reachable at from anywhere on the internet.

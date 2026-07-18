@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/engine"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/engine"
 )
 
 // newProbeHWAccelCmd reports the hardware-acceleration capabilities the daemon

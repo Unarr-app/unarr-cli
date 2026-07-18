@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -212,5 +213,41 @@ func TestTryFallbackConfigListSingle(t *testing.T) {
 	task := &Task{PreferredMethod: "auto", ResolvedMethod: MethodDebrid}
 	if tryFallback(task, downloaders, []string{"debrid"}) {
 		t.Error("debrid-only must not fall back to torrent")
+	}
+}
+
+// ── VPN kill-switch gate (ErrVPNRequired) ─────────────────────────────────────
+
+// A torrent downloader gated by the VPN kill-switch reports ErrVPNRequired; with
+// no other method available, resolveMethod surfaces that exact reason (wrapped) so
+// the task's error message is actionable instead of the generic "no method".
+func TestResolveMethodVPNGateNoFallback(t *testing.T) {
+	downloaders := map[DownloadMethod]Downloader{
+		MethodTorrent: &mockDownloader{method: MethodTorrent, available: false, err: ErrVPNRequired},
+	}
+	task := &Task{ID: "vpn-gate", PreferredMethod: "auto"}
+	_, err := resolveMethod(context.Background(), task, downloaders, nil)
+	if err == nil {
+		t.Fatal("expected an error when the only method is VPN-gated")
+	}
+	if !errors.Is(err, ErrVPNRequired) {
+		t.Errorf("error should wrap ErrVPNRequired, got: %v", err)
+	}
+}
+
+// The kill-switch never blocks the SAFE methods: a VPN-gated torrent falls back to
+// debrid (HTTPS — no IP leak to a swarm), exactly like the network-error fallback.
+func TestResolveMethodVPNGateFallsBackToDebrid(t *testing.T) {
+	downloaders := map[DownloadMethod]Downloader{
+		MethodTorrent: &mockDownloader{method: MethodTorrent, available: false, err: ErrVPNRequired},
+		MethodDebrid:  &mockDownloader{method: MethodDebrid, available: true},
+	}
+	task := &Task{ID: "vpn-fallback", PreferredMethod: "auto"}
+	method, err := resolveMethod(context.Background(), task, downloaders, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != MethodDebrid {
+		t.Errorf("method = %q, want debrid (safe fallback when torrent is VPN-gated)", method)
 	}
 }

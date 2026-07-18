@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/engine"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/engine"
 )
 
 // --- Mocks para tests del comando download ---

@@ -7,14 +7,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/usenet/nntp"
-	"github.com/torrentclaw/unarr/internal/usenet/nzb"
-	"github.com/torrentclaw/unarr/internal/usenet/yenc"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nntp"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nzb"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/yenc"
 )
 
 // Progress is emitted during download.
@@ -43,8 +42,12 @@ func NewDownloader(nntpClient *nntp.Client) *Downloader {
 // fileIndex is the index of this file within the NZB (for the tracker).
 // Returns the path to the assembled file.
 func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, fileIndex int, outputDir string, tracker *ProgressTracker, progressCh chan<- Progress) (string, error) {
-	fileName := file.Filename()
-	if fileName == "" {
+	// Confine the filename to outputDir. File.Filename() is a raw substring of
+	// the NZB subject (third-party indexer content) and can carry "/" or ".." —
+	// filepath.Base strips any path, so a "../../x" subject can't escape the
+	// task dir. This is the single sink for both content and par2 writes.
+	fileName := filepath.Base(file.Filename())
+	if fileName == "" || fileName == "." || fileName == ".." || fileName == string(os.PathSeparator) {
 		fileName = fmt.Sprintf("usenet_%d", time.Now().UnixNano())
 	}
 
@@ -67,20 +70,13 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, fileIndex 
 	totalBytes := file.TotalBytes()
 	totalSegs := len(file.Segments)
 
-	// Sort segments by number
-	segments := make([]nzb.Segment, len(file.Segments))
-	copy(segments, file.Segments)
-	sort.Slice(segments, func(i, j int) bool {
-		return segments[i].Number < segments[j].Number
-	})
-
-	// Track file offsets for each segment (sequential assembly)
-	offsets := make([]int64, len(segments))
-	var offset int64
-	for i, seg := range segments {
-		offsets[i] = offset
-		offset += seg.Bytes
-	}
+	// Sort segments by number and compute each one's start offset for
+	// sequential assembly. Both steps are the shared nzb primitives the
+	// streaming OffsetIndex also builds on (extracted so the layout logic has a
+	// single tested home); behaviour here is identical to the previous inline
+	// sort + Bytes accumulation.
+	segments := nzb.SortSegmentsByNumber(file.Segments)
+	offsets := nzb.EstimatedByteOffsets(segments)
 
 	// Open output file — resume-aware
 	var outFile *os.File
@@ -296,8 +292,9 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, fileIndex 
 }
 
 // DownloadNZB downloads content files from an NZB (rars or direct content).
-// Par2 files are NOT downloaded initially — they're only fetched on demand
-// if extraction fails (via DownloadPar2).
+// Par2 files are NOT downloaded here — the engine fetches the small par2 index
+// up front and the recovery volumes on demand (via DownloadPar2Files) when
+// verification detects damage.
 // If tracker is non-nil, completed files are skipped and progress is tracked per-segment.
 // Returns a map of filename → filepath for all downloaded files.
 func (d *Downloader) DownloadNZB(ctx context.Context, n *nzb.NZB, outputDir string, tracker *ProgressTracker, progressCh chan<- Progress) (map[string]string, error) {
@@ -355,23 +352,40 @@ func (d *Downloader) DownloadNZB(ctx context.Context, n *nzb.NZB, outputDir stri
 	return results, nil
 }
 
-// DownloadPar2 downloads par2 parity files from the NZB.
-// Called on-demand when extraction/verification fails.
-// No resume tracking — par2 files are small and downloaded fresh.
-func (d *Downloader) DownloadPar2(ctx context.Context, n *nzb.NZB, outputDir string, progressCh chan<- Progress) (map[string]string, error) {
-	par2Files := n.Par2Files()
-	if len(par2Files) == 0 {
-		return nil, fmt.Errorf("no par2 files in NZB")
+// DownloadPar2Files downloads the given par2 parity files. Called lazily: the
+// small index up front for verification, the (potentially large) recovery
+// volumes only when verification detects damage. No resume tracking — but a
+// volume already fully on disk from a prior integrity attempt is skipped
+// (os.Create would re-truncate it), so a 3× integrity retry doesn't re-fetch
+// the whole parity set each time. Per-file failures are skipped (logged) so one
+// missing parity article doesn't abort the set; it errors only when NOTHING
+// could be fetched, and the caller decides whether the remainder is enough.
+func (d *Downloader) DownloadPar2Files(ctx context.Context, files []nzb.File, outputDir string, progressCh chan<- Progress) (map[string]string, error) {
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no par2 files requested")
 	}
 
 	results := make(map[string]string)
-	for _, file := range par2Files {
-		path, err := d.DownloadFile(ctx, file, -1, outputDir, nil, progressCh)
-		if err != nil {
-			log.Printf("[usenet] par2 download failed (non-fatal): %v", err)
+	for _, file := range files {
+		name := file.Filename()
+		// Skip a par2 already fully downloaded (size match). par2 volumes are
+		// self-verifying, so a size match is a safe cheap guard; a short one is
+		// re-fetched. filepath.Base mirrors DownloadFile's confinement so the
+		// stat path matches the eventual write path.
+		dest := filepath.Join(outputDir, filepath.Base(name))
+		if fi, statErr := os.Stat(dest); statErr == nil && fi.Size() == file.TotalBytes() {
+			results[name] = dest
 			continue
 		}
-		results[file.Filename()] = path
+		path, err := d.DownloadFile(ctx, file, -1, outputDir, nil, progressCh)
+		if err != nil {
+			log.Printf("[usenet] par2 download failed for %s (non-fatal): %v", name, err)
+			continue
+		}
+		results[name] = path
+	}
+	if len(results) == 0 {
+		return nil, fmt.Errorf("all %d par2 downloads failed", len(files))
 	}
 	return results, nil
 }

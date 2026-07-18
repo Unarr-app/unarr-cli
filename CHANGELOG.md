@@ -5,12 +5,268 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-07-17
+
+
+### Fixed
+
+- **agent**: report config the server can act on, and reload for real
+## [1.5.0] - 2026-07-17
+
+
+### Added
+
+- **usenet**: direct streaming from Usenet with resilient fallback
+- **usenet**: activate par2 verify/repair + de-obfuscation on the usenet path
+- **vpn**: optional P2P kill-switch (downloads.vpn.required)
+- **webdav**: read-only WebDAV export of the agent library
+
+### Fixed
+
+- **vpn**: show exit server after a fail-closed tunnel heals
+- **webdav**: symlink-safe root check, season-pack grouping, UPnP warning
+- **webdav**: deterministic collision suffix + drop redundant nolint
+
+### Other
+
+- **release**: 1.5.0
+
+### Merge
+
+- read-only WebDAV library export (feat/webdav-readonly)
+- VPN P2P kill-switch (feat/vpn-killswitch)
+## [1.4.0] - 2026-07-16
+
+
+### Added
+
+- **stream**: auto-pause P2P background download when the stream goes idle
+
+### Other
+
+- **release**: 1.4.0
+## [1.3.9-beta] - 2026-07-15
+
+
+### Added
+
+- **search**: interactive picker + --stream/--no-interactive
+
+### Other
+
+- **release**: 1.3.9-beta
+## [1.3.8-beta] - 2026-07-15
+
+
+### Added
+
+- **doctor**: add --fix self-repair for common misconfigurations
+
+### Fixed
+
+- **discovery**: route search/stats to TorrentClaw hosts, not unarr.app
+
+### Other
+
+- **release**: 1.3.8-beta
+## [1.3.7-beta] - 2026-07-12
+
+
+### Documentation
+
+- /version + /releases/download kept as GitHub redirects, not removed
+
+### Fixed
+
+- **hls**: report source_unreachable for remote probe failures + explicit ffprobe timeout
+
+### Other
+
+- **release**: 1.3.7-beta
+- **release**: remove self-hosted ship pipeline; GitHub Actions is the only path
+## [1.3.6-beta] - 2026-07-09
+
+
+### Fixed
+
+- **hls**: wait for subtitle sidecar first byte instead of instant 404
+
+### Other
+
+- **release**: 1.3.6-beta
+## [1.3.5-beta] - 2026-07-09
+
+
+### Fixed
+
+- **hls**: harden copy-vod pass — stat-guard fallback + honor prewarm index budget
+- **hls**: reset copy-vod watermark on pass restart + dedup codec check
+- **hls**: kill copy-vod echo via segment-muxer pass + mp4 annexb bsf
+
+### Other
+
+- **release**: 1.3.5-beta
+- **release**: deprecate make ship — releases run on GitHub Actions
+
+### Performance
+
+- **hls**: cache copy-vod keyframe index as a scan-time sidecar
+## [1.3.4-beta] - 2026-07-07
+
+
+### Changed
+
+- **library**: gofmt integrity + types doc comments
+
+### Fixed
+
+- **docker**: bundle Intel QSV runtime so h264_qsv doesn't core-dump
+
+### Other
+
+- **release**: 1.3.4-beta
+## [1.3.3-beta] - 2026-07-03
+
+
+### Added
+
+- **library**: flag truncated/damaged files at scan time
+
+### Other
+
+- **release**: 1.3.3-beta
+## [1.3.2-beta] - 2026-07-02
+
+
+### Fixed
+
+- **acme**: re-issue direct-TLS cert when agent_hash no longer matches
+- **daemon**: harden cert re-issue gate + funnel backoff reset (review findings)
+- **ship**: define HOMEBREW_TAP_TOKEN for local goreleaser runs
+
+### Other
+
+- **release**: 1.3.2-beta
+## [1.3.1-beta] - 2026-06-29
+
+
+### Added
+
+- **config**: default to unarr.app primary, TorrentClaw as failover
+- **release**: auto-publish Homebrew formula in CI; drop dead Forgejo prune
+- **stream**: allow Google Cast receiver + wildcard CORS
+
+### Changed
+
+- **release**: migrate Homebrew brews → homebrew_casks
+
+### Documentation
+
+- **dockerhub**: rewrite for unarr brand + GitHub-native releases
+
+### Fixed
+
+- **ci**: check out the dispatched tag in the release workflow
+- **ship**: run buildx on a host-network builder for CDN egress
+
+### Other
+
+- **brew**: prep goreleaser tap block for Unarr-app/homebrew-tap
+- **release**: 1.3.1-beta
+## [1.3.0-beta] - 2026-06-26
+
+
+### Added
+
+- **agent**: `unarr up --auth-key` redeems a short-lived key for a durable credential
+- **hls**: remote COPY-VOD — full duration + seek-anywhere for connector/IPTV
+
+### CI/CD
+
+- **deps**: bump goreleaser/goreleaser-action from 6 to 7 (#5)
+- **deps**: bump docker/build-push-action from 6 to 7 (#4)
+- **deps**: bump actions/checkout from 4 to 7 (#3)
+- **deps**: bump docker/setup-qemu-action from 3 to 4 (#2)
+- **deps**: bump docker/setup-buildx-action from 3 to 4 (#1)
+
+### Changed
+
+- **engine**: extract COPY-VOD segment generation into its own file
+- **upgrade**: extract verifyArchive to flatten checksum nesting
+
+### Fixed
+
+- **cmd**: make merged up.go build & pass the gate after rebrand
+
+### Other
+
+- **release**: 1.3.0-beta
+## [1.2.4-beta] - 2026-06-25
+
+
+### Documentation
+
+- **release**: mirrors are independent, not byte-identical
+
+### Other
+
+- **rebrand**: migrate to Unarr-app/unarr-cli + unarr Docker org
+- **release**: 1.2.4-beta
+## [1.2.3-beta] - 2026-06-25
+
+
+### Documentation
+
+- **readme**: point repo references at Unarr-app/unarr-cli
+
+### Fixed
+
+- **upgrade**: pin one mirror per update, never mix checksums across hosts
+
+### Other
+
+- **release**: 1.2.3-beta
+
+### Build
+
+- reproducible release builds (trimpath + mod_timestamp + pinned toolchain)
+## [1.2.2-beta] - 2026-06-25
+
+
+### Added
+
+- **upgrade**: fail over to the web origin (Hetzner) when GitHub is unreachable
+- **upgrade**: pull self-update releases directly from GitHub
+
+### CI/CD
+
+- **github**: bump golangci-lint-action to v7 for golangci-lint v2
+- **github**: migrate release + CI from forgejo/Hetzner to GitHub Actions
+
+### Documentation
+
+- **release**: document GitHub-primary + Hetzner-backup dual-publish ritual
+
+### Fixed
+
+- **changelog**: point cliff remote_url at Unarr-app/unarr-cli
+- **engine**: guard task.ResolvedMethod with the task mutex (data race)
+- **upgrade**: pick latest release by max semver, not the API's first
+
+### Other
+
+- **lint**: clear pre-existing golangci v2.11.4 findings for CI green
+- **release**: 1.2.2-beta
 ## [1.2.1-beta] - 2026-06-23
 
 
 ### Added
 
 - **hls**: emit WebVTT subtitle sidecars in the EVENT-copy pass (remote sources)
+
+### Other
+
+- **release**: 1.2.1-beta
 ## [1.2.0-beta] - 2026-06-18
 
 
@@ -909,67 +1165,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
-[1.2.1-beta]: https://github.com/torrentclaw/unarr/compare/v1.2.0-beta...v1.2.1-beta
-[1.2.0-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.7-beta...v1.2.0-beta
-[1.1.7-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.6-beta...v1.1.7-beta
-[1.1.6-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.5-beta...v1.1.6-beta
-[1.1.5-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.4-beta...v1.1.5-beta
-[1.1.4-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.3-beta...v1.1.4-beta
-[1.1.3-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.2-beta...v1.1.3-beta
-[1.1.2-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.1-beta...v1.1.2-beta
-[1.1.1-beta]: https://github.com/torrentclaw/unarr/compare/v1.1.0-beta...v1.1.1-beta
-[1.1.0-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.9-beta...v1.1.0-beta
-[1.0.9-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.8-beta...v1.0.9-beta
-[1.0.8-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.7-beta...v1.0.8-beta
-[1.0.7-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.6-beta...v1.0.7-beta
-[1.0.6-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.5-beta...v1.0.6-beta
-[1.0.5-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.4-beta...v1.0.5-beta
-[1.0.4-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.3-beta...v1.0.4-beta
-[1.0.3-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.2-beta...v1.0.3-beta
-[1.0.2-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.1-beta...v1.0.2-beta
-[1.0.1-beta]: https://github.com/torrentclaw/unarr/compare/v1.0.0-beta...v1.0.1-beta
-[1.0.0-beta]: https://github.com/torrentclaw/unarr/compare/v0.9.19...v1.0.0-beta
-[0.9.19]: https://github.com/torrentclaw/unarr/compare/v0.9.18...v0.9.19
-[0.9.18]: https://github.com/torrentclaw/unarr/compare/v0.9.17...v0.9.18
-[0.9.17]: https://github.com/torrentclaw/unarr/compare/v0.9.15...v0.9.17
-[0.9.15]: https://github.com/torrentclaw/unarr/compare/v0.9.14...v0.9.15
-[0.9.14]: https://github.com/torrentclaw/unarr/compare/v0.9.13...v0.9.14
-[0.9.13]: https://github.com/torrentclaw/unarr/compare/v0.9.11...v0.9.13
-[0.9.11]: https://github.com/torrentclaw/unarr/compare/v0.9.8...v0.9.11
-[0.9.8]: https://github.com/torrentclaw/unarr/compare/v0.9.7...v0.9.8
-[0.9.7]: https://github.com/torrentclaw/unarr/compare/v0.9.6...v0.9.7
-[0.9.6]: https://github.com/torrentclaw/unarr/compare/v0.9.5...v0.9.6
-[0.9.5]: https://github.com/torrentclaw/unarr/compare/v0.9.4...v0.9.5
-[0.9.4]: https://github.com/torrentclaw/unarr/compare/v0.9.3...v0.9.4
-[0.9.3]: https://github.com/torrentclaw/unarr/compare/v0.9.2...v0.9.3
-[0.9.2]: https://github.com/torrentclaw/unarr/compare/v0.9.1...v0.9.2
-[0.9.1]: https://github.com/torrentclaw/unarr/compare/v0.9.0...v0.9.1
-[0.9.0]: https://github.com/torrentclaw/unarr/compare/v0.8.1...v0.9.0
-[0.8.1]: https://github.com/torrentclaw/unarr/compare/v0.8.0...v0.8.1
-[0.8.0]: https://github.com/torrentclaw/unarr/compare/v0.7.0...v0.8.0
-[0.7.0]: https://github.com/torrentclaw/unarr/compare/v0.6.8...v0.7.0
-[0.6.8]: https://github.com/torrentclaw/unarr/compare/v0.6.7...v0.6.8
-[0.6.7]: https://github.com/torrentclaw/unarr/compare/v0.6.6...v0.6.7
-[0.6.6]: https://github.com/torrentclaw/unarr/compare/v0.6.5...v0.6.6
-[0.6.5]: https://github.com/torrentclaw/unarr/compare/v0.6.4...v0.6.5
-[0.6.4]: https://github.com/torrentclaw/unarr/compare/v0.6.3...v0.6.4
-[0.6.3]: https://github.com/torrentclaw/unarr/compare/v0.6.2...v0.6.3
-[0.6.2]: https://github.com/torrentclaw/unarr/compare/v0.6.1...v0.6.2
-[0.6.1]: https://github.com/torrentclaw/unarr/compare/v0.6.0...v0.6.1
-[0.6.0]: https://github.com/torrentclaw/unarr/compare/v0.5.5...v0.6.0
-[0.5.5]: https://github.com/torrentclaw/unarr/compare/v0.5.4...v0.5.5
-[0.5.4]: https://github.com/torrentclaw/unarr/compare/v0.5.3...v0.5.4
-[0.5.3]: https://github.com/torrentclaw/unarr/compare/v0.5.2...v0.5.3
-[0.5.2]: https://github.com/torrentclaw/unarr/compare/v0.5.1...v0.5.2
-[0.5.1]: https://github.com/torrentclaw/unarr/compare/v0.5.0...v0.5.1
-[0.5.0]: https://github.com/torrentclaw/unarr/compare/v0.4.1...v0.5.0
-[0.4.1]: https://github.com/torrentclaw/unarr/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/torrentclaw/unarr/compare/v0.3.7...v0.4.0
-[0.3.7]: https://github.com/torrentclaw/unarr/compare/v0.3.6...v0.3.7
-[0.3.6]: https://github.com/torrentclaw/unarr/compare/v0.3.5...v0.3.6
-[0.3.5]: https://github.com/torrentclaw/unarr/compare/v0.3.3...v0.3.5
-[0.3.3]: https://github.com/torrentclaw/unarr/compare/v0.3.2...v0.3.3
-[0.3.2]: https://github.com/torrentclaw/unarr/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/torrentclaw/unarr/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/torrentclaw/unarr/releases/tag/v0.3.0
+[1.5.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.0...v1.5.1
+[1.5.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.4.0...v1.5.0
+[1.4.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.9-beta...v1.4.0
+[1.3.9-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.8-beta...v1.3.9-beta
+[1.3.8-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.7-beta...v1.3.8-beta
+[1.3.7-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.6-beta...v1.3.7-beta
+[1.3.6-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.5-beta...v1.3.6-beta
+[1.3.5-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.4-beta...v1.3.5-beta
+[1.3.4-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.3-beta...v1.3.4-beta
+[1.3.3-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.2-beta...v1.3.3-beta
+[1.3.2-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.1-beta...v1.3.2-beta
+[1.3.1-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.3.0-beta...v1.3.1-beta
+[1.3.0-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.4-beta...v1.3.0-beta
+[1.2.4-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.3-beta...v1.2.4-beta
+[1.2.3-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.2-beta...v1.2.3-beta
+[1.2.2-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.1-beta...v1.2.2-beta
+[1.2.1-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.2.0-beta...v1.2.1-beta
+[1.2.0-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.1.7-beta...v1.2.0-beta
+[1.1.7-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.1.6-beta...v1.1.7-beta
+[1.1.6-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.1.5-beta...v1.1.6-beta
+[1.1.5-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.1.4-beta...v1.1.5-beta
+[1.1.4-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.1.3-beta...v1.1.4-beta
+[1.1.3-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.1.2-beta...v1.1.3-beta
+[1.1.2-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.1.1-beta...v1.1.2-beta
+[1.1.1-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.1.0-beta...v1.1.1-beta
+[1.1.0-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.0.9-beta...v1.1.0-beta
+[1.0.9-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.0.8-beta...v1.0.9-beta
+[1.0.8-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.0.7-beta...v1.0.8-beta
+[1.0.7-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.0.6-beta...v1.0.7-beta
+[1.0.6-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.0.5-beta...v1.0.6-beta
+[1.0.5-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.0.4-beta...v1.0.5-beta
+[1.0.4-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.0.3-beta...v1.0.4-beta
+[1.0.3-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.0.2-beta...v1.0.3-beta
+[1.0.2-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.0.1-beta...v1.0.2-beta
+[1.0.1-beta]: https://github.com/Unarr-app/unarr-cli/compare/v1.0.0-beta...v1.0.1-beta
+[1.0.0-beta]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.19...v1.0.0-beta
+[0.9.19]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.18...v0.9.19
+[0.9.18]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.17...v0.9.18
+[0.9.17]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.15...v0.9.17
+[0.9.15]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.14...v0.9.15
+[0.9.14]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.13...v0.9.14
+[0.9.13]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.11...v0.9.13
+[0.9.11]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.8...v0.9.11
+[0.9.8]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.7...v0.9.8
+[0.9.7]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.6...v0.9.7
+[0.9.6]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.5...v0.9.6
+[0.9.5]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.4...v0.9.5
+[0.9.4]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.3...v0.9.4
+[0.9.3]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/Unarr-app/unarr-cli/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/Unarr-app/unarr-cli/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/Unarr-app/unarr-cli/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/Unarr-app/unarr-cli/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/Unarr-app/unarr-cli/compare/v0.6.8...v0.7.0
+[0.6.8]: https://github.com/Unarr-app/unarr-cli/compare/v0.6.7...v0.6.8
+[0.6.7]: https://github.com/Unarr-app/unarr-cli/compare/v0.6.6...v0.6.7
+[0.6.6]: https://github.com/Unarr-app/unarr-cli/compare/v0.6.5...v0.6.6
+[0.6.5]: https://github.com/Unarr-app/unarr-cli/compare/v0.6.4...v0.6.5
+[0.6.4]: https://github.com/Unarr-app/unarr-cli/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/Unarr-app/unarr-cli/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/Unarr-app/unarr-cli/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/Unarr-app/unarr-cli/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/Unarr-app/unarr-cli/compare/v0.5.5...v0.6.0
+[0.5.5]: https://github.com/Unarr-app/unarr-cli/compare/v0.5.4...v0.5.5
+[0.5.4]: https://github.com/Unarr-app/unarr-cli/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/Unarr-app/unarr-cli/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/Unarr-app/unarr-cli/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/Unarr-app/unarr-cli/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/Unarr-app/unarr-cli/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/Unarr-app/unarr-cli/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/Unarr-app/unarr-cli/compare/v0.3.7...v0.4.0
+[0.3.7]: https://github.com/Unarr-app/unarr-cli/compare/v0.3.6...v0.3.7
+[0.3.6]: https://github.com/Unarr-app/unarr-cli/compare/v0.3.5...v0.3.6
+[0.3.5]: https://github.com/Unarr-app/unarr-cli/compare/v0.3.3...v0.3.5
+[0.3.3]: https://github.com/Unarr-app/unarr-cli/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/Unarr-app/unarr-cli/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/Unarr-app/unarr-cli/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/Unarr-app/unarr-cli/releases/tag/v0.3.0
 

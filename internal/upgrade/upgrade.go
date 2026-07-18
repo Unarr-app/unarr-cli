@@ -59,6 +59,21 @@ func (u *Upgrader) log(msg string) {
 	log.Printf("[upgrade] %s", msg)
 }
 
+// verifyArchive checks the downloaded archive against the release checksum
+// (and ed25519 signature when configured). If the release is unsigned and the
+// caller passed --allow-unsigned, it falls back to SHA256-only verification.
+func (u *Upgrader) verifyArchive(ctx context.Context, targetVersion, archivePath, base string) error {
+	err := verifyChecksum(ctx, targetVersion, archivePath, base)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrMissingSignature) || !u.AllowUnsigned {
+		return err
+	}
+	u.log("WARNING: release is unsigned and --allow-unsigned was passed; continuing with SHA256-only verification")
+	return verifyChecksumOnly(ctx, targetVersion, archivePath, base)
+}
+
 // Execute performs a full upgrade to the target version.
 func (u *Upgrader) Execute(ctx context.Context, targetVersion string) Result {
 	targetVersion = strings.TrimPrefix(targetVersion, "v")
@@ -88,9 +103,11 @@ func (u *Upgrader) Execute(ctx context.Context, targetVersion string) Result {
 		return u.fail("no write permission to %s — run with elevated privileges or move the binary to a user-writable location", binDir)
 	}
 
-	// 4. Download archive
+	// 4. Download archive. download resolves the mirror (GitHub → Hetzner
+	// fallback) and returns the base it used so checksums + signature are
+	// verified against the SAME mirror's artifacts.
 	u.log(fmt.Sprintf("Downloading v%s...", targetVersion))
-	archivePath, err := downloadWithRetry(ctx, targetVersion, u.log)
+	archivePath, base, err := downloadWithRetry(ctx, targetVersion, u.log)
 	if err != nil {
 		return u.fail("download: %v", err)
 	}
@@ -102,15 +119,8 @@ func (u *Upgrader) Execute(ctx context.Context, targetVersion string) Result {
 	} else {
 		u.log("Verifying checksum (release signature verification not configured for this build)...")
 	}
-	if err := verifyChecksum(ctx, targetVersion, archivePath); err != nil {
-		if errors.Is(err, ErrMissingSignature) && u.AllowUnsigned {
-			u.log("WARNING: release is unsigned and --allow-unsigned was passed; continuing with SHA256-only verification")
-			if err := verifyChecksumOnly(ctx, targetVersion, archivePath); err != nil {
-				return u.fail("checksum: %v", err)
-			}
-		} else {
-			return u.fail("checksum: %v", err)
-		}
+	if err := u.verifyArchive(ctx, targetVersion, archivePath, base); err != nil {
+		return u.fail("checksum: %v", err)
 	}
 
 	// 6. Extract binary
@@ -242,26 +252,68 @@ func archiveName(version string) string {
 	return fmt.Sprintf("%s_%s_%s_%s.%s", binaryName, version, runtime.GOOS, runtime.GOARCH, ext)
 }
 
-// updateBaseURL is the base URL the self-updater fetches releases from —
-// TorrentClaw's own app, no GitHub dependency (the org is shadow-banned, so
-// GitHub releases/raw/API all 404 to anonymous clients). Defaults to the
-// production apex; SetBaseURL points it at the configured host (cfg.Auth.APIURL)
-// so mirrors / onion / staging work, and tests can point it at an httptest.Server.
-var updateBaseURL = "https://torrentclaw.com"
+// githubOwnerRepo is the public GitHub repo the signed releases live in.
+const githubOwnerRepo = "Unarr-app/unarr-cli"
 
-// SetBaseURL overrides the release endpoint base (trailing slash trimmed).
-// No-op for empty input so a blank config can't break the default.
+// updateBaseURL is the PRIMARY asset host: the project's public GitHub Releases.
+// GitHub serves assets at `{base}/releases/download/v{ver}/{file}` — exactly the
+// path releaseURL builds. SetBaseURL overrides it (UNARR_UPDATE_BASE for a
+// staging origin, or an httptest.Server in tests); a custom base must mirror the
+// same asset layout.
+var updateBaseURL = "https://github.com/" + githubOwnerRepo
+
+// fallbackBaseURL is the SECONDARY asset host, tried when the primary is
+// unreachable — the web origin, which proxies the self-hosted Hetzner mirror.
+// Dual-publishing every release keeps it current, so a GitHub account takedown
+// (which has happened before) doesn't strand deployed agents: they transparently
+// fail over to Hetzner. Set from the agent's API host (cfg.Auth.APIURL) in root
+// PreRun; default is the production apex. Empty disables the fallback.
+var fallbackBaseURL = "https://torrentclaw.com"
+
+// githubAPIBase is the REST base for the version check. The list endpoint
+// (releases?per_page=1) is used rather than releases/latest because the latter
+// hides prereleases and the channel is currently all `-beta`. Only consulted
+// while updateBaseURL still points at GitHub (isGitHubBase).
+const githubAPIBase = "https://api.github.com/repos/" + githubOwnerRepo
+
+// SetBaseURL overrides the PRIMARY release base (trailing slash trimmed).
+// No-op for empty input so a blank override can't break the default.
 func SetBaseURL(base string) {
 	if base != "" {
 		updateBaseURL = strings.TrimRight(base, "/")
 	}
 }
 
-// releaseURL returns the download URL for a release asset:
+// SetFallbackBaseURL sets the SECONDARY (Hetzner-backed) release base, normally
+// the agent's API host. No-op on empty so a blank config keeps the default apex.
+func SetFallbackBaseURL(base string) {
+	if base != "" {
+		fallbackBaseURL = strings.TrimRight(base, "/")
+	}
+}
+
+// isGitHubBase reports whether the PRIMARY base still targets GitHub (vs a
+// staging/test origin set via SetBaseURL). Drives the version-check endpoint.
+func isGitHubBase() bool {
+	return strings.HasPrefix(updateBaseURL, "https://github.com/")
+}
+
+// assetBases is the ordered list of hosts to try for a release asset: the
+// primary (GitHub) first, then the Hetzner-backed fallback — de-duplicated, and
+// skipping an empty fallback.
+func assetBases() []string {
+	bases := []string{updateBaseURL}
+	if fallbackBaseURL != "" && fallbackBaseURL != updateBaseURL {
+		bases = append(bases, fallbackBaseURL)
+	}
+	return bases
+}
+
+// releaseURL returns the download URL for a release asset on a given base:
 //
 //	{base}/releases/download/v{version}/{filename}
 //
-// served by the app's src/app/releases/download/[...seg] route handler.
-func releaseURL(version, filename string) string {
-	return fmt.Sprintf("%s/releases/download/v%s/%s", updateBaseURL, version, filename)
+// GitHub's native release-asset path (and the layout the Hetzner mirror serves).
+func releaseURL(base, version, filename string) string {
+	return fmt.Sprintf("%s/releases/download/v%s/%s", base, version, filename)
 }

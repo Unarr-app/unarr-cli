@@ -94,8 +94,11 @@ func TestCopyVODSmoke(t *testing.T) {
 		if idx >= s.segmentCount {
 			continue
 		}
-		if err := s.generateCopySegment(ctx, idx); err != nil {
-			t.Fatalf("generateCopySegment(%d): %v", idx, err)
+		// ensureCopySegment routes correctly: waits on the background pass (local)
+		// or generates on demand (lazy). Calling generateCopySegment directly would
+		// race the pass writing the same seg-N.ts.
+		if err := s.ensureCopySegment(ctx, idx); err != nil {
+			t.Fatalf("ensureCopySegment(%d): %v", idx, err)
 		}
 	}
 	t.Logf("manifest + %d segments written to %s/video", len(gen), tmpDir)

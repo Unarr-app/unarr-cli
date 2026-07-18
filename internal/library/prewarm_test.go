@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 )
 
 func itemWithDuration(d float64) LibraryItem {

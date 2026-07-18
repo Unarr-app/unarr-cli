@@ -86,7 +86,26 @@ func Decode(r io.Reader) (*Part, error) {
 		}
 	}
 
+	normalizeSinglePart(part)
 	return part, nil
+}
+
+// normalizeSinglePart fills in the byte range a single-part article implies.
+// Single-part yEnc bodies carry no =ypart header, so Begin/End stay zero even
+// though the article IS the whole file. Synthesizing Begin=1, End=len(Data)
+// (and Size when =ybegin omitted it) makes every decoded Part self-consistent —
+// the streaming OffsetIndex/Reader can then treat single- and multi-part
+// articles uniformly instead of reading a lone-article file as empty. Multipart
+// parts already have a non-zero range from =ypart and are left untouched.
+func normalizeSinglePart(part *Part) {
+	if part.Begin != 0 || part.End != 0 || len(part.Data) == 0 {
+		return
+	}
+	part.Begin = 1
+	part.End = int64(len(part.Data))
+	if part.Size == 0 {
+		part.Size = part.End
+	}
 }
 
 // DecodeBytes decodes a yEnc encoded byte slice.

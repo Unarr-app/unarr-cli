@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/usenet/download"
-	"github.com/torrentclaw/unarr/internal/usenet/nzb"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/download"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nzb"
 )
 
 // emptyNZB returns a minimal NZB with no files, suitable for test tracker creation.

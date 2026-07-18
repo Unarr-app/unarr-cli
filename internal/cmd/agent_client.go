@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
 // newAgentClientFromConfig builds an agent.Client wired with the mirror pool

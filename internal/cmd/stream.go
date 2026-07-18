@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/engine"
+	"github.com/Unarr-app/unarr-cli/internal/parser"
+	"github.com/Unarr-app/unarr-cli/internal/ui"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/engine"
-	"github.com/torrentclaw/unarr/internal/parser"
-	"github.com/torrentclaw/unarr/internal/ui"
 )
 
 // streamDeps agrupa las funciones constructoras usadas por runStream.
@@ -101,6 +102,17 @@ func runStreamWithDeps(input string, port int, noOpen bool, playerCmd string, de
 		dataDir = filepath.Join(os.TempDir(), "unarr-stream")
 	}
 
+	// P2P kill-switch: when the VPN is configured, bring the tunnel up so this local
+	// stream's peer + tracker + DHT traffic is split-tunnelled. With required=true a
+	// failed/absent tunnel makes NewStreamEngine refuse (ErrVPNRequired) so
+	// `unarr stream` NEVER joins the swarm over the user's real IP. One-shot: no
+	// reconnect supervisor (see bringUpVPNForOneShot).
+	vpnRequired := cfg.Download.VPN.Required
+	vpnTunnel := bringUpVPNForOneShot(cfg, vpnRequired)
+	if vpnTunnel != nil {
+		defer vpnTunnel.Close()
+	}
+
 	// Create engine
 	eng, err := deps.newStreamEngine(engine.StreamConfig{
 		DataDir:     dataDir,
@@ -108,8 +120,13 @@ func runStreamWithDeps(input string, port int, noOpen bool, playerCmd string, de
 		MetaTimeout: 60 * time.Second,
 		NoOpen:      noOpen,
 		PlayerCmd:   playerCmd,
+		VPNTunnel:   vpnTunnel,
+		VPNRequired: vpnRequired,
 	})
 	if err != nil {
+		if errors.Is(err, engine.ErrVPNRequired) {
+			return fmt.Errorf("VPN required ([downloads.vpn] required=true) but the tunnel is not up — P2P streaming is disabled so your IP is not exposed to the swarm. Check `unarr vpn status`, or set required=false to allow clear-net streaming")
+		}
 		return fmt.Errorf("create stream engine: %w", err)
 	}
 
@@ -201,6 +218,13 @@ func runStreamWithDeps(input string, port int, noOpen bool, playerCmd string, de
 		case <-ctx.Done():
 			goto shutdown
 		case <-ticker.C:
+			// Kill-switch: stop the stream if the VPN tunnel drops mid-playback (while
+			// still fetching) so no pieces are pulled over the real IP.
+			if !completed && !eng.VPNStillHealthy() {
+				fmt.Println()
+				yellow.Println("  VPN tunnel down — stopping P2P stream (no clear-net leak).")
+				goto shutdown
+			}
 			p := eng.Progress()
 			pct := 0
 			if p.TotalBytes > 0 {

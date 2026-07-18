@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -11,14 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/vpn"
 	"github.com/anacrolix/dht/v2"
 	"github.com/anacrolix/dht/v2/krpc"
 	alog "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/storage"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/vpn"
 	"golang.org/x/term"
 	"golang.org/x/time/rate"
 )
@@ -99,7 +100,35 @@ type TorrentConfig struct {
 	// traffic through an in-process userspace WireGuard tunnel (managed-VPN
 	// add-on). nil = downloads in the clear. Brought up by the daemon.
 	VPNTunnel *vpn.Tunnel
+
+	// VPNRequired turns the tunnel into a fail-CLOSED kill-switch for P2P. When
+	// true, the torrent method is UNAVAILABLE unless a healthy tunnel is up —
+	// Available() reports ErrVPNRequired and resolveMethod skips torrent (debrid
+	// + usenet still resolve, they don't leak the IP to a swarm). A tunnel that
+	// dies mid-download pauses the torrent (files kept) instead of continuing in
+	// the clear. Fed from config.toml `[downloads.vpn] required`; false = the
+	// historical best-effort behavior (a failed tunnel just downloads in the clear).
+	VPNRequired bool
 }
+
+// ErrVPNRequired is reported by the torrent downloader's Available() when the VPN
+// kill-switch is on (VPNRequired) but no healthy tunnel is up, so P2P must stay
+// disabled to avoid exposing the user's IP to peers/trackers. resolveMethod
+// surfaces it as the reason no safe method remained.
+var ErrVPNRequired = errors.New("VPN required: tunnel down — P2P disabled")
+
+// ErrVPNTunnelDown is returned mid-download when the VPN kill-switch is on and the
+// tunnel goes unhealthy: the torrent is dropped (partial files kept on disk) so no
+// peer/tracker traffic continues in the clear. It is NOT an integrity or disk error.
+// The manager handles it specially (see attemptDownload + pauseForVPN): a
+// multi-method agent falls back to a genuinely-available safe method
+// (debrid/usenet); a torrent-only agent PAUSES the task (StatusCancelled, resume
+// store entry KEPT) instead of hard-failing it, so it resumes from the kept pieces
+// once the tunnel heals — via a web re-dispatch or a daemon restart. Deliberate
+// limit (no over-engineering): the manager does NOT itself re-queue on the
+// supervisor's reconnect signal, so in-session torrent-only resume relies on the web
+// re-creating the paused task; a daemon restart resumes it unconditionally.
+var ErrVPNTunnelDown = errors.New("VPN required: tunnel went down mid-download — torrent paused")
 
 // TorrentDownloader downloads torrents via BitTorrent P2P.
 type TorrentDownloader struct {
@@ -266,17 +295,14 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	tcfg.PeriodicallyAnnounceTorrentsToDht = true
 
 	// --- Managed-VPN split-tunnel ---
-	// Route the torrent client's outbound peer + tracker traffic through the
-	// in-process WireGuard tunnel so the swarm + trackers see the VPN IP, not
-	// the user's. unarr's control plane keeps using the normal net. uTP (UDP
-	// peers) is disabled — TCP peers + HTTP/UDP tracker announces are tunnelled;
-	// inbound peers don't apply (leech-only, no port forward).
+	// Route the torrent client's peer + tracker + DHT traffic through the in-process
+	// WireGuard tunnel so the swarm, trackers and DHT see the VPN IP, not the user's,
+	// and disable every clear-net leak (clear-net peer dialer, DHT on the real
+	// socket, inbound accept, router port map). unarr's control plane keeps using the
+	// normal net. Identical wiring as the P2P stream client — see applyVPNTunnel.
 	if cfg.VPNTunnel != nil {
-		tcfg.DisableUTP = true
-		tcfg.TrackerDialContext = cfg.VPNTunnel.Net.DialContext
-		tcfg.HTTPDialContext = cfg.VPNTunnel.Net.DialContext
-		tcfg.TrackerListenPacket = cfg.VPNTunnel.ListenPacket
-		log.Printf("[torrent] VPN split-tunnel enabled (peer + tracker traffic routed through WireGuard)")
+		applyVPNTunnel(tcfg, cfg.VPNTunnel)
+		log.Printf("[torrent] VPN split-tunnel enabled (peer + tracker + DHT routed through WireGuard; clear-net peer/DHT/inbound disabled)")
 	}
 
 	// Try to create client; if the port is in use, try the next few ports.
@@ -301,9 +327,11 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	}
 
 	// Route outgoing peer dials through the VPN tunnel (TCP). Added after client
-	// creation; DialForPeerConns defaults to true so this is used for peers.
+	// creation. applyVPNTunnel set DialForPeerConns=false, so this tunnel dialer is
+	// the ONLY peer dialer (no clear-net socket dialer races it). The Tunnel itself
+	// is the WithContext dialer, so a Reconnect re-routes peers too.
 	if cfg.VPNTunnel != nil {
-		client.AddDialer(torrent.NetworkDialer{Network: "tcp", Dialer: cfg.VPNTunnel.Net})
+		addVPNDialer(client, cfg.VPNTunnel)
 	}
 
 	// Restore DHT nodes with full node IDs (direct routing table insertion, no async pings).
@@ -328,8 +356,47 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 
 func (d *TorrentDownloader) Method() DownloadMethod { return MethodTorrent }
 
+// tunnelHealthy reports whether the P2P kill-switch is satisfied: either it is off
+// (VPNRequired=false, the current best-effort behavior) or a live WireGuard tunnel
+// is up. Tunnel.Healthy() is nil-safe, so required=true with no tunnel fails closed.
+func (d *TorrentDownloader) tunnelHealthy() bool {
+	return !d.cfg.VPNRequired || d.cfg.VPNTunnel.Healthy()
+}
+
+// Available reports whether torrent can handle the task. Torrent needs an info
+// hash; and when the VPN kill-switch is on it additionally needs a healthy tunnel
+// — otherwise it returns ErrVPNRequired so resolveMethod skips torrent (and can
+// still fall back to debrid/usenet) rather than exposing the user's IP over P2P.
 func (d *TorrentDownloader) Available(_ context.Context, task *Task) (bool, error) {
-	return task.InfoHash != "", nil
+	if task.InfoHash == "" {
+		return false, nil
+	}
+	if !d.tunnelHealthy() {
+		return false, ErrVPNRequired
+	}
+	return true, nil
+}
+
+// vpnHealthCheckInterval throttles the mid-download / seeding tunnel-health probe
+// so the kill-switch reacts within ~seconds of a tunnel dropping without polling
+// the WireGuard UAPI every progress tick.
+const vpnHealthCheckInterval = 12 * time.Second
+
+// vpnStillHealthy is the throttled mid-transfer kill-switch check. When the VPN is
+// required it re-verifies tunnel health at most once per vpnHealthCheckInterval; a
+// down tunnel returns false so the caller pauses the torrent (files kept) before
+// any peer/tracker traffic could leak. Always true when the kill-switch is off, so
+// the default best-effort path is untouched. *last is advanced only on an actual
+// probe, so the interval throttles real IpcGet calls.
+func (d *TorrentDownloader) vpnStillHealthy(last *time.Time, now time.Time) bool {
+	if !d.cfg.VPNRequired {
+		return true
+	}
+	if now.Sub(*last) < vpnHealthCheckInterval {
+		return true
+	}
+	*last = now
+	return d.tunnelHealthy()
 }
 
 func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir string, progressCh chan<- Progress) (*Result, error) {
@@ -459,6 +526,7 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 	}
 	lastBytesAt := time.Now()
 	lastBytes := int64(0)
+	lastVPNCheckAt := time.Now()
 	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
 
 	for {
@@ -478,6 +546,17 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 		case <-ticker.C:
 			downloaded := t.BytesCompleted()
 			now := time.Now()
+
+			// Kill-switch: if the VPN went down mid-download, stop now and return
+			// ErrVPNTunnelDown. The caller drops the torrent (partial files kept =
+			// paused), so no peer/tracker traffic continues without the tunnel.
+			if !d.vpnStillHealthy(&lastVPNCheckAt, now) {
+				if isTTY {
+					fmt.Fprintln(os.Stderr)
+				}
+				log.Printf("[%s] VPN tunnel went down — pausing torrent (files kept, P2P disabled)", task.ID[:8])
+				return nil, ErrVPNTunnelDown
+			}
 
 			// Speed calculation
 			speed := downloaded - lastBytes
@@ -603,11 +682,14 @@ func (d *TorrentDownloader) seedAndDrop(taskID string, t *torrent.Torrent, total
 
 	ratioTarget := d.cfg.SeedRatio
 	timeTarget := d.cfg.SeedTime
-	if ratioTarget <= 0 && timeTarget <= 0 {
+	if ratioTarget <= 0 && timeTarget <= 0 && !d.cfg.VPNRequired {
 		log.Printf("[%s] seeding indefinitely (no ratio/time target) — drops at shutdown", sid)
 		return
 	}
-	log.Printf("[%s] seeding (ratio target: %.2f, time target: %s)", sid, ratioTarget, timeTarget)
+	// With the kill-switch on we always run the loop, even with no ratio/time
+	// target, purely to watch tunnel health: seeding is P2P upload, so a tunnel
+	// death must stop it (drop) just like it pauses an in-flight download.
+	log.Printf("[%s] seeding (ratio target: %.2f, time target: %s, vpn-required: %v)", sid, ratioTarget, timeTarget, d.cfg.VPNRequired)
 
 	interval := d.seedCheckInterval
 	if interval <= 0 {
@@ -627,6 +709,14 @@ func (d *TorrentDownloader) seedAndDrop(taskID string, t *torrent.Torrent, total
 			cur, ok := d.active[taskID]
 			d.activeMu.Unlock()
 			if !ok || cur != t {
+				return
+			}
+
+			// Kill-switch: stop uploading the instant the tunnel goes down — a
+			// completed torrent must not keep seeding in the clear after the VPN dies.
+			if d.cfg.VPNRequired && !d.tunnelHealthy() {
+				log.Printf("[%s] VPN tunnel down — stopping seeding (P2P disabled)", sid)
+				d.dropTracked(taskID, t)
 				return
 			}
 
@@ -678,6 +768,7 @@ func makeReadable(path string) {
 		} else if firstFile == "" {
 			firstFile = p
 		}
+		//nolint:gosec // G122: makeReadable walks the user's own local download dir to fix share permissions; symlink TOCTOU is not a threat model here (no privileged caller, no untrusted root).
 		if err := os.Chmod(p, mode); err != nil {
 			chmodFails++
 			log.Printf("[organize] makeReadable chmod %q: %v", p, err)

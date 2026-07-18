@@ -35,7 +35,7 @@ var ErrMissingSignature = errors.New("release signature file is missing")
 // signature over the checksums.txt content) and verifies it with the embedded
 // public key. Returns nil if verification succeeds or if no public key has
 // been embedded yet (caller is expected to surface a warning in that case).
-func verifyChecksumsSignature(ctx context.Context, version string, checksumsContent []byte) error {
+func verifyChecksumsSignature(ctx context.Context, version, base string, checksumsContent []byte) error {
 	pubKey, err := loadReleasePubKey()
 	if err != nil {
 		return fmt.Errorf("load release pubkey: %w", err)
@@ -45,28 +45,9 @@ func verifyChecksumsSignature(ctx context.Context, version string, checksumsCont
 		return nil
 	}
 
-	url := releaseURL(version, "checksums.txt.sig")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	rawSig, err := fetchSignature(ctx, version, base)
 	if err != nil {
 		return err
-	}
-	req.Header.Set("User-Agent", "unarr-updater")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetch signature: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return ErrMissingSignature
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("fetch signature: HTTP %d", resp.StatusCode)
-	}
-
-	// Signature file is base64(signature)\n — small and bounded.
-	rawSig, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
-	if err != nil {
-		return fmt.Errorf("read signature: %w", err)
 	}
 	sig, err := decodeSignature(rawSig)
 	if err != nil {
@@ -79,6 +60,40 @@ func verifyChecksumsSignature(ctx context.Context, version string, checksumsCont
 		return errors.New("ed25519 signature verification failed")
 	}
 	return nil
+}
+
+// fetchSignature downloads checksums.txt.sig (base64(signature)\n — small and
+// bounded) from `base`: the SAME mirror that served the archive + checksums.txt
+// (resolved by download). Fetching all three from one host is what keeps
+// verification sound — the two builds (GitHub Actions and local ship) are not
+// guaranteed byte-identical, so a signature from one mirror would NOT verify a
+// checksums.txt from another. A 404 means the release on this mirror genuinely
+// ships no signature → ErrMissingSignature (the --allow-unsigned path); other
+// non-200s and transport errors surface as-is.
+func fetchSignature(ctx context.Context, version, base string) ([]byte, error) {
+	url := releaseURL(base, version, "checksums.txt.sig")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "unarr-updater")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch signature: %w", err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		data, rerr := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+		if rerr != nil {
+			return nil, fmt.Errorf("read signature: %w", rerr)
+		}
+		return data, nil
+	case http.StatusNotFound:
+		return nil, ErrMissingSignature
+	default:
+		return nil, fmt.Errorf("fetch signature: HTTP %d", resp.StatusCode)
+	}
 }
 
 // SignatureVerificationConfigured reports whether the build has a release

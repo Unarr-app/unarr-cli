@@ -67,8 +67,10 @@ type SyncClient struct {
 	// is active, else "". Sent on every sync so the web picks it up live.
 	GetFunnelURL func() string
 	// OnDeleteFiles is called when the server requests file deletion from disk.
-	// It should delete the files and return the IDs of successfully deleted items.
-	OnDeleteFiles func(items []LibraryDeleteRequest) []int
+	// It returns the IDs successfully deleted plus the ones that failed, with a
+	// reason. Both halves must be reported: an unreported failure leaves the
+	// server's request pending forever and the web spinning on it.
+	OnDeleteFiles func(items []LibraryDeleteRequest) (deleted []int, failed []LibraryDeleteError)
 
 	// OnSubtitleFetch is called when the server requests on-demand subtitle
 	// downloads. It should download each (from req.URL, already VTT), write a
@@ -88,6 +90,12 @@ type SyncClient struct {
 	watching atomic.Bool
 	interval atomic.Int64 // stored as nanoseconds
 
+	// canDelete mirrors cfg.CanDelete but is live: SIGUSR1 reload updates it
+	// without a restart. It is the SINGLE source of truth for both what we report
+	// to the server and whether we actually delete — reporting one thing and
+	// doing another means the server queues deletions we silently drop.
+	canDelete atomic.Bool
+
 	// livenessTimeout is the max wait for any SSE frame before the downlink
 	// treats the stream as dead/buffered. Defaults to downlinkLivenessTimeout;
 	// overridable in tests.
@@ -96,6 +104,9 @@ type SyncClient struct {
 	// pendingDeleteConfirmed holds item IDs to report as deleted in the next sync.
 	pendingDeleteMu        sync.Mutex
 	pendingDeleteConfirmed []int
+	// pendingDeleteFailed holds deletions that failed on disk, reported once so
+	// the web can surface the error instead of spinning forever.
+	pendingDeleteFailed []LibraryDeleteError
 	// deleteInFlight tracks item IDs currently being processed or awaiting confirmation.
 	// Prevents the same file from being passed to OnDeleteFiles multiple times.
 	deleteInFlight map[int]struct{}
@@ -116,8 +127,16 @@ func NewSyncClient(client *Client, cfg DaemonConfig, state *LocalState) *SyncCli
 		livenessTimeout: downlinkLivenessTimeout,
 	}
 	sc.interval.Store(int64(SyncIntervalIdle))
+	sc.canDelete.Store(cfg.CanDelete)
 	return sc
 }
+
+// SetCanDelete updates the live file-deletion capability (config hot-reload).
+// Reported on the next sync, so the web's Delete button follows within seconds.
+func (sc *SyncClient) SetCanDelete(v bool) { sc.canDelete.Store(v) }
+
+// CanDelete reports the live capability, not the value frozen at startup.
+func (sc *SyncClient) CanDelete() bool { return sc.canDelete.Load() }
 
 // Watching returns whether someone is viewing the web UI.
 func (sc *SyncClient) Watching() bool {
@@ -191,6 +210,7 @@ func (sc *SyncClient) doSync(ctx context.Context) {
 }
 
 func (sc *SyncClient) buildRequest() SyncRequest {
+	httpsPort, agentHash := directTLSWire(sc.cfg.HTTPSStreamPort, sc.cfg.AgentHash)
 	req := SyncRequest{
 		AgentID:         sc.cfg.AgentID,
 		Name:            sc.cfg.AgentName,
@@ -199,11 +219,11 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 		Arch:            runtime.GOARCH,
 		DownloadDir:     sc.cfg.DownloadDir,
 		StreamPort:      sc.cfg.StreamPort,
-		HTTPSStreamPort: sc.cfg.HTTPSStreamPort,
-		AgentHash:       sc.cfg.AgentHash,
+		HTTPSStreamPort: httpsPort,
+		AgentHash:       agentHash,
 		LanIP:           sc.cfg.LanIP,
 		TailscaleIP:     sc.cfg.TailscaleIP,
-		CanDelete:       sc.cfg.CanDelete,
+		CanDelete:       sc.canDelete.Load(),
 		IsDocker:        RunningInDocker(),
 	}
 	if sc.GetTaskStates != nil {
@@ -237,6 +257,16 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 			delete(sc.deleteInFlight, id)
 		}
 		sc.pendingDeleteConfirmed = nil
+	}
+	// Same for failures: report once, then drop from in-flight. Keeping a failed
+	// ID in the map made it un-retryable forever — the server re-sent it and we
+	// skipped it as "already in flight" on every cycle, silently.
+	if len(sc.pendingDeleteFailed) > 0 {
+		req.DeleteFailed = sc.pendingDeleteFailed
+		for _, f := range sc.pendingDeleteFailed {
+			delete(sc.deleteInFlight, f.ID)
+		}
+		sc.pendingDeleteFailed = nil
 	}
 	if len(sc.pendingSubtitlesFetched) > 0 {
 		req.SubtitlesFetched = sc.pendingSubtitlesFetched
@@ -314,12 +344,11 @@ func (sc *SyncClient) processResponse(resp *SyncResponse) {
 			// Run deletions off the sync goroutine — disk I/O must not block the
 			// next sync tick. Confirmations are picked up on the next regular cycle.
 			go func(items []LibraryDeleteRequest) {
-				confirmed := sc.OnDeleteFiles(items)
-				if len(confirmed) > 0 {
-					sc.pendingDeleteMu.Lock()
-					sc.pendingDeleteConfirmed = append(sc.pendingDeleteConfirmed, confirmed...)
-					sc.pendingDeleteMu.Unlock()
-				}
+				confirmed, failed := sc.OnDeleteFiles(items)
+				sc.pendingDeleteMu.Lock()
+				sc.pendingDeleteConfirmed = append(sc.pendingDeleteConfirmed, confirmed...)
+				sc.pendingDeleteFailed = append(sc.pendingDeleteFailed, failed...)
+				sc.pendingDeleteMu.Unlock()
 			}(newItems)
 		}
 	}

@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/engine"
+	"github.com/Unarr-app/unarr-cli/internal/parser"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/engine"
-	"github.com/torrentclaw/unarr/internal/parser"
 )
 
 // downloadDeps agrupa las funciones constructoras usadas por runDownload.
@@ -107,6 +107,18 @@ func runDownloadWithDeps(input, method string, deps downloadDeps) error {
 	fmt.Printf("  Method: %s | Output: %s\n", method, outputDir)
 	fmt.Println()
 
+	// P2P kill-switch: when the VPN is configured, bring the tunnel up so this
+	// one-shot torrent's peer + tracker + DHT traffic is split-tunnelled. With
+	// [downloads.vpn] required=true and no healthy tunnel, the torrent method is
+	// gated off (Available → ErrVPNRequired) so `unarr download` never joins the
+	// swarm over the user's real IP — it fails with an actionable reason instead.
+	// One-shot: no reconnect supervisor (see bringUpVPNForOneShot).
+	vpnRequired := cfg.Download.VPN.Required
+	vpnTunnel := bringUpVPNForOneShot(cfg, vpnRequired)
+	if vpnTunnel != nil {
+		defer vpnTunnel.Close()
+	}
+
 	// Create torrent downloader
 	torrentDl, err := deps.newTorrentDl(engine.TorrentConfig{
 		DataDir:         outputDir,
@@ -116,6 +128,8 @@ func runDownloadWithDeps(input, method string, deps downloadDeps) error {
 		// One-shot foreground download: leech then exit. Seeding only makes sense
 		// for the always-on daemon (see DownloadConfig.SeedEnabled).
 		SeedEnabled: false,
+		VPNTunnel:   vpnTunnel,
+		VPNRequired: vpnRequired,
 	})
 	if err != nil {
 		return fmt.Errorf("create downloader: %w", err)

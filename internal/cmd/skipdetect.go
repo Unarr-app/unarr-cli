@@ -4,10 +4,10 @@ import (
 	"context"
 	"log"
 
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/library"
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/library"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 )
 
 // detectAndSubmitSkipSegments runs intro/credits detection over a scanned

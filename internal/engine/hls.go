@@ -35,6 +35,13 @@ import (
 	"time"
 )
 
+// ErrSourceUnreachable marks a probe failure on a REMOTE source (debrid
+// HLS-from-URL / direct link): the provider link timed out, 4xx'd, or the CDN
+// node never delivered probeable bytes. The daemon maps it to the
+// "source_unreachable" session-error code so the web's streaming-health
+// watchdog doesn't count the user's dead debrid link as an agent HW regression.
+var ErrSourceUnreachable = errors.New("source unreachable")
+
 // hlsSegmentDuration is the target seconds per HLS fragment.
 //
 // We use 2 seconds (not the more common 4-6 s). Trade-off: 2× more segments
@@ -336,6 +343,13 @@ type HLSSession struct {
 	copySegStarts []float64
 	copyGenMu     sync.Mutex
 	copyGen       map[int]*sync.Mutex // per-index gate single-flighting segment gen
+	// copyLazy=true means this COPY-VOD session generates segments lazily per
+	// request via `-ss` (remote/uniform sources, or a local file with too little
+	// disk for the background pass). copyLazy=false means a single background
+	// segment-muxer pass writes every seg-N.ts sequentially and handlers wait on
+	// readyMax (like encode mode) — the echo-free path for local files.
+	copyLazy     bool
+	srcSizeBytes int64 // source size in bytes; sizes the copy-pass segment-wait deadline
 }
 
 // hlsSeekAhead is how many segments past the writer's current position the
@@ -581,14 +595,31 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		return nil, errors.New("hls: ffmpeg/ffprobe not available")
 	}
 
-	// Probe gets a 15 s ceiling. ffprobe on a 50 GB MKV over a slow remote
-	// fs can hang indefinitely; without a deadline the daemon would block
-	// the goroutine that started the session forever and the user would
-	// see the player phase stuck on "Preparando sesión".
-	probeCtx, cancelProbe := context.WithTimeout(ctx, 15*time.Second)
+	// Probe gets a deadline so ffprobe can't hang the session-start goroutine
+	// forever (else the player sticks on "Preparando sesión"). A REMOTE source
+	// (debrid HLS-from-URL) gets a longer ceiling: a cold tb-cdn.io /dld node
+	// can take >15 s just to start delivering bytes, and killing ffprobe early
+	// surfaces an empty-stderr "start_failed" that (a) mislabels the user's slow
+	// debrid link as an agent HW fault and (b) gives zero diagnostics. Local
+	// files keep the tighter 15 s (a local disk that slow IS a real problem).
+	probeTimeout := 15 * time.Second
+	if cfg.SourceURL != "" {
+		probeTimeout = 30 * time.Second
+	}
+	probeCtx, cancelProbe := context.WithTimeout(ctx, probeTimeout)
 	probe, err := ProbeFile(probeCtx, cfg.Transcode.FFprobePath, cfg.sourceRef())
 	cancelProbe()
 	if err != nil {
+		// A probe failure on a remote source is treated as "the provider link is
+		// unreachable" (timeout / 4xx / dead CDN node), not a local agent fault.
+		// Tag it so the daemon reports "source_unreachable" instead of
+		// "start_failed". Deliberate trade-off: rare agent-side probe faults on
+		// remote inputs (e.g. an ffmpeg build without TLS → "Protocol not
+		// found") get the same tag — distinguishing them would need brittle
+		// stderr string-matching, and the error message keeps the detail.
+		if cfg.SourceURL != "" {
+			return nil, fmt.Errorf("hls: probe: %w: %w", ErrSourceUnreachable, err)
+		}
 		return nil, fmt.Errorf("hls: probe: %w", err)
 	}
 	if probe.DurationSec <= 0 {
@@ -784,6 +815,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	}
 	s.cmd = cmd
 
+	//nolint:gosec // G118: waitFFmpeg owns the ffmpeg process lifecycle (Wait+cleanup); it must outlive ffCtx, not be cancelled by it. ffCtx is already wired into the process via CommandContext above.
 	go s.waitFFmpeg()
 	go s.pollSegments(ffCtx)
 
@@ -1209,11 +1241,21 @@ func (s *HLSSession) waitFFmpeg() {
 	}
 }
 
-// pollSegments watches the video tmpdir for newly-finished .m4s files and
-// advances readyMax. ffmpeg writes a segment by first creating an empty
-// file, then closing+renaming on completion (atomic-replace), so we use
-// stat size > 0 + presence of the *next* segment as proof the previous one
-// is done. For the last segment, ffmpeg's exit terminates the wait.
+// segmentFileName is the on-disk basename of segment i. Encode mode writes
+// fMP4 (.m4s); COPY-VOD writes MPEG-TS (.ts). pollSegments/ServeSegment use
+// this so the watermark poller watches the files the writer actually produces.
+func (s *HLSSession) segmentFileName(i int) string {
+	if s.copyVOD {
+		return fmt.Sprintf("seg-%d%s", i, copyVODSegExt)
+	}
+	return fmt.Sprintf("seg-%d.m4s", i)
+}
+
+// pollSegments watches the video tmpdir for newly-finished segment files and
+// advances readyMax. The writer produces a segment by opening the next file
+// only after closing the current one (fMP4 temp_file rename in encode mode; the
+// segment muxer's avio_close→open in COPY-VOD pass mode), so "seg-(i+1) exists"
+// proves seg-i is fully written. For the last segment, ffmpeg's exit ends the wait.
 func (s *HLSSession) pollSegments(ctx context.Context) {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
@@ -1233,8 +1275,8 @@ func (s *HLSSession) pollSegments(ctx context.Context) {
 
 		highest := start
 		for i := start; i < s.segmentCount; i++ {
-			cur := filepath.Join(videoDir, fmt.Sprintf("seg-%d.m4s", i))
-			next := filepath.Join(videoDir, fmt.Sprintf("seg-%d.m4s", i+1))
+			cur := filepath.Join(videoDir, s.segmentFileName(i))
+			next := filepath.Join(videoDir, s.segmentFileName(i+1))
 			ci, err := os.Stat(cur)
 			if err != nil || ci.Size() == 0 {
 				break
@@ -1284,11 +1326,28 @@ func (s *HLSSession) pollSegments(ctx context.Context) {
 	}
 }
 
+// segmentWaitTimeout bounds how long waitForSegment blocks. Encode mode caps at
+// 60s (ffmpeg keeps pace with playback). A COPY-VOD background pass writes
+// segments sequentially, so a deep cold seek waits for the pass to READ that far
+// into the file — up to a full-file read. Size the ceiling by an assumed floor
+// read speed (8 MB/s: slow NAS over WAN) so a large-file deep seek still
+// completes, while a genuinely stuck pass can't hang a handler forever.
+func (s *HLSSession) segmentWaitTimeout() time.Duration {
+	if s.copyVOD && !s.copyLazy && s.srcSizeBytes > 0 {
+		secs := s.srcSizeBytes / (8 * 1024 * 1024)
+		if d := time.Duration(secs) * time.Second; d > 120*time.Second {
+			return d
+		}
+		return 120 * time.Second
+	}
+	return 60 * time.Second
+}
+
 // waitForSegment blocks until segment idx has been fully written, ffmpeg
 // has exited, or ctx is cancelled. Returns nil iff the segment file is
 // safe to read at return time.
 func (s *HLSSession) waitForSegment(ctx context.Context, idx int) error {
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(s.segmentWaitTimeout())
 	for {
 		s.readyMu.Lock()
 		ready := idx < s.readyMax
@@ -1429,13 +1488,33 @@ func (s *HLSSession) ServeInit(w http.ResponseWriter, r *http.Request) {
 //
 // The file fills as ffmpeg reads the (remote) input, so a client fetching it
 // mid-transcode gets cues only up to the read position — accepted for this MVP.
-// 404 until the first byte exists rather than blocking, mirroring ServeInit.
+//
+// On a FRESH session the sidecar extractor has only just started, so the file
+// doesn't exist for the first few seconds. Returning 404 immediately there is
+// a footgun for the web player: a <track> whose fetch 404s once sticks in a
+// terminal ERROR state in Chromium (flipping TextTrack.mode never re-fetches),
+// so subtitles go permanently blank after a pause/tab-switch session
+// re-bootstrap until a full reload. We instead wait briefly for the first byte
+// (mirroring ServeInit) so the initial fetch resolves to a 200 with real cues.
 func (s *HLSSession) ServeSubtitleVTT(w http.ResponseWriter, r *http.Request, idx int) {
 	s.Touch()
 	path := filepath.Join(s.tmpDir, "subs", fmt.Sprintf("s%d.vtt", idx))
-	if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
-		http.Error(w, "subtitle track unavailable", http.StatusNotFound)
-		return
+	// Wait up to 15s for the extractor to write the first cue bytes. Bail early
+	// if the session closes or the client goes away.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
+			break
+		}
+		if s.isClosed() || time.Now().After(deadline) {
+			http.Error(w, "subtitle track unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(150 * time.Millisecond):
+		}
 	}
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")

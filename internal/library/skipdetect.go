@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 )
 
 // Skip-segment detection: find intro (OP) and credits (ED) ranges by comparing

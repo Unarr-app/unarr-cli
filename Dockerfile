@@ -18,7 +18,7 @@ COPY . .
 ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w -X github.com/torrentclaw/unarr/internal/cmd.Version=${VERSION}" -trimpath -o /unarr ./cmd/unarr/
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w -X github.com/Unarr-app/unarr-cli/internal/cmd.Version=${VERSION}" -trimpath -o /unarr ./cmd/unarr/
 
 # ---- Runtime stage ----
 # glibc base (not Alpine/musl). NVIDIA's userspace — nvidia-smi and the
@@ -54,10 +54,40 @@ FROM debian:bookworm-slim
 #         loader stays so that on the RARE host where Vulkan does come up the
 #         probe can use it. nvenc/nvdec (CUDA, not Vulkan) work regardless.
 #         GPU HDR tonemap is a bare-metal-binary feature, not a container one.
+# libdrm2/libva2/libva-drm2 → VAAPI/QSV userspace the bundled BtbN ffmpeg
+#         dlopen()s for Intel QuickSync (h264_qsv/hevc_qsv). Without libdrm.so.2
+#         the qsv encoder aborts on the very first frame ("libdrm.so.2: cannot
+#         open shared object file" → `load_library: Assertion 0` → core dump), so
+#         an Intel-GPU host (renderD128) never produces a segment and web
+#         playback hangs forever on init.mp4. All three exist on arm64 too and
+#         are inert there, so they live on the common line; the Intel-only driver
+#         + oneVPL runtime are installed in an amd64-guarded block below.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      ca-certificates tzdata wget xz-utils par2 p7zip-full libvulkan1 && \
+      ca-certificates tzdata wget xz-utils par2 p7zip-full libvulkan1 \
+      libdrm2 libva2 libva-drm2 && \
     rm -rf /var/lib/apt/lists/*
+
+# Intel QuickSync (QSV) runtime — amd64 only. The oneVPL dispatcher (libvpl2) +
+# the Gen GPU runtime (libmfx-gen1.2) are what the bundled ffmpeg loads for
+# h264_qsv/hevc_qsv; intel-media-va-driver-non-free is the iHD VAAPI driver
+# covering Gen9+ incl the Alder Lake-N SoCs that UGREEN / Intel NAS boxes ship.
+# These packages have no arm64 candidate (Intel x86 media stack), so installing
+# them on the common line would break the arm64 buildx leg — guard by arch. iHD
+# lives in non-free, absent from bookworm-slim's default sources, so enable the
+# component first. Inert on NVIDIA hosts (which use nvenc, not QSV).
+# The non-free stanza reuses the base image's deb822 keyring (Signed-By); a plain
+# one-line `deb ...` list for the same suite trips apt's "Conflicting values set
+# for option Signed-By" on modern bookworm-slim (which ships /etc/apt/sources.list.d
+# /debian.sources with the keyring pinned), so it must be deb822 with the same key.
+RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+      printf 'Types: deb\nURIs: http://deb.debian.org/debian\nSuites: bookworm\nComponents: non-free non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' \
+        > /etc/apt/sources.list.d/non-free.sources && \
+      apt-get update && \
+      apt-get install -y --no-install-recommends \
+        intel-media-va-driver-non-free libmfx-gen1.2 libvpl2 && \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Arch for the bundled deps below is taken from `dpkg --print-architecture` (the
 # real arch of THIS runtime stage), NOT the TARGETARCH build-arg. A baked
@@ -130,6 +160,12 @@ ENV UNARR_DOCKER=1
 # Harmless when no GPU is attached.
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility,graphics
+
+# Select the iHD VAAPI driver for Intel QuickSync (installed on amd64 above).
+# Without this libva may probe the wrong/absent driver on some hosts; iHD is the
+# modern Intel driver (Gen9+). Harmless on NVIDIA/arm64 hosts where no libva
+# device is used (QSV simply isn't selected). Pass /dev/dri via `--device`.
+ENV LIBVA_DRIVER_NAME=iHD
 
 VOLUME ["/config", "/downloads", "/data"]
 

@@ -3,7 +3,7 @@ package library
 import (
 	"testing"
 
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 )
 
 func TestBuildSyncItems(t *testing.T) {

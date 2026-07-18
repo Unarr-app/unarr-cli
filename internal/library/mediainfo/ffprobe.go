@@ -67,6 +67,15 @@ func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*Media
 
 	output, err := cmd.Output()
 	if err != nil {
+		// Context deadline/cancel kills ffprobe BEFORE it writes anything to
+		// stderr, so the generic branch below would report an empty
+		// "ffprobe failed (...): " with zero diagnostics (prod 2026-07-12: 16
+		// tb-cdn.io debrid probes all timed out with a blank message). Surface
+		// the timeout explicitly so the failure is legible in the session-error
+		// channel and logs.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("ffprobe aborted (%w) probing %s", ctxErr, filePath)
+		}
 		// A remote URL (debrid HLS-from-URL, hueco #2/2b) has no local file to
 		// stat — surface ffprobe's own stderr (e.g. "Protocol not found" when the
 		// ffmpeg build lacks TLS, or an HTTP error) instead of a misleading
@@ -76,7 +85,11 @@ func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*Media
 				return nil, fmt.Errorf("ffprobe: file not found: %s", filePath)
 			}
 		}
-		return nil, fmt.Errorf("ffprobe failed (file=%s): %s", filePath, stderr.String())
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error() // e.g. "signal: killed" / "exit status 1" — better than blank
+		}
+		return nil, fmt.Errorf("ffprobe failed (file=%s): %s", filePath, msg)
 	}
 
 	var data ffprobeOutput
@@ -320,7 +333,7 @@ func ResolveFFprobe(explicit string) (string, error) {
 		return "", fmt.Errorf(
 			"ffprobe not found and auto-download failed (read-only filesystem?).\n" +
 				"Options:\n" +
-				"  • Use the official image: torrentclaw/unarr (includes ffprobe)\n" +
+				"  • Use the official image: unarr/cli (includes ffprobe)\n" +
 				"  • Set FFPROBE_PATH env var to point to a pre-installed ffprobe binary\n" +
 				"  • Add to config.toml: [library]\\nffprobe_path = \"/path/to/ffprobe\"",
 		)

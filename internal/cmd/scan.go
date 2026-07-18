@@ -10,12 +10,12 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/library"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/library"
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
 )
 
 func newScanCmd() *cobra.Command {
@@ -32,7 +32,7 @@ func newScanCmd() *cobra.Command {
 		Long: `Walk a folder recursively, analyze each video file with ffprobe,
 and sync the results to your TorrentClaw account.
 
-After scanning, visit your Library page at torrentclaw.com/library
+After scanning, visit your Library page at unarr.app/library
 to see available quality upgrades.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -137,6 +137,7 @@ func runScan(ctx context.Context, cfg config.Config, dirPath string, workers int
 	cache, err := library.Scan(ctx, dirPath, existing, library.ScanOptions{
 		Workers:     workers,
 		FFprobePath: ffprobePath,
+		FFmpegPath:  cfg.Library.FFmpegPath,
 		Incremental: existing != nil,
 		OnProgress: func(scanned, total int, current string) {
 			// Truncate filename for display
@@ -181,14 +182,19 @@ func runScan(ctx context.Context, cfg config.Config, dirPath string, workers int
 	if cfg.Library.CacheSubtitles || cfg.Library.CacheThumbnails || cfg.Library.Trickplay.Enabled {
 		if ff, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err == nil {
 			fmt.Fprintf(os.Stderr, "  Pre-extracting subtitles + thumbnails to cache… (Ctrl-C to skip)\n")
+			// ffprobe powers the COPY-VOD keyframe-index sidecar; if it can't be
+			// resolved, keyframe prewarm is skipped (playback self-warms it).
+			ffprobe, _ := mediainfo.ResolveFFprobe(ffprobePath)
 			library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
 				FFmpegPath:           ff,
+				FFprobePath:          ffprobe,
 				CacheSubtitles:       cfg.Library.CacheSubtitles,
 				CacheThumbnails:      cfg.Library.CacheThumbnails,
 				Workers:              2,
 				Trickplay:            cfg.Library.Trickplay.Enabled,
 				TrickplayIntervalSec: cfg.Library.Trickplay.IntervalSeconds(),
 				TrickplayWidth:       cfg.Library.Trickplay.Width,
+				Keyframes:            ffprobe != "",
 				MaxLoadRatio:         cfg.Library.PrewarmMaxLoadRatio,
 			})
 		} else {

@@ -2,19 +2,29 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/engine"
-	"github.com/torrentclaw/unarr/internal/ui"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/engine"
+	"github.com/Unarr-app/unarr-cli/internal/ui"
+	"github.com/Unarr-app/unarr-cli/internal/vpn"
 )
 
 const streamIdleTimeout = 30 * time.Minute
+
+// streamDownloadIdlePause is how long a P2P stream can have zero active player
+// connections before the agent pauses its greedy background download. Short
+// enough to stop caching a title the user abandoned; long enough to survive a
+// seek (which briefly reopens the /stream connection) and to act as a small
+// cache-ahead grace after playback stops. The download resumes instantly when a
+// player reconnects, and downloaded pieces stay on disk regardless.
+const streamDownloadIdlePause = 30 * time.Second
 
 // startIdleGuard monitors the persistent stream server and clears the file after inactivity.
 func startIdleGuard(ctx context.Context, srv *engine.StreamServer) {
@@ -87,7 +97,7 @@ func cancelStreamTask(taskID string) {
 // handleStreamTask manages a streaming task lifecycle for active torrent downloads.
 // It creates a StreamEngine, buffers, sets the file on the persistent server,
 // and reports progress until the task is cancelled or the download completes.
-func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client, srv *engine.StreamServer, onStateChange func()) {
+func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client, srv *engine.StreamServer, vpnTunnel *vpn.Tunnel, onStateChange func()) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
@@ -162,13 +172,24 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		return
 	}
 
-	// 1. Create StreamEngine
+	// 1. Create StreamEngine. The VPN kill-switch is threaded in: with
+	// [downloads.vpn] required=true and no healthy tunnel, NewStreamEngine returns
+	// ErrVPNRequired so a torrent-only (non-debrid) title is NEVER streamed in the
+	// clear — the daemon is the trust boundary and self-protects regardless of what
+	// the web sent. Debrid direct-play (at.DirectURL) returned above and is unaffected.
 	eng, err := engine.NewStreamEngine(engine.StreamConfig{
 		DataDir:     cfg.Download.Dir,
 		MetaTimeout: 60 * time.Second,
+		VPNTunnel:   vpnTunnel,
+		VPNRequired: cfg.Download.VPN.Required,
 	})
 	if err != nil {
-		task.ErrorMessage = "create stream engine: " + err.Error()
+		if errors.Is(err, engine.ErrVPNRequired) {
+			task.ErrorMessage = "VPN required: tunnel down — P2P streaming disabled (debrid still works)"
+			log.Printf("[%s] stream refused: VPN required but tunnel down — not joining the swarm in the clear", at.ID[:8])
+		} else {
+			task.ErrorMessage = "create stream engine: " + err.Error()
+		}
 		task.Transition(engine.StatusFailed)
 		return
 	}
@@ -226,6 +247,18 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 			return
 
 		case <-progressTicker.C:
+			// Kill-switch: a mid-stream tunnel drop while still fetching must stop the
+			// P2P stream so no pieces are pulled over the real IP. The engine's dials
+			// already fail closed (tunnel-routed), but tear the session down
+			// explicitly rather than serve a stalled stream. Once completed there is
+			// nothing left to fetch, so a later drop can't leak.
+			if !completed && !eng.VPNStillHealthy() {
+				task.ErrorMessage = "VPN tunnel down — P2P streaming stopped (no clear-net leak)"
+				task.Transition(engine.StatusFailed)
+				log.Printf("[%s] VPN tunnel went down mid-stream — stopping P2P (partial kept, P2P disabled)", at.ID[:8])
+				return
+			}
+
 			p := eng.Progress()
 			task.UpdateProgress(engine.Progress{
 				DownloadedBytes: p.DownloadedBytes,
@@ -236,13 +269,50 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 				FileName:        p.FileName,
 			})
 
+			pct := 0
+			if p.TotalBytes > 0 {
+				pct = int(float64(p.DownloadedBytes) / float64(p.TotalBytes) * 100)
+			}
+
 			// Terminal progress
 			if !completed && p.TotalBytes > 0 {
-				pct := int(float64(p.DownloadedBytes) / float64(p.TotalBytes) * 100)
 				fmt.Fprintf(os.Stderr, "\r[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
 					at.ID[:8], pct,
 					ui.FormatBytes(p.DownloadedBytes), ui.FormatBytes(p.TotalBytes), ui.FormatBytes(p.SpeedBps),
 					p.Peers, p.Seeds)
+			}
+
+			// Idle guard: pause the greedy whole-file download so the agent does
+			// not cache a whole title nobody is watching. Two triggers:
+			//   1. Displaced — a newer stream took over the persistent server
+			//      (CurrentTaskID moved on); nobody can reach our file anymore, so
+			//      pause at once. (Without this, switching titles would leave the
+			//      old title downloading to 100% in the background — the single
+			//      most common abandonment.)
+			//   2. Read-idle — we are still the served file but no bytes have been
+			//      served for the grace window: player stopped, closed, or paused.
+			//      ReadIdleSince() is byte-based, so a paused player whose TCP
+			//      socket lingers still counts as idle (a plain connection count
+			//      would not).
+			// A connected reader keeps fetching its own readahead regardless of
+			// the file's base priority, so pausing never interrupts live playback;
+			// resume is instant on the next byte served. Skip once completed.
+			if !completed {
+				displaced := srv.CurrentTaskID() != at.ID
+				idle := displaced || srv.ReadIdleSince() >= streamDownloadIdlePause
+				switch {
+				case idle && !eng.IsDownloadPaused():
+					reason := "no active viewer"
+					if displaced {
+						reason = "stream replaced by a newer title"
+					}
+					eng.PauseDownload()
+					log.Printf("[%s] %s — pausing background download at %d%% (partial kept, resumes on replay)",
+						at.ID[:8], reason, pct)
+				case !idle && eng.IsDownloadPaused():
+					eng.ResumeDownload()
+					log.Printf("[%s] viewer active — resuming background download", at.ID[:8])
+				}
 			}
 
 			if !completed && p.DownloadedBytes >= p.TotalBytes && p.TotalBytes > 0 {

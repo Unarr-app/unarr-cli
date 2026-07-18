@@ -6,18 +6,6 @@ import (
 	"testing"
 )
 
-func TestCopyVODEligibleCodec(t *testing.T) {
-	cases := map[string]bool{
-		"h264": true, "avc": true, "avc1": true, "H264": true,
-		"hevc": false, "h265": false, "av1": false, "vp9": false, "": false,
-	}
-	for codec, want := range cases {
-		if got := copyVODEligibleCodec(codec); got != want {
-			t.Errorf("copyVODEligibleCodec(%q)=%v want %v", codec, got, want)
-		}
-	}
-}
-
 func TestPlanCopySegments(t *testing.T) {
 	// Keyframes every 2.002s (the common WEB-DL cadence), 30s duration.
 	kfs := []float64{}
@@ -83,6 +71,50 @@ func TestPlanCopySegmentsFoldsTinyTail(t *testing.T) {
 	}
 }
 
+func TestPlanUniformSegments(t *testing.T) {
+	// 30s → fixed copyVODTargetSec (6s) boundaries: [0,6,12,18,24,30].
+	starts := planUniformSegments(30.0)
+	if starts[0] != 0 {
+		t.Errorf("first start = %v, want 0", starts[0])
+	}
+	if last := starts[len(starts)-1]; math.Abs(last-30.0) > 1e-9 {
+		t.Errorf("last start = %v, want 30.0", last)
+	}
+	for i := 1; i < len(starts); i++ {
+		if starts[i] <= starts[i-1] {
+			t.Fatalf("starts not strictly increasing at %d: %v", i, starts)
+		}
+		if d := starts[i] - starts[i-1]; d < 1.0 {
+			t.Errorf("segment %d duration %v < 1s: %v", i-1, d, starts)
+		}
+	}
+	// Interior boundaries are wall-clock multiples of the target (NOT keyframes).
+	for i := 1; i < len(starts)-1; i++ {
+		if math.Mod(starts[i], copyVODTargetSec) > 1e-9 {
+			t.Errorf("interior boundary %v is not a %vs multiple", starts[i], copyVODTargetSec)
+		}
+	}
+}
+
+func TestPlanUniformSegmentsEdge(t *testing.T) {
+	// Source shorter than one target segment → a single segment [0,dur].
+	if s := planUniformSegments(3.0); len(s) != 2 || s[0] != 0 || math.Abs(s[1]-3.0) > 1e-9 {
+		t.Fatalf("short source plan = %v, want [0 3]", s)
+	}
+	// The loop stops at < dur-1, so the final fragment is always ≥1s — no
+	// near-empty trailing segment regardless of where the end lands.
+	for _, dur := range []float64{24.5, 25.0, 36.2, 90.0} {
+		s := planUniformSegments(dur)
+		if tail := s[len(s)-1] - s[len(s)-2]; tail < 1.0 {
+			t.Errorf("dur %v left a sub-1s tail %v: %v", dur, tail, s)
+		}
+	}
+	// Non-positive duration → no plan (caller falls back to EVENT copy).
+	if s := planUniformSegments(0); s != nil {
+		t.Errorf("planUniformSegments(0) = %v, want nil", s)
+	}
+}
+
 func TestRenderVideoPlaylistCopyVOD(t *testing.T) {
 	starts := []float64{0, 6.006, 12.012, 18.0}
 	m := renderVideoPlaylistCopyVOD(starts)
@@ -109,5 +141,86 @@ func TestRenderVideoPlaylistCopyVOD(t *testing.T) {
 	// TARGETDURATION must be >= longest segment (6.006 → 7).
 	if !strings.Contains(m, "#EXT-X-TARGETDURATION:7") {
 		t.Errorf("expected TARGETDURATION:7\n%s", m)
+	}
+}
+
+// argsHasPair reports whether args contains flag immediately followed by val.
+func argsHasPair(args []string, flag, val string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == val {
+			return true
+		}
+	}
+	return false
+}
+
+func argValue(args []string, flag string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// TestBuildCopyVODPassArgs locks in the echo-free segment-muxer pass invocation:
+// linear read (no -ss), keyframe-boundary cuts via -segment_times, absolute PTS
+// (mpegts_copyts=1), and the mandatory Annex-B bitstream filter.
+func TestBuildCopyVODPassArgs(t *testing.T) {
+	cfg := HLSSessionConfig{SourcePath: "/movies/x.mp4", AudioIndex: -1}
+	probe := &StreamProbe{VideoCodec: "h264", AudioCodec: "aac",
+		AudioTracks: []ProbeAudioTrack{{Codec: "aac", Channels: 2, Default: true}}}
+	starts := []float64{0, 6.0, 12.5, 18.0}
+	args := buildCopyVODPassArgs(cfg, probe, starts, "/tmp/sess")
+
+	// No input seek — the whole point (a mid-file -ss mislands on VBR sources).
+	if argValue(args, "-ss") != "" {
+		t.Errorf("pass must not use -ss (input seek mislands → echo): %v", args)
+	}
+	if !argsHasPair(args, "-c:v", "copy") {
+		t.Error("video must be copied")
+	}
+	if !argsHasPair(args, "-bsf:v", "h264_mp4toannexb") {
+		t.Error("missing h264_mp4toannexb (mp4 segments are undecodable without it)")
+	}
+	if !argsHasPair(args, "-f", "segment") {
+		t.Error("must use the segment muxer")
+	}
+	if !argsHasPair(args, "-reset_timestamps", "0") {
+		t.Error("must keep absolute timestamps across segments")
+	}
+	if !argsHasPair(args, "-segment_format_options", "mpegts_copyts=1") {
+		t.Error("missing mpegts_copyts=1 (absolute PTS, no +1.4s TS base offset)")
+	}
+	// Interior boundaries only: starts[1:len-1] == 6.0,12.5 (not 0, not 18.0).
+	if got := argValue(args, "-segment_times"); got != "6.000000,12.500000" {
+		t.Errorf("-segment_times = %q, want interior boundaries 6.000000,12.500000", got)
+	}
+	if last := args[len(args)-1]; !strings.HasSuffix(last, "seg-%d.ts") {
+		t.Errorf("output pattern = %q, want .../seg-%%d.ts", last)
+	}
+}
+
+// TestBuildCopyVODPassArgsSingleSegment: a source with no interior boundaries
+// (starts=[0,dur]) must omit -segment_times (empty list is invalid).
+func TestBuildCopyVODPassArgsSingleSegment(t *testing.T) {
+	cfg := HLSSessionConfig{SourcePath: "/movies/x.mkv", AudioIndex: -1}
+	probe := &StreamProbe{VideoCodec: "h264", AudioCodec: "aac",
+		AudioTracks: []ProbeAudioTrack{{Codec: "aac", Channels: 2}}}
+	args := buildCopyVODPassArgs(cfg, probe, []float64{0, 9.0}, "/tmp/sess")
+	if argValue(args, "-segment_times") != "" {
+		t.Errorf("single-segment source must omit -segment_times: %v", args)
+	}
+}
+
+// TestBuildCopyVODSegmentArgsHasBSF: the lazy per-segment path (remote/uniform)
+// also needs the Annex-B filter, else remote mp4 sources serve undecodable TS.
+func TestBuildCopyVODSegmentArgsHasBSF(t *testing.T) {
+	cfg := HLSSessionConfig{SourceURL: "http://panel/x.mp4", AudioIndex: -1}
+	probe := &StreamProbe{VideoCodec: "h264", AudioCodec: "aac",
+		AudioTracks: []ProbeAudioTrack{{Codec: "aac", Channels: 2}}}
+	args := buildCopyVODSegmentArgs(cfg, probe, "/tmp/seg.ts", 6.0, 12.0)
+	if !argsHasPair(args, "-bsf:v", "h264_mp4toannexb") {
+		t.Errorf("lazy per-segment path missing h264_mp4toannexb: %v", args)
 	}
 }

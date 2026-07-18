@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 // ActionFunc is called when the server signals an action on a task.

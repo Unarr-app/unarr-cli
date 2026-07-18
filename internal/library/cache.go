@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
 // CachePath returns the default library cache file path.

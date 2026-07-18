@@ -13,9 +13,14 @@ type MediaInfo struct {
 }
 
 // IntegrityInfo flags a file whose metadata probed OK enough to land in the
-// library but that shows structural damage (ffprobe emitted EBML / "invalid
-// data" errors, a truncated moov atom, or no usable video/duration) — the
-// hallmark of an incomplete or corrupt download.
+// library but that shows structural damage — the hallmark of an incomplete or
+// corrupt download. Reason is a stable code the web localizes; two families:
+//
+//	header probe (assessIntegrity): "invalid_data", "ebml_corrupt",
+//	  "moov_missing", "bitstream_corrupt", "no_duration".
+//	deep probe (AssessTruncation): "truncated" (tail data stops before the
+//	  header's claimed duration), "tail_corrupt" (bytes short but tail decode
+//	  fails).
 type IntegrityInfo struct {
 	Damaged bool   `json:"damaged"`
 	Reason  string `json:"reason,omitempty"`

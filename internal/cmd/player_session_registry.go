@@ -4,9 +4,9 @@ import (
 	"context"
 	"sync"
 
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/engine"
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/engine"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 )
 
 // playerSessionRegistry tracks per-session cancel funcs for active in-browser

@@ -15,11 +15,11 @@ Only the latest release receives security updates.
 
 Instead, report them via **GitHub Security Advisories**:
 
-1. Go to [Security Advisories](https://github.com/torrentclaw/unarr/security/advisories)
+1. Go to [Security Advisories](https://github.com/Unarr-app/unarr-cli/security/advisories)
 2. Click **"Report a vulnerability"**
 3. Fill in the details
 
-Alternatively, email **security@torrentclaw.com** with:
+Alternatively, email **security@unarr.app** with:
 
 - Description of the vulnerability
 - Steps to reproduce
@@ -61,7 +61,7 @@ This project follows these security practices:
 
 ## Container Image Vulnerability Scanning
 
-The Docker image (`torrentclaw/unarr`) is scanned by Docker Scout on Docker Hub and
+The Docker image (`unarr/cli`) is scanned by Docker Scout on Docker Hub and
 by a CVE gate in CI (see `.github/workflows/`). Two things matter when reading the
 Docker Hub vulnerability count:
 

@@ -77,9 +77,11 @@ func TestBuildCSR(t *testing.T) {
 }
 
 func TestNeedsIssue(t *testing.T) {
+	const hash = "x"
+	const base = "agent.unarr.app"
 	dir := t.TempDir()
 	// Missing cert → needs issue.
-	if !NeedsIssue(dir) {
+	if !NeedsIssue(dir, hash, base) {
 		t.Error("missing cert should need issue")
 	}
 
@@ -88,36 +90,79 @@ func TestNeedsIssue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	writeSelfSigned := func(notAfter time.Time) {
+	// selfSigned returns a PEM cert. wildcard=true covers *.<h>.agent.unarr.app
+	// (via the same WildcardName helper production uses); false emits a CA-ish
+	// cert with no agent SANs (stands in for a chain intermediate).
+	selfSigned := func(h string, wildcard bool, notAfter time.Time) []byte {
 		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		tmpl := &x509.Certificate{
 			SerialNumber: big.NewInt(1),
-			Subject:      pkix.Name{CommonName: "*.x.agent.unarr.app"},
 			NotBefore:    time.Now().Add(-time.Hour),
 			NotAfter:     notAfter,
 		}
+		if wildcard {
+			w := WildcardName(h, "agent.unarr.app")
+			tmpl.Subject = pkix.Name{CommonName: w}
+			tmpl.DNSNames = []string{w, h + ".agent.unarr.app"}
+		} else {
+			tmpl.Subject = pkix.Name{CommonName: "Fake Intermediate CA"}
+		}
 		der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-		if err := os.WriteFile(certPath, pemBytes, 0o644); err != nil {
+		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	}
+	writeSelfSigned := func(h string, notAfter time.Time) {
+		if err := os.WriteFile(certPath, selfSigned(h, true, notAfter), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// Fresh cert (90d) → no issue needed.
-	writeSelfSigned(time.Now().Add(90 * 24 * time.Hour))
-	if NeedsIssue(dir) {
+	// Fresh cert (90d) for the current hash → no issue needed.
+	writeSelfSigned(hash, time.Now().Add(90*24*time.Hour))
+	if NeedsIssue(dir, hash, base) {
 		t.Error("fresh cert should not need issue")
 	}
 
+	// Fresh cert but issued for a DIFFERENT hash (agent_hash was regenerated) →
+	// needs issue, else direct-TLS stays silently broken until the stale cert
+	// expires. Regression guard for the fleet-wide direct-TLS outage.
+	if !NeedsIssue(dir, "y", base) {
+		t.Error("cert for a stale hash should need re-issue")
+	}
+
+	// Empty hash (direct-TLS not configured) → pure expiry semantics, no re-issue
+	// for a fresh cert.
+	if NeedsIssue(dir, "", "") {
+		t.Error("empty hash should keep expiry-only semantics (fresh cert, no issue)")
+	}
+
+	// CHAIN with the intermediate FIRST and the leaf second → still recognized
+	// (the SAN check must walk every PEM block, not just block[0] — an
+	// intermediate-first chain used to trigger a perpetual re-issue loop).
+	fresh := time.Now().Add(90 * 24 * time.Hour)
+	chain := append(selfSigned(hash, false, fresh), selfSigned(hash, true, fresh)...)
+	if err := os.WriteFile(certPath, chain, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if NeedsIssue(dir, hash, base) {
+		t.Error("intermediate-first chain with a fresh matching leaf should not need issue")
+	}
+
+	// Case-insensitive SAN match: Let's Encrypt lowercases SANs, so a
+	// mixed-case configured base domain must still match the on-disk cert.
+	writeSelfSigned(hash, fresh)
+	if NeedsIssue(dir, hash, "Agent.Unarr.App") {
+		t.Error("mixed-case base domain should match the lowercased SAN (EqualFold)")
+	}
+
 	// Within renew window (10d left) → needs issue.
-	writeSelfSigned(time.Now().Add(10 * 24 * time.Hour))
-	if !NeedsIssue(dir) {
+	writeSelfSigned(hash, time.Now().Add(10*24*time.Hour))
+	if !NeedsIssue(dir, hash, base) {
 		t.Error("near-expiry cert should need issue")
 	}
 
 	// Garbage → needs issue.
 	_ = os.WriteFile(certPath, []byte("not a cert"), 0o644)
-	if !NeedsIssue(dir) {
+	if !NeedsIssue(dir, hash, base) {
 		t.Error("unparseable cert should need issue")
 	}
 }

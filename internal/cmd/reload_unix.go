@@ -10,9 +10,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/fatih/color"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
 )
 
 // ReloadableConfig holds a reference to the daemon for hot-reload.
@@ -22,7 +22,13 @@ type ReloadableConfig struct {
 
 // startReloadWatcher listens for SIGUSR1 and reloads config.
 // With the sync-based architecture, intervals are fixed (3s watching, 60s idle).
-// Hot-reload now mainly serves as a signal to re-read config for future settings.
+//
+// This used to Load() the config and THROW THE RESULT AWAY while logging "Config
+// reloaded successfully" — so `unarr daemon reload` was a no-op that claimed to
+// work. Users toggled allow_delete / preferred_method, reloaded, and the daemon
+// kept reporting the startup values forever (the web then showed "file deletion
+// not enabled" against a config.toml that plainly said true). Anything applied
+// here MUST really be applied; anything that still needs a restart MUST say so.
 func startReloadWatcher(rc *ReloadableConfig) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGUSR1)
@@ -31,13 +37,18 @@ func startReloadWatcher(rc *ReloadableConfig) {
 		for range sigCh {
 			log.Println("Received SIGUSR1, reloading config...")
 
-			_, err := config.Load("")
+			cfg, err := config.Load("")
 			if err != nil {
 				log.Printf("Config reload failed: %v", err)
 				continue
 			}
-
-			log.Println("Config reloaded successfully")
+			if rc == nil || rc.Daemon == nil {
+				log.Println("Config reload: no daemon attached, nothing applied")
+				continue
+			}
+			// ApplyReloadedConfig logs precisely what landed and what still needs
+			// a restart — don't add a blanket "reloaded successfully" on top of it.
+			rc.Daemon.ApplyReloadedConfig(cfg.Library.AllowDelete, cfg.Download.MethodOrder())
 		}
 	}()
 }
@@ -60,7 +71,9 @@ func sendReloadSignal() error {
 	}
 	fmt.Println()
 	color.New(color.FgGreen).Printf("  ✓ Reload signal sent to daemon (PID %d)\n", state.PID)
-	fmt.Println("  Config will be re-read shortly.")
+	// Be precise about what a reload does and doesn't apply — claiming a blanket
+	// "config re-read" is what sent users chasing a setting that never took.
+	fmt.Println("  Applies now: allow_delete. Everything else needs 'unarr daemon restart'.")
 	fmt.Println()
 	return nil
 }

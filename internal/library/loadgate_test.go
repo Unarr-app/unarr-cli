@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 )
 
 // A huge ratio means the threshold is always above the real load, so the gate

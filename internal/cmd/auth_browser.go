@@ -217,7 +217,7 @@ const callbackHTML = `<!DOCTYPE html>
 <body>
   <div class="card">
     <div class="check">✓</div>
-    <h1>Connected to torrentclaw</h1>
+    <h1>Connected to unarr</h1>
     <p>You can close this tab and return to your terminal.</p>
   </div>
 </body>

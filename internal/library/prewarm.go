@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 )
 
 // Thumbnail sampling — kept in lockstep with the web's src/lib/stream/thumbnails.ts
@@ -25,9 +25,15 @@ const thumbWidth = 320
 // PrewarmOptions controls scan-time sidecar extraction.
 type PrewarmOptions struct {
 	FFmpegPath      string // resolved ffmpeg binary; empty disables prewarm
+	FFprobePath     string // resolved ffprobe binary; needed for the keyframe index
 	CacheSubtitles  bool   // library.cache_subtitles
 	CacheThumbnails bool   // library.cache_thumbnails
 	Workers         int    // concurrent ffmpeg jobs (each is heavy); default 2
+
+	// Keyframes caches the COPY-VOD keyframe index (.unarr/<file>.copyseg.json) for
+	// H.264 items so playback plans its segment boundaries without the full
+	// demux-only ffprobe read. Requires FFprobePath.
+	Keyframes bool
 
 	// Trickplay (library.trickplay): generate ONE montage sprite per file sampled
 	// every TrickplayIntervalSec at TrickplayWidth. Replaces live scrubber
@@ -50,6 +56,7 @@ type prewarmJob struct {
 	path     string
 	thumb    bool
 	trick    bool    // trickplay sprite job
+	keyframe bool    // COPY-VOD keyframe index job
 	subIdx   []int   // subtitle stream indices to extract in ONE pass (subtitle job)
 	posSec   float64 // frame position in seconds (thumbnail job)
 	width    int     // frame/tile width (thumbnail + trickplay jobs)
@@ -66,7 +73,7 @@ type prewarmJob struct {
 // the item moves on, and ctx cancellation (Ctrl-C / daemon shutdown) stops
 // cleanly. Safe to call after every scan — only missing/stale caches do work.
 func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptions) {
-	if cache == nil || opts.FFmpegPath == "" || (!opts.CacheSubtitles && !opts.CacheThumbnails && !opts.Trickplay) {
+	if cache == nil || opts.FFmpegPath == "" || (!opts.CacheSubtitles && !opts.CacheThumbnails && !opts.Trickplay && !opts.Keyframes) {
 		return
 	}
 	workers := opts.Workers
@@ -86,7 +93,7 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 	jobs := make(chan prewarmJob)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	subCached, thumbCached, trickCached, failed := 0, 0, 0, 0
+	subCached, thumbCached, trickCached, kfCached, failed := 0, 0, 0, 0, 0
 	var sampleErr string // first extraction error, surfaced in the summary so a
 	// systemic ffmpeg failure (vs one corrupt file) is diagnosable from "N failed".
 
@@ -97,6 +104,24 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 			for j := range jobs {
 				if ctx.Err() != nil {
 					return
+				}
+				if j.keyframe {
+					// Demux-only ffprobe pass → tiny sidecar. Idempotent (skips a
+					// fresh cache). 45 min bounds a huge/stalled remux like the subs pass.
+					jctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+					err := mediainfo.PrewarmKeyframes(jctx, opts.FFprobePath, j.path)
+					cancel()
+					mu.Lock()
+					if err != nil {
+						failed++
+						if sampleErr == "" {
+							sampleErr = err.Error()
+						}
+					} else {
+						kfCached++
+					}
+					mu.Unlock()
+					continue
 				}
 				if j.thumb {
 					if _, ok := mediainfo.ReadCachedThumbnail(j.path, j.posSec, j.width); ok {
@@ -263,15 +288,24 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 					}
 				}
 			}
+			// COPY-VOD keyframe index — only H.264 rides that MPEG-TS path.
+			if opts.Keyframes && opts.FFprobePath != "" && item.MediaInfo.Video != nil &&
+				mediainfo.CopyVODEligibleCodec(item.MediaInfo.Video.Codec) {
+				select {
+				case jobs <- prewarmJob{path: item.FilePath, keyframe: true}:
+				case <-ctx.Done():
+					return
+				}
+			}
 		}
 	}()
 
 	wg.Wait()
-	if subCached > 0 || thumbCached > 0 || trickCached > 0 || failed > 0 {
+	if subCached > 0 || thumbCached > 0 || trickCached > 0 || kfCached > 0 || failed > 0 {
 		if failed > 0 && sampleErr != "" {
-			log.Printf("[prewarm] %d subtitles, %d thumbnails, %d trickplay cached, %d failed (e.g. %s)", subCached, thumbCached, trickCached, failed, sampleErr)
+			log.Printf("[prewarm] %d subtitles, %d thumbnails, %d trickplay, %d keyframes cached, %d failed (e.g. %s)", subCached, thumbCached, trickCached, kfCached, failed, sampleErr)
 		} else {
-			log.Printf("[prewarm] %d subtitles, %d thumbnails, %d trickplay cached, %d failed", subCached, thumbCached, trickCached, failed)
+			log.Printf("[prewarm] %d subtitles, %d thumbnails, %d trickplay, %d keyframes cached, %d failed", subCached, thumbCached, trickCached, kfCached, failed)
 		}
 	}
 }

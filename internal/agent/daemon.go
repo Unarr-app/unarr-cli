@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/upgrade"
+	"github.com/Unarr-app/unarr-cli/internal/upgrade"
 )
 
 // DaemonConfig holds daemon runtime settings.
@@ -85,9 +87,13 @@ type Daemon struct {
 
 	// Managed-VPN split-tunnel state, set by cmd/daemon.go before Run and folded
 	// into DaemonState on every write so external tools (`unarr vpn status`) see it.
-	vpnActive bool
-	vpnMode   string
-	vpnServer string
+	// vpnMu guards these because the reconnect supervisor can flip vpnActive live
+	// (tunnel down → up) from its own goroutine while the sync loop reads them.
+	vpnMu       sync.Mutex
+	vpnActive   bool
+	vpnRequired bool // config [downloads.vpn] required — the fail-closed P2P kill-switch
+	vpnMode     string
+	vpnServer   string
 
 	// CloudFlare Quick Tunnel public URL; folded into DaemonState + heartbeat
 	// so the web can prefer it over Tailscale/LAN for in-browser playback.
@@ -115,13 +121,8 @@ func NewDaemon(cfg DaemonConfig, client *Client) *Daemon {
 // SyncClient returns the sync client for external wiring.
 func (d *Daemon) SyncClient() *SyncClient { return d.sync }
 
-// SetVPNState records the managed-VPN split-tunnel state so it's reflected in the
-// daemon state file (read by `unarr vpn status`). Call before Run.
-func (d *Daemon) SetVPNState(active bool, mode, server string) {
-	d.vpnActive = active
-	d.vpnMode = mode
-	d.vpnServer = server
-}
+// SetVPNState + vpnSnapshot — the managed-VPN split-tunnel / P2P kill-switch state
+// accessors — live in daemon_vpn.go to keep this file within the size budget.
 
 // SetFunnelURL records the CloudFlare Quick Tunnel hostname so it's reflected
 // in the daemon state file (read by `unarr funnel status`) and in heartbeat
@@ -145,9 +146,65 @@ func (d *Daemon) UpdateStreamPort(port int) {
 	d.sync.cfg.StreamPort = port
 }
 
+// directTLSWire renders the per-agent direct-TLS pair for the wire. The daemon
+// read the config, so it always reports explicitly: &0/&"" when the feature is
+// off, which tells the server to clear the columns instead of keeping a port
+// that no longer listens and a hash that squats the unique index.
+func directTLSWire(port int, hash string) (*int, *string) {
+	return &port, &hash
+}
+
+// ApplyReloadedConfig applies the settings a SIGUSR1 reload can change without a
+// restart, and reports honestly on the ones it can't. A reload that silently
+// no-ops is worse than one that refuses, because the user believes it.
+//
+// allow_delete rides the next sync (seconds), so it lands immediately.
+//
+// The method order does NOT: it is only ever sent at register time, and
+// re-registering from here is not safe — Register rewrites d.State (raced by the
+// sync/VPN goroutines) and can fire OnAgentKeyMinted, whose config.Save writes
+// the STARTUP config back to disk, clobbering the very edit that triggered this
+// reload. So we say it needs a restart instead of pretending. Restart is a real
+// fix now: the daemon reports "auto" explicitly, so the server stops enforcing a
+// stale order (it never did before — see RegisterRequest.PreferredMethods).
+func (d *Daemon) ApplyReloadedConfig(allowDelete bool, methodOrder []string) {
+	if d.sync == nil {
+		return
+	}
+	// Never advertise a capability we can't perform: without a delete handler
+	// (no scan paths at startup) the server would queue deletions we drop on the
+	// floor, and the web would spin on them forever.
+	if allowDelete && d.sync.OnDeleteFiles == nil {
+		log.Printf("[reload] allow_delete=true ignored: this daemon has no library scan paths")
+		allowDelete = false
+	}
+	d.sync.SetCanDelete(allowDelete)
+	log.Printf("[reload] allow_delete=%v (reported on next sync)", allowDelete)
+
+	if methodOrder == nil {
+		methodOrder = []string{}
+	}
+	prev := d.cfg.PreferredMethods
+	if prev == nil {
+		prev = []string{}
+	}
+	if !slices.Equal(prev, methodOrder) {
+		log.Printf("[reload] preferred method order changed (%v → %v) — RESTART REQUIRED: run 'unarr daemon restart' to apply it", prev, methodOrder)
+	}
+}
+
 // Register registers the agent and fetches user info + features.
 // Retries with exponential backoff on transient errors (429, 5xx, network).
 func (d *Daemon) Register(ctx context.Context) error {
+	vpnActive, vpnRequired, vpnMode, vpnServer := d.vpnSnapshot()
+	// The daemon read config.toml, so it always reports an explicit preference.
+	// nil means "auto" locally, but on the wire it must be [] — a missing key
+	// leaves a stale server-side list in place (see RegisterRequest).
+	methods := d.cfg.PreferredMethods
+	if methods == nil {
+		methods = []string{}
+	}
+	httpsPort, agentHash := directTLSWire(d.cfg.HTTPSStreamPort, d.cfg.AgentHash)
 	req := RegisterRequest{
 		AgentID:            d.cfg.AgentID,
 		Name:               d.cfg.AgentName,
@@ -156,8 +213,8 @@ func (d *Daemon) Register(ctx context.Context) error {
 		Version:            d.cfg.Version,
 		DownloadDir:        d.cfg.DownloadDir,
 		StreamPort:         d.cfg.StreamPort,
-		HTTPSStreamPort:    d.cfg.HTTPSStreamPort,
-		AgentHash:          d.cfg.AgentHash,
+		HTTPSStreamPort:    httpsPort,
+		AgentHash:          agentHash,
 		StreamSecret:       d.cfg.StreamSecret,
 		LanIP:              d.cfg.LanIP,
 		TailscaleIP:        d.cfg.TailscaleIP,
@@ -167,12 +224,12 @@ func (d *Daemon) Register(ctx context.Context) error {
 		FFmpegPath:         d.cfg.FFmpegPath,
 		HWEncoders:         d.cfg.HWEncoders,
 		HWDevices:          d.cfg.HWDevices,
-		VPNActive:          d.vpnActive,
-		VPNMode:            d.vpnMode,
-		VPNServer:          d.vpnServer,
+		VPNActive:          vpnActive,
+		VPNMode:            vpnMode,
+		VPNServer:          vpnServer,
 		FunnelURL:          d.funnelURL,
 		IsDocker:           RunningInDocker(),
-		PreferredMethods:   d.cfg.PreferredMethods,
+		PreferredMethods:   &methods,
 		MaxStreamSessions:  d.cfg.MaxStreamSessions,
 	}
 	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {
@@ -230,9 +287,11 @@ func (d *Daemon) Register(ctx context.Context) error {
 		PID:         os.Getpid(),
 		StartedAt:   now,
 		MethodStats: make(map[string]int),
-		VPNActive:   d.vpnActive,
-		VPNMode:     d.vpnMode,
-		VPNServer:   d.vpnServer,
+		VPNActive:   vpnActive,
+		VPNMode:     vpnMode,
+		VPNServer:   vpnServer,
+		VPNRequired: vpnRequired,
+		VPNBlocking: vpnRequired && !vpnActive,
 		FunnelURL:   d.funnelURL,
 	}
 	WriteState(&d.State)
@@ -314,7 +373,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.Watching.Store(watching)
 	}
 	d.sync.GetVPNState = func() (bool, string, string) {
-		return d.vpnActive, d.vpnMode, d.vpnServer
+		active, _, mode, server := d.vpnSnapshot()
+		return active, mode, server
 	}
 	d.sync.GetFunnelURL = func() string {
 		return d.funnelURL

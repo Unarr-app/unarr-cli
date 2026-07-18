@@ -10,21 +10,22 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/acme"
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/davfs"
+	"github.com/Unarr-app/unarr-cli/internal/engine"
+	"github.com/Unarr-app/unarr-cli/internal/funnel"
+	"github.com/Unarr-app/unarr-cli/internal/library"
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/download"
 	"github.com/fatih/color"
 	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
-	"github.com/torrentclaw/unarr/internal/acme"
-	"github.com/torrentclaw/unarr/internal/agent"
-	"github.com/torrentclaw/unarr/internal/config"
-	"github.com/torrentclaw/unarr/internal/engine"
-	"github.com/torrentclaw/unarr/internal/funnel"
-	"github.com/torrentclaw/unarr/internal/library"
-	"github.com/torrentclaw/unarr/internal/library/mediainfo"
-	"github.com/torrentclaw/unarr/internal/usenet/download"
-	"github.com/torrentclaw/unarr/internal/vpn"
 )
 
 // newStartCmd creates the top-level `unarr start` command.
@@ -287,54 +288,32 @@ func runDaemonStart() error {
 	reporter := engine.NewProgressReporter(agentClient, statusInterval)
 	reporter.SetWatchingFunc(func() bool { return d.Watching.Load() })
 
-	// Managed-VPN add-on: bring up the in-process WireGuard split-tunnel before
-	// the torrent client so peer + tracker traffic routes through it. Failure is
-	// non-fatal — log and download in the clear (better than refusing to run).
-	var vpnTunnel *vpn.Tunnel
-	if cfg.Download.VPN.ConfigFile != "" {
-		// Self-hosted / personal-VPN mode: read a local .conf directly.
-		raw, rerr := os.ReadFile(cfg.Download.VPN.ConfigFile)
-		if rerr != nil {
-			log.Printf("[vpn] could not read config_file %q (%v) — downloading in the clear", cfg.Download.VPN.ConfigFile, rerr)
-		} else if t, uerr := vpn.Up(string(raw)); uerr != nil {
-			log.Printf("[vpn] tunnel failed to start from config_file (%v) — downloading in the clear", uerr)
-		} else {
-			vpnTunnel = t
-			defer vpnTunnel.Close()
-			log.Printf("[vpn] managed VPN active (local config_file) — torrent traffic split-tunnelled through WireGuard")
-		}
-	} else if cfg.Download.VPN.Enabled {
-		apiURL := cfg.Auth.APIURL
-		if apiURL == "" {
-			apiURL = "https://torrentclaw.com"
-		}
-		fetchCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-		conf, ferr := vpn.FetchConfig(fetchCtx, apiURL, cfg.Auth.APIKey, "unarr/"+Version, cfg.Agent.ID, false)
-		cancel()
-		var fe *vpn.FetchError
-		switch {
-		case ferr != nil && errors.As(ferr, &fe) && fe.Code == vpn.ErrSlotOnDevice:
-			log.Printf("[vpn] the single WireGuard slot is already held by another unarr agent — this one downloads in the clear. To protect this machine too, set up OpenVPN on it (1 agent uses WireGuard, the rest use OpenVPN — up to 10). See https://torrentclaw.com/vpn")
-		case ferr != nil:
-			log.Printf("[vpn] could not enable VPN (%v) — downloading in the clear", ferr)
-		default:
-			if t, uerr := vpn.Up(conf); uerr != nil {
-				log.Printf("[vpn] tunnel failed to start (%v) — downloading in the clear", uerr)
-			} else {
-				vpnTunnel = t
-				defer vpnTunnel.Close()
-				log.Printf("[vpn] managed VPN active — torrent traffic split-tunnelled through WireGuard")
-			}
-		}
+	// Managed-VPN add-on: bring up the in-process WireGuard split-tunnel before the
+	// torrent client so peer + tracker traffic routes through it (see daemon_vpn.go).
+	// With [downloads.vpn] required=false (default) a failed tunnel is non-fatal —
+	// download in the clear. With required=true it is a fail-CLOSED kill-switch:
+	// torrent/P2P is DISABLED without a live tunnel (debrid/usenet keep working).
+	vpnRequired := cfg.Download.VPN.Required
+	vpnTunnel, vpnModeLabel := bringUpVPN(cfg, vpnRequired)
+	if vpnTunnel != nil {
+		defer vpnTunnel.Close()
 	}
 
-	// Record VPN split-tunnel state for `unarr vpn status`.
-	if vpnTunnel != nil {
-		mode := "managed"
-		if cfg.Download.VPN.ConfigFile != "" {
-			mode = "self-hosted"
-		}
-		d.SetVPNState(true, mode, vpnTunnel.Endpoint)
+	// Record VPN state UNCONDITIONALLY when required, so a nil/failed tunnel is
+	// surfaced as BLOCKING to `unarr vpn status` + doctor (not silently off).
+	// Report active by real HEALTH, not mere presence: a device-less tunnel
+	// (bring-up failed but returned a non-nil object) must not read as
+	// "protected" for ~15s until the supervisor's first tick — a privacy feature
+	// erring toward "safe" must never claim protection it doesn't have yet.
+	// Healthy() is nil-safe.
+	if vpnRequired || vpnTunnel != nil {
+		d.SetVPNState(vpnTunnel.Healthy(), vpnRequired, vpnModeLabel, vpnEndpoint(vpnTunnel))
+	}
+
+	// Kill-switch auto-heal: when required and a tunnel was attempted, watch health
+	// and reconnect with backoff so a mid-session tunnel death self-recovers.
+	if vpnRequired && (cfg.Download.VPN.Enabled || cfg.Download.VPN.ConfigFile != "") {
+		go superviseVPNTunnel(ctx, d, vpnTunnel, cfg, vpnModeLabel)
 	}
 
 	// Create torrent downloader
@@ -351,6 +330,7 @@ func runDaemonStart() error {
 		SeedRatio:          cfg.Download.SeedRatio,
 		SeedTime:           seedTime,
 		VPNTunnel:          vpnTunnel,
+		VPNRequired:        vpnRequired,
 	})
 	if err != nil {
 		return fmt.Errorf("create torrent downloader: %w", err)
@@ -393,6 +373,14 @@ func runDaemonStart() error {
 			log.Printf("[usenet] enabled via preferred_methods")
 			break
 		}
+	}
+	// On-the-fly Usenet streaming is strictly opt-in (downloads.usenet_streaming).
+	// Log its state so the boot line makes clear whether a Usenet stream session
+	// will be served live from NNTP or always fall back to the batch download.
+	if cfg.Download.UsenetStreaming {
+		log.Printf("[usenet] on-the-fly streaming ENABLED (downloads.usenet_streaming=true) — streamable releases play live, others fall back to download")
+	} else {
+		log.Printf("[usenet] on-the-fly streaming disabled (downloads.usenet_streaming=false) — usenet stream sessions use the batch download")
 	}
 
 	// Pre-flight disk reserve: refuse a download that would leave less than this
@@ -537,6 +525,9 @@ func runDaemonStart() error {
 	} else {
 		log.Printf("[hls_cache] disabled by config — every play re-encodes from scratch")
 	}
+	// Read-only WebDAV library export (opt-in). Armed before Listen() so it is
+	// mounted on the same mux (and thus served by the HTTPS listener too).
+	setupWebDAV(streamSrv, cfg)
 	if err := streamSrv.Listen(ctx); err != nil {
 		return fmt.Errorf("start stream server: %w", err)
 	}
@@ -555,10 +546,14 @@ func runDaemonStart() error {
 				case <-ctx.Done():
 					return
 				case <-t.C:
-					if !acme.NeedsIssue(config.DataDir()) {
+					// fetchAgentCert owns the NeedsIssue gate and reports whether a
+					// fresh cert was actually persisted. Hot-swap ONLY then — the old
+					// unconditional reload logged "renewed cert hot-swapped" every 6h
+					// even when issuance was being rejected, masking a permanent
+					// direct-TLS outage as a healthy renewal.
+					if !fetchAgentCert(ctx, agentClient, cfg.Agent.Hash) {
 						continue
 					}
-					fetchAgentCert(ctx, agentClient, cfg.Agent.Hash)
 					keyPath, certPath := acme.Paths(config.DataDir())
 					if err := streamSrv.LoadTLSCertificateFromFiles(certPath, keyPath); err != nil {
 						log.Printf("[acme] hot-swap after renewal failed: %v", err)
@@ -623,7 +618,7 @@ func runDaemonStart() error {
 				streamRegistry.mu.Lock()
 				streamRegistry.cancels[t.ID] = streamCancel
 				streamRegistry.mu.Unlock()
-				go handleStreamTask(streamCtx, t, reporter, cfg, agentClient, streamSrv, func() { d.TriggerSync() })
+				go handleStreamTask(streamCtx, t, reporter, cfg, agentClient, streamSrv, vpnTunnel, func() { d.TriggerSync() })
 			} else {
 				manager.Submit(ctx, t)
 			}
@@ -697,12 +692,33 @@ func runDaemonStart() error {
 		}
 	}
 
-	// Wire: sync receives file deletion requests from the server
-	if cfg.Library.AllowDelete && len(daemonCfg.ScanPaths) > 0 {
-		sc.OnDeleteFiles = func(items []agent.LibraryDeleteRequest) []int {
+	// Wire: sync receives file deletion requests from the server.
+	// Wired whenever we have scan paths and gated at CALL time on the live flag,
+	// not at startup: a reload that flips allow_delete on must not leave the
+	// handler unwired (we'd report canDelete=true and drop every deletion), and
+	// one that flips it off must stop deleting immediately.
+	if len(daemonCfg.ScanPaths) > 0 {
+		sc.OnDeleteFiles = func(items []agent.LibraryDeleteRequest) ([]int, []agent.LibraryDeleteError) {
+			if !sc.CanDelete() {
+				// Report rather than drop: the server thinks a deletion is pending
+				// and would re-send it every sync while the web waits on it.
+				log.Printf("[library] refusing %d deletion request(s): allow_delete is off", len(items))
+				failed := make([]agent.LibraryDeleteError, 0, len(items))
+				for _, it := range items {
+					failed = append(failed, agent.LibraryDeleteError{
+						ID:    it.ItemID,
+						Error: "file deletion is disabled on this agent (library.allow_delete)",
+					})
+				}
+				return nil, failed
+			}
 			return library.DeleteFiles(items, daemonCfg.ScanPaths)
 		}
+	} else if cfg.Library.AllowDelete {
+		log.Printf("[library] allow_delete=true but no scan paths resolved — deletion stays OFF")
+		sc.SetCanDelete(false) // never advertise what we cannot perform
 	}
+	log.Printf("[library] file deletion from web: %v", sc.CanDelete())
 
 	// Wire: sync receives on-demand subtitle-fetch jobs (write VTT sidecars).
 	// Always available (additive, no deletion) as long as we have scan paths.
@@ -871,7 +887,15 @@ func runDaemonStart() error {
 				if err != nil {
 					playerSessionRegistry.remove(hlsCfg.SessionID)
 					hlsCancel()
-					failSession(hlsCfg.SessionID, sessErrStartFailed, err.Error())
+					// A remote debrid/URL source that wouldn't probe is the user's
+					// provider link, not our agent — report source_unreachable so
+					// the web's streaming-health watchdog doesn't false-page it as
+					// a transcode/HW ("QSV-class") regression.
+					code := sessErrStartFailed
+					if errors.Is(err, engine.ErrSourceUnreachable) {
+						code = sessErrSourceUnreachable
+					}
+					failSession(hlsCfg.SessionID, code, err.Error())
 					return
 				}
 				if prewarm {
@@ -885,6 +909,28 @@ func runDaemonStart() error {
 				streamSrv.HLS().Register(hsess)
 				go watchSessionReady(hlsCtx, agentClient, hsess, hlsCfg.SessionID)
 			}()
+		}
+
+		// Usenet stream (on-the-fly NNTP, hueco #3 for usenet): the source is an
+		// NZB release, not a local file or a debrid link. Try to serve it live
+		// straight from NNTP; a non-streamable release (compressed/encrypted RAR,
+		// password) OR the feature being off falls back CLEANLY to a normal Usenet
+		// download inside the handler — playback is never blocked. Runs before the
+		// debrid/filePath branches: a usenet stream session carries no DirectURL
+		// and has no local FilePath yet.
+		if sess.Usenet {
+			handleUsenetStreamSession(sess, usenetStreamDeps{
+				ctx:         ctx,
+				cfg:         cfg,
+				usenetDl:    usenetDl,
+				streamSrv:   streamSrv,
+				manager:     manager,
+				hlsCache:    hlsCache,
+				startHLS:    startHLSPlayback,
+				failSession: failSession,
+				markReady:   markReady,
+			})
+			return
 		}
 
 		// Debrid direct-play (hueco #2 / 2a): the source has no local file — the
@@ -911,7 +957,10 @@ func runDaemonStart() error {
 				provider, perr := engine.NewDebridFileProvider(bctx, sess.DirectURL, sess.FileName, sess.FileSize, refresh)
 				if perr != nil {
 					playerSessionRegistry.remove(sess.SessionID)
-					failSession(sess.SessionID, sessErrStartFailed, fmt.Sprintf("debrid provider: %v", perr))
+					// Provider setup does a HEAD against the debrid link — a
+					// failure here means the remote source is unreachable (expired
+					// link / dead CDN node), not a local agent fault.
+					failSession(sess.SessionID, sessErrSourceUnreachable, fmt.Sprintf("debrid provider: %v", perr))
 					return
 				}
 				streamSrv.SetFile(provider, sess.TaskID)
@@ -1208,6 +1257,46 @@ func streamAllowedRoots(cfg config.Config) []string {
 		cfg.Organize.MoviesDir, cfg.Organize.TVShowsDir}
 }
 
+// setupWebDAV arms the read-only WebDAV library export when opted in via
+// downloads.webdav_enabled. Credentials default to user "unarr" + a password
+// derived from the STABLE API key (so a mounted Infuse/Kodi share survives
+// daemon restarts, unlike the per-start stream secret). The virtual FS reuses
+// the exact same allowed-roots gate as /stream. No-op (with a log line) when
+// disabled or when no usable credentials exist.
+func setupWebDAV(streamSrv *engine.StreamServer, cfg config.Config) {
+	if !cfg.Download.WebDAVEnabled {
+		log.Printf("[webdav] disabled (set downloads.webdav_enabled = true to expose the library read-only)")
+		return
+	}
+	user, pass, active := engine.ResolveWebDAVCreds(cfg.Download.WebDAVUsername, cfg.Download.WebDAVPassword, cfg.Auth.APIKey)
+	if !active {
+		log.Printf("[webdav] NOT enabled: set downloads.webdav_password (API key is empty, so no password can be derived)")
+		return
+	}
+	roots := streamAllowedRoots(cfg)
+	fs := davfs.New(davfs.Options{
+		Load:      library.LoadCache,
+		CachePath: library.CachePath(),
+		AllowPath: func(p string) bool { return isAllowedStreamPathResolved(filepath.Clean(p), roots...) },
+	})
+	streamSrv.EnableWebDAV(fs, user, pass)
+	log.Printf("[webdav] read-only library export enabled (user %q) at :%d/dav/", user, cfg.Download.StreamPort)
+	if webDAVOverUPnPExposed(cfg) {
+		log.Printf("[webdav] WARNING: enable_upnp is ALSO on — UPnP maps the stream port to the WAN, " +
+			"exposing /dav/ (HTTP Basic auth over cleartext) to the public internet. " +
+			"Disable enable_upnp, or keep the mount on LAN / Tailscale only.")
+	}
+}
+
+// webDAVOverUPnPExposed reports the dangerous combination where the read-only
+// WebDAV export AND UPnP/NAT-PMP WAN port-mapping are BOTH enabled: UPnP
+// publishes the stream port to the public internet, so /dav/ (served with HTTP
+// Basic auth over cleartext) becomes reachable from the WAN. Callers warn loudly
+// but do not refuse to start — the operator may have opted in deliberately.
+func webDAVOverUPnPExposed(cfg config.Config) bool {
+	return cfg.Download.WebDAVEnabled && cfg.Download.EnableUPnP
+}
+
 // allowedDirs. filePath must already be cleaned (filepath.Clean) by the caller.
 // This defends against a compromised API server sending a path traversal payload.
 func isAllowedStreamPath(filePath string, allowedDirs ...string) bool {
@@ -1217,6 +1306,40 @@ func isAllowedStreamPath(filePath string, allowedDirs ...string) bool {
 		}
 		rel, err := filepath.Rel(filepath.Clean(dir), filePath)
 		if err == nil && !strings.HasPrefix(rel, "..") {
+			return true
+		}
+	}
+	return false
+}
+
+// isAllowedStreamPathResolved is a symlink-hardened variant used by the WebDAV
+// export's per-open re-check. The lexical isAllowedStreamPath can be defeated by
+// a symlink that lives INSIDE an allowed root but points OUTSIDE it — os.Open /
+// os.Stat happily follow it out, leaking an arbitrary file. This first requires
+// the lexical gate to pass (so it can only ever DENY more, never allow a path
+// the lexical check rejects), then resolves BOTH the file and the roots with
+// EvalSymlinks and re-checks containment against the resolved roots. Resolving
+// both sides keeps a library legitimately mounted THROUGH a symlink (e.g.
+// /downloads → /mnt/nas) allowed, matching relocateUnreachable's approach. A
+// failed EvalSymlinks (e.g. a vanished file) is treated as outside the roots
+// (fail-closed) — a GET would fail on os.Open anyway.
+func isAllowedStreamPathResolved(filePath string, allowedDirs ...string) bool {
+	if !isAllowedStreamPath(filePath, allowedDirs...) {
+		return false
+	}
+	realPath, err := filepath.EvalSymlinks(filePath)
+	if err != nil {
+		return false
+	}
+	for _, dir := range allowedDirs {
+		if dir == "" {
+			continue
+		}
+		realDir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			continue
+		}
+		if isAllowedStreamPath(realPath, realDir) {
 			return true
 		}
 	}
@@ -1280,7 +1403,13 @@ const (
 	pathErrMissing       = "file_missing"
 	pathErrNoVideo       = "no_video_file"
 	sessErrFfmpegMissing = "ffmpeg_unavailable"
-	sessErrStartFailed   = "start_failed"
+	// sessErrSourceUnreachable: a REMOTE source (debrid HLS-from-URL / direct
+	// link) could not be probed or reached — the provider link timed out, 4xx'd,
+	// or the CDN node never delivered bytes. Kept distinct from start_failed so
+	// the web's streaming-health watchdog does NOT count the user's dead debrid
+	// link as an agent transcode/HW ("QSV-class") regression.
+	sessErrSourceUnreachable = "source_unreachable"
+	sessErrStartFailed       = "start_failed"
 )
 
 // resolvePlayableFile validates and self-heals a web-provided source path into
@@ -1542,8 +1671,21 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 // exponential backoff so we don't hammer cloudflared into a tight loop when
 // it can't reach the CF edge.
 func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
-	backoff := 2 * time.Second
+	const initialBackoff = 2 * time.Second
 	const maxBackoff = 5 * time.Minute
+	// A tunnel that stayed up this long AND actually published a URL was
+	// HEALTHY — its exit is CF's routine ~6h quick-tunnel rotation (or a
+	// one-off blip), not a crash loop. Without this reset the backoff only
+	// ever grew: a few flaky restarts early in the daemon's life ratcheted it
+	// toward 5 min, and then EVERY later rotation of a perfectly healthy
+	// tunnel cost remote viewers up to 5 minutes of funnel downtime, forever.
+	// Healthy exit → fast respawn; only consecutive unhealthy runs keep
+	// escalating. The URL requirement matters: a cloudflared that connects
+	// but never provisions (regional CF incident) idles past any lifetime
+	// threshold before dying — lifetime alone would classify that as healthy
+	// and churn max-frequency restarts through the whole incident.
+	const healthyRun = 5 * time.Minute
+	backoff := initialBackoff
 	for ctx.Err() == nil {
 		t, err := funnel.Start(ctx, funnel.Config{Port: port})
 		if err != nil {
@@ -1556,6 +1698,8 @@ func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
 			backoff = min(backoff*2, maxBackoff)
 			continue
 		}
+		startedAt := time.Now()
+		var gotURL atomic.Bool
 		log.Printf("[funnel] cloudflared started, waiting for public URL...")
 		go func() {
 			url, werr := t.WaitURL(45 * time.Second)
@@ -1564,6 +1708,7 @@ func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
 				return
 			}
 			log.Printf("[funnel] public URL: %s", url)
+			gotURL.Store(true)
 			d.SetFunnelURL(url)
 		}()
 		// Block until cloudflared exits (CF rotation, crash, or shutdown).
@@ -1572,6 +1717,9 @@ func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
 		d.SetFunnelURL("")
 		if ctx.Err() != nil {
 			return
+		}
+		if gotURL.Load() && time.Since(startedAt) >= healthyRun {
+			backoff = initialBackoff
 		}
 		if exitErr != nil {
 			log.Printf("[funnel] cloudflared exited: %v — restarting in %s", exitErr, backoff)
@@ -1749,29 +1897,36 @@ func agentTLSBaseDomain() string {
 // and writes it to the agent state dir. The agent's private key never leaves the
 // machine — only a CSR is sent. Failure is non-fatal: HTTPS stays off and the
 // HTTP listener + CloudFlare funnel keep serving.
-func fetchAgentCert(ctx context.Context, client *agent.Client, hash string) {
+//
+// Returns true ONLY when a fresh cert was actually issued AND persisted — it is
+// the single owner of the NeedsIssue gate, so callers must not re-check it (the
+// old ticker did, then hot-swapped + logged "renewed" unconditionally: on a
+// persistently-rejected issuance it reloaded the same stale cert and printed a
+// success line every 6h, masking the failure for months).
+func fetchAgentCert(ctx context.Context, client *agent.Client, hash string) bool {
 	dataDir := config.DataDir()
-	if !acme.NeedsIssue(dataDir) {
-		return
-	}
 	base := agentTLSBaseDomain()
+	if !acme.NeedsIssue(dataDir, hash, base) {
+		return false
+	}
 	csr, err := acme.BuildCSR(dataDir, hash, base)
 	if err != nil {
 		log.Printf("[acme] build CSR failed: %v", err)
-		return
+		return false
 	}
 	cctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	cert, err := client.IssueCert(cctx, csr)
 	if err != nil {
 		log.Printf("[acme] cert issuance failed (HTTPS stays off, funnel still works): %v", err)
-		return
+		return false
 	}
 	if err := acme.WriteCert(dataDir, cert); err != nil {
 		log.Printf("[acme] write cert failed: %v", err)
-		return
+		return false
 	}
-	log.Printf("[acme] installed cert for *.%s.%s", hash, base)
+	log.Printf("[acme] installed cert for %s", acme.WildcardName(hash, base))
+	return true
 }
 
 // monitorSessionHealth keeps re-posting the live transcode health for the

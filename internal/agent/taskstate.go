@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torrentclaw/unarr/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
 // TaskState represents the execution state of a single download task.

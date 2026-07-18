@@ -8,6 +8,25 @@ import (
 	"time"
 )
 
+// ExchangeAuthKeyRequest is sent (unauthenticated) to redeem a single-use
+// auth-key for a durable per-agent API credential. The field names match the
+// FIXED web contract at POST /api/internal/agent/authkey/exchange.
+type ExchangeAuthKeyRequest struct {
+	AuthKey  string `json:"authKey"`
+	AgentID  string `json:"agentId"`
+	Hostname string `json:"hostname,omitempty"`
+	Platform string `json:"platform,omitempty"` // "<os>/<arch>", e.g. "linux/amd64"
+}
+
+// ExchangeAuthKeyResponse is the 200 body of a successful auth-key exchange.
+// APIURL is optional — when set the agent persists it so a key minted against
+// a specific host (staging, a mirror) sticks.
+type ExchangeAuthKeyResponse struct {
+	APIKey string `json:"apiKey"`
+	UserID string `json:"userId"`
+	APIURL string `json:"apiUrl,omitempty"`
+}
+
 // RegisterRequest is sent by the CLI on startup to register itself.
 type RegisterRequest struct {
 	AgentID        string `json:"agentId"`
@@ -22,10 +41,18 @@ type RegisterRequest struct {
 	// HTTPSStreamPort + AgentHash drive the per-agent direct-TLS feature: the web
 	// builds https://<ip-dashed>.<hash>.agent.unarr.app:<httpsPort>/... once the
 	// agent has an issued cert. Zero/empty when the feature is off or pre-cert.
-	HTTPSStreamPort int    `json:"httpsStreamPort,omitempty"`
-	AgentHash       string `json:"agentHash,omitempty"`
-	LanIP           string `json:"lanIp,omitempty"`
-	TailscaleIP     string `json:"tailscaleIp,omitempty"`
+	//
+	// Tri-state pointers, same trap as PreferredMethods: "off" is a MEANINGFUL 0/""
+	// that omitempty elided, so the server could not tell it from "not reported"
+	// and kept the last value forever — leaving the web building URLs to a port
+	// that no longer listens, and a dead hash squatting the unique index so the
+	// machine that legitimately owns it gets 409 hash_taken.
+	//   nil → omitted: "not reported" (partial registrars), server keeps its value
+	//   &0 / &"" → explicitly off, server clears the column
+	HTTPSStreamPort *int    `json:"httpsStreamPort,omitempty"`
+	AgentHash       *string `json:"agentHash,omitempty"`
+	LanIP           string  `json:"lanIp,omitempty"`
+	TailscaleIP     string  `json:"tailscaleIp,omitempty"`
 	// StreamSecret is the daemon's per-run HMAC key (hex) for stream tokens. The
 	// web mints the HLS path token with it (the agent mints /stream tokens on its
 	// own URLs); the agent verifies both. In memory, regenerated each start, so a
@@ -66,8 +93,19 @@ type RegisterRequest struct {
 	IsDocker bool `json:"isDocker"`
 	// PreferredMethods is the agent's ordered download-method preference from
 	// config.toml (e.g. ["debrid","usenet"]). The web honours it so a "debrid
-	// only" agent is never handed a torrent task. Empty/["auto"] → web decides.
-	PreferredMethods []string `json:"preferredMethods,omitempty"`
+	// only" agent is never handed a torrent task.
+	//
+	// Tri-state, and the pointer is load-bearing. The server only overwrites the
+	// column when the key is present, so a plain []string with omitempty made
+	// "auto" (nil) indistinguishable from "not reported": the key vanished and a
+	// previously-reported ["usenet"] stuck forever, with no way back from either
+	// the CLI or the web (the agent's list wins over the web toggle). See the
+	// IsDocker note above — same trap, and this field fell into it.
+	//   nil       → key omitted: "I don't know" (partial registrars: status, doctor)
+	//   &[]string{} → sends []: "explicitly auto", clears the column server-side
+	//   &[...]    → sends the ordered list
+	// Callers that read config.toml MUST send a non-nil pointer, never nil.
+	PreferredMethods *[]string `json:"preferredMethods,omitempty"`
 	// MaxStreamSessions is how many concurrent in-browser HLS sessions this
 	// daemon will hold (config.toml downloads.max_stream_sessions; 1 on a
 	// personal agent, higher on a shared/server agent). The web reads it to
@@ -439,23 +477,29 @@ type LibrarySyncResponse struct {
 // SyncRequest is sent by the CLI periodically to synchronize state with the server.
 // Contains the CLI's full execution state — the server responds with pending actions.
 type SyncRequest struct {
-	AgentID         string      `json:"agentId"`
-	Version         string      `json:"version,omitempty"`
-	OS              string      `json:"os,omitempty"`
-	Arch            string      `json:"arch,omitempty"`
-	Name            string      `json:"name,omitempty"`
-	DownloadDir     string      `json:"downloadDir,omitempty"`
-	DiskFreeBytes   int64       `json:"diskFreeBytes,omitempty"`
-	DiskTotalBytes  int64       `json:"diskTotalBytes,omitempty"`
-	StreamPort      int         `json:"streamPort,omitempty"`
-	HTTPSStreamPort int         `json:"httpsStreamPort,omitempty"`
-	AgentHash       string      `json:"agentHash,omitempty"`
+	AgentID        string `json:"agentId"`
+	Version        string `json:"version,omitempty"`
+	OS             string `json:"os,omitempty"`
+	Arch           string `json:"arch,omitempty"`
+	Name           string `json:"name,omitempty"`
+	DownloadDir    string `json:"downloadDir,omitempty"`
+	DiskFreeBytes  int64  `json:"diskFreeBytes,omitempty"`
+	DiskTotalBytes int64  `json:"diskTotalBytes,omitempty"`
+	StreamPort     int    `json:"streamPort,omitempty"`
+	// Tri-state — see RegisterRequest.HTTPSStreamPort. Sent every sync so turning
+	// direct-TLS off takes effect without waiting for a re-register.
+	HTTPSStreamPort *int        `json:"httpsStreamPort,omitempty"`
+	AgentHash       *string     `json:"agentHash,omitempty"`
 	LanIP           string      `json:"lanIp,omitempty"`
 	TailscaleIP     string      `json:"tailscaleIp,omitempty"`
 	FreeSlots       int         `json:"freeSlots"`
 	Tasks           []TaskState `json:"tasks"`
 	CanDelete       bool        `json:"canDelete"`                 // library.allow_delete is enabled
 	DeleteConfirmed []int       `json:"deleteConfirmed,omitempty"` // library item IDs successfully deleted from disk
+	// Deletions that failed on disk (permission, path outside our scan paths, I/O).
+	// The web clears the pending flag and shows the error — a failure the agent
+	// never reports is a spinner the user watches forever.
+	DeleteFailed []LibraryDeleteError `json:"deleteFailed,omitempty"`
 	// Subtitle-fetch job IDs the agent completed (sidecar written to disk).
 	SubtitlesFetched []int `json:"subtitlesFetched,omitempty"`
 	// Subtitle-fetch jobs that permanently failed (download/write error) — the web
@@ -553,6 +597,22 @@ type StreamSession struct {
 	// and gates it on an agent-version floor so older daemons never receive a
 	// field they can't serve. Takes priority over FilePath when present.
 	DirectURL string `json:"directUrl,omitempty"`
+	// Usenet marks a stream session whose source is a Usenet (NZB) release rather
+	// than a local file / debrid link. When set — AND the daemon opted into
+	// downloads.usenet_streaming — the daemon tries to serve the release on the
+	// fly from NNTP via NzbID (arranca en segundos); if the release isn't
+	// streamable (compressed/encrypted RAR, password) it falls back CLEANLY to a
+	// normal Usenet download so playback is never blocked. Older daemons ignore
+	// the field and simply never Usenet-stream (they wait for the batch download).
+	Usenet bool `json:"usenet,omitempty"`
+	// NzbID is the pre-resolved NZB id for a Usenet stream session (Usenet=true).
+	// Empty is allowed — the daemon then resolves the NZB from InfoHash/title, the
+	// same way the batch Usenet downloader does.
+	NzbID string `json:"nzbId,omitempty"`
+	// NzbPassword is the archive password for a password-protected Usenet release.
+	// Its mere presence makes the release non-streamable (encrypted) → the daemon
+	// falls back to the batch download, which can extract it with the password.
+	NzbPassword string `json:"nzbPassword,omitempty"`
 }
 
 // SyncResponse is returned by the server with all pending actions for the CLI.
@@ -580,6 +640,16 @@ type SubtitleFetchRequest struct {
 
 // SubtitleFetchError reports a permanently-failed subtitle fetch back to the web.
 type SubtitleFetchError struct {
+	ID    int    `json:"id"`
+	Error string `json:"error"`
+}
+
+// LibraryDeleteError reports a failed disk deletion back to the web.
+//
+// Without this the failure was invisible: the item stayed in deleteInFlight, the
+// server re-sent it every sync, the agent skipped it as already-in-flight, and
+// the web spun forever on a deletion that would never happen or report why.
+type LibraryDeleteError struct {
 	ID    int    `json:"id"`
 	Error string `json:"error"`
 }
