@@ -1,13 +1,20 @@
 name: desktop
 
 # Builds the unarr-desktop system-tray companion on each OS. It is a SEPARATE
-# binary from the headless `unarr` daemon (which ships via the self-hosted
-# `make ship` pipeline, CGO_ENABLED=0). The tray's systray backend is pure-Go on
-# Linux (DBus) and Windows (syscall) but needs CGO on macOS (Cocoa), so it cannot
-# cross-compile from one box — hence this per-OS matrix.
+# binary from the headless `unarr` daemon (whose signed archives ship via
+# goreleaser in release.yml, CGO_ENABLED=0). The tray's systray backend is
+# pure-Go on Linux (DBus) and Windows (syscall) but needs CGO on macOS (Cocoa),
+# so it cannot cross-compile from one box — hence this per-OS matrix.
 #
-# Runs on the GitHub mirror (origin). Forgejo Actions also picks up
-# .github/workflows/ if runners are configured on git.torrentclaw.com.
+# Publishing model ("todo hilado" with the CLI): when release.yml publishes the
+# GitHub Release for a v* tag, the `release: published` trigger here builds the
+# four desktop binaries AND ATTACHES THEM TO THAT SAME RELEASE as
+#   unarr-desktop_<version>_<os>_<arch>[.exe]
+# so /install.sh --desktop and install.ps1 resolve them with the exact same
+# "latest release" logic they already use for the CLI. Older releases simply
+# lack the assets — the installers warn and skip, never fail.
+#
+# Push/PR runs (branch work) only upload workflow artifacts, no release touch.
 
 on:
   push:
@@ -18,6 +25,8 @@ on:
       - "go.sum"
       - ".github/workflows/desktop.yml"
     tags: ["desktop-v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -27,6 +36,9 @@ jobs:
   build:
     name: ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      # gh release upload on the `release` event; read-only otherwise.
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -49,10 +61,23 @@ jobs:
           CGO_ENABLED: ${{ matrix.cgo }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          go build -trimpath -ldflags "-s -w" \
-            -o "unarr-desktop${{ matrix.ext }}" ./cmd/unarr-desktop
-          ls -la "unarr-desktop${{ matrix.ext }}"
+          # Version: CLI release tag vX.Y.Z or standalone desktop-vX.Y.Z tag
+          # → X.Y.Z; branch builds fall back to the short SHA.
+          TAG="${RELEASE_TAG:-${GITHUB_REF_NAME}}"
+          case "$TAG" in
+            desktop-v*) VERSION="${TAG#desktop-v}" ;;
+            v*)         VERSION="${TAG#v}" ;;
+            *)          VERSION="${GITHUB_SHA::7}" ;;
+          esac
+          ASSET="unarr-desktop_${VERSION}_${GOOS}_${GOARCH}${{ matrix.ext }}"
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION} ${SENTRY_DSN:+-X github.com/Unarr-app/unarr-cli/internal/sentry.dsn=${SENTRY_DSN}}" \
+            -o "$ASSET" ./cmd/unarr-desktop
+          ls -la "$ASSET"
 
       - name: Vet
         shell: bash
@@ -62,8 +87,15 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go vet ./cmd/unarr-desktop
 
+      - name: Attach to release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "$ASSET" --clobber
+
       - uses: actions/upload-artifact@v4
         with:
           name: unarr-desktop-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: unarr-desktop${{ matrix.ext }}
+          path: unarr-desktop_*
           if-no-files-found: error

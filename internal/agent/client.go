@@ -546,3 +546,29 @@ func (c *Client) SubmitSkipSegments(ctx context.Context, req SkipSegmentsRequest
 	}
 	return &resp, nil
 }
+
+// SupportReport is a diagnostics bundle sent to the developers. The server
+// emails it to the support inbox (support@unarr.app); nothing is stored
+// client-side beyond the temp log dump the user can inspect first.
+type SupportReport struct {
+	Kind           string `json:"kind"` // "crash" | "logs"
+	Message        string `json:"message,omitempty"`
+	Logs           string `json:"logs,omitempty"`
+	AgentID        string `json:"agentId,omitempty"`
+	AgentVersion   string `json:"agentVersion,omitempty"`
+	DesktopVersion string `json:"desktopVersion,omitempty"`
+	OS             string `json:"os"`
+	Arch           string `json:"arch"`
+}
+
+// SendSupportReport posts a diagnostics/crash report to the server, which
+// forwards it to the developers by email.
+func (c *Client) SendSupportReport(ctx context.Context, r SupportReport) error {
+	var resp struct {
+		OK bool `json:"ok"`
+	}
+	if err := c.doPost(ctx, "/api/internal/agent/support-report", r, &resp); err != nil {
+		return fmt.Errorf("support report: %w", err)
+	}
+	return nil
+}

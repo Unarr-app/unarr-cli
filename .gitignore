@@ -49,3 +49,4 @@ dist-ffbinaries/
 graphify-out/
 CLAUDE.md
 .claude/settings.json
+/unarr-desktop

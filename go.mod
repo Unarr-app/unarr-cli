@@ -3,6 +3,7 @@ module github.com/Unarr-app/unarr-cli
 go 1.25.0
 
 require (
+	fyne.io/systray v1.12.2
 	github.com/BurntSushi/toml v1.6.0
 	github.com/anacrolix/dht/v2 v2.24.0
 	github.com/anacrolix/log v0.17.1-0.20251118025802-918f1157b7bb
@@ -15,6 +16,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/huin/goupnp v1.3.0
 	github.com/olekukonko/tablewriter v1.1.4
+	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/torrentclaw/go-client v0.2.0
@@ -26,7 +28,6 @@ require (
 )
 
 require (
-	fyne.io/systray v1.12.2 // indirect
 	github.com/RoaringBitmap/roaring v1.9.4 // indirect
 	github.com/alecthomas/atomic v0.1.0-alpha2 // indirect
 	github.com/anacrolix/btree v0.1.1 // indirect
@@ -113,7 +114,6 @@ require (
 	github.com/pion/transport/v4 v4.0.1 // indirect
 	github.com/pion/turn/v4 v4.1.4 // indirect
 	github.com/pion/webrtc/v4 v4.2.11 // indirect
-	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/protolambda/ctxlock v0.1.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
