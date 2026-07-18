@@ -1,13 +1,17 @@
-package engine
+// Package notify sends best-effort desktop notifications on the three
+// supported platforms. Shared by the engine (download complete/failed) and the
+// unarr-desktop tray (agent crash / report status) — one implementation, never
+// duplicated per caller.
+package notify
 
 import (
 	"os/exec"
 	"runtime"
 )
 
-// desktopNotify sends a best-effort desktop notification.
+// Send sends a best-effort desktop notification.
 // Silent failure — never blocks or errors.
-func desktopNotify(title, body string) {
+func Send(title, body string) {
 	switch runtime.GOOS {
 	case "linux":
 		exec.Command("notify-send", title, body, "--icon=dialog-information", "--app-name=unarr").Start()

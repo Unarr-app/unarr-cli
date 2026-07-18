@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/notify"
 )
 
 // ManagerConfig holds download manager settings.
@@ -581,7 +582,7 @@ func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Resu
 	}
 	log.Printf("[%s] completed: %s -> %s", agent.ShortID(task.ID), task.Title, finalPath)
 	if m.cfg.Notifications {
-		desktopNotify("Download complete", task.Title)
+		notify.Send("Download complete", task.Title)
 	}
 	m.recordFinished(task.ToStatusUpdate())
 	m.reporter.ReportFinal(ctx, task)
@@ -594,7 +595,7 @@ func (m *Manager) fail(ctx context.Context, task *Task, msg string) {
 	task.Transition(StatusFailed)
 	log.Printf("[%s] FAILED: %s — %s", agent.ShortID(task.ID), task.Title, msg)
 	if m.cfg.Notifications {
-		desktopNotify("Download failed", task.Title+": "+msg)
+		notify.Send("Download failed", task.Title+": "+msg)
 	}
 	m.recordFinished(task.ToStatusUpdate())
 	m.reporter.ReportFinal(ctx, task)
