@@ -93,12 +93,17 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go vet ./cmd/unarr-desktop
 
+      # Attach on the release event AND on a workflow_dispatch/push against a
+      # v* tag — release.yml dispatches us on the tag (its GITHUB_TOKEN can't
+      # fire the `release` event, GitHub's recursion guard). desktop-v* tags
+      # (standalone tray builds) deliberately do NOT match: there is no CLI
+      # release to attach to.
       - name: Attach to release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "$ASSET" --clobber
+        run: gh release upload "${{ github.event.release.tag_name || github.ref_name }}" "$ASSET" --clobber
 
       - uses: actions/upload-artifact@v4
         with:

@@ -26,6 +26,7 @@ on:
 
 permissions:
   contents: write # create the GitHub Release + upload assets
+  actions: write # dispatch desktop.yml so the tray binaries attach to the release
 
 jobs:
   goreleaser:
@@ -59,6 +60,17 @@ jobs:
           # Always defined (empty when the secret is unset) so .goreleaser.yml's
           # skip_upload guard can no-op the brew step instead of erroring.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      # goreleaser publishes the Release with the workflow GITHUB_TOKEN, and
+      # GitHub does NOT fire `release: published` for events created by another
+      # workflow's token (recursion guard) — so desktop.yml would never run on
+      # its own. workflow_dispatch via the API is the documented exception:
+      # explicitly kick the per-OS tray build, which attaches
+      # unarr-desktop_<ver>_<os>_<arch> assets to this same release.
+      - name: Dispatch desktop companion build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run desktop.yml --repo "$GITHUB_REPOSITORY" --ref "${{ github.event.inputs.tag || github.ref_name }}"
 
   docker:
     runs-on: ubuntu-latest
