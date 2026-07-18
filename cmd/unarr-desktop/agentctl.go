@@ -83,6 +83,19 @@ func readStatus() agentStatus {
 // same way the daemon does).
 func configPath() string { return config.FilePath() }
 
+// reapStaleState removes the state file a dead daemon left behind, but only
+// when it still names the given PID (never races a freshly started daemon).
+// Used for tray-initiated stops: a 1.5.1-and-older `unarr stop` can leave the
+// orphan (early-stop race on unix; taskkill /f always on Windows), which would
+// otherwise read as a crash 20s later and email a false report. Newer CLIs
+// reap it themselves — this makes the tray safe with ANY installed CLI.
+func reapStaleState(pid int) {
+	st := agent.ReadState()
+	if st != nil && st.PID == pid && !agent.IsProcessAlive(pid) {
+		agent.RemoveState()
+	}
+}
+
 // pausedMarkerPath marks a tray-initiated pause. Pause and stop are the same
 // daemon operation (clean stop); the on-disk marker is what lets the tray show
 // "paused" (amber) instead of "stopped" (gray) across tray restarts. Lives next

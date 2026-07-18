@@ -135,6 +135,10 @@ func onReady() {
 	// duplicate notification, so plain fields are fine.
 	var suppressCrashUntil time.Time
 	var reportedCrashPID int
+	// lastStopPID: the daemon PID a tray-initiated stop/restart targeted. If
+	// that exact PID later shows up as a stale "running" state (old CLIs don't
+	// always clean up on stop), it is OUR stop, not a crash — reap, don't report.
+	var lastStopPID int
 
 	// refresh reflects daemon state into the status row + pause/resume/restart
 	// enablement. Read from the same state file `unarr status` uses (no drift).
@@ -142,6 +146,12 @@ func onReady() {
 		s := readStatus()
 		if s.running && isPausedMarker() {
 			markPaused(false) // resumed outside the tray (CLI/web) — self-heal
+		}
+		if s.crashed && s.pid == lastStopPID {
+			// Tray-initiated stop that the (old) CLI didn't clean up after —
+			// reap the orphan and re-read: renders paused/stopped, never crash.
+			reapStaleState(s.pid)
+			s = readStatus()
 		}
 		st := displayState(s, isPausedMarker())
 		applyState(st)
@@ -180,7 +190,14 @@ func onReady() {
 
 	// control execs a daemon command, surfaces spawn errors, and nudges a refresh
 	// shortly after (the state file updates asynchronously) on top of the ticker.
+	// Stops/restarts remember the targeted PID so a state file the old daemon
+	// failed to clean up is recognized as our stop, not a crash.
 	control := func(args ...string) {
+		if args[0] == "stop" || args[0] == "daemon" {
+			if s := readStatus(); s.running {
+				lastStopPID = s.pid
+			}
+		}
 		suppressCrashUntil = time.Now().Add(crashSuppressWindow)
 		if err := runUnarr(args...); err != nil {
 			fmt.Fprintln(os.Stderr, "unarr-desktop: control:", err)
