@@ -74,8 +74,12 @@ jobs:
           esac
           ASSET="unarr-desktop_${VERSION}_${GOOS}_${GOARCH}${{ matrix.ext }}"
           echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+          # -H=windowsgui: GUI subsystem so the tray doesn't drag a console
+          # window around on Windows.
+          EXTRA=""
+          [ "$GOOS" = "windows" ] && EXTRA="-H=windowsgui"
           go build -trimpath \
-            -ldflags "-s -w -X main.version=${VERSION} ${SENTRY_DSN:+-X github.com/Unarr-app/unarr-cli/internal/sentry.dsn=${SENTRY_DSN}}" \
+            -ldflags "-s -w $EXTRA -X main.version=${VERSION} ${SENTRY_DSN:+-X github.com/Unarr-app/unarr-cli/internal/sentry.dsn=${SENTRY_DSN}}" \
             -o "$ASSET" ./cmd/unarr-desktop
           ls -la "$ASSET"
 
