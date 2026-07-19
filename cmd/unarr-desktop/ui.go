@@ -197,7 +197,13 @@ func (ui *trayUI) refresh() {
 // applyMode Show/Hides the mode-specific menu items. Called only on the
 // full<->player transition (systray Show/Hide every tick would spam the host).
 func (ui *trayUI) applyMode(cli bool) {
-	daemon := []*systray.MenuItem{ui.mPause, ui.mResume, ui.mRestart, ui.mAccount, ui.mVersion}
+	// Rows that only make sense with a daemon: control, account/version, and
+	// the download dir + config file (player-only installs neither). The Player
+	// submenu + Open unarr.app / library / docs stay in both modes.
+	daemon := []*systray.MenuItem{
+		ui.mPause, ui.mResume, ui.mRestart, ui.mAccount, ui.mVersion,
+		ui.mDownloads, ui.mEdit,
+	}
 	for _, it := range daemon {
 		if cli {
 			it.Show()
@@ -356,6 +362,13 @@ func (ui *trayUI) refreshAccount() {
 	}
 	ui.mVersion.SetTitle(versionTitle(resolveAgentVersion(), version))
 	info, base, err := fetchAccount()
+	if !hasCLI() {
+		// The CLI was removed while the (blocking) fetch was in flight — the
+		// ticker has already switched to player-only mode and hidden these
+		// rows. Applying the result now would re-Show() a stray upgrade CTA
+		// that then persists (no further applyMode until the mode flips again).
+		return
+	}
 	var httpErr *agent.HTTPError
 	authDead := errors.As(err, &httpErr) &&
 		(httpErr.StatusCode == 401 || httpErr.StatusCode == 410)
