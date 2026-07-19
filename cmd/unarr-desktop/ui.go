@@ -138,6 +138,7 @@ func newTrayUI() *trayUI {
 	ui.mUpdate = systray.AddMenuItem("Update desktop app", "Install the latest unarr-desktop version")
 	ui.mUpdate.Hide()
 	ui.mQuit = systray.AddMenuItem("Quit", "Close the tray (the agent keeps running)")
+	ui.applyMenuIcons()
 	return ui
 }
 
