@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +89,21 @@ func readStatus() agentStatus {
 // configPath is the active config.toml (honors UNARR_CONFIG_DIR / --config the
 // same way the daemon does).
 func configPath() string { return config.FilePath() }
+
+// openDownloadsFolder opens the agent's configured download directory in the OS
+// file manager. It reads the same config the daemon uses (honoring
+// UNARR_DOWNLOAD_DIR); a load error or an unset/missing dir degrades to a
+// stderr line (openFile stats the path), never a crash — the tray runs where a
+// CLI is installed, but a half-configured install must not take the menu down.
+func openDownloadsFolder() {
+	cfg, err := config.Load(config.FilePath())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: downloads dir:", err)
+		return
+	}
+	cfg.ApplyEnvOverrides()
+	openFile(cfg.Download.Dir)
+}
 
 // reapStaleState removes the state file a dead daemon left behind, but only
 // when it still names the given PID (never races a freshly started daemon).

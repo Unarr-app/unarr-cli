@@ -25,9 +25,15 @@ type trayUI struct {
 
 	mStatus, mAccount, mVersion, mUpgrade *systray.MenuItem
 	mPause, mResume, mRestart             *systray.MenuItem
-	mOpen, mConfigure, mEdit              *systray.MenuItem
+	mOpen, mLibrary, mDownloads           *systray.MenuItem
+	mConfigure, mEdit                     *systray.MenuItem
 	mLogs, mSendLogs, mDocs               *systray.MenuItem
 	mAutostart, mUpdate, mQuit            *systray.MenuItem
+
+	// shownTooltip diffs the app-level tooltip so a task-count change updates it
+	// (SetTooltip only when the text actually changed — the DBus/Cocoa spam guard
+	// applyState uses for the icon, applied here to the tooltip).
+	shownTooltip string
 
 	// Crash-watcher state — touched only from refresh()/control(); systray
 	// delivers those on independent goroutines but never concurrently in
@@ -83,6 +89,8 @@ func newTrayUI() *trayUI {
 	ui.mRestart = systray.AddMenuItem("Restart agent", "Restart the agent")
 	systray.AddSeparator()
 	ui.mOpen = systray.AddMenuItem("Open unarr.app", "Open the unarr web app")
+	ui.mLibrary = systray.AddMenuItem("Open library (web)", "Your unarr library on the web")
+	ui.mDownloads = systray.AddMenuItem("Open downloads folder", "Open the agent's download directory")
 	ui.mConfigure = systray.AddMenuItem("Configure agent (web)", "Paths, codecs, hardware — on the web")
 	ui.mEdit = systray.AddMenuItem("Edit config.toml", "Open the agent config file")
 	systray.AddSeparator()
@@ -109,15 +117,36 @@ func newTrayUI() *trayUI {
 	return ui
 }
 
-// applyState swaps the tray icon + tooltip only on transitions (SetIcon on
-// every 5s tick would spam DBus/Cocoa for nothing).
+// applyState swaps the tray icon only on transitions (SetIcon on every 5s tick
+// would spam DBus/Cocoa for nothing). The tooltip is driven separately by
+// setTooltip so it can also reflect the download count, which changes without a
+// state transition.
 func (ui *trayUI) applyState(st trayState) {
 	if st == ui.shown {
 		return
 	}
 	ui.shown = st
 	systray.SetIcon(ui.icons[st])
-	systray.SetTooltip("unarr agent — " + st.label())
+}
+
+// setTooltip updates the tray tooltip only when the text changed — same
+// transition-only discipline as applyState, so a 5s tick with nothing new is a
+// no-op instead of a DBus/Cocoa write.
+func (ui *trayUI) setTooltip(s string) {
+	if s == ui.shownTooltip {
+		return
+	}
+	ui.shownTooltip = s
+	systray.SetTooltip(s)
+}
+
+// trayTooltip is the icon hover text: the download count when the agent is
+// actively working, else the plain state label.
+func trayTooltip(st trayState, s agentStatus) string {
+	if st == stateRunning && s.tasks > 0 {
+		return fmt.Sprintf("unarr — %d download(s) active", s.tasks)
+	}
+	return "unarr agent — " + st.label()
 }
 
 // refresh reflects daemon state into the status row + pause/resume/restart
@@ -139,13 +168,17 @@ func (ui *trayUI) refresh() {
 	}
 	st := displayState(s, isPausedMarker())
 	ui.applyState(st)
+	ui.setTooltip(trayTooltip(st, s))
 	switch st {
 	case stateRunning:
-		title := fmt.Sprintf("Agent: running (PID %d)", s.pid)
+		// Downloads are what the user cares about; the PID is diagnostic, so it
+		// moves to the row tooltip. No active tasks → the plain "running" line.
 		if s.tasks > 0 {
-			title += fmt.Sprintf(" · %d task(s)", s.tasks)
+			ui.mStatus.SetTitle(fmt.Sprintf("Downloading %d item(s)", s.tasks))
+		} else {
+			ui.mStatus.SetTitle("Agent: running")
 		}
-		ui.mStatus.SetTitle(title)
+		ui.mStatus.SetTooltip(fmt.Sprintf("Agent running · PID %d", s.pid))
 		ui.mPause.Enable()
 		ui.mResume.Disable()
 		ui.mRestart.Enable()
@@ -282,6 +315,10 @@ func (ui *trayUI) upgradeCTA() {
 	time.AfterFunc(5*time.Minute, ui.kickAccount)
 }
 
+// clickLoop handles the lifecycle/control items (agent start/stop, plan CTA,
+// autostart, self-update, quit). The pure "open a URL/file" items run in
+// navLoop so neither select grows past the complexity gate — each item has its
+// own channel, so splitting across goroutines is safe.
 func (ui *trayUI) clickLoop() {
 	for {
 		select {
@@ -294,8 +331,30 @@ func (ui *trayUI) clickLoop() {
 		case <-ui.mRestart.ClickedCh:
 			markPaused(false)
 			ui.control("daemon", "restart")
+		case <-ui.mUpgrade.ClickedCh:
+			ui.upgradeCTA()
+		case <-ui.mAutostart.ClickedCh:
+			toggleAutostart(ui.mAutostart)
+		case <-ui.mUpdate.ClickedCh:
+			go traySelfUpdate(ui.mUpdate)
+		case <-ui.mQuit.ClickedCh:
+			systray.Quit()
+			return
+		}
+	}
+}
+
+// navLoop handles the navigation items — each just opens a URL, file, or the
+// downloads folder. Split out of clickLoop to keep both selects small.
+func (ui *trayUI) navLoop() {
+	for {
+		select {
 		case <-ui.mOpen.ClickedCh:
 			openURL(webBase())
+		case <-ui.mLibrary.ClickedCh:
+			openURL(libraryURL())
+		case <-ui.mDownloads.ClickedCh:
+			openDownloadsFolder()
 		case <-ui.mConfigure.ClickedCh:
 			openURL(hubURL())
 		case <-ui.mEdit.ClickedCh:
@@ -304,17 +363,8 @@ func (ui *trayUI) clickLoop() {
 			openLogs()
 		case <-ui.mSendLogs.ClickedCh:
 			go sendLogsToSupport()
-		case <-ui.mUpgrade.ClickedCh:
-			ui.upgradeCTA()
 		case <-ui.mDocs.ClickedCh:
 			openURL(docsURL())
-		case <-ui.mAutostart.ClickedCh:
-			toggleAutostart(ui.mAutostart)
-		case <-ui.mUpdate.ClickedCh:
-			go traySelfUpdate(ui.mUpdate)
-		case <-ui.mQuit.ClickedCh:
-			systray.Quit()
-			return
 		}
 	}
 }
