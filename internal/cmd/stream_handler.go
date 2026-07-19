@@ -116,6 +116,38 @@ func cancelStreamTask(taskID string) {
 	}
 }
 
+// displacePriorStreams cancels every active stream goroutine EXCEPT the incoming
+// keepID (and its own paired watch reporter "watch:"+keepID). The persistent
+// StreamServer serves exactly ONE stream at a time, so a new stream must displace
+// the prior one whether it is already serving a file (visible as CurrentTaskID) OR
+// still inside its multi-second streamability probe — a usenet probe has not called
+// SetFile yet, so it is INVISIBLE to CurrentTaskID. Cancelling only the served task
+// (the old cancelStreamTask(CurrentTaskID())) leaked a still-probing usenet stream's
+// goroutine + NNTP handle forever: nothing else ever cancels a stream that never
+// became current (the idle guard only reaps CurrentTaskID). Displaced streams' watch
+// reporters are reaped alongside them (as cancelStreamTask(CurrentTaskID()) already
+// did for the served id). This is the displacement counterpart of the per-task
+// cancelStreamTask (stop-stream/cancel/pause/idle) and the shutdown-only
+// cancelAllStreamContexts nuke; unlike the latter it never touches download engines —
+// only stream goroutines + watch reporters are registered here.
+func displacePriorStreams(keepID string) {
+	keepWatch := "watch:" + keepID
+	streamRegistry.mu.Lock()
+	toCancel := make([]context.CancelFunc, 0, len(streamRegistry.cancels))
+	for key, cancel := range streamRegistry.cancels {
+		if key == keepID || key == keepWatch {
+			continue
+		}
+		toCancel = append(toCancel, cancel)
+		delete(streamRegistry.cancels, key)
+	}
+	streamRegistry.mu.Unlock()
+
+	for _, cancel := range toCancel {
+		cancel()
+	}
+}
+
 // handleStreamTask manages a streaming task lifecycle for active torrent downloads.
 // It creates a StreamEngine, buffers, sets the file on the persistent server,
 // and reports progress until the task is cancelled or the download completes.
