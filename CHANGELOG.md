@@ -5,12 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] - 2026-07-19
+
+
+### Added
+
+- **usenet**: stream web-dispatched tasks via the on-the-fly usenet streamer
+
+### Fixed
+
+- **usenet**: displace a still-probing prior stream on a new claim
+
+### Performance
+
+- **usenet**: probe rar-store volume headers concurrently
 ## [1.5.3] - 2026-07-19
 
 
 ### Added
 
 - **agent**: coexist multiple downloaded versions instead of overwriting
+
+### Other
+
+- **release**: 1.5.3
 ## [1.5.2] - 2026-07-18
 
 
@@ -1203,6 +1221,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.5.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.3...v1.5.4
 [1.5.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.0...v1.5.1
