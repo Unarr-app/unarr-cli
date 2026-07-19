@@ -5,9 +5,38 @@ import (
 	"io"
 	"log"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/usenet/nzb"
 )
+
+// probeConcurrencyDefault is the header-probe fan-out used when the fetcher does
+// not advertise its connection-pool size. Matches nntp.Client's default pool.
+const probeConcurrencyDefault = 10
+
+// concurrencyHinter is optionally implemented by a fetcher backed by a bounded
+// connection pool (the NNTP client). probeVolumes fans out no wider than the pool
+// — extra goroutines would only block on connection acquisition.
+type concurrencyHinter interface{ MaxConcurrency() int }
+
+// probeConcurrency picks the header-probe fan-out for this fetcher, capped to the
+// number of volumes.
+func probeConcurrency(fetcher ArticleFetcher, volumeCount int) int {
+	limit := probeConcurrencyDefault
+	if h, ok := fetcher.(concurrencyHinter); ok {
+		if m := h.MaxConcurrency(); m > 0 {
+			limit = m
+		}
+	}
+	if limit > volumeCount {
+		limit = volumeCount
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	return limit
+}
 
 // NotStreamableError marks a release the streaming path must NOT attempt —
 // compressed, encrypted, multi-file-ambiguous, or otherwise not a plain STORE
@@ -91,22 +120,80 @@ func Probe(ctx context.Context, fetcher ArticleFetcher, rarFiles []nzb.File) (*R
 	}, nil
 }
 
-// probeVolumes parses every volume's headers, returning all file chunks found.
-// Each volume reader is opened only long enough to read headers, then closed.
+// probeVolumes parses every volume's headers CONCURRENTLY (bounded by the NNTP
+// connection pool) and returns all file chunks in DETERMINISTIC volume order.
+//
+// Each volume needs one NNTP round-trip (fetch its first article, read the RAR
+// headers). Done sequentially that is ~44s for a 99-volume release — the user sits
+// on "Iniciando" the whole time (incident 2026-07-19). Fanning the header reads
+// across the pool's connections cuts it to a few seconds. The chunk order is
+// preserved by writing each volume's chunks into its own index slot and flattening
+// in order (never an append race), so buildExtents stitches the video by volume
+// index exactly as the sequential version did. First error wins and cancels the
+// rest — a not-streamable / faulty volume still fails fast.
 func probeVolumes(ctx context.Context, fetcher ArticleFetcher, volumes []nzb.File) ([]rarChunk, error) {
-	var all []rarChunk
+	limit := probeConcurrency(fetcher, len(volumes))
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	perVol := make([][]rarChunk, len(volumes))
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var firstErr error
+	setErr := func(err error) {
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+			cancel() // abort other in-flight header reads
+		}
+		errMu.Unlock()
+	}
+
+	start := time.Now()
+	log.Printf("[usenet-stream] probing %d volume header(s) (concurrency %d)...", len(volumes), limit)
+
 	for i, f := range volumes {
-		vs, err := newReaderVolume(ctx, fetcher, f)
-		if err != nil {
-			return nil, notStreamable("open volume " + f.Filename() + ": " + err.Error())
+		// Fail fast: once a volume errored, stop launching. The already-launched
+		// goroutines see the cancelled ctx and abort quickly.
+		errMu.Lock()
+		stop := firstErr != nil
+		errMu.Unlock()
+		if stop {
+			break
 		}
-		chunks, perr := parseVolume(vs, i)
-		_ = vs.close()
-		if perr != nil {
-			return nil, perr
-		}
+		sem <- struct{}{} // blocks until a pool slot is free; every goroutine releases it
+		wg.Add(1)
+		go func(i int, f nzb.File) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			vs, err := newReaderVolume(ctx, fetcher, f)
+			if err != nil {
+				setErr(notStreamable("open volume " + f.Filename() + ": " + err.Error()))
+				return
+			}
+			chunks, perr := parseVolume(vs, i)
+			_ = vs.close()
+			if perr != nil {
+				setErr(perr)
+				return
+			}
+			perVol[i] = chunks
+		}(i, f)
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	var all []rarChunk
+	for _, chunks := range perVol {
 		all = append(all, chunks...)
 	}
+	log.Printf("[usenet-stream] probed %d volume header(s) in %s (concurrency %d)",
+		len(volumes), time.Since(start).Round(time.Millisecond), limit)
 	return all, nil
 }
 

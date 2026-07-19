@@ -130,6 +130,13 @@ func (c *Client) ActiveConnections() int {
 	return c.open
 }
 
+// MaxConcurrency reports how many Body calls can run in parallel before they
+// block on connection acquisition — i.e. the pool size. Concurrent header-probe
+// fan-out uses this to size its worker pool to the connections actually available.
+func (c *Client) MaxConcurrency() int {
+	return c.cfg.MaxConnections
+}
+
 // Close shuts down all connections in the pool.
 func (c *Client) Close() error {
 	select {
