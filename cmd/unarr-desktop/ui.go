@@ -25,6 +25,7 @@ type trayUI struct {
 
 	mStatus, mAccount, mVersion, mUpgrade *systray.MenuItem
 	mPause, mResume, mRestart             *systray.MenuItem
+	mEnableDownloads                      *systray.MenuItem
 	mOpen, mLibrary, mDownloads           *systray.MenuItem
 	mConfigure, mEdit, mPlayer            *systray.MenuItem
 	mLogs, mSendLogs, mDocs               *systray.MenuItem
@@ -33,6 +34,12 @@ type trayUI struct {
 	// playerChoices are the Player submenu entries (playerpicker.go), each
 	// bound to the config value it writes.
 	playerChoices []playerChoice
+
+	// hasCLI-mode tracking: the tray adapts between the full daemon UI and a
+	// player-only menu (no `unarr` installed). applyMode toggles the mode-
+	// specific items only on transition; cliModeInit forces the first apply.
+	prevHasCLI  bool
+	cliModeInit bool
 
 	// shownTooltip diffs the app-level tooltip so a task-count change updates it
 	// (SetTooltip only when the text actually changed — the DBus/Cocoa spam guard
@@ -91,6 +98,11 @@ func newTrayUI() *trayUI {
 	ui.mPause = systray.AddMenuItem("Pause agent", "Stop the agent (downloads and streams halt)")
 	ui.mResume = systray.AddMenuItem("Resume agent", "Start the agent")
 	ui.mRestart = systray.AddMenuItem("Restart agent", "Restart the agent")
+	// Shown only in player-only mode (no CLI): the upgrade path from "just a
+	// player" to the full downloads+library agent, handled entirely on the web.
+	ui.mEnableDownloads = systray.AddMenuItem("Enable downloads & library…",
+		"Install the unarr agent to download and build your library")
+	ui.mEnableDownloads.Hide()
 	systray.AddSeparator()
 	ui.mOpen = systray.AddMenuItem("Open unarr.app", "Open the unarr web app")
 	ui.mLibrary = systray.AddMenuItem("Open library (web)", "Your unarr library on the web")
@@ -161,9 +173,57 @@ func trayTooltip(st trayState, s agentStatus) string {
 	return "unarr agent — " + st.label()
 }
 
-// refresh reflects daemon state into the status row + pause/resume/restart
-// enablement. Read from the same state file `unarr status` uses (no drift).
+// refresh picks the mode (full daemon UI vs player-only) each tick and renders
+// it. Installing/removing the `unarr` CLI while the tray runs flips the menu
+// without a restart. applyMode does the one-time Show/Hide on transition.
 func (ui *trayUI) refresh() {
+	cli := hasCLI()
+	if !ui.cliModeInit || cli != ui.prevHasCLI {
+		ui.applyMode(cli)
+		ui.prevHasCLI = cli
+		ui.cliModeInit = true
+		if cli {
+			ui.kickAccount() // CLI just appeared — fetch account for the full UI
+		}
+	}
+	if cli {
+		ui.renderDaemonStatus()
+	} else {
+		ui.renderPlayerStatus()
+	}
+}
+
+// applyMode Show/Hides the mode-specific menu items. Called only on the
+// full<->player transition (systray Show/Hide every tick would spam the host).
+func (ui *trayUI) applyMode(cli bool) {
+	daemon := []*systray.MenuItem{ui.mPause, ui.mResume, ui.mRestart, ui.mAccount, ui.mVersion}
+	for _, it := range daemon {
+		if cli {
+			it.Show()
+		} else {
+			it.Hide()
+		}
+	}
+	if cli {
+		ui.mEnableDownloads.Hide()
+	} else {
+		ui.mEnableDownloads.Show()
+		ui.mUpgrade.Hide() // no account fetched in player-only mode
+	}
+}
+
+// renderPlayerStatus is the player-only status row: no daemon to report on, so
+// the icon is the plain (stopped) logo and the row states the handler is live.
+func (ui *trayUI) renderPlayerStatus() {
+	ui.applyState(stateStopped)
+	ui.setTooltip("unarr — player handler active")
+	ui.mStatus.SetTitle("Player handler active")
+	ui.mStatus.SetTooltip("unarr:// links open in your local player")
+}
+
+// renderDaemonStatus reflects daemon state into the status row + pause/resume/
+// restart enablement. Read from the same state file `unarr status` uses.
+func (ui *trayUI) renderDaemonStatus() {
 	s := readStatus()
 	if s.running && isPausedMarker() {
 		markPaused(false) // resumed outside the tray (CLI/web) — self-heal
@@ -290,6 +350,9 @@ func (ui *trayUI) accountLoop() {
 // a transient error — or a revoked key would freeze the old email/plan/CTA on
 // screen forever. Transient errors keep the last good title.
 func (ui *trayUI) refreshAccount() {
+	if !hasCLI() {
+		return // player-only: no daemon, no credential — account rows stay hidden
+	}
 	ui.mVersion.SetTitle(versionTitle(resolveAgentVersion(), version))
 	info, base, err := fetchAccount()
 	var httpErr *agent.HTTPError
@@ -367,6 +430,8 @@ func (ui *trayUI) navLoop() {
 			openURL(libraryURL())
 		case <-ui.mDownloads.ClickedCh:
 			openDownloadsFolder()
+		case <-ui.mEnableDownloads.ClickedCh:
+			openURL(hubURL()) // player-only → the web installs the full agent
 		case <-ui.mConfigure.ClickedCh:
 			openURL(hubURL())
 		case <-ui.mEdit.ClickedCh:

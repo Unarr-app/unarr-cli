@@ -13,12 +13,13 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
-// unarrBin resolves the headless `unarr` daemon binary: PATH first, then a
+// resolveUnarrBin locates the headless `unarr` daemon binary: PATH first, then a
 // sibling of this executable (installers drop `unarr` + `unarr-desktop`
-// together), then a bare name as a last resort.
-func unarrBin() string {
+// together). The bool reports whether it was actually found — false means only
+// the bare-name fallback is returned, i.e. no CLI is installed (player-only).
+func resolveUnarrBin() (string, bool) {
 	if p, err := exec.LookPath("unarr"); err == nil {
-		return p
+		return p, true
 	}
 	if self, err := os.Executable(); err == nil {
 		cand := filepath.Join(filepath.Dir(self), "unarr")
@@ -26,11 +27,21 @@ func unarrBin() string {
 			cand += ".exe"
 		}
 		if _, statErr := os.Stat(cand); statErr == nil {
-			return cand
+			return cand, true
 		}
 	}
-	return "unarr"
+	return "unarr", false
 }
+
+// unarrBin is the path to exec the daemon with (bare "unarr" if not found).
+func unarrBin() string { p, _ := resolveUnarrBin(); return p }
+
+// hasCLI reports whether the `unarr` daemon binary is installed. When it isn't,
+// the tray runs in player-only mode: no daemon to control, so the pause/resume/
+// restart + account rows are hidden and an "Enable downloads & library" CTA is
+// shown instead. Re-checked every tick, so installing the CLI later promotes the
+// menu without a restart.
+func hasCLI() bool { _, ok := resolveUnarrBin(); return ok }
 
 // runUnarr execs `unarr <args…>` DETACHED — the daemon's lifetime must not be
 // tied to the tray process. Returns only the spawn error, not the exit status
