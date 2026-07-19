@@ -1,8 +1,6 @@
 package agent
 
 import (
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -109,100 +107,6 @@ func TestLocalState_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 	// No race condition = test passes
-}
-
-func TestLocalState_WriteToDisk_ReadFromDisk(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "tasks.json")
-
-	// Override the file path for testing
-	orig := taskStateFilePathFn
-	taskStateFilePathFn = func() string { return path }
-	defer func() { taskStateFilePathFn = orig }()
-
-	s := NewLocalState()
-	s.Update(TaskState{TaskID: "t1", Status: "downloading", Progress: 45})
-	s.Update(TaskState{TaskID: "t2", Status: "completed", Progress: 100, FilePath: "/tmp/movie.mkv"})
-	s.WriteToDisk()
-
-	// Verify file exists
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		t.Fatal("tasks.json was not created")
-	}
-
-	// Read into a new LocalState
-	s2 := NewLocalState()
-	s2.ReadFromDisk()
-
-	snap := s2.Snapshot()
-	if len(snap) != 2 {
-		t.Fatalf("expected 2 tasks after read, got %d", len(snap))
-	}
-
-	byID := make(map[string]TaskState, len(snap))
-	for _, ts := range snap {
-		byID[ts.TaskID] = ts
-	}
-
-	if byID["t1"].Progress != 45 {
-		t.Errorf("expected progress 45, got %d", byID["t1"].Progress)
-	}
-	if byID["t2"].FilePath != "/tmp/movie.mkv" {
-		t.Errorf("expected /tmp/movie.mkv, got %s", byID["t2"].FilePath)
-	}
-}
-
-func TestLocalState_ReadFromDisk_CorruptedFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "tasks.json")
-
-	orig := taskStateFilePathFn
-	taskStateFilePathFn = func() string { return path }
-	defer func() { taskStateFilePathFn = orig }()
-
-	// Write corrupted JSON
-	os.WriteFile(path, []byte("{invalid json"), 0o644)
-
-	s := NewLocalState()
-	s.ReadFromDisk() // should not panic
-
-	snap := s.Snapshot()
-	if len(snap) != 0 {
-		t.Errorf("expected 0 tasks from corrupted file, got %d", len(snap))
-	}
-}
-
-func TestLocalState_ReadFromDisk_FileNotFound(t *testing.T) {
-	orig := taskStateFilePathFn
-	taskStateFilePathFn = func() string { return "/nonexistent/path/tasks.json" }
-	defer func() { taskStateFilePathFn = orig }()
-
-	s := NewLocalState()
-	s.ReadFromDisk() // should not panic
-
-	snap := s.Snapshot()
-	if len(snap) != 0 {
-		t.Errorf("expected 0 tasks, got %d", len(snap))
-	}
-}
-
-func TestLocalState_AtomicWrite(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "tasks.json")
-
-	orig := taskStateFilePathFn
-	taskStateFilePathFn = func() string { return path }
-	defer func() { taskStateFilePathFn = orig }()
-
-	s := NewLocalState()
-	s.Update(TaskState{TaskID: "t1", Status: "downloading"})
-	s.WriteToDisk()
-
-	// Verify no .tmp file remains
-	tmpPath := path + ".tmp"
-	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
-		t.Error("temp file should not exist after write")
-	}
 }
 
 func TestLocalState_EmptySnapshot(t *testing.T) {

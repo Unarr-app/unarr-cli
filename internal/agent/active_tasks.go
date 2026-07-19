@@ -19,7 +19,7 @@ var activeTasksFilePathFn = func() string {
 // downloaders resume the partial data — torrent via the persisted
 // piece-completion DB, debrid via HTTP Range, usenet via its segment tracker.
 //
-// Distinct from LocalState (tasks.json), which holds transient status/progress
+// Distinct from LocalState (in memory), which holds transient status/progress
 // for syncing to the web; this holds the re-dispatch payload needed to restart
 // the work. An entry is added when a download starts and removed when it
 // reaches a genuine terminal state (completed / failed / cancelled) — but NOT
