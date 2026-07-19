@@ -8,8 +8,17 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
+
+// moveMu serializes the "pick a free destination → move onto it" pair in
+// moveToDir. Without it two concurrent finalizations of the SAME title (distinct
+// tasks, e.g. 1080p and 2160p) could both see the deterministic path free and
+// clobber each other in the stat→rename window — exactly the overwrite this
+// feature exists to prevent. Moves are cheap (a same-filesystem rename is
+// instant); only the rare cross-device fallback copy holds it longer.
+var moveMu sync.Mutex
 
 var (
 	yearRegex    = regexp.MustCompile(`\b(19|20)\d{2}\b`)
@@ -111,7 +120,7 @@ func organize(result *Result, task *Task, cfg OrganizeConfig) (string, error) {
 		return organizeLegacy(result, task, cfg)
 	}
 
-	return moveToDir(result, destDir, destFileName, cfg)
+	return moveToDir(result, task, destDir, destFileName, cfg)
 }
 
 // organizeLegacy is the original regex-based organize logic for tasks without server metadata.
@@ -143,12 +152,22 @@ func organizeLegacy(result *Result, task *Task, cfg OrganizeConfig) (string, err
 		return result.FilePath, nil
 	}
 
-	return moveToDir(result, destDir, "", cfg)
+	return moveToDir(result, task, destDir, "", cfg)
 }
 
 // moveToDir handles the actual directory creation and file move, including path traversal check.
 // If destFileName is non-empty, the file is renamed to that name (instead of keeping the original).
-func moveToDir(result *Result, destDir, destFileName string, cfg OrganizeConfig) (string, error) {
+//
+// Multi-version coexistence: moveToDir NEVER overwrites an existing file/dir at
+// the destination — a 2160p grabbed next to a 1080p, a usenet copy next to a
+// torrent one, or a Castilian cut next to an English one all coexist. When the
+// deterministic destination is occupied it is redirected to a free,
+// version-tagged sibling (see versionDistinctPath). This holds for upgrade tasks
+// too (ReplacePath set): landing on a sibling instead of the deterministic path
+// lets finalizeVerified's replaceFile back the OLD file up before swapping —
+// renaming straight onto ReplacePath would destroy it first. Deliberate
+// replacement is always replaceFile's job, never a silent clobber here.
+func moveToDir(result *Result, task *Task, destDir, destFileName string, cfg OrganizeConfig) (string, error) {
 	// Validate destination is within an expected base directory
 	if !((cfg.TVShowsDir != "" && isWithinDir(cfg.TVShowsDir, destDir)) ||
 		(cfg.MoviesDir != "" && isWithinDir(cfg.MoviesDir, destDir)) ||
@@ -171,10 +190,22 @@ func moveToDir(result *Result, destDir, destFileName string, cfg OrganizeConfig)
 		return "", fmt.Errorf("stat source: %w", err)
 	}
 
+	// Reserve a free destination + move under a lock so the "is it free? → claim
+	// it" pair is atomic against a concurrent finalization of the same title.
+	moveMu.Lock()
+	defer moveMu.Unlock()
+
+	// Never destroy an existing file/dir at the destination — redirect to a free,
+	// version-tagged sibling instead (see the function doc). Applies to normal AND
+	// upgrade downloads: the deliberate swap is replaceFile's job afterwards.
+	if pathExists(destPath) {
+		destPath = versionDistinctPath(destDir, fileName, result, task)
+	}
+	// The move may have re-pointed destPath, so subtitles must follow the FINAL
+	// video name (e.g. "Movie (2023) [1080p ES].es.srt"), not the original.
+	finalFileName := filepath.Base(destPath)
+
 	if srcInfo.IsDir() {
-		if _, err := os.Stat(destPath); err == nil {
-			os.RemoveAll(destPath)
-		}
 		if err := os.Rename(result.FilePath, destPath); err != nil {
 			return "", fmt.Errorf("move directory: %w", err)
 		}
@@ -189,7 +220,7 @@ func moveToDir(result *Result, destDir, destFileName string, cfg OrganizeConfig)
 	}
 
 	// Move subtitle files alongside the video
-	moveSubtitles(result.FilePath, destDir, destFileName)
+	moveSubtitles(result.FilePath, destDir, finalFileName)
 
 	// Clean up the source torrent directory if it's a subdirectory of OutputDir
 	// and now empty or only contains junk files (nfo, txt, url, etc.)
@@ -409,6 +440,133 @@ func replaceFile(oldPath, newPath, backupDir string) error {
 	}
 
 	return nil
+}
+
+// pathExists reports whether anything (file or directory) already lives at path.
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+var (
+	resTagRegex  = regexp.MustCompile(`(?i)\b(2160p|1080p|720p|480p|4k)\b`)
+	hdrTagRegex  = regexp.MustCompile(`(?i)\b(hdr10\+?|hdr|dolby[ .]?vision|dovi|dv|hlg)\b`)
+	langTagRegex = regexp.MustCompile(`(?i)\b(castellano|espa(?:ñ|n)ol|latino|ingl[eé]s|english|dual|multi)\b`)
+)
+
+// versionDistinctPath returns a destination under destDir that collides with no
+// existing file, so a second download of the same title coexists with the first
+// instead of overwriting it. The preferred sibling carries a readable version
+// tag parsed from the release name (resolution, HDR, audio language) so the
+// library shows "Movie (2023) [2160p HDR]" beside "Movie (2023) [1080p]". If
+// tagging still collides (two same-quality grabs, e.g. torrent + usenet) the
+// download method and then a numeric counter break the tie. Never returns an
+// occupied path.
+func versionDistinctPath(destDir, fileName string, result *Result, task *Task) string {
+	ext := filepath.Ext(fileName)
+	stem := strings.TrimSuffix(fileName, ext)
+
+	tag := versionTag(task)
+	method := ""
+	if result != nil {
+		method = string(result.Method)
+	}
+
+	// Ordered candidates, most descriptive first.
+	var candidates []string
+	switch {
+	case tag != "" && method != "":
+		candidates = append(candidates,
+			fmt.Sprintf("%s [%s]", stem, tag),
+			fmt.Sprintf("%s [%s %s]", stem, tag, method),
+		)
+	case tag != "":
+		candidates = append(candidates, fmt.Sprintf("%s [%s]", stem, tag))
+	case method != "":
+		candidates = append(candidates, fmt.Sprintf("%s [%s]", stem, method))
+	}
+	for _, c := range candidates {
+		p := filepath.Join(destDir, sanitizePath(c)+ext)
+		if !pathExists(p) {
+			return p
+		}
+	}
+
+	// Numeric counter fallback on the richest stem we have.
+	base := stem
+	if tag != "" {
+		base = sanitizePath(fmt.Sprintf("%s [%s]", stem, tag))
+	}
+	for i := 2; i < 1000; i++ {
+		p := filepath.Join(destDir, fmt.Sprintf("%s (%d)%s", base, i, ext))
+		if !pathExists(p) {
+			return p
+		}
+	}
+	// 998 identical siblings is not a real scenario; keep a stable name.
+	return filepath.Join(destDir, base+ext)
+}
+
+// versionTag builds a short, human-readable label (e.g. "2160p HDR", "1080p ES")
+// from the release title so coexisting downloads get self-describing filenames.
+// Returns "" when nothing recognizable is present — the caller then falls back
+// to the download method or a numeric counter.
+func versionTag(task *Task) string {
+	if task == nil {
+		return ""
+	}
+	title := task.Title
+	var parts []string
+	if m := resTagRegex.FindString(title); m != "" {
+		res := strings.ToLower(m)
+		if res == "4k" {
+			res = "2160p"
+		}
+		parts = append(parts, res)
+	}
+	if m := hdrTagRegex.FindString(title); m != "" {
+		parts = append(parts, normalizeHDRTag(m))
+	}
+	if m := langTagRegex.FindString(title); m != "" {
+		parts = append(parts, normalizeLangTag(m))
+	}
+	return strings.Join(parts, " ")
+}
+
+// normalizeHDRTag collapses HDR variants to a compact stable label.
+func normalizeHDRTag(m string) string {
+	s := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(m, ".", " "), "  ", " "))
+	switch {
+	case s == "dv" || strings.Contains(s, "dolby") || s == "dovi":
+		return "DV"
+	case s == "hdr10+":
+		return "HDR10+"
+	case s == "hdr10":
+		return "HDR10"
+	case s == "hlg":
+		return "HLG"
+	default:
+		return "HDR"
+	}
+}
+
+// normalizeLangTag maps an audio-language hint to a compact stable label.
+func normalizeLangTag(m string) string {
+	s := strings.ToLower(m)
+	switch {
+	case strings.HasPrefix(s, "castellano") || strings.HasPrefix(s, "espa"):
+		return "ES"
+	case s == "latino":
+		return "LAT"
+	case strings.HasPrefix(s, "ingl") || s == "english":
+		return "EN"
+	case s == "dual":
+		return "DUAL"
+	case s == "multi":
+		return "MULTI"
+	default:
+		return strings.ToUpper(s)
+	}
 }
 
 func copyFile(src, dst string) error {
