@@ -612,11 +612,13 @@ func runDaemonStart() error {
 				if isStreamingTask(t.ID) {
 					continue
 				}
-				// Displace ONLY the currently-served stream (last-writer-wins on the
-				// persistent server), never other tasks' live streams or in-flight
-				// streamability probes. A blank CurrentTaskID (nothing served) is a
-				// safe no-op.
-				cancelStreamTask(streamSrv.CurrentTaskID())
+				// Displace the prior stream (last-writer-wins on the persistent
+				// server): both the currently-served one AND any still in its
+				// multi-second streamability probe (not yet SetFile, so invisible to
+				// CurrentTaskID). Cancelling only the served task leaked a still-probing
+				// usenet stream's goroutine + NNTP handle forever. Other tasks' watch
+				// reporters and downloads are untouched.
+				displacePriorStreams(t.ID)
 				streamSrv.ClearFile()
 				streamCtx, streamCancel := context.WithCancel(ctx) //nolint:gosec // G118: cancel stored in registry
 				streamRegistry.mu.Lock()
@@ -678,8 +680,8 @@ func runDaemonStart() error {
 				log.Printf("[%s] stream failed: %v", agent.ShortID(taskID), err)
 				return
 			}
-			// Displace only the currently-served stream, not other tasks' work.
-			cancelStreamTask(streamSrv.CurrentTaskID())
+			// Displace the prior stream (served OR still probing), not other tasks' work.
+			displacePriorStreams(taskID)
 			streamSrv.SetFile(provider, taskID)
 			task.SetStreamURL(streamSrv.URLsJSON())
 			log.Printf("[%s] streaming: %s", agent.ShortID(taskID), provider.FileName())
@@ -776,8 +778,8 @@ func runDaemonStart() error {
 			return
 		}
 
-		// Displace only the currently-served stream, not other tasks' work.
-		cancelStreamTask(streamSrv.CurrentTaskID())
+		// Displace the prior stream (served OR still probing), not other tasks' work.
+		displacePriorStreams(sr.TaskID)
 		streamSrv.SetFile(engine.NewDiskFileProvider(filePath), sr.TaskID)
 		log.Printf("[%s] streaming from disk: %s → %s", agent.ShortID(sr.TaskID), filepath.Base(filePath), streamSrv.URL())
 
