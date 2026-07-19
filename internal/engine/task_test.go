@@ -97,6 +97,36 @@ func TestTransitionFailedSetsCompletedAt(t *testing.T) {
 	}
 }
 
+func TestTransitionClearsStaleErrorOnRecovery(t *testing.T) {
+	// A retry re-enters Resolving/Downloading; the prior attempt's error must
+	// not ride along on the next ToStatusUpdate (the "metadata timeout" that
+	// stuck to a 92%-downloaded stream).
+	cases := []struct{ from, to TaskStatus }{
+		{StatusDownloading, StatusResolving}, // fallback / integrity retry
+		{StatusResolving, StatusDownloading}, // resume into the swarm
+	}
+	for _, c := range cases {
+		task := &Task{Status: c.from, ErrorMessage: "metadata timeout after 1m0s: no peers found"}
+		if err := task.Transition(c.to); err != nil {
+			t.Fatalf("transition %s->%s: %v", c.from, c.to, err)
+		}
+		if task.ErrorMessage != "" {
+			t.Errorf("recovery to %s must clear ErrorMessage, got %q", c.to, task.ErrorMessage)
+		}
+	}
+}
+
+func TestTransitionFailedKeepsError(t *testing.T) {
+	// A genuine failure keeps its cause for the server to surface.
+	task := &Task{Status: StatusResolving, ErrorMessage: "no peers found"}
+	if err := task.Transition(StatusFailed); err != nil {
+		t.Fatalf("transition to failed: %v", err)
+	}
+	if task.ErrorMessage != "no peers found" {
+		t.Errorf("failure must keep its ErrorMessage, got %q", task.ErrorMessage)
+	}
+}
+
 func TestFallbackTransition(t *testing.T) {
 	// downloading -> resolving (fallback)
 	task := &Task{Status: StatusDownloading}

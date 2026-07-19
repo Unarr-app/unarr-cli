@@ -136,6 +136,15 @@ func (t *Task) Transition(to TaskStatus) error {
 			if to == StatusDownloading {
 				t.StartedAt = time.Now()
 			}
+			// Entering a live/recovery state clears any error from a prior
+			// attempt. A failed download's message would otherwise ride along on
+			// every ToStatusUpdate through a Downloading->Resolving->Downloading
+			// integrity retry, so the server showed a stale cause on a task that
+			// was actually progressing again (the "metadata timeout" that stuck
+			// to a 92%-downloaded stream). Failed/Cancelled keep their message.
+			if to == StatusResolving || to == StatusDownloading {
+				t.ErrorMessage = ""
+			}
 			if to == StatusCompleted || to == StatusFailed {
 				t.CompletedAt = time.Now()
 			}
