@@ -79,31 +79,47 @@ const iinaAppPath = "/Applications/IINA.app"
 func resolvePlayer(name string) (player, bool) {
 	switch name {
 	case "mpv":
-		if p, err := lookPath("mpv"); err == nil {
-			return player{playerMPV, p}, true
-		}
+		return resolveOnPath(playerMPV, "mpv")
 	case "vlc":
-		if p, err := lookPath("vlc"); err == nil {
-			return player{playerVLC, p}, true
-		}
+		return resolveOnPath(playerVLC, "vlc")
 	case "iina":
-		if hostGOOS != "darwin" {
-			return player{}, false
-		}
-		if _, err := statFile(iinaAppPath); err != nil {
-			return player{}, false
-		}
-		if p, err := lookPath("open"); err == nil {
-			return player{playerIINA, p}, true
-		}
+		return resolveIINA()
 	case "mpc", "mpc-hc":
-		if hostGOOS != "windows" {
-			return player{}, false
-		}
-		for _, cand := range []string{"mpc-hc64.exe", "mpc-hc.exe"} {
-			if p, err := lookPath(cand); err == nil {
-				return player{playerMPC, p}, true
-			}
+		return resolveMPC()
+	}
+	return player{}, false
+}
+
+// resolveOnPath resolves a player that is just a binary on PATH (mpv, vlc).
+func resolveOnPath(kind playerKind, bin string) (player, bool) {
+	if p, err := lookPath(bin); err == nil {
+		return player{kind, p}, true
+	}
+	return player{}, false
+}
+
+// resolveIINA resolves IINA on macOS (the .app must exist; launched via `open`).
+func resolveIINA() (player, bool) {
+	if hostGOOS != "darwin" {
+		return player{}, false
+	}
+	if _, err := statFile(iinaAppPath); err != nil {
+		return player{}, false
+	}
+	if p, err := lookPath("open"); err == nil {
+		return player{playerIINA, p}, true
+	}
+	return player{}, false
+}
+
+// resolveMPC resolves MPC-HC on Windows (either 64- or 32-bit executable name).
+func resolveMPC() (player, bool) {
+	if hostGOOS != "windows" {
+		return player{}, false
+	}
+	for _, cand := range []string{"mpc-hc64.exe", "mpc-hc.exe"} {
+		if p, err := lookPath(cand); err == nil {
+			return player{playerMPC, p}, true
 		}
 	}
 	return player{}, false
@@ -154,52 +170,67 @@ func selectPlayer() (player, bool) {
 func buildPlayerArgv(p player, req playRequest) ([]string, error) {
 	switch p.kind {
 	case playerMPV:
-		argv := []string{p.bin}
-		if req.Start > 0 {
-			argv = append(argv, "--start="+strconv.Itoa(req.Start))
-		}
-		if req.Title != "" {
-			argv = append(argv, "--force-media-title="+req.Title)
-		}
-		if len(req.ALang) > 0 {
-			argv = append(argv, "--alang="+strings.Join(req.ALang, ","))
-		}
-		if len(req.SLang) > 0 {
-			argv = append(argv, "--slang="+strings.Join(req.SLang, ","))
-		}
-		return append(argv, "--", req.URL), nil
+		return mpvArgv(p, req), nil
 	case playerVLC:
-		argv := []string{p.bin}
-		if req.Start > 0 {
-			argv = append(argv, "--start-time="+strconv.Itoa(req.Start))
-		}
-		if req.Title != "" {
-			argv = append(argv, "--meta-title="+req.Title)
-		}
-		if len(req.ALang) > 0 {
-			argv = append(argv, "--audio-language="+strings.Join(req.ALang, ","))
-		}
-		if len(req.SLang) > 0 {
-			argv = append(argv, "--sub-language="+strings.Join(req.SLang, ","))
-		}
-		return append(argv, "--", req.URL), nil
+		return vlcArgv(p, req), nil
 	case playerIINA:
 		// v1: just hand the URL over. Extras would need `open --args --mpv-*`,
 		// which replaces open's own URL handling — not worth it yet.
 		return []string{p.bin, "-a", "IINA", req.URL}, nil
 	case playerMPC:
-		// mpc-hc parses /switches and has no end-of-options terminator, so a
-		// URL that even LOOKS like a switch is refused (see file header).
-		if strings.HasPrefix(req.URL, "-") || strings.HasPrefix(req.URL, "/") {
-			return nil, fmt.Errorf("refusing stream url %q for mpc-hc (could be parsed as a switch)", req.URL)
-		}
-		argv := []string{p.bin, req.URL}
-		if req.Start > 0 {
-			argv = append(argv, "/start", strconv.Itoa(req.Start*1000)) // mpc-hc takes milliseconds
-		}
-		return argv, nil
+		return mpcArgv(p, req)
 	}
 	return nil, fmt.Errorf("unknown player kind %q", p.kind)
+}
+
+// mpvArgv builds mpv's command line (native --flag=value options, `--` before
+// the URL so it can never be parsed as a switch).
+func mpvArgv(p player, req playRequest) []string {
+	argv := []string{p.bin}
+	if req.Start > 0 {
+		argv = append(argv, "--start="+strconv.Itoa(req.Start))
+	}
+	if req.Title != "" {
+		argv = append(argv, "--force-media-title="+req.Title)
+	}
+	if len(req.ALang) > 0 {
+		argv = append(argv, "--alang="+strings.Join(req.ALang, ","))
+	}
+	if len(req.SLang) > 0 {
+		argv = append(argv, "--slang="+strings.Join(req.SLang, ","))
+	}
+	return append(argv, "--", req.URL)
+}
+
+// vlcArgv builds VLC's command line (its own flag spellings, `--` before URL).
+func vlcArgv(p player, req playRequest) []string {
+	argv := []string{p.bin}
+	if req.Start > 0 {
+		argv = append(argv, "--start-time="+strconv.Itoa(req.Start))
+	}
+	if req.Title != "" {
+		argv = append(argv, "--meta-title="+req.Title)
+	}
+	if len(req.ALang) > 0 {
+		argv = append(argv, "--audio-language="+strings.Join(req.ALang, ","))
+	}
+	if len(req.SLang) > 0 {
+		argv = append(argv, "--sub-language="+strings.Join(req.SLang, ","))
+	}
+	return append(argv, "--", req.URL)
+}
+
+// mpcArgv builds MPC-HC's command line. mpc-hc parses /switches and has no
+// end-of-options terminator, so a URL that even LOOKS like a switch is refused.
+func mpcArgv(p player, req playRequest) ([]string, error) {
+	if strings.HasPrefix(req.URL, "-") || strings.HasPrefix(req.URL, "/") {
+		return nil, fmt.Errorf("refusing stream url %q for mpc-hc (could be parsed as a switch)", req.URL)
+	}
+	argv := []string{p.bin, req.URL}
+	if req.Start > 0 {
+		argv = append(argv, "/start", strconv.Itoa(req.Start*1000)) // mpc-hc takes milliseconds
+	}
+	return argv, nil
 }
 
 // dispatchPlayer launches req in the best available local player, falling
