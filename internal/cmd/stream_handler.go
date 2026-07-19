@@ -42,7 +42,10 @@ func startIdleGuard(ctx context.Context, srv *engine.StreamServer) {
 					short = short[:8]
 				}
 				log.Printf("[%s] stream idle timeout (%v no HTTP requests), clearing file", short, streamIdleTimeout)
-				cancelStreamContexts()
+				// Per-task cancel: only reap the IDLE stream (the one served on the
+				// persistent server), never other tasks' live streams or in-flight
+				// streamability probes.
+				cancelStreamTask(taskID)
 				srv.ClearFile()
 			}
 		}
@@ -58,9 +61,16 @@ var streamRegistry = struct {
 	cancels: make(map[string]context.CancelFunc),
 }
 
-// cancelStreamContexts cancels all active stream goroutines (download engines, etc.).
-// Does NOT touch the persistent server — call srv.ClearFile() separately if needed.
-func cancelStreamContexts() {
+// cancelAllStreamContexts cancels EVERY active stream goroutine (download engines,
+// watch reporters, streamability probes, …). This is a nuke — use it ONLY at
+// daemon shutdown, where tearing everything down is the intent. For displacing or
+// stopping a single stream use cancelStreamTask: a global cancel here would abort
+// UNRELATED in-flight work (e.g. another task's ~44s NNTP streamability probe),
+// which then fails with "context canceled" and falls back to a full download while
+// the web polls the stream forever (incident 2026-07-19: idle-timeout of one
+// stream killed another task's probe → mobile stuck on "Iniciando").
+// Does NOT touch the persistent server — call srv.Shutdown()/ClearFile() separately.
+func cancelAllStreamContexts() {
 	streamRegistry.mu.Lock()
 	cancels := make(map[string]context.CancelFunc, len(streamRegistry.cancels))
 	for k, v := range streamRegistry.cancels {
@@ -82,14 +92,26 @@ func isStreamingTask(taskID string) bool {
 	return ok
 }
 
-// cancelStreamTask cancels a specific stream goroutine.
+// cancelStreamTask cancels the stream goroutine for ONE task and its paired watch
+// reporter ("watch:"+taskID), leaving every other task's stream/probe untouched.
+// A blank taskID (e.g. srv.CurrentTaskID() when nothing is served) is a safe no-op.
+// This is the per-task counterpart of cancelAllStreamContexts and the ONLY cancel
+// used for displacement (new claim), stop-stream, and the idle guard.
 func cancelStreamTask(taskID string) {
+	if taskID == "" {
+		return
+	}
 	streamRegistry.mu.Lock()
-	cancel, ok := streamRegistry.cancels[taskID]
-	delete(streamRegistry.cancels, taskID)
+	toCancel := make([]context.CancelFunc, 0, 2)
+	for _, key := range []string{taskID, "watch:" + taskID} {
+		if cancel, ok := streamRegistry.cancels[key]; ok {
+			toCancel = append(toCancel, cancel)
+			delete(streamRegistry.cancels, key)
+		}
+	}
 	streamRegistry.mu.Unlock()
 
-	if ok {
+	for _, cancel := range toCancel {
 		cancel()
 	}
 }
@@ -97,7 +119,7 @@ func cancelStreamTask(taskID string) {
 // handleStreamTask manages a streaming task lifecycle for active torrent downloads.
 // It creates a StreamEngine, buffers, sets the file on the persistent server,
 // and reports progress until the task is cancelled or the download completes.
-func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client, srv *engine.StreamServer, vpnTunnel *vpn.Tunnel, onStateChange func()) {
+func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client, srv *engine.StreamServer, vpnTunnel *vpn.Tunnel, usenetDl *engine.UsenetDownloader, manager *engine.Manager, onStateChange func()) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
@@ -127,6 +149,20 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	// wires this for downloads), so set it here too — resolving/downloading/
 	// completed/failed get pushed to the server immediately.
 	task.SetOnChange(onStateChange)
+
+	// Usenet on-the-fly stream: the web resolved a Usenet release (preferredMethod
+	// "usenet" + a pre-resolved NzbID) and asked to STREAM it. Route it to the SAME
+	// resilient Usenet streamer the in-browser player-session path uses — NEVER the
+	// torrent path below, whose AddMagnet(at.InfoHash) parses an empty hash and
+	// hard-errors ("unhandled xt parameter encoding", the hang this closes). The
+	// helper owns its OWN reporter lifecycle (a fallback hands the id to the manager
+	// as a batch download; sharing reporter.Track/ReportFinal on one id would
+	// collide), so it returns before the torrent-oriented tracking below.
+	if isUsenetStreamTask(at) {
+		handleUsenetStreamTask(ctx, parentCtx, at, task, reporter, cfg, agentClient, usenetDl, manager, srv)
+		return
+	}
+
 	task.ResolvedMethod = engine.MethodTorrent
 	reporter.Track(task)
 	defer reporter.ReportFinal(context.Background(), task)

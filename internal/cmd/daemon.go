@@ -612,13 +612,17 @@ func runDaemonStart() error {
 				if isStreamingTask(t.ID) {
 					continue
 				}
-				cancelStreamContexts()
+				// Displace ONLY the currently-served stream (last-writer-wins on the
+				// persistent server), never other tasks' live streams or in-flight
+				// streamability probes. A blank CurrentTaskID (nothing served) is a
+				// safe no-op.
+				cancelStreamTask(streamSrv.CurrentTaskID())
 				streamSrv.ClearFile()
 				streamCtx, streamCancel := context.WithCancel(ctx) //nolint:gosec // G118: cancel stored in registry
 				streamRegistry.mu.Lock()
 				streamRegistry.cancels[t.ID] = streamCancel
 				streamRegistry.mu.Unlock()
-				go handleStreamTask(streamCtx, t, reporter, cfg, agentClient, streamSrv, vpnTunnel, func() { d.TriggerSync() })
+				go handleStreamTask(streamCtx, t, reporter, cfg, agentClient, streamSrv, vpnTunnel, usenetDl, manager, func() { d.TriggerSync() })
 			} else {
 				manager.Submit(ctx, t)
 			}
@@ -674,7 +678,8 @@ func runDaemonStart() error {
 				log.Printf("[%s] stream failed: %v", agent.ShortID(taskID), err)
 				return
 			}
-			cancelStreamContexts()
+			// Displace only the currently-served stream, not other tasks' work.
+			cancelStreamTask(streamSrv.CurrentTaskID())
 			streamSrv.SetFile(provider, taskID)
 			task.SetStreamURL(streamSrv.URLsJSON())
 			log.Printf("[%s] streaming: %s", agent.ShortID(taskID), provider.FileName())
@@ -771,7 +776,8 @@ func runDaemonStart() error {
 			return
 		}
 
-		cancelStreamContexts()
+		// Displace only the currently-served stream, not other tasks' work.
+		cancelStreamTask(streamSrv.CurrentTaskID())
 		streamSrv.SetFile(engine.NewDiskFileProvider(filePath), sr.TaskID)
 		log.Printf("[%s] streaming from disk: %s → %s", agent.ShortID(sr.TaskID), filepath.Base(filePath), streamSrv.URL())
 
@@ -922,6 +928,7 @@ func runDaemonStart() error {
 			handleUsenetStreamSession(sess, usenetStreamDeps{
 				ctx:         ctx,
 				cfg:         cfg,
+				agentClient: agentClient,
 				usenetDl:    usenetDl,
 				streamSrv:   streamSrv,
 				manager:     manager,
@@ -1193,7 +1200,7 @@ func runDaemonStart() error {
 	select {
 	case sig := <-sigCh:
 		fmt.Printf("\n  Received %s, shutting down...\n", sig)
-		cancelStreamContexts()
+		cancelAllStreamContexts()
 		cancelAllPlayerSessions()
 		streamSrv.Shutdown(context.Background())
 
@@ -1211,7 +1218,7 @@ func runDaemonStart() error {
 		return nil
 
 	case err := <-errCh:
-		cancelStreamContexts()
+		cancelAllStreamContexts()
 		cancelAllPlayerSessions()
 		streamSrv.Shutdown(context.Background())
 		cancel()
