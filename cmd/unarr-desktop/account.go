@@ -46,16 +46,28 @@ func newAgentClient() (*agent.Client, string, error) {
 // isPro is AUTHORITATIVE — it already encodes plan/trial/future tier
 // semantics, so an unrecognized paid plan value must still render as unarr+
 // (old shipped binaries can't be fixed server-side); plan/trialActive only
-// refine the wording.
-func planLabel(plan string, isPro, trialActive bool) string {
+// refine the wording. On an active trial the remaining days become a countdown
+// (a gentle nudge to convert before it lapses).
+func planLabel(plan string, isPro, trialActive bool, trialDaysLeft int) string {
 	switch {
 	case !isPro:
 		return "Free"
 	case trialActive && plan != "pro":
+		if trialDaysLeft > 0 {
+			return "unarr+ trial · " + dayCount(trialDaysLeft) + " left"
+		}
 		return "unarr+ (trial)"
 	default:
 		return "unarr+"
 	}
+}
+
+// dayCount renders a whole-day count with correct singular/plural.
+func dayCount(n int) string {
+	if n == 1 {
+		return "1 day"
+	}
+	return fmt.Sprintf("%d days", n)
 }
 
 // upgradeURL is where the tray's "Upgrade to unarr+" CTA points, built on the
@@ -67,7 +79,7 @@ func upgradeURL(base string) string {
 
 // accountTitle renders the disabled "Account: …" menu row for a fetched account.
 func accountTitle(info *agent.AccountInfo) string {
-	return "Account: " + info.Email + " — " + planLabel(info.Plan, info.IsPro, info.TrialActive)
+	return "Account: " + info.Email + " — " + planLabel(info.Plan, info.IsPro, info.TrialActive, info.TrialDaysLeft)
 }
 
 // versionTitle renders the disabled "Version: …" menu row.

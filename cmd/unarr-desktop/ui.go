@@ -26,9 +26,13 @@ type trayUI struct {
 	mStatus, mAccount, mVersion, mUpgrade *systray.MenuItem
 	mPause, mResume, mRestart             *systray.MenuItem
 	mOpen, mLibrary, mDownloads           *systray.MenuItem
-	mConfigure, mEdit                     *systray.MenuItem
+	mConfigure, mEdit, mPlayer            *systray.MenuItem
 	mLogs, mSendLogs, mDocs               *systray.MenuItem
 	mAutostart, mUpdate, mQuit            *systray.MenuItem
+
+	// playerChoices are the Player submenu entries (playerpicker.go), each
+	// bound to the config value it writes.
+	playerChoices []playerChoice
 
 	// shownTooltip diffs the app-level tooltip so a task-count change updates it
 	// (SetTooltip only when the text actually changed — the DBus/Cocoa spam guard
@@ -93,6 +97,14 @@ func newTrayUI() *trayUI {
 	ui.mDownloads = systray.AddMenuItem("Open downloads folder", "Open the agent's download directory")
 	ui.mConfigure = systray.AddMenuItem("Configure agent (web)", "Paths, codecs, hardware — on the web")
 	ui.mEdit = systray.AddMenuItem("Edit config.toml", "Open the agent config file")
+	// Player submenu: pick which local player unarr:// links open in (writes
+	// [desktop] player). Checkmark reflects the current config value.
+	ui.mPlayer = systray.AddMenuItem("Player", "Which player unarr:// links open in")
+	current := configuredPlayer()
+	for _, opt := range playerMenuOptions() {
+		it := ui.mPlayer.AddSubMenuItemCheckbox(opt.label, "Use "+opt.label, opt.value == current)
+		ui.playerChoices = append(ui.playerChoices, playerChoice{it, opt.value})
+	}
 	systray.AddSeparator()
 	ui.mLogs = systray.AddMenuItem("View logs", "Open the agent log file")
 	ui.mSendLogs = systray.AddMenuItem("Send logs to support", "Send agent logs to the developers")
@@ -143,7 +155,7 @@ func (ui *trayUI) setTooltip(s string) {
 // trayTooltip is the icon hover text: the download count when the agent is
 // actively working, else the plain state label.
 func trayTooltip(st trayState, s agentStatus) string {
-	if st == stateRunning && s.tasks > 0 {
+	if st == stateDownloading {
 		return fmt.Sprintf("unarr — %d download(s) active", s.tasks)
 	}
 	return "unarr agent — " + st.label()
@@ -170,7 +182,7 @@ func (ui *trayUI) refresh() {
 	ui.applyState(st)
 	ui.setTooltip(trayTooltip(st, s))
 	switch st {
-	case stateRunning:
+	case stateRunning, stateDownloading:
 		// Downloads are what the user cares about; the PID is diagnostic, so it
 		// moves to the row tooltip. No active tasks → the plain "running" line.
 		if s.tasks > 0 {

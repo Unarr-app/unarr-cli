@@ -193,6 +193,7 @@ func onReady() {
 	go ui.updateLoop()
 	go ui.clickLoop()
 	go ui.navLoop()
+	ui.startPlayerWatchers() // spawns one goroutine per Player submenu entry
 }
 
 // toggleAutostart flips "Start at login" to the opposite of the checkbox

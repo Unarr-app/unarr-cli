@@ -14,6 +14,7 @@ type trayState int
 const (
 	stateUnknown trayState = iota
 	stateRunning
+	stateDownloading
 	statePaused
 	stateStopped
 	stateCrashed
@@ -23,6 +24,8 @@ func (s trayState) label() string {
 	switch s {
 	case stateRunning:
 		return "running"
+	case stateDownloading:
+		return "downloading"
 	case statePaused:
 		return "paused"
 	case stateStopped:
@@ -37,8 +40,13 @@ func (s trayState) label() string {
 // displayState maps daemon status + the tray's own pause marker to the icon
 // state. Pause and stop are the same daemon operation (clean stop); the marker
 // is what distinguishes "I paused it from the tray" from "it is not running".
+// Running with ≥1 active task is its OWN state so the icon carries an activity
+// badge — the running↔downloading boundary is the 0↔>0 task transition, which
+// is exactly when applyState (transition-only) swaps the icon.
 func displayState(s agentStatus, paused bool) trayState {
 	switch {
+	case s.running && s.tasks > 0:
+		return stateDownloading
 	case s.running:
 		return stateRunning
 	case s.crashed:
@@ -53,6 +61,9 @@ func displayState(s agentStatus, paused bool) trayState {
 var (
 	amber = color.NRGBA{R: 0xF5, G: 0xA6, B: 0x23, A: 0xFF}
 	red   = color.NRGBA{R: 0xE0, G: 0x33, B: 0x2C, A: 0xFF}
+	// green reads on the COLORED (amber) logo, unlike amber-on-amber — it marks
+	// the running icon while a download is active.
+	green = color.NRGBA{R: 0x2E, G: 0xC4, B: 0x66, A: 0xFF}
 )
 
 // buildStateIcons derives the per-state tray icons from the embedded logo at
@@ -64,7 +75,8 @@ var (
 // can never drift from the logo. Any failure falls back to the plain logo.
 func buildStateIcons(base []byte) map[trayState][]byte {
 	fallback := map[trayState][]byte{
-		stateRunning: base, statePaused: base, stateStopped: base, stateCrashed: base,
+		stateRunning: base, stateDownloading: base, statePaused: base,
+		stateStopped: base, stateCrashed: base,
 	}
 	src, err := png.Decode(bytes.NewReader(base))
 	if err != nil {
@@ -73,9 +85,12 @@ func buildStateIcons(base []byte) map[trayState][]byte {
 	gray := dimGray(src)
 	return map[trayState][]byte{
 		stateRunning: base,
-		statePaused:  encodeOr(base, badge(gray, amber)),
-		stateStopped: encodeOr(base, gray),
-		stateCrashed: encodeOr(base, badge(gray, red)),
+		// Downloading: green badge on the COLORED logo (amber-on-amber would be
+		// invisible, hence green, unlike the not-running badges on gray).
+		stateDownloading: encodeOr(base, badge(src, green)),
+		statePaused:      encodeOr(base, badge(gray, amber)),
+		stateStopped:     encodeOr(base, gray),
+		stateCrashed:     encodeOr(base, badge(gray, red)),
 	}
 }
 

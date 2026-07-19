@@ -8,27 +8,30 @@ import (
 
 func TestPlanLabel(t *testing.T) {
 	tests := []struct {
-		name        string
-		plan        string
-		isPro       bool
-		trialActive bool
-		want        string
+		name          string
+		plan          string
+		isPro         bool
+		trialActive   bool
+		trialDaysLeft int
+		want          string
 	}{
-		{"pro plan", "pro", true, false, "unarr+"},
-		{"pro plan wins over trial", "pro", true, true, "unarr+"},
-		{"active trial without pro plan", "free", true, true, "unarr+ (trial)"},
-		{"free", "free", false, false, "Free"},
-		{"trial flag without isPro", "free", false, true, "Free"},
+		{"pro plan", "pro", true, false, 0, "unarr+"},
+		{"pro plan wins over trial", "pro", true, true, 5, "unarr+"},
+		{"active trial with days left", "free", true, true, 4, "unarr+ trial · 4 days left"},
+		{"active trial one day left", "free", true, true, 1, "unarr+ trial · 1 day left"},
+		{"active trial without a day count", "free", true, true, 0, "unarr+ (trial)"},
+		{"free", "free", false, false, 0, "Free"},
+		{"trial flag without isPro", "free", false, true, 3, "Free"},
 		// isPro is authoritative: a plan value this binary doesn't know
 		// (future tier) must still render as paid — old shipped trays can't
 		// be fixed server-side.
-		{"unknown paid plan trusts isPro", "plus", true, false, "unarr+"},
-		{"empty plan", "", false, false, "Free"},
+		{"unknown paid plan trusts isPro", "plus", true, false, 0, "unarr+"},
+		{"empty plan", "", false, false, 0, "Free"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := planLabel(tt.plan, tt.isPro, tt.trialActive); got != tt.want {
-				t.Errorf("planLabel(%q, %v, %v) = %q, want %q", tt.plan, tt.isPro, tt.trialActive, got, tt.want)
+			if got := planLabel(tt.plan, tt.isPro, tt.trialActive, tt.trialDaysLeft); got != tt.want {
+				t.Errorf("planLabel(%q, %v, %v, %d) = %q, want %q", tt.plan, tt.isPro, tt.trialActive, tt.trialDaysLeft, got, tt.want)
 			}
 		})
 	}
