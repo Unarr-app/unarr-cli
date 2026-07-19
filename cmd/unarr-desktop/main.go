@@ -170,6 +170,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unarr-desktop: unrecognized arguments: %s\n\n", strings.Join(os.Args[1:], " "))
 		fmt.Fprint(os.Stderr, usageText)
 		os.Exit(2)
+	case modeTray:
+		// Default form (no args): fall through to the systray startup below.
+		// Every other mode returns/exits above, so this is the only path that
+		// reaches sentry.Init + systray.Run.
 	}
 	sentry.Init(version)
 	defer sentry.Close()
