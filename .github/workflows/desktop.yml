@@ -59,7 +59,7 @@ jobs:
           - { runner: macos-latest, goos: darwin, goarch: arm64, cgo: "1", ext: "" }
           - { runner: windows-latest, goos: windows, goarch: amd64, cgo: "0", ext: ".exe" }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
@@ -134,7 +134,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
