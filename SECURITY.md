@@ -59,6 +59,38 @@ This project follows these security practices:
 - **Non-root Docker** — Container runs as unprivileged user (UID 1000)
 - **Dependency scanning** — Automated via Dependabot
 
+## What the agent exposes to the network
+
+The daemon serves two listeners on your machine. They have different exposure
+rules because they have different authentication.
+
+| Listener | Reaches the internet? | Protected by |
+|---|---|---|
+| Cleartext stream port | Only if you set `enable_upnp = true` | Nothing — hence opt-in |
+| HTTPS stream port (direct-TLS) | Yes, by default (`auto_https_upnp = true`) | TLS + a per-request token the web mints |
+
+`auto_https_upnp` asks your router (UPnP/NAT-PMP) to forward the HTTPS port so
+remote playback reaches a stable address with a valid certificate, rather than a
+CloudFlare quick tunnel that changes hostname on every restart. It is on by
+default because that listener is TLS-only and rejects any request without a
+valid token. The lease is renewed while the daemon runs and removed on shutdown;
+if the daemon is killed it expires on its own within 2 hours.
+
+Set `auto_https_upnp = false` if you would rather the agent never touch your
+router. Remote playback then falls back to the tunnel.
+
+**The WebDAV mount is not part of this.** `/dav/` shares the same mux, but it
+answers only callers on your local network (loopback, RFC1918, link-local, and
+Tailscale's `100.64.0.0/10`) — anything else gets a 404, not an auth challenge,
+so a port scan cannot even tell the mount is there. Publishing the stream port
+exposes playback, never your library.
+
+`webdav_allow_wan = true` lifts that restriction. Think before setting it: the
+only thing left protecting the mount is HTTP Basic auth with **no rate
+limiting**, which makes it an unthrottled online password-guessing target. The
+daemon logs a warning at startup whenever that flag is on and the port is
+published.
+
 ## Container Image Vulnerability Scanning
 
 The Docker image (`unarr/cli`) is scanned by Docker Scout on Docker Hub and

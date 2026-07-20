@@ -492,11 +492,25 @@ max_upload_speed = "0"
 # off by default. Only GET/HEAD/PROPFIND are served — every write verb is 405'd.
 # Basic auth: username defaults to "unarr"; password defaults to a stable value
 # derived from your API key (shown by `unarr status`) unless you set one. The
-# mount is served on the same port as streaming, at /dav/. Prefer LAN/Tailscale
-# on untrusted networks. Requires unarr >= 1.5.0-beta.
+# mount is served on the same port as streaming, at /dav/. Requires unarr >= 1.5.0-beta.
 webdav_enabled = false
 # webdav_username = "unarr"
 # webdav_password = ""           # blank = derive from the API key
+# The mount answers only your local network (LAN, Tailscale, loopback);
+# everything else gets a 404, so it stays private even when the stream port is
+# reachable from the internet. Turning this on removes that restriction, and the
+# Basic auth left protecting it has NO rate limiting — an exposed mount is an
+# unthrottled password-guessing target. Remote playback does not use WebDAV, so
+# leaving it off costs you nothing there.
+# webdav_allow_wan = false
+
+# Publish the HTTPS streaming port to your router (UPnP/NAT-PMP) so remote
+# playback uses your agent's stable direct-TLS address instead of a CloudFlare
+# quick tunnel, which changes hostname on every restart and gets rate-limited.
+# On by default: that listener is TLS-only and every request needs a token the
+# web mints, so nothing unauthenticated is reachable. The lease is renewed
+# automatically and removed on shutdown. Set to false to never touch your router.
+# auto_https_upnp = true
 
 [organize]
 enabled = true

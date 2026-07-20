@@ -416,6 +416,10 @@ func runDaemonStart() error {
 	log.Printf("[stream] HLS server on port %d (max concurrent sessions: %d)",
 		cfg.Download.StreamPort, cfg.Download.MaxStreamSessions)
 	streamSrv.SetUPnPEnabled(cfg.Download.EnableUPnP)
+	streamSrv.SetAutoHTTPSUpnp(cfg.Download.AutoHTTPSUpnp)
+	// Push HTTPS-port WAN-mapping state onto the daemon so it rides the sync
+	// heartbeat (the web gates its direct-TLS reachability probe on this hint).
+	streamSrv.SetWanMappedCallback(d.SetHTTPSWanMapped)
 	// Wire ffmpeg so /thumbnail can extract single frames for the web's "file
 	// characteristics" panel (frames on demand). Empty = thumbnails 503.
 	streamSrv.SetFFmpegPath(ffmpegResolved)
@@ -1298,19 +1302,27 @@ func setupWebDAV(streamSrv *engine.StreamServer, cfg config.Config) {
 	streamSrv.SetWebDAVAllowWAN(cfg.Download.WebDAVAllowWAN)
 	log.Printf("[webdav] read-only library export enabled (user %q) at :%d/dav/", user, cfg.Download.StreamPort)
 	if webDAVOverUPnPExposed(cfg) {
-		log.Printf("[webdav] WARNING: enable_upnp is ALSO on — UPnP maps the stream port to the WAN, " +
-			"exposing /dav/ (HTTP Basic auth over cleartext) to the public internet. " +
-			"Disable enable_upnp, or keep the mount on LAN / Tailscale only.")
+		log.Printf("[webdav] WARNING: webdav_allow_wan is on AND the stream port is published to the WAN " +
+			"(enable_upnp / auto_https_upnp) — /dav/ is reachable from the public internet, and its Basic auth " +
+			"has no rate limiting. Turn webdav_allow_wan off to restrict the mount to LAN / Tailscale.")
 	}
 }
 
-// webDAVOverUPnPExposed reports the dangerous combination where the read-only
-// WebDAV export AND UPnP/NAT-PMP WAN port-mapping are BOTH enabled: UPnP
-// publishes the stream port to the public internet, so /dav/ (served with HTTP
-// Basic auth over cleartext) becomes reachable from the WAN. Callers warn loudly
-// but do not refuse to start — the operator may have opted in deliberately.
+// webDAVOverUPnPExposed reports the combination that actually puts the read-only
+// WebDAV export on the public internet: the mount is on, its local-network
+// restriction has been lifted (webdav_allow_wan), and something publishes the
+// stream port to the WAN — enable_upnp for the cleartext listener, or
+// auto_https_upnp for the TLS one.
+//
+// webdav_allow_wan is the load-bearing term. Without it the guard answers 404 to
+// any caller outside loopback/RFC1918/link-local/Tailscale, so publishing the
+// port exposes playback but not the mount. Callers warn loudly and still start:
+// an operator who set the flag asked for this.
 func webDAVOverUPnPExposed(cfg config.Config) bool {
-	return cfg.Download.WebDAVEnabled && cfg.Download.EnableUPnP
+	if !cfg.Download.WebDAVEnabled || !cfg.Download.WebDAVAllowWAN {
+		return false
+	}
+	return cfg.Download.EnableUPnP || cfg.Download.AutoHTTPSUpnp
 }
 
 // allowedDirs. filePath must already be cleaned (filepath.Clean) by the caller.
