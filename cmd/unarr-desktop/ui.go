@@ -86,6 +86,11 @@ func newTrayUI() *trayUI {
 	systray.SetTitle("unarr")
 	systray.SetTooltip("unarr agent")
 
+	// Left button opens the web app, right button opens this menu — everywhere
+	// but macOS, which keeps its native "click opens the menu" gesture. See
+	// traytap_other.go / traytap_darwin.go for why the split exists.
+	installTapHandler()
+
 	ui.mStatus = systray.AddMenuItem("Checking…", "Agent status")
 	ui.mStatus.Disable()
 	ui.mAccount = systray.AddMenuItem("Account: …", "Signed-in unarr account")
