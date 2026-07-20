@@ -44,6 +44,10 @@ type SyncClient struct {
 	cfg    DaemonConfig
 	state  *LocalState
 
+	// blocked records that a terminal failure has been written to disk, so the
+	// record is cleared exactly once on recovery instead of on every sync.
+	blocked atomic.Bool
+
 	// Callbacks — set by the daemon before calling Run.
 	OnNewTasks       func(tasks []Task)
 	OnControl        func(action, taskID string, deleteFiles bool)
@@ -201,9 +205,26 @@ func (sc *SyncClient) doSync(ctx context.Context) {
 				sc.OnRevoked(err)
 				return
 			}
+			// A sync the server will keep rejecting is not a hiccup: the agent
+			// is connected, alive, and doing nothing at all. Logging it and
+			// retrying forever left the tray showing a green "running" agent
+			// that could not accept a single download — the worst state in the
+			// product, because every indicator says it is fine. Record it so
+			// the tray can say what is actually wrong.
+			if b, terminal := Classify(err); terminal {
+				b.Version = sc.cfg.Version
+				WriteBlocked(b)
+				sc.blocked.Store(true)
+			}
 			log.Printf("sync failed: %v", err)
 		}
 		return
+	}
+	// The server accepted us again, so whatever we told the user to fix is
+	// fixed. Guarded by the flag rather than clearing unconditionally: a sync
+	// runs every few seconds and must not touch the disk each time.
+	if sc.blocked.CompareAndSwap(true, false) {
+		ClearBlocked()
 	}
 	sc.processResponse(resp)
 	sc.adjustInterval(resp.Watching)

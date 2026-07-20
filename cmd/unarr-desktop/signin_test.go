@@ -55,7 +55,7 @@ func TestSignInNeeded(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := signInNeeded(tc.accountOK, tc.state, tc.fail); got != tc.want {
+			if got := signInNeeded(tc.accountOK, tc.state, tc.fail, nil); got != tc.want {
 				t.Errorf("signInNeeded(accountOK=%v, %v, %+v) = %v, want %v",
 					tc.accountOK, tc.state, tc.fail, got, tc.want)
 			}

@@ -23,6 +23,12 @@ const (
 	// user must see, but a failed control must never be mistaken for a crash
 	// and reported as one.
 	stateFailed
+	// stateBlocked: the daemon is alive but the server will not let it work —
+	// a rejected credential, an exhausted plan. It OUTRANKS running: a process
+	// with a live PID that cannot accept a single download is the state this
+	// tray used to render as a healthy green agent, which told the user nothing
+	// was wrong while nothing worked.
+	stateBlocked
 )
 
 func (s trayState) label() string {
@@ -39,6 +45,8 @@ func (s trayState) label() string {
 		return "crashed"
 	case stateFailed:
 		return "failed"
+	case stateBlocked:
+		return "blocked"
 	default:
 		return "unknown"
 	}
@@ -53,8 +61,12 @@ func (s trayState) label() string {
 // failed reports that the last control the user asked for did not work; it
 // outranks paused/stopped because "it is not running" is precisely the part the
 // user already knows — why is the part they are missing.
-func displayState(s agentStatus, paused, failed bool) trayState {
+func displayState(s agentStatus, paused, failed, blocked bool) trayState {
 	switch {
+	case blocked:
+		// Checked before "running" on purpose: the daemon IS running, which is
+		// exactly why this needs to outrank it.
+		return stateBlocked
 	case s.running && s.tasks > 0:
 		return stateDownloading
 	case s.running:
@@ -89,6 +101,7 @@ func buildStateIcons(base []byte) map[trayState][]byte {
 	fallback := map[trayState][]byte{
 		stateRunning: base, stateDownloading: base, statePaused: base,
 		stateStopped: base, stateCrashed: base, stateFailed: base,
+		stateBlocked: base,
 	}
 	src, err := png.Decode(bytes.NewReader(base))
 	if err != nil {
@@ -106,6 +119,10 @@ func buildStateIcons(base []byte) map[trayState][]byte {
 		// A failed control is an error the user must notice, so it gets the
 		// same red badge as a crash.
 		stateFailed: encodeOr(base, badge(gray, red)),
+		// Blocked waits on the user, like a failed control does, so it wears the
+		// same red badge on gray — the daemon may be alive, but nothing it can
+		// do matters until the user acts.
+		stateBlocked: encodeOr(base, badge(gray, red)),
 	}
 }
 

@@ -33,7 +33,7 @@ func TestDisplayState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := displayState(tt.status, tt.paused, tt.failed); got != tt.want {
+			if got := displayState(tt.status, tt.paused, tt.failed, false); got != tt.want {
 				t.Errorf("displayState(%+v, paused=%v, failed=%v) = %v, want %v", tt.status, tt.paused, tt.failed, got, tt.want)
 			}
 		})

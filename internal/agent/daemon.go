@@ -75,6 +75,14 @@ type Daemon struct {
 	// persists it so the next start authenticates with the bound agent key —
 	// migrating legacy agents and stopping the per-restart re-mint.
 	OnAgentKeyMinted func(newKey string)
+	// OnBlocked fires once when a terminal failure parks the daemon, so cmd can
+	// tell the user on a channel they will actually see (a desktop notification
+	// — the daemon usually runs as a service where stdout goes nowhere).
+	OnBlocked func(b *Blocked)
+	// ReloadCredential re-reads the API key from disk while blocked. Signing in
+	// from the tray rewrites it, and without this the daemon would keep offering
+	// the rejected key forever — making a successful sign-in look like a failure.
+	ReloadCredential func()
 
 	// State
 	User                UserInfo
@@ -126,6 +134,10 @@ func NewDaemon(cfg DaemonConfig, client *Client) *Daemon {
 
 // SyncClient returns the sync client for external wiring.
 func (d *Daemon) SyncClient() *SyncClient { return d.sync }
+
+// Client exposes the API client so cmd can swap in a credential the user
+// re-authorized while the daemon was parked on a rejected one.
+func (d *Daemon) Client() *Client { return d.client }
 
 // SetVPNState + vpnSnapshot — the managed-VPN split-tunnel / P2P kill-switch state
 // accessors — live in daemon_vpn.go to keep this file within the size budget.
@@ -271,6 +283,20 @@ func (d *Daemon) Register(ctx context.Context) error {
 		if err == nil {
 			break
 		}
+		if b, terminal := Classify(err); terminal {
+			// Retrying on our own cannot fix this — the user has to. Exiting
+			// cannot fix it either: the supervisor is Restart=always, so a
+			// process that quits (with ANY status) is back in ten seconds to
+			// fail identically, which is how a rejected key became an invisible
+			// restart loop. So the daemon stays up, says what is wrong, and
+			// waits for the user to resolve it.
+			b.Version = d.cfg.Version
+			resp, err = d.waitOutBlock(ctx, b, req)
+			if err != nil {
+				return err
+			}
+			break
+		}
 		if !isTransientError(err) {
 			return fmt.Errorf("register: %w", err)
 		}
@@ -287,6 +313,12 @@ func (d *Daemon) Register(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("register: %w (after %d retries)", err, maxRetries)
 	}
+
+	// Registration succeeded, so whatever the user was blocked on is resolved.
+	// Clearing it here — rather than where each block is fixed — means a stale
+	// block can never outlive the problem: a user who signs in again must not
+	// still be told to sign in.
+	ClearBlocked()
 
 	// Registered with a general/legacy key → the server minted a per-machine key.
 	// Persist it (cmd wires the callback) so the next start uses the bound key.

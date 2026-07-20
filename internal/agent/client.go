@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,7 +19,11 @@ import (
 // and retries up to `len(mirrors)-1` times so a single agent run survives
 // a primary-domain takedown without user intervention.
 type Client struct {
-	pool       *MirrorPool
+	pool *MirrorPool
+	// keyMu guards apiKey: a blocked daemon swaps in a freshly signed-in key
+	// while other goroutines (stream sessions, library sync) may be sending
+	// requests with the old one.
+	keyMu      sync.RWMutex
 	apiKey     string
 	httpClient *http.Client
 	// wakeClient has no built-in timeout — used exclusively for the long-poll
@@ -521,8 +526,22 @@ func (c *Client) withMirrorFailover(fn func(base string) error) error {
 	return lastErr
 }
 
+// SetAPIKey swaps the credential a live client authenticates with, so a daemon
+// parked on a rejected key picks up a fresh sign-in without a restart.
+func (c *Client) SetAPIKey(key string) {
+	c.keyMu.Lock()
+	defer c.keyMu.Unlock()
+	c.apiKey = key
+}
+
+func (c *Client) currentKey() string {
+	c.keyMu.RLock()
+	defer c.keyMu.RUnlock()
+	return c.apiKey
+}
+
 func (c *Client) setHeaders(req *http.Request) {
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.currentKey())
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
 	}
@@ -538,7 +557,11 @@ func (c *Client) handleResponse(resp *http.Response, dst any) error {
 		// Try to parse as JSON error
 		var errResp ErrorResponse
 		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return &HTTPError{StatusCode: resp.StatusCode, Message: errResp.Error}
+			return &HTTPError{
+				StatusCode: resp.StatusCode,
+				Message:    errResp.Error,
+				Detail:     errResp.Message,
+			}
 		}
 		// Non-JSON response (e.g. HTML error page) — truncate to something readable
 		msg := string(body)

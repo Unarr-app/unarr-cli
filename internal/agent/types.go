@@ -245,9 +245,12 @@ type UpgradeSignal struct {
 	Version string `json:"version"`
 }
 
-// ErrorResponse is returned on API errors.
+// ErrorResponse is returned on API errors. Error is the machine code that
+// client code branches on; Message is the sentence written for the user, which
+// the server can improve without shipping a new binary to every machine.
 type ErrorResponse struct {
 	Error   string `json:"error"`
+	Message string `json:"message,omitempty"`
 	Details any    `json:"details,omitempty"`
 }
 
@@ -255,10 +258,20 @@ type ErrorResponse struct {
 // Use errors.As to extract the status code for retry decisions.
 type HTTPError struct {
 	StatusCode int
-	Message    string
+	// Message is the machine code the server sent ("agent_revoked"), which
+	// callers match on. It stays the code for compatibility with the paths that
+	// tokenize it.
+	Message string
+	// Detail is the server's human sentence, when it sent one. It is what a
+	// user should read: it knows specifics the client cannot (which plan, how
+	// many machines). Empty for older servers and non-JSON errors.
+	Detail string
 }
 
 func (e *HTTPError) Error() string {
+	if e.Detail != "" {
+		return fmt.Sprintf("API error %d: %s (%s)", e.StatusCode, e.Detail, e.Message)
+	}
 	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
 }
 

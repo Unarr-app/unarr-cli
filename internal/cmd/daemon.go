@@ -22,6 +22,7 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/funnel"
 	"github.com/Unarr-app/unarr-cli/internal/library"
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/notify"
 	"github.com/Unarr-app/unarr-cli/internal/usenet/download"
 	"github.com/fatih/color"
 	"github.com/gofrs/flock"
@@ -1195,6 +1196,29 @@ func runDaemonStart() error {
 		}
 	}
 
+	// A terminal failure parks the daemon instead of exiting it (see
+	// agent.waitOutBlock). Tell the user once, where they will see it.
+	d.OnBlocked = func(b *agent.Blocked) { reportBlocked(b) }
+
+	// While parked, re-read the credential each attempt: signing in from the
+	// tray rewrites config.toml, and the daemon must pick that up on its own —
+	// otherwise a successful sign-in looks like it did nothing, which is exactly
+	// the dead end this whole path exists to remove.
+	d.ReloadCredential = func() {
+		fresh, lerr := config.Load(resolvedConfigPath())
+		if lerr != nil {
+			log.Printf("[agent] blocked: could not re-read config: %v", lerr)
+			return
+		}
+		fresh.ApplyEnvOverrides()
+		if fresh.Auth.APIKey == "" || fresh.Auth.APIKey == cfg.Auth.APIKey {
+			return
+		}
+		log.Printf("[agent] blocked: picked up a new credential from %s", resolvedConfigPath())
+		cfg.Auth.APIKey = fresh.Auth.APIKey
+		d.Client().SetAPIKey(fresh.Auth.APIKey)
+	}
+
 	// Start daemon (blocks — runs sync loop)
 	errCh := make(chan error, 1)
 	go func() {
@@ -1245,6 +1269,25 @@ func runDaemonStart() error {
 	}
 }
 
+// reportBlocked tells the user why the agent cannot work and what to do about
+// it, on every channel they might actually be watching. Printing to stdout is
+// not enough: the agent usually runs as a service under a tray, where nobody
+// ever sees its output — which is how a rejected credential became an invisible
+// restart loop. The recorded block is what the tray reads; the notification is
+// what reaches a user who is not looking at the tray either.
+//
+// Fired once per block, not once per retry (see agent.waitOutBlock): the daemon
+// stays up and keeps trying, and a user who is already blocked does not need the
+// same popup every minute.
+func reportBlocked(b *agent.Blocked) {
+	log.Printf("[agent] needs attention: %s (%s)", b.Message, b.Reason)
+	fmt.Println()
+	fmt.Println("  " + b.Message)
+	fmt.Println("  " + b.Remedy)
+	fmt.Println()
+	notify.SendUrgent("unarr agent needs attention", b.Message+"\n\n"+b.Remedy)
+}
+
 // reportAgentRevoked tells the user their agent was removed and wipes the
 // stored credential (api key + agentId) so the next start requires a fresh
 // `unarr login` (which mints a new per-machine key bound to a new agentId)
@@ -1260,6 +1303,9 @@ func reportAgentRevoked(cfg config.Config, err error) {
 	fmt.Println("  This agent was removed from your account.")
 	fmt.Println("  Run `unarr login` on this machine to reconnect it.")
 	fmt.Println()
+	// Same reason as reportBlocked: under a tray nobody reads stdout.
+	notify.SendUrgent("unarr agent disconnected",
+		"This machine was removed from your unarr account.\n\nSign in again to reconnect it.")
 }
 
 // isAllowedStreamPath checks that filePath is within one of the directories

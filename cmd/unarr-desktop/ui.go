@@ -196,9 +196,14 @@ func (ui *trayUI) setTooltip(s string) {
 
 // trayTooltip is the icon hover text: the download count when the agent is
 // actively working, else the plain state label.
-func trayTooltip(st trayState, s agentStatus) string {
+func trayTooltip(st trayState, s agentStatus, blocked *agent.Blocked) string {
 	if st == stateDownloading {
 		return fmt.Sprintf("unarr — %d download(s) active", s.tasks)
+	}
+	if st == stateBlocked {
+		// "blocked" on its own is jargon, and this is the one hover the user
+		// gets without opening the menu — spend it on the actual problem.
+		return "unarr — " + blockedTitle(blocked)
 	}
 	return "unarr agent — " + st.label()
 }
@@ -278,14 +283,29 @@ func (ui *trayUI) renderDaemonStatus() {
 		s = readStatus()
 	}
 	fail, _ := ui.controlFail.Load().(controlFailure)
-	st := displayState(s, isPausedMarker(), fail.failed())
+	// The daemon records a terminal failure it cannot resolve on its own. Read
+	// it every tick so a block that clears (the user signs in, the daemon
+	// recovers) disappears from the menu without a tray restart.
+	blocked := agent.ReadBlocked()
+	st := displayState(s, isPausedMarker(), fail.failed(), blocked != nil)
 	// One authority for the sign-in row: deciding it here, on the ticker, keeps
 	// the account goroutine from fighting the renderer over the same item every
 	// few seconds.
-	ui.showLogin(signInNeeded(ui.accountOK.Load(), st, fail))
+	ui.showLogin(signInNeeded(ui.accountOK.Load(), st, fail, blocked))
 	ui.applyState(st)
-	ui.setTooltip(trayTooltip(st, s))
+	ui.setTooltip(trayTooltip(st, s, blocked))
 	switch st {
+	case stateBlocked:
+		// The daemon already worked out what is wrong and what to do about it,
+		// in the server's own words. The tray's job is to carry that, not to
+		// re-derive it from an exit code it never sees.
+		ui.mStatus.SetTitle(blockedTitle(blocked))
+		ui.mStatus.SetTooltip(blocked.Message + " " + blocked.Remedy)
+		// Pause/resume/restart all lead back here until the block is resolved:
+		// offering them would be offering a button that cannot work.
+		ui.mPause.Disable()
+		ui.mResume.Disable()
+		ui.mRestart.Disable()
 	case stateRunning, stateDownloading:
 		ui.controlFail.Store(controlFailure{}) // it is up: any past failure is moot
 		// Downloads are what the user cares about; the PID is diagnostic, so it
@@ -350,7 +370,13 @@ func (ui *trayUI) renderDaemonStatus() {
 // credential was rejected. "Account: unavailable" counts — the user is told
 // something is wrong with their account, so the way to fix it has to be there
 // too; offering it and having it fail beats showing a dead end.
-func signInNeeded(accountOK bool, st trayState, fail controlFailure) bool {
+func signInNeeded(accountOK bool, st trayState, fail controlFailure, blocked *agent.Blocked) bool {
+	// The daemon's own diagnosis outranks the tray's guesswork: it talked to the
+	// server and knows whether signing in is the fix. A plan limit is blocked
+	// too, but re-authorizing would succeed and change nothing.
+	if st == stateBlocked {
+		return blockNeedsSignIn(blocked)
+	}
 	if !accountOK {
 		return true
 	}
