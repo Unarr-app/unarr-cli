@@ -90,16 +90,23 @@ func TestDedupeScopes(t *testing.T) {
 }
 
 func TestDescribeControlFailure(t *testing.T) {
-	t.Run("a rejected key tells the user how to fix it", func(t *testing.T) {
-		// The most common failure and the only one the user can act on, so it
-		// must not be reported as a raw wrapped error.
+	t.Run("a rejected key points at the menu, not a terminal", func(t *testing.T) {
+		// The most common failure and the only one the user can act on. The
+		// tray exists so a user never needs a terminal, so the message must not
+		// send them to one — "Sign in…" in the menu does it for them.
 		got := describeControlFailure("start", errRejectedKey)
 
 		if !strings.Contains(got.title, "sign-in") {
 			t.Errorf("title = %q, want it to mention sign-in", got.title)
 		}
-		if !strings.Contains(got.detail, "unarr login") {
-			t.Errorf("detail = %q, want it to name the command that fixes it", got.detail)
+		if !got.authRequired {
+			t.Error("authRequired must be set: it is what collapses the menu to the Sign in action")
+		}
+		if !strings.Contains(got.detail, "Sign in") {
+			t.Errorf("detail = %q, want it to point at the menu action", got.detail)
+		}
+		if strings.Contains(got.detail, "unarr login") {
+			t.Errorf("detail = %q, must not tell the user to run a terminal command", got.detail)
 		}
 		if !got.failed() {
 			t.Error("a described failure must report failed()")
@@ -116,6 +123,9 @@ func TestDescribeControlFailure(t *testing.T) {
 		}
 		if !strings.Contains(got.title, "start") {
 			t.Errorf("title = %q, want it to name the action", got.title)
+		}
+		if got.authRequired {
+			t.Error("a non-auth failure must not collapse the menu to Sign in")
 		}
 	})
 
@@ -180,7 +190,7 @@ func TestAwaitControl(t *testing.T) {
 		// process fails afterwards.
 		cmd, out := startHelper(t, "fail")
 
-		err := awaitControl(cmd, out)
+		err := awaitControl(cmd, out, controlWatch)
 
 		if err == nil {
 			t.Fatal("awaitControl returned nil for a command that exited 1")
@@ -194,7 +204,7 @@ func TestAwaitControl(t *testing.T) {
 		// `stop` exits 0 promptly and must not be reported as broken.
 		cmd, out := startHelper(t, "ok")
 
-		if err := awaitControl(cmd, out); err != nil {
+		if err := awaitControl(cmd, out, controlWatch); err != nil {
 			t.Errorf("awaitControl = %v, want nil for a clean exit", err)
 		}
 	})
@@ -202,12 +212,11 @@ func TestAwaitControl(t *testing.T) {
 	t.Run("a daemon still up after the window is a success", func(t *testing.T) {
 		// `start` keeps running when it works, so outliving the window is the
 		// signal that it came up.
-		swapControlWatch(t, 50*time.Millisecond)
 		cmd, out := startHelper(t, "linger")
 		t.Cleanup(func() { _ = cmd.Process.Kill() })
 
 		start := time.Now()
-		err := awaitControl(cmd, out)
+		err := awaitControl(cmd, out, 50*time.Millisecond)
 
 		if err != nil {
 			t.Errorf("awaitControl = %v, want nil for a process that outlived the window", err)
@@ -222,7 +231,7 @@ func TestAwaitControl(t *testing.T) {
 		// leaked a zombie. ProcessState is only set once Wait has reaped it.
 		cmd, out := startHelper(t, "ok")
 
-		_ = awaitControl(cmd, out)
+		_ = awaitControl(cmd, out, controlWatch)
 
 		if cmd.ProcessState == nil {
 			t.Fatal("the child was never reaped")
@@ -230,11 +239,17 @@ func TestAwaitControl(t *testing.T) {
 	})
 }
 
-func swapControlWatch(t *testing.T, d time.Duration) {
-	t.Helper()
-	prev := controlWatch
-	controlWatch = d
-	t.Cleanup(func() { controlWatch = prev })
+func TestWatchForGivesSignInLonger(t *testing.T) {
+	// `login --browser` waits on a human and a browser for up to a minute;
+	// watching it for the daemon window would call an abandoned sign-in a
+	// success and never report the timeout.
+	if watchFor(signInAction) <= watchFor("start") {
+		t.Errorf("sign-in window %v must exceed the control window %v",
+			watchFor(signInAction), watchFor("start"))
+	}
+	if watchFor(signInAction) < 60*time.Second {
+		t.Errorf("sign-in window %v is shorter than the browser flow's own timeout", watchFor(signInAction))
+	}
 }
 
 // startHelper spawns this test binary as a stand-in child process, so the

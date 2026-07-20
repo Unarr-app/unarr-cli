@@ -27,6 +27,7 @@ type trayUI struct {
 
 	mStatus, mAccount, mVersion, mUpgrade *systray.MenuItem
 	mPause, mResume, mRestart             *systray.MenuItem
+	mLogin                                *systray.MenuItem
 	mEnableDownloads                      *systray.MenuItem
 	mOpen, mLibrary, mDownloads           *systray.MenuItem
 	mConfigure, mEdit, mPlayer            *systray.MenuItem
@@ -112,6 +113,10 @@ func newTrayUI() *trayUI {
 	ui.mPause = systray.AddMenuItem("Pause agent", "Stop the agent (downloads and streams halt)")
 	ui.mResume = systray.AddMenuItem("Resume agent", "Start the agent")
 	ui.mRestart = systray.AddMenuItem("Restart agent", "Restart the agent")
+	// Shown only when the agent's credential was rejected: signing in is the
+	// one action that can help, and it runs the browser flow — no terminal.
+	ui.mLogin = systray.AddMenuItem("Sign in…", "Reconnect this machine to your unarr account")
+	ui.mLogin.Hide()
 	// Shown only in player-only mode (no CLI): the upgrade path from "just a
 	// player" to the full downloads+library agent, handled entirely on the web.
 	ui.mEnableDownloads = systray.AddMenuItem("Enable downloads & library…",
@@ -238,6 +243,9 @@ func (ui *trayUI) applyMode(cli bool) {
 func (ui *trayUI) renderPlayerStatus() {
 	ui.applyState(stateStopped)
 	ui.setTooltip("unarr — player handler active")
+	// No daemon here, so there is nothing to sign in for — and the item would
+	// otherwise linger if the CLI was removed while auth was failing.
+	ui.showLogin(false)
 	ui.mStatus.SetTitle("Player handler active")
 	ui.mStatus.SetTooltip("unarr:// links open in your local player")
 }
@@ -266,6 +274,7 @@ func (ui *trayUI) renderDaemonStatus() {
 	switch st {
 	case stateRunning, stateDownloading:
 		ui.controlFail.Store(controlFailure{}) // it is up: any past failure is moot
+		ui.showLogin(false)
 		// Downloads are what the user cares about; the PID is diagnostic, so it
 		// moves to the row tooltip. No active tasks → the plain "running" line.
 		if s.tasks > 0 {
@@ -278,6 +287,7 @@ func (ui *trayUI) renderDaemonStatus() {
 		ui.mResume.Disable()
 		ui.mRestart.Enable()
 	case stateCrashed:
+		ui.showLogin(false)
 		ui.mStatus.SetTitle("Agent: crashed")
 		ui.mPause.Disable()
 		ui.mResume.Enable()
@@ -288,24 +298,48 @@ func (ui *trayUI) renderDaemonStatus() {
 		}
 	case stateFailed:
 		// The red badge already said something is wrong without opening the
-		// menu; this says what, and Resume stays live so it can be retried.
+		// menu; this says what.
 		ui.mStatus.SetTitle(fail.title)
 		ui.mStatus.SetTooltip(fail.detail)
 		ui.mPause.Disable()
-		ui.mResume.Enable()
-		ui.mRestart.Enable()
+		if fail.authRequired {
+			// Every control would fail the same way until the machine is
+			// reconnected, so offer the one action that helps instead of
+			// buttons that cannot work.
+			ui.showLogin(true)
+			ui.mResume.Disable()
+			ui.mRestart.Disable()
+		} else {
+			ui.showLogin(false)
+			ui.mResume.Enable()
+			ui.mRestart.Enable()
+		}
 	case statePaused:
+		ui.showLogin(false)
 		ui.mStatus.SetTitle("Agent: paused")
 		ui.mPause.Disable()
 		ui.mResume.Enable()
 		ui.mRestart.Disable()
 	default:
+		ui.showLogin(false)
 		ui.mStatus.SetTitle("Agent: stopped")
 		ui.mStatus.SetTooltip("")
 		ui.mPause.Disable()
 		ui.mResume.Enable()
 		ui.mRestart.Disable()
 	}
+}
+
+// showLogin reveals the sign-in action only while it is the thing to do. The
+// menu is append-only, so the item is created up front and hidden — the same
+// slots pattern the update item uses.
+func (ui *trayUI) showLogin(on bool) {
+	if on {
+		ui.mLogin.Show()
+		ui.mLogin.Enable()
+		return
+	}
+	ui.mLogin.Hide()
 }
 
 // control execs a daemon command, surfaces spawn errors, and nudges a refresh
@@ -329,7 +363,7 @@ func (ui *trayUI) control(action string, args ...string) {
 		return
 	}
 	go func() {
-		if waitErr := awaitControl(cmd, out); waitErr != nil {
+		if waitErr := awaitControl(cmd, out, watchFor(action)); waitErr != nil {
 			ui.reportControlFailure(action, waitErr)
 		}
 	}()
@@ -474,6 +508,11 @@ func (ui *trayUI) clickLoop() {
 		case <-ui.mRestart.ClickedCh:
 			markPaused(false)
 			ui.control("restart", "daemon", "restart")
+		case <-ui.mLogin.ClickedCh:
+			// --browser: the flow the tray can actually drive, since it needs
+			// no TTY. It opens the browser and waits on a local callback.
+			markPaused(false)
+			ui.control(signInAction, "login", "--browser")
 		case <-ui.mUpgrade.ClickedCh:
 			ui.upgradeCTA()
 		case <-ui.mAutostart.ClickedCh:

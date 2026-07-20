@@ -33,6 +33,7 @@ func clearRevokedIdentity(cfg config.Config, retryCmd string) {
 
 func newLoginCmd() *cobra.Command {
 	var apiURL string
+	var browserOnly bool
 
 	cmd := &cobra.Command{
 		Use:     "login",
@@ -48,18 +49,25 @@ settings, or other configuration.`,
 		Example: `  unarr login
   unarr login --api-url https://custom.server.com`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runLogin(apiURL)
+			return runLogin(apiURL, browserOnly)
 		},
 	}
 
 	cmd.Flags().StringVar(&apiURL, "api-url", "", "API URL override (default: https://torrentclaw.com)")
+	// --browser is what makes signing in possible without a terminal: it is the
+	// same browser flow, minus the interactive paste-your-key fallback that
+	// needs a TTY. The desktop tray drives login through it, so a user who
+	// never opens a terminal can still reconnect a revoked agent.
+	cmd.Flags().BoolVar(&browserOnly, "browser", false, "Sign in via the browser only, without interactive prompts")
 
 	return cmd
 }
 
-func runLogin(apiURLOverride string) error {
-	if !isTerminal() {
-		return fmt.Errorf("interactive mode requires a terminal (use UNARR_API_KEY env var instead)")
+func runLogin(apiURLOverride string, browserOnly bool) error {
+	// --browser needs no terminal: the browser collects the credential and a
+	// local callback receives it, so there is nothing to prompt for.
+	if !browserOnly && !isTerminal() {
+		return fmt.Errorf("interactive mode requires a terminal (use --browser, or the UNARR_API_KEY env var)")
 	}
 
 	bold := color.New(color.Bold)
@@ -101,6 +109,12 @@ func runLogin(apiURLOverride string) error {
 		apiKey = browserKey
 		green.Println("  ✓ Connected via browser")
 		fmt.Println()
+	} else if browserOnly {
+		// No TTY to fall back to; report why the browser flow did not complete.
+		if browserErr != nil {
+			return fmt.Errorf("browser sign-in failed: %w", browserErr)
+		}
+		return errors.New("browser sign-in returned no usable key")
 	} else {
 		// Fallback to manual API key entry
 		if browserErr != nil {

@@ -21,12 +21,29 @@ import (
 	"time"
 )
 
-// controlWatch is how long a control command is watched for an early exit.
-// Long enough for the daemon's startup (transcode probe, transport, registration
-// — ~2s locally) to fail, short enough that a wedged binary is not watched
-// forever. Past it the daemon is considered up. A var so tests need not sit
-// through it.
+// controlWatch is how long a daemon control is watched for an early exit. Long
+// enough for the daemon's startup (transcode probe, transport, registration —
+// ~2s locally) to fail, short enough that a wedged binary is not watched
+// forever. Past it the daemon is considered up.
 var controlWatch = 10 * time.Second
+
+// signInWatch is the window for `login --browser`, which is not a daemon
+// control at all: it opens a browser and waits on a local callback for up to a
+// minute. Watching it for only controlWatch would call an abandoned sign-in a
+// success and report nothing when it finally timed out.
+var signInWatch = 75 * time.Second
+
+// signInAction is the action name for the browser sign-in the menu offers in
+// place of controls that cannot work with a rejected key.
+const signInAction = "sign-in"
+
+// watchFor is how long the given action is watched before it counts as started.
+func watchFor(action string) time.Duration {
+	if action == signInAction {
+		return signInWatch
+	}
+	return controlWatch
+}
 
 // controlOutputCap bounds what is kept from a control command's output. Only
 // the failure reason is ever needed, and a daemon that starts successfully
@@ -37,9 +54,13 @@ const controlOutputCap = 8 << 10
 type controlFailure struct {
 	// title replaces the status row, so it must read as a state.
 	title string
-	// detail is the notification body and the row's tooltip: what went wrong
-	// and what to do about it.
+	// detail is the dialog body and the row's tooltip: what went wrong and what
+	// to do about it.
 	detail string
+	// authRequired: the agent's credential was rejected, so no control will
+	// work until the user signs in again. The menu collapses to that one action
+	// rather than offering buttons that are guaranteed to fail.
+	authRequired bool
 }
 
 // failed reports whether this is a real failure rather than the zero value
@@ -93,7 +114,7 @@ func startUnarr(args ...string) (*exec.Cmd, *cappedBuffer, error) {
 // The wait runs on its own goroutine and is never abandoned, so the child is
 // reaped even when the watch window expires first — the previous fire-and-
 // forget Start() left a zombie behind on every pause/resume.
-func awaitControl(cmd *exec.Cmd, out *cappedBuffer) error {
+func awaitControl(cmd *exec.Cmd, out *cappedBuffer, within time.Duration) error {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
@@ -108,7 +129,7 @@ func awaitControl(cmd *exec.Cmd, out *cappedBuffer) error {
 			return fmt.Errorf("%s", reason)
 		}
 		return err
-	case <-time.After(controlWatch):
+	case <-time.After(within):
 		return nil
 	}
 }
@@ -158,9 +179,12 @@ func dedupeScopes(msg string) string {
 func describeControlFailure(action string, err error) controlFailure {
 	reason := err.Error()
 	if isAuthFailure(reason) {
+		// No terminal in the message: the tray exists precisely so the user
+		// never needs one, and "Sign in…" in this menu does it for them.
 		return controlFailure{
-			title:  "Agent: sign-in required",
-			detail: "unarr rejected this agent's key. Run `unarr login` to sign in again, then resume the agent.",
+			title:        "Agent: sign-in required",
+			detail:       "unarr rejected this agent's key. Choose “Sign in…” in the unarr menu to reconnect this machine.",
+			authRequired: true,
 		}
 	}
 	return controlFailure{
