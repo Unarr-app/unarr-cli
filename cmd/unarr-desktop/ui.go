@@ -50,6 +50,12 @@ type trayUI struct {
 	// reads it.
 	controlFail atomic.Value // controlFailure
 
+	// accountOK: the last account fetch actually produced an account. False
+	// covers both "not signed in" and "could not be read", because in either
+	// case the user has no confirmed account and signing in is a way forward.
+	// atomic because the account goroutine writes it while refresh reads it.
+	accountOK atomic.Bool
+
 	// shownTooltip diffs the app-level tooltip so a task-count change updates it
 	// (SetTooltip only when the text actually changed — the DBus/Cocoa spam guard
 	// applyState uses for the icon, applied here to the tooltip).
@@ -105,6 +111,11 @@ func newTrayUI() *trayUI {
 	ui.mStatus.Disable()
 	ui.mAccount = systray.AddMenuItem("Account: …", "Signed-in unarr account")
 	ui.mAccount.Disable()
+	// Signing in belongs to the account, not to the daemon controls: it sits
+	// under the account row it fixes. Hidden until there is no confirmed
+	// account — see signInNeeded.
+	ui.mLogin = systray.AddMenuItem("Sign in…", "Reconnect this machine to your unarr account")
+	ui.mLogin.Hide()
 	ui.mVersion = systray.AddMenuItem("Version: …", "Agent and app versions")
 	ui.mVersion.Disable()
 	ui.mUpgrade = systray.AddMenuItem("Upgrade to unarr+", "See unarr+ plans")
@@ -113,10 +124,6 @@ func newTrayUI() *trayUI {
 	ui.mPause = systray.AddMenuItem("Pause agent", "Stop the agent (downloads and streams halt)")
 	ui.mResume = systray.AddMenuItem("Resume agent", "Start the agent")
 	ui.mRestart = systray.AddMenuItem("Restart agent", "Restart the agent")
-	// Shown only when the agent's credential was rejected: signing in is the
-	// one action that can help, and it runs the browser flow — no terminal.
-	ui.mLogin = systray.AddMenuItem("Sign in…", "Reconnect this machine to your unarr account")
-	ui.mLogin.Hide()
 	// Shown only in player-only mode (no CLI): the upgrade path from "just a
 	// player" to the full downloads+library agent, handled entirely on the web.
 	ui.mEnableDownloads = systray.AddMenuItem("Enable downloads & library…",
@@ -269,12 +276,15 @@ func (ui *trayUI) renderDaemonStatus() {
 	}
 	fail, _ := ui.controlFail.Load().(controlFailure)
 	st := displayState(s, isPausedMarker(), fail.failed())
+	// One authority for the sign-in row: deciding it here, on the ticker, keeps
+	// the account goroutine from fighting the renderer over the same item every
+	// few seconds.
+	ui.showLogin(signInNeeded(ui.accountOK.Load(), st, fail))
 	ui.applyState(st)
 	ui.setTooltip(trayTooltip(st, s))
 	switch st {
 	case stateRunning, stateDownloading:
 		ui.controlFail.Store(controlFailure{}) // it is up: any past failure is moot
-		ui.showLogin(false)
 		// Downloads are what the user cares about; the PID is diagnostic, so it
 		// moves to the row tooltip. No active tasks → the plain "running" line.
 		if s.tasks > 0 {
@@ -287,7 +297,6 @@ func (ui *trayUI) renderDaemonStatus() {
 		ui.mResume.Disable()
 		ui.mRestart.Enable()
 	case stateCrashed:
-		ui.showLogin(false)
 		ui.mStatus.SetTitle("Agent: crashed")
 		ui.mPause.Disable()
 		ui.mResume.Enable()
@@ -304,30 +313,37 @@ func (ui *trayUI) renderDaemonStatus() {
 		ui.mPause.Disable()
 		if fail.authRequired {
 			// Every control would fail the same way until the machine is
-			// reconnected, so offer the one action that helps instead of
-			// buttons that cannot work.
-			ui.showLogin(true)
+			// reconnected, so the buttons that cannot work are taken away.
 			ui.mResume.Disable()
 			ui.mRestart.Disable()
 		} else {
-			ui.showLogin(false)
 			ui.mResume.Enable()
 			ui.mRestart.Enable()
 		}
 	case statePaused:
-		ui.showLogin(false)
 		ui.mStatus.SetTitle("Agent: paused")
 		ui.mPause.Disable()
 		ui.mResume.Enable()
 		ui.mRestart.Disable()
 	default:
-		ui.showLogin(false)
 		ui.mStatus.SetTitle("Agent: stopped")
 		ui.mStatus.SetTooltip("")
 		ui.mPause.Disable()
 		ui.mResume.Enable()
 		ui.mRestart.Disable()
 	}
+}
+
+// signInNeeded reports whether the tray should offer to sign in: whenever
+// there is no confirmed account, or a control was refused because the
+// credential was rejected. "Account: unavailable" counts — the user is told
+// something is wrong with their account, so the way to fix it has to be there
+// too; offering it and having it fail beats showing a dead end.
+func signInNeeded(accountOK bool, st trayState, fail controlFailure) bool {
+	if !accountOK {
+		return true
+	}
+	return st == stateFailed && fail.authRequired
 }
 
 // showLogin reveals the sign-in action only while it is the thing to do. The
@@ -486,13 +502,16 @@ func (ui *trayUI) refreshAccount() {
 		ui.mAccount.SetTitle("Account: not signed in")
 		ui.mUpgrade.Hide()
 		ui.accountShown = false
+		ui.accountOK.Store(false)
 	case err != nil:
 		fmt.Fprintln(os.Stderr, "unarr-desktop: account:", err)
+		ui.accountOK.Store(false)
 		if !ui.accountShown {
 			ui.mAccount.SetTitle("Account: unavailable")
 		}
 	default:
 		ui.accountShown = true
+		ui.accountOK.Store(true)
 		ui.upgradeTarget.Store(upgradeURL(base))
 		ui.mAccount.SetTitle(accountTitle(info))
 		if info.IsPro {
