@@ -83,6 +83,12 @@ type Daemon struct {
 	// from the tray rewrites it, and without this the daemon would keep offering
 	// the rejected key forever — making a successful sign-in look like a failure.
 	ReloadCredential func()
+	// OnCredentialRejected fires when the server tombstones this agent, so cmd
+	// can wipe the dead credential. Kept separate from OnBlocked: a rejected
+	// 401 is ambiguous (a deploy blip rejects a perfectly good key) and must
+	// never wipe anything, while a 410 is the server saying this identity is
+	// gone for good.
+	OnCredentialRejected func()
 
 	// State
 	User                UserInfo

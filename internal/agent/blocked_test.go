@@ -236,6 +236,49 @@ func TestWaitOutBlockRecoversWhenTheUserSignsIn(t *testing.T) {
 	}
 }
 
+func TestRevocationStillWipesTheDeadCredential(t *testing.T) {
+	// Parking replaced an exit that used to wipe a tombstoned credential. The
+	// wipe has to survive that change: a 410 identity is never accepted again,
+	// and leaving it on disk means the next sign-in re-offers a dead key.
+	withTempStateDir(t)
+	prev := blockedRetry
+	blockedRetry = time.Hour
+	t.Cleanup(func() { blockedRetry = prev })
+
+	var wiped atomic.Int32
+	d := &Daemon{client: NewClient("http://127.0.0.1:1", "k", "test")}
+	d.OnCredentialRejected = func() { wiped.Add(1) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.waitOutBlock(ctx, &Blocked{Reason: BlockRevoked, Message: "m", Remedy: "r"}, RegisterRequest{})
+
+	if got := wiped.Load(); got != 1 {
+		t.Errorf("credential wiped %d times, want exactly 1", got)
+	}
+}
+
+func TestAnAmbiguousRejectionNeverWipesAWorkingCredential(t *testing.T) {
+	// A bare 401 can be a deploy blip or a load-balancer hiccup. Wiping on it
+	// would log a user out of a machine whose key was fine all along.
+	withTempStateDir(t)
+	prev := blockedRetry
+	blockedRetry = time.Hour
+	t.Cleanup(func() { blockedRetry = prev })
+
+	var wiped atomic.Int32
+	d := &Daemon{client: NewClient("http://127.0.0.1:1", "k", "test")}
+	d.OnCredentialRejected = func() { wiped.Add(1) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.waitOutBlock(ctx, &Blocked{Reason: BlockSignIn, Message: "m", Remedy: "r"}, RegisterRequest{})
+
+	if got := wiped.Load(); got != 0 {
+		t.Errorf("wiped the credential on an ambiguous 401 (%d times)", got)
+	}
+}
+
 func TestWaitOutBlockRecordsTheBlockForTheTray(t *testing.T) {
 	// The tray has no other way to learn why the agent is idle: it never sees
 	// the daemon's exit code or its stderr.

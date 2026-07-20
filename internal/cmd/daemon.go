@@ -1200,6 +1200,11 @@ func runDaemonStart() error {
 	// agent.waitOutBlock). Tell the user once, where they will see it.
 	d.OnBlocked = func(b *agent.Blocked) { reportBlocked(b) }
 
+	// The server tombstoned this agent: the stored credential is dead for good,
+	// so it is cleared and a fresh sign-in mints a new identity. The daemon
+	// stays parked meanwhile — its retry is what picks that new key up.
+	d.OnCredentialRejected = func() { wipeAgentCredential(&cfg) }
+
 	// While parked, re-read the credential each attempt: signing in from the
 	// tray rewrites config.toml, and the daemon must pick that up on its own —
 	// otherwise a successful sign-in looks like it did nothing, which is exactly
@@ -1269,6 +1274,22 @@ func runDaemonStart() error {
 	}
 }
 
+// wipeAgentCredential clears a credential the server has tombstoned, so the
+// next sign-in mints a fresh identity instead of re-offering one that will
+// never be accepted again. One implementation for both callers (the parked
+// daemon and the mid-run revocation) so they can never diverge on what
+// "forget this machine" means.
+//
+// A failure to save is logged, not swallowed: the dead key survives on disk and
+// the daemon will be rejected again, which is worth seeing in the logs.
+func wipeAgentCredential(cfg *config.Config) {
+	cfg.Auth.APIKey = ""
+	cfg.Agent.ID = ""
+	if err := config.Save(*cfg, resolvedConfigPath()); err != nil {
+		log.Printf("[agent] could not clear the revoked credential (it stays on disk): %v", err)
+	}
+}
+
 // reportBlocked tells the user why the agent cannot work and what to do about
 // it, on every channel they might actually be watching. Printing to stdout is
 // not enough: the agent usually runs as a service under a tray, where nobody
@@ -1294,11 +1315,7 @@ func reportBlocked(b *agent.Blocked) {
 // instead of looping against a server that keeps rejecting the old identity.
 func reportAgentRevoked(cfg config.Config, err error) {
 	log.Printf("[agent] credential revoked by server (%v) — this machine was removed from your account", err)
-	cfg.Auth.APIKey = ""
-	cfg.Agent.ID = ""
-	if serr := config.Save(cfg, resolvedConfigPath()); serr != nil {
-		log.Printf("[agent] could not clear stored credential: %v", serr)
-	}
+	wipeAgentCredential(&cfg)
 	fmt.Println()
 	fmt.Println("  This agent was removed from your account.")
 	fmt.Println("  Run `unarr login` on this machine to reconnect it.")

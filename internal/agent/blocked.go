@@ -152,6 +152,13 @@ var blockedRetry = 60 * time.Second
 func (d *Daemon) waitOutBlock(ctx context.Context, b *Blocked, req RegisterRequest) (*RegisterResponse, error) {
 	WriteBlocked(b)
 	log.Printf("[agent] blocked: %s (%s) — %s", b.Message, b.Reason, b.Remedy)
+	// A revoked agent is tombstoned server-side: that exact credential will
+	// never be accepted again, so it is wiped here as it always was. Parking
+	// afterwards is still right — the retry is what picks up the key a fresh
+	// sign-in mints, turning a dead end into a recovery.
+	if b.Reason == BlockRevoked && d.OnCredentialRejected != nil {
+		d.OnCredentialRejected()
+	}
 	// Told once. A user who is blocked does not need the same popup every
 	// minute; the tray carries the state from here on.
 	if d.OnBlocked != nil {
