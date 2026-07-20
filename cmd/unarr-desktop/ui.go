@@ -67,6 +67,9 @@ type trayUI struct {
 	// notification, so plain fields are fine.
 	suppressCrashUntil time.Time
 	reportedCrashPID   int
+	// crashes tracks recent crashes so a supervisor's restart loop is reported
+	// once rather than once per restart, and named as a loop in the status row.
+	crashes crashTracker
 	// lastStopPID: the daemon PID a tray-initiated stop/restart targeted. If
 	// that exact PID later shows up as a stale "running" state (old CLIs don't
 	// always clean up on stop), it is OUR stop, not a crash — reap, don't report.
@@ -297,14 +300,22 @@ func (ui *trayUI) renderDaemonStatus() {
 		ui.mResume.Disable()
 		ui.mRestart.Enable()
 	case stateCrashed:
-		ui.mStatus.SetTitle("Agent: crashed")
+		now := time.Now()
+		if s.pid != ui.reportedCrashPID && now.After(ui.suppressCrashUntil) {
+			ui.reportedCrashPID = s.pid
+			ui.crashes.observe(now)
+			// A restart loop re-reports one failure: the developers need it
+			// once, not once per restart.
+			if ui.crashes.shouldReport(now) {
+				go handleCrash(s)
+			}
+		}
+		flapping := ui.crashes.flapping(now)
+		ui.mStatus.SetTitle(crashStatusTitle(flapping))
+		ui.mStatus.SetTooltip(crashStatusTooltip(flapping))
 		ui.mPause.Disable()
 		ui.mResume.Enable()
 		ui.mRestart.Disable()
-		if s.pid != ui.reportedCrashPID && time.Now().After(ui.suppressCrashUntil) {
-			ui.reportedCrashPID = s.pid
-			go handleCrash(s)
-		}
 	case stateFailed:
 		// The red badge already said something is wrong without opening the
 		// menu; this says what.
