@@ -18,6 +18,11 @@ const (
 	statePaused
 	stateStopped
 	stateCrashed
+	// stateFailed: a control the user asked for (start/stop/restart) failed.
+	// Distinct from stateCrashed — same red badge, because both are errors the
+	// user must see, but a failed control must never be mistaken for a crash
+	// and reported as one.
+	stateFailed
 )
 
 func (s trayState) label() string {
@@ -32,6 +37,8 @@ func (s trayState) label() string {
 		return "stopped"
 	case stateCrashed:
 		return "crashed"
+	case stateFailed:
+		return "failed"
 	default:
 		return "unknown"
 	}
@@ -43,7 +50,10 @@ func (s trayState) label() string {
 // Running with ≥1 active task is its OWN state so the icon carries an activity
 // badge — the running↔downloading boundary is the 0↔>0 task transition, which
 // is exactly when applyState (transition-only) swaps the icon.
-func displayState(s agentStatus, paused bool) trayState {
+// failed reports that the last control the user asked for did not work; it
+// outranks paused/stopped because "it is not running" is precisely the part the
+// user already knows — why is the part they are missing.
+func displayState(s agentStatus, paused, failed bool) trayState {
 	switch {
 	case s.running && s.tasks > 0:
 		return stateDownloading
@@ -51,6 +61,8 @@ func displayState(s agentStatus, paused bool) trayState {
 		return stateRunning
 	case s.crashed:
 		return stateCrashed
+	case failed:
+		return stateFailed
 	case paused:
 		return statePaused
 	default:
@@ -76,7 +88,7 @@ var (
 func buildStateIcons(base []byte) map[trayState][]byte {
 	fallback := map[trayState][]byte{
 		stateRunning: base, stateDownloading: base, statePaused: base,
-		stateStopped: base, stateCrashed: base,
+		stateStopped: base, stateCrashed: base, stateFailed: base,
 	}
 	src, err := png.Decode(bytes.NewReader(base))
 	if err != nil {
@@ -91,6 +103,9 @@ func buildStateIcons(base []byte) map[trayState][]byte {
 		statePaused:      encodeOr(base, badge(gray, amber)),
 		stateStopped:     encodeOr(base, gray),
 		stateCrashed:     encodeOr(base, badge(gray, red)),
+		// A failed control is an error the user must notice, so it gets the
+		// same red badge as a crash.
+		stateFailed: encodeOr(base, badge(gray, red)),
 	}
 }
 

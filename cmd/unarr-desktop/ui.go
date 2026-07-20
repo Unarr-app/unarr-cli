@@ -16,6 +16,7 @@ import (
 	"fyne.io/systray"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/dialog"
 	"github.com/Unarr-app/unarr-cli/internal/notify"
 	"github.com/Unarr-app/unarr-cli/internal/upgrade"
 )
@@ -258,7 +259,8 @@ func (ui *trayUI) renderDaemonStatus() {
 		reapStaleState(s.pid)
 		s = readStatus()
 	}
-	st := displayState(s, isPausedMarker())
+	fail, _ := ui.controlFail.Load().(controlFailure)
+	st := displayState(s, isPausedMarker(), fail.failed())
 	ui.applyState(st)
 	ui.setTooltip(trayTooltip(st, s))
 	switch st {
@@ -284,30 +286,26 @@ func (ui *trayUI) renderDaemonStatus() {
 			ui.reportedCrashPID = s.pid
 			go handleCrash(s)
 		}
+	case stateFailed:
+		// The red badge already said something is wrong without opening the
+		// menu; this says what, and Resume stays live so it can be retried.
+		ui.mStatus.SetTitle(fail.title)
+		ui.mStatus.SetTooltip(fail.detail)
+		ui.mPause.Disable()
+		ui.mResume.Enable()
+		ui.mRestart.Enable()
 	case statePaused:
 		ui.mStatus.SetTitle("Agent: paused")
 		ui.mPause.Disable()
 		ui.mResume.Enable()
 		ui.mRestart.Disable()
 	default:
-		ui.applyStoppedStatus()
+		ui.mStatus.SetTitle("Agent: stopped")
+		ui.mStatus.SetTooltip("")
 		ui.mPause.Disable()
 		ui.mResume.Enable()
 		ui.mRestart.Disable()
 	}
-}
-
-// applyStoppedStatus labels the stopped row, preferring the reason the last
-// control failed. A bare "stopped" after pressing Resume is exactly what made a
-// rejected agent key look like nothing happening at all.
-func (ui *trayUI) applyStoppedStatus() {
-	if fail, _ := ui.controlFail.Load().(controlFailure); fail.failed() {
-		ui.mStatus.SetTitle(fail.title)
-		ui.mStatus.SetTooltip(fail.detail)
-		return
-	}
-	ui.mStatus.SetTitle("Agent: stopped")
-	ui.mStatus.SetTooltip("")
 }
 
 // control execs a daemon command, surfaces spawn errors, and nudges a refresh
@@ -338,15 +336,22 @@ func (ui *trayUI) control(action string, args ...string) {
 	time.AfterFunc(1500*time.Millisecond, ui.refresh)
 }
 
-// reportControlFailure surfaces a failed control twice over, because a tray has
-// no terminal: a desktop notification for the moment it happens, and the status
-// row for afterwards — a notification the user misses would leave the menu
-// reading "stopped" with no hint that anything went wrong.
+// reportControlFailure surfaces a failed control on every surface the tray has,
+// because it has no terminal and the user is standing right there having just
+// clicked something that did nothing.
+//
+// A dialog leads: the user asked for this, so a failure has earned the
+// interruption (background events stay notifications). Where no dialog program
+// exists — a Linux box with neither zenity nor kdialog — an urgent
+// notification takes its place, so something always reaches the user. The
+// status row and the red-badged icon then keep saying it after either is gone.
 func (ui *trayUI) reportControlFailure(action string, err error) {
 	fail := describeControlFailure(action, err)
 	ui.controlFail.Store(fail)
-	notify.Send("unarr agent", fail.detail)
-	ui.refresh()
+	ui.refresh() // repaint first: the menu is already right when the dialog appears
+	if !dialog.Error("unarr agent", fail.detail) {
+		notify.SendUrgent("unarr agent", fail.detail)
+	}
 }
 
 func (ui *trayUI) statusLoop() {

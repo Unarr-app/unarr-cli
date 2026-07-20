@@ -37,10 +37,23 @@ var onReap func(*os.ProcessState)
 
 // Send sends a best-effort desktop notification.
 // Silent failure — never blocks or errors.
-func Send(title, body string) {
+func Send(title, body string) { send(title, body, false) }
+
+// SendUrgent is Send for things the user must not miss — a failure they have to
+// act on. On Linux that means critical urgency, which most desktops keep on
+// screen until dismissed instead of fading after a few seconds; a failure that
+// fades is how "nothing happened" is reported. The other platforms have no
+// equivalent knob, so it degrades to a normal notification.
+func SendUrgent(title, body string) { send(title, body, true) }
+
+func send(title, body string, urgent bool) {
 	switch runtime.GOOS {
 	case "linux":
-		spawnAndReap(exec.Command("notify-send", title, body, "--icon=dialog-information", "--app-name=unarr"))
+		args := []string{title, body, "--icon=dialog-information", "--app-name=unarr"}
+		if urgent {
+			args = append(args, "--urgency=critical")
+		}
+		spawnAndReap(exec.Command("notify-send", args...))
 	case "darwin":
 		script := `display notification "` + escapeAppleScript(body) + `" with title "` + escapeAppleScript(title) + `"`
 		spawnAndReap(exec.Command("osascript", "-e", script))

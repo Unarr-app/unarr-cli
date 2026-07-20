@@ -184,6 +184,9 @@ func main() {
 	// install.sh / the future .app bundle — see register_*.go). Doing it on
 	// every start self-heals the registration when the binary moves.
 	registerURLScheme()
+	// The launcher names an icon that only this binary carries; drop it into the
+	// icon theme so the app menu entry is not a generic placeholder.
+	installAppIcon()
 	systray.Run(onReady, func() {})
 }
 
