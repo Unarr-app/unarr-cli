@@ -383,9 +383,30 @@ func (ui *trayUI) reportControlFailure(action string, err error) {
 	fail := describeControlFailure(action, err)
 	ui.controlFail.Store(fail)
 	ui.refresh() // repaint first: the menu is already right when the dialog appears
-	if !dialog.Error("unarr agent", fail.detail) {
+	switch dialog.Error("unarr agent", fail.detail) {
+	case dialog.SendReport:
+		go reportFailureToSupport(action, fail.detail, err)
+	case dialog.Unavailable:
+		// No dialog program on this box. An urgent notification stays on screen
+		// until dismissed, so the failure is not lost; the menu's "Send logs to
+		// support" is still there if the user wants to report it.
 		notify.SendUrgent("unarr agent", fail.detail)
+	case dialog.Dismissed:
 	}
+}
+
+// reportFailureToSupport hands the developers the failure the user just saw,
+// with the logs attached — the point of offering it on the dialog is that a
+// failure gets reported while the user is still in front of it, instead of
+// dying on their screen.
+func reportFailureToSupport(action, detail string, cause error) {
+	msg := fmt.Sprintf("Desktop tray: %q failed.\n\nShown to the user: %s\n\nUnderlying error: %v",
+		action, detail, cause)
+	if err := sendReport("error", msg); err != nil {
+		notify.Send("unarr agent", "Could not send the report: "+err.Error())
+		return
+	}
+	notify.Send("unarr agent", "Report sent. Thank you — it helps us fix this.")
 }
 
 func (ui *trayUI) statusLoop() {

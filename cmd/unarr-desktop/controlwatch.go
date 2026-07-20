@@ -139,9 +139,17 @@ func awaitControl(cmd *exec.Cmd, out *cappedBuffer, within time.Duration) error 
 // explicit "Error:" line is preferred over merely the last one; its prefix and
 // the wrapper's repeated scopes ("register: register: …") are stripped so the
 // text reads as a sentence.
+//
+// Lines are split on carriage returns as well as newlines, and ANSI escapes are
+// stripped: progress output like the sign-in countdown redraws one line with
+// \r and clears it with an escape, so splitting on \n alone would treat a
+// minute of "Waiting… 60s/59s/58s" and the error that follows it as a single
+// line — and show the user all of it.
 func failureReason(output string) string {
 	errLine, lastLine := "", ""
-	for line := range strings.SplitSeq(output, "\n") {
+	for line := range strings.FieldsFuncSeq(stripANSI(output), func(r rune) bool {
+		return r == '\n' || r == '\r'
+	}) {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -155,6 +163,32 @@ func failureReason(output string) string {
 		return dedupeScopes(errLine)
 	}
 	return dedupeScopes(lastLine)
+}
+
+// stripANSI removes escape sequences from command output. Progress rendering
+// emits them to clear and repaint a line; left in, they reach the user as
+// mojibake like "[K" in the middle of an error message.
+func stripANSI(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b { // ESC: skip to the end of the sequence
+			i++
+			if i < len(s) && s[i] == '[' {
+				i++
+				for i < len(s) && (s[i] < '@' || s[i] > '~') {
+					i++
+				}
+			}
+			if i < len(s) {
+				i++ // the final byte of the sequence
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
 }
 
 // dedupeScopes collapses a repeated leading scope from wrapped errors, so

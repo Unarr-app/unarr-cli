@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -102,6 +103,15 @@ func browserAuth(apiURL, agentID string) (string, error) {
 	if agentID != "" {
 		authURL += "&agentId=" + url.QueryEscape(agentID)
 	}
+	// Check the server answers BEFORE handing the user a browser tab. Opening a
+	// URL nothing is serving shows them a browser error page and then makes
+	// them wait out the full authorization timeout for a failure that was
+	// knowable in a second — and the reason (a stale api_url, a server that is
+	// down) never reaches them.
+	if err := reachable(apiURL); err != nil {
+		shutdownServer(server)
+		return "", err
+	}
 	openBrowser(authURL)
 
 	// Listen for Enter key to skip to manual fallback
@@ -161,6 +171,22 @@ func browserAuth(apiURL, agentID string) (string, error) {
 	shutdownServer(server)
 
 	return token, nil
+}
+
+// reachableTimeout bounds the pre-flight probe: long enough for a slow link,
+// short enough that it is not a second wait of its own.
+const reachableTimeout = 6 * time.Second
+
+// reachable reports whether the API server answers at all. Any HTTP reply
+// counts — the probe is about the server existing, not about what it says.
+func reachable(apiURL string) error {
+	client := &http.Client{Timeout: reachableTimeout}
+	resp, err := client.Get(strings.TrimRight(apiURL, "/") + "/api/health")
+	if err != nil {
+		return fmt.Errorf("cannot reach %s: %w\nCheck the agent's api_url (unarr config) or your connection", apiURL, err)
+	}
+	defer resp.Body.Close()
+	return nil
 }
 
 func shutdownServer(server *http.Server) {

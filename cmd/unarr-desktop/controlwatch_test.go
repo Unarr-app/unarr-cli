@@ -76,6 +76,46 @@ func TestFailureReason(t *testing.T) {
 	}
 }
 
+// signInTimeoutOutput is the real output of an abandoned `login --browser`: a
+// countdown that redraws ONE line with carriage returns, an ANSI erase, and
+// then the error. Splitting on newlines alone made all of it a single line, so
+// the user was shown a minute of "Waiting…" instead of the reason.
+var signInTimeoutOutput = "\n  Opening browser to connect your account...\n\n" +
+	"  Waiting for browser authorization... 60s (Enter to skip)\r" +
+	"  Waiting for browser authorization... 59s (Enter to skip)\r" +
+	"  Waiting for browser authorization... 1s (Enter to skip)\r" +
+	"  Waiting for browser authorization... 0s (Enter to skip)\r" +
+	"\x1b[KError: browser sign-in failed: timed out waiting for browser authorization\n"
+
+func TestFailureReasonSurvivesProgressOutput(t *testing.T) {
+	got := failureReason(signInTimeoutOutput)
+
+	want := "browser sign-in failed: timed out waiting for browser authorization"
+	if got != want {
+		t.Errorf("failureReason() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "Waiting for browser") {
+		t.Error("the countdown leaked into the message the user is shown")
+	}
+	if strings.ContainsRune(got, '\x1b') || strings.Contains(got, "[K") {
+		t.Errorf("ANSI escapes reached the user: %q", got)
+	}
+}
+
+func TestStripANSI(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"\x1b[Kplain", "plain"},
+		{"\x1b[1;31mred\x1b[0m", "red"},
+		{"nothing to strip", "nothing to strip"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		if got := stripANSI(tc.in); got != tc.want {
+			t.Errorf("stripANSI(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestDedupeScopes(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"register: register: API error 401", "register: API error 401"},

@@ -1,74 +1,109 @@
 package dialog
 
 import (
-	"os"
+	"errors"
 	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
-func TestErrorCommandsAlwaysOfferSomething(t *testing.T) {
-	cmds := errorCommands("title", "body")
-	if len(cmds) == 0 {
+func TestCandidatesAlwaysOfferSomething(t *testing.T) {
+	if len(candidates("title", "body")) == 0 {
 		t.Fatal("no dialog candidate for this platform")
 	}
 }
 
-func TestErrorCommandsCarryTheMessage(t *testing.T) {
+func TestCandidatesCarryTheMessageAndTheReportOffer(t *testing.T) {
 	// Whatever the platform's dialog program is, the text the user must read
-	// has to actually reach it.
+	// has to reach it — and so must the offer to report, which is the whole
+	// point of showing a dialog instead of a toast.
 	const body = "unarr rejected this agent's key"
-	for _, cmd := range errorCommands("unarr agent", body) {
-		joined := strings.Join(cmd.Args, " ")
+	for _, c := range candidates("unarr agent", body) {
+		joined := strings.Join(c.cmd.Args, " ")
 		if !strings.Contains(joined, "unarr rejected this agent") {
-			t.Errorf("%s does not carry the message: %v", cmd.Path, cmd.Args)
+			t.Errorf("%s does not carry the message: %v", c.cmd.Path, c.cmd.Args)
+		}
+		if !strings.Contains(joined, sendLabel) && !strings.Contains(joined, "report") {
+			t.Errorf("%s offers no way to send a report: %v", c.cmd.Path, c.cmd.Args)
 		}
 	}
 }
 
-func TestErrorCommandsFallBackOnLinux(t *testing.T) {
+func TestCandidatesFallBackOnLinux(t *testing.T) {
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		t.Skip("only Linux has no guaranteed dialog program")
 	}
 	// A Linux desktop may ship none of these, so more than one is tried before
 	// the caller is told to fall back to a notification.
-	cmds := errorCommands("t", "b")
-	if len(cmds) < 2 {
-		t.Fatalf("got %d candidates, want several so a missing zenity is survivable", len(cmds))
+	cs := candidates("t", "b")
+	if len(cs) < 2 {
+		t.Fatalf("got %d candidates, want several so a missing zenity is survivable", len(cs))
 	}
-	if !strings.Contains(cmds[0].Path, "zenity") && cmds[0].Args[0] != "zenity" {
-		t.Errorf("first candidate is %v, want zenity (the most widely installed)", cmds[0].Args)
-	}
-}
-
-func TestSpawnAndReapReportsAMissingProgram(t *testing.T) {
-	// This false is what makes the caller fall back to a notification instead
-	// of silently showing nothing.
-	if spawnAndReap(exec.Command("unarr-no-such-dialog-program")) {
-		t.Error("spawnAndReap reported success for a program that does not exist")
+	if cs[0].cmd.Args[0] != "zenity" {
+		t.Errorf("first candidate is %v, want zenity (the most widely installed)", cs[0].cmd.Args)
 	}
 }
 
-func TestSpawnAndReapDoesNotLeaveAZombie(t *testing.T) {
-	// The tray is long-lived, so a dismissed dialog that is never waited on
-	// stays a zombie for the life of the process.
-	reaped := make(chan *os.ProcessState, 1)
-	onReap = func(st *os.ProcessState) { reaped <- st }
-	defer func() { onReap = nil }()
-
-	if !spawnAndReap(helperCmd()) {
-		t.Fatal("the helper process did not start")
+func TestErrorIsUnavailableWhenNothingIsInstalled(t *testing.T) {
+	// The bug this guards: a program that is NOT installed must not be read as
+	// the user dismissing a dialog they never saw — that would swallow the
+	// failure instead of falling back to a notification.
+	prev := candidates
+	t.Cleanup(func() { candidates = prev })
+	candidates = func(_, _ string) []candidate {
+		return []candidate{{
+			cmd:             exec.Command("unarr-no-such-dialog-program"),
+			exitMeansAnswer: true,
+			pressedSend:     func(string, error) bool { return true },
+		}}
 	}
 
-	select {
-	case st := <-reaped:
-		if st == nil {
-			t.Fatal("the dialog exited without being waited on: it is a zombie")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the dialog process was never reaped")
+	if got := Error("t", "b"); got != Unavailable {
+		t.Errorf("Error() = %v, want Unavailable so the caller notifies instead", got)
+	}
+}
+
+func TestErrorReadsTheUsersAnswer(t *testing.T) {
+	tests := []struct {
+		name  string
+		press bool
+		want  Choice
+	}{
+		{"user asked to report", true, SendReport},
+		{"user closed it", false, Dismissed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := candidates
+			t.Cleanup(func() { candidates = prev })
+			candidates = func(_, _ string) []candidate {
+				return []candidate{{
+					cmd:             exec.Command("echo", "ignored"),
+					exitMeansAnswer: true,
+					pressedSend:     func(string, error) bool { return tc.press },
+				}}
+			}
+
+			if got := Error("t", "b"); got != tc.want {
+				t.Errorf("Error() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExitCode(t *testing.T) {
+	// xmessage reports the pressed button as an exit status, so reading it
+	// wrongly would report the wrong answer.
+	if got := exitCode(nil); got != 0 {
+		t.Errorf("exitCode(nil) = %d, want 0", got)
+	}
+	if got := exitCode(errors.New("never ran")); got != -1 {
+		t.Errorf("exitCode(non-exit error) = %d, want -1", got)
+	}
+	err := exec.Command("sh", "-c", "exit 2").Run()
+	if got := exitCode(err); got != 2 {
+		t.Errorf("exitCode(exit 2) = %d, want 2", got)
 	}
 }
 
@@ -99,18 +134,4 @@ func TestEscapePowerShell(t *testing.T) {
 			t.Errorf("escapePowerShell(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
-}
-
-func helperCmd() *exec.Cmd {
-	cmd := exec.Command(os.Args[0], "-test.run=TestDialogHelperProcess")
-	cmd.Env = append(os.Environ(), "GO_DIALOG_HELPER=1")
-	return cmd
-}
-
-// TestDialogHelperProcess is not a test: it is the child helperCmd spawns.
-func TestDialogHelperProcess(t *testing.T) {
-	if os.Getenv("GO_DIALOG_HELPER") != "1" {
-		t.Skip("helper process; only runs when spawned by helperCmd")
-	}
-	os.Exit(0)
 }
