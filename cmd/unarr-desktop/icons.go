@@ -29,6 +29,10 @@ const (
 	// tray used to render as a healthy green agent, which told the user nothing
 	// was wrong while nothing worked.
 	stateBlocked
+	// stateVPNBlocked: the fail-closed VPN kill-switch is on and the tunnel is
+	// down, so torrent downloads are disabled. Nothing is broken — this is the
+	// setting working as asked — but "running" was a lie: nothing can download.
+	stateVPNBlocked
 )
 
 func (s trayState) label() string {
@@ -47,6 +51,8 @@ func (s trayState) label() string {
 		return "failed"
 	case stateBlocked:
 		return "blocked"
+	case stateVPNBlocked:
+		return "downloads paused (VPN)"
 	default:
 		return "unknown"
 	}
@@ -75,6 +81,11 @@ func displayState(s agentStatus, paused, failed, blocked bool) trayState {
 		// re-registers and clears the record, or parks again and re-states the
 		// problem with fresh information.
 		return stateBlocked
+	case s.running && s.vpnBlocking:
+		// Ranked above running for the same reason as a credential block: the
+		// daemon is alive and healthy, and that is exactly what makes a green
+		// icon misleading while no torrent can move.
+		return stateVPNBlocked
 	case s.running && s.tasks > 0:
 		return stateDownloading
 	case s.running:
@@ -109,7 +120,7 @@ func buildStateIcons(base []byte) map[trayState][]byte {
 	fallback := map[trayState][]byte{
 		stateRunning: base, stateDownloading: base, statePaused: base,
 		stateStopped: base, stateCrashed: base, stateFailed: base,
-		stateBlocked: base,
+		stateBlocked: base, stateVPNBlocked: base,
 	}
 	src, err := png.Decode(bytes.NewReader(base))
 	if err != nil {
@@ -131,6 +142,9 @@ func buildStateIcons(base []byte) map[trayState][]byte {
 		// same red badge on gray — the daemon may be alive, but nothing it can
 		// do matters until the user acts.
 		stateBlocked: encodeOr(base, badge(gray, red)),
+		// Amber, not red: the kill-switch is doing its job. Nothing has failed —
+		// but downloads are stopped, so it cannot look like business as usual.
+		stateVPNBlocked: encodeOr(base, badge(gray, amber)),
 	}
 }
 

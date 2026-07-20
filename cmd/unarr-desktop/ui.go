@@ -295,6 +295,17 @@ func (ui *trayUI) renderDaemonStatus() {
 	ui.applyState(st)
 	ui.setTooltip(trayTooltip(st, s, blocked))
 	switch st {
+	case stateVPNBlocked:
+		// Not a failure — the kill-switch is doing what it was asked to. But
+		// "running" was actively misleading: no torrent can move, and the user
+		// would have gone looking for a broken download instead of a dead
+		// tunnel. Controls stay live: pausing or restarting is still reasonable.
+		ui.mStatus.SetTitle("Downloads paused: VPN tunnel is down")
+		ui.mStatus.SetTooltip("Torrent downloads are blocked because the VPN kill-switch is on" +
+			" and no healthy tunnel is up. They resume by themselves once it reconnects.")
+		ui.mPause.Enable()
+		ui.mResume.Disable()
+		ui.mRestart.Enable()
 	case stateBlocked:
 		// The daemon already worked out what is wrong and what to do about it,
 		// in the server's own words. The tray's job is to carry that, not to
@@ -416,7 +427,11 @@ func (ui *trayUI) control(action string, args ...string) {
 		return
 	}
 	go func() {
-		if waitErr := awaitControl(cmd, out, watchFor(action)); waitErr != nil {
+		// The same handler for both: a failure that takes 80 seconds (register
+		// exhausting its transient retries) deserves the same explanation as one
+		// that takes two, and it was the one being discarded.
+		late := func(err error) { ui.reportControlFailure(action, err) }
+		if waitErr := awaitControl(cmd, out, watchFor(action), late); waitErr != nil {
 			ui.reportControlFailure(action, waitErr)
 		}
 	}()

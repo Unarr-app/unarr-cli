@@ -66,6 +66,10 @@ type agentStatus struct {
 	version string
 	agentID string
 	tasks   int
+	// vpnBlocking: the fail-closed VPN kill-switch is on and no healthy tunnel
+	// is up, so torrent downloads are DISABLED. Safe, deliberate — and a total
+	// functional outage that the tray used to render as a healthy green agent.
+	vpnBlocking bool
 }
 
 func readStatus() agentStatus {
@@ -82,11 +86,12 @@ func readStatus() agentStatus {
 		}
 	}
 	return agentStatus{
-		running: true,
-		pid:     st.PID,
-		version: st.Version,
-		agentID: st.AgentID,
-		tasks:   st.ActiveTasks,
+		running:     true,
+		pid:         st.PID,
+		version:     st.Version,
+		agentID:     st.AgentID,
+		tasks:       st.ActiveTasks,
+		vpnBlocking: st.VPNBlocking,
 	}
 }
 

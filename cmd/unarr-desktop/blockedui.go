@@ -27,6 +27,8 @@ func blockedTitle(b *agent.Blocked) string {
 		return "Agent: plan limit reached"
 	case agent.BlockConflict:
 		return "Agent: identity conflict"
+	case agent.BlockVersion:
+		return "Agent: update required"
 	default:
 		return "Agent: stopped — action needed"
 	}

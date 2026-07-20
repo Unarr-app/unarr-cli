@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -234,5 +235,27 @@ func TestSyncClearsTheBlockWhenItRecovers(t *testing.T) {
 
 	if got := ReadBlocked(); got != nil {
 		t.Errorf("block %+v survived recovery — the user is still told to act on a fixed problem", got)
+	}
+}
+
+func TestClassifyNamesAnOutdatedAgent(t *testing.T) {
+	// The web gates features on agent version, so a server refusing an old agent
+	// is a matter of when, not if. It went into the generic terminal bucket with
+	// no message of its own, so the one thing that fixes it — updating — was the
+	// one thing nothing said.
+	for _, err := range []error{
+		&HTTPError{StatusCode: 412, Message: "agent_version_too_old"},
+		&HTTPError{StatusCode: 400, Message: "agent_version_too_old"},
+	} {
+		b, ok := Classify(err)
+		if !ok {
+			t.Fatalf("Classify(%v) not terminal", err)
+		}
+		if b.Reason != BlockVersion {
+			t.Errorf("reason = %q, want %q", b.Reason, BlockVersion)
+		}
+		if !strings.Contains(strings.ToLower(b.Remedy), "update") {
+			t.Errorf("remedy = %q, want it to say the agent must be updated", b.Remedy)
+		}
 	}
 }

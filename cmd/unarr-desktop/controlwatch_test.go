@@ -249,7 +249,7 @@ func TestAwaitControl(t *testing.T) {
 		// process fails afterwards.
 		cmd, out := startHelper(t, "fail")
 
-		err := awaitControl(cmd, out, controlWatch)
+		err := awaitControl(cmd, out, controlWatch, nil)
 
 		if err == nil {
 			t.Fatal("awaitControl returned nil for a command that exited 1")
@@ -263,7 +263,7 @@ func TestAwaitControl(t *testing.T) {
 		// `stop` exits 0 promptly and must not be reported as broken.
 		cmd, out := startHelper(t, "ok")
 
-		if err := awaitControl(cmd, out, controlWatch); err != nil {
+		if err := awaitControl(cmd, out, controlWatch, nil); err != nil {
 			t.Errorf("awaitControl = %v, want nil for a clean exit", err)
 		}
 	})
@@ -275,7 +275,7 @@ func TestAwaitControl(t *testing.T) {
 		t.Cleanup(func() { _ = cmd.Process.Kill() })
 
 		start := time.Now()
-		err := awaitControl(cmd, out, 50*time.Millisecond)
+		err := awaitControl(cmd, out, 50*time.Millisecond, nil)
 
 		if err != nil {
 			t.Errorf("awaitControl = %v, want nil for a process that outlived the window", err)
@@ -285,12 +285,54 @@ func TestAwaitControl(t *testing.T) {
 		}
 	})
 
+	t.Run("a failure after the window still reaches the user", func(t *testing.T) {
+		// The window is a UI deadline, not a limit on how long a command may take
+		// to fail. Registration retries transient errors for over a minute, so
+		// the failure the user most needs was the one guaranteed to miss it: the
+		// exit code and the whole captured output were collected, then dropped,
+		// leaving "Agent: crashed" with an empty tooltip.
+		cmd, out := startHelper(t, "fail-late")
+
+		reported := make(chan error, 1)
+		err := awaitControl(cmd, out, 50*time.Millisecond, func(e error) { reported <- e })
+
+		if err != nil {
+			t.Fatalf("awaitControl = %v, want nil while the command is still running", err)
+		}
+		select {
+		case late := <-reported:
+			if late == nil {
+				t.Fatal("late failure reported as nil")
+			}
+			if !strings.Contains(late.Error(), "Invalid API key") {
+				t.Errorf("late failure = %q, want the captured reason", late)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the failure never reached the user — it was discarded with the window")
+		}
+	})
+
+	t.Run("a command that outlives the window and succeeds says nothing", func(t *testing.T) {
+		// The counterpart: a healthy `start` must not produce a late error just
+		// for exiting cleanly later (an upgrade restart, a user stop).
+		cmd, out := startHelper(t, "ok")
+
+		reported := make(chan error, 1)
+		_ = awaitControl(cmd, out, time.Nanosecond, func(e error) { reported <- e })
+
+		select {
+		case late := <-reported:
+			t.Fatalf("reported %v for a command that succeeded", late)
+		case <-time.After(500 * time.Millisecond):
+		}
+	})
+
 	t.Run("reaps the child instead of leaving a zombie", func(t *testing.T) {
 		// The old fire-and-forget Start() never waited, so every pause/resume
 		// leaked a zombie. ProcessState is only set once Wait has reaped it.
 		cmd, out := startHelper(t, "ok")
 
-		_ = awaitControl(cmd, out, controlWatch)
+		_ = awaitControl(cmd, out, controlWatch, nil)
 
 		if cmd.ProcessState == nil {
 			t.Fatal("the child was never reaped")
@@ -339,6 +381,12 @@ func TestControlHelperProcess(t *testing.T) {
 	case "linger":
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
+	case "fail-late":
+		// Outlives the watch window, THEN fails — the shape of registration
+		// exhausting its transient retries, which takes over a minute.
+		time.Sleep(300 * time.Millisecond)
+		os.Stderr.WriteString(daemonStartupFailure)
+		os.Exit(1)
 	default:
 		os.Exit(0)
 	}

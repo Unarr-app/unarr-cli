@@ -144,3 +144,50 @@ func TestBlockedIconIsDistinctFromRunning(t *testing.T) {
 		t.Error("blocked wears the running icon — the badge is the only at-a-glance signal")
 	}
 }
+
+func TestVPNKillSwitchIsNotAHealthyAgent(t *testing.T) {
+	// The kill-switch working as asked is still a total outage for downloads.
+	// The tray read only "is the PID alive", so it showed a green running agent
+	// while no torrent could move — sending the user to look for a broken
+	// download instead of a dead tunnel.
+	got := displayState(agentStatus{running: true, vpnBlocking: true}, false, false, false)
+	if got == stateRunning || got == stateDownloading {
+		t.Fatalf("displayState(vpn blocking) = %v — downloads are dead but the icon says fine", got)
+	}
+	if got != stateVPNBlocked {
+		t.Errorf("displayState(vpn blocking) = %v, want %v", got, stateVPNBlocked)
+	}
+}
+
+func TestACredentialBlockOutranksTheVPNKillSwitch(t *testing.T) {
+	// Both stop downloads, but only one needs the user. If the credential is
+	// rejected, reconnecting the VPN changes nothing.
+	got := displayState(agentStatus{running: true, vpnBlocking: true}, false, false, true)
+	if got != stateBlocked {
+		t.Errorf("displayState(blocked + vpn) = %v, want %v", got, stateBlocked)
+	}
+}
+
+func TestVPNBlockedLooksDifferentFromBothRunningAndBroken(t *testing.T) {
+	icons := buildStateIcons(trayIcon)
+	vpn, ok := icons[stateVPNBlocked]
+	if !ok || len(vpn) == 0 {
+		t.Fatal("no icon for the VPN-blocked state")
+	}
+	if string(vpn) == string(icons[stateRunning]) {
+		t.Error("wears the running icon: the outage is invisible at a glance")
+	}
+	if string(vpn) == string(icons[stateCrashed]) {
+		t.Error("wears the crashed icon: nothing has failed, the kill-switch is doing its job")
+	}
+}
+
+func TestOutdatedAgentAsksForAnUpdateNotASignIn(t *testing.T) {
+	b := &agent.Blocked{Reason: agent.BlockVersion}
+	if title := blockedTitle(b); !strings.Contains(strings.ToLower(title), "update") {
+		t.Errorf("title = %q, want it to name the update", title)
+	}
+	if blockNeedsSignIn(b) {
+		t.Error("offered sign-in for an outdated agent: signing in would succeed and change nothing")
+	}
+}

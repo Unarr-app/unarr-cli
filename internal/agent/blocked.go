@@ -48,6 +48,9 @@ const (
 	// BlockConflict: another active agent already claims this machine's
 	// identity (duplicated config, restored backup).
 	BlockConflict BlockReason = "identity_conflict"
+	// BlockVersion: this agent is older than the server will accept. Updating
+	// it is the fix, and no amount of retrying or re-authorizing changes that.
+	BlockVersion BlockReason = "update_required"
 )
 
 // Blocked is the on-disk record of a terminal failure. Written by the daemon on
@@ -277,6 +280,20 @@ func Classify(err error) (*Blocked, bool) {
 			Message: serverSaid(he,
 				"This machine was removed from your unarr account."),
 			Remedy: "Sign in again to reconnect this machine.",
+		}, true
+
+	case he.StatusCode == http.StatusPreconditionFailed || code == "agent_version_too_old":
+		// The web gates features on agent version, so a server that refuses an
+		// old agent is a matter of when, not if. Handled ahead of that: the fix
+		// is one command, and an agent that cannot say so is an agent whose user
+		// has no idea why it stopped. Retrying and re-authorizing both change
+		// nothing here.
+		return &Blocked{
+			Reason: BlockVersion,
+			Status: he.StatusCode,
+			Message: serverSaid(he,
+				"This machine is running a version of the unarr agent that the server no longer accepts."),
+			Remedy: "Update the agent (`unarr update`, or `docker pull` for a container install).",
 		}, true
 
 	case he.StatusCode == http.StatusUnauthorized:

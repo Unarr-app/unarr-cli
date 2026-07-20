@@ -114,24 +114,46 @@ func startUnarr(args ...string) (*exec.Cmd, *cappedBuffer, error) {
 // The wait runs on its own goroutine and is never abandoned, so the child is
 // reaped even when the watch window expires first — the previous fire-and-
 // forget Start() left a zombie behind on every pause/resume.
-func awaitControl(cmd *exec.Cmd, out *cappedBuffer, within time.Duration) error {
+// late, when set, receives a failure that arrives AFTER the watch window. The
+// window is a UI deadline — how long the tray waits before assuming the command
+// worked — not a limit on how long a command can take to fail. Registration
+// retries transient errors for over a minute before giving up, so the failure
+// the user most needs to hear about was the one guaranteed to miss the window:
+// its exit code and the whole captured output were collected and then thrown
+// away, leaving "Agent: crashed" with an empty tooltip.
+func awaitControl(cmd *exec.Cmd, out *cappedBuffer, within time.Duration, late func(error)) error {
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
 	select {
 	case err := <-done:
-		if err == nil {
-			return nil
-		}
-		// Read only after Wait has returned: the output copiers are finished,
-		// so this sees everything the child wrote.
-		if reason := failureReason(out.String()); reason != "" {
-			return fmt.Errorf("%s", reason)
-		}
-		return err
+		return controlError(err, out)
 	case <-time.After(within):
+		// Still running, so the tray stops waiting and reports nothing — but it
+		// keeps listening, because a command that dies a minute from now failed
+		// just as much as one that died in five seconds.
+		if late != nil {
+			go func() {
+				if err := controlError(<-done, out); err != nil {
+					late(err)
+				}
+			}()
+		}
 		return nil
 	}
+}
+
+// controlError turns a finished command into the reason it failed, or nil if it
+// succeeded. Read only after Wait has returned: the output copiers are finished,
+// so this sees everything the child wrote.
+func controlError(err error, out *cappedBuffer) error {
+	if err == nil {
+		return nil
+	}
+	if reason := failureReason(out.String()); reason != "" {
+		return fmt.Errorf("%s", reason)
+	}
+	return err
 }
 
 // failureReason picks the line of a failed command's output that explains it.
