@@ -19,6 +19,11 @@ const (
 	testDAVUser = "unarr"
 	testDAVPass = "s3cr3t-webdav-pass"
 	testDAVBody = "hello-media-payload"
+
+	// testDAVLANAddr / testDAVWANAddr stand in for the two sides of the
+	// local-network gate on /dav/.
+	testDAVLANAddr = "192.168.1.20:5000"
+	testDAVWANAddr = "8.8.8.8:5000"
 )
 
 // newWebDAVServer returns a StreamServer with a read-only WebDAV export over a
@@ -39,9 +44,22 @@ func newWebDAVServer(t *testing.T) (*StreamServer, http.Handler) {
 	return ss, ss.webdavGuard(ss.webdavHandler)
 }
 
+// davRequest drives the guard as a LAN client — the case every test here that
+// isn't about the network gate cares about. httptest.NewRequest's default
+// RemoteAddr is 192.0.2.1 (TEST-NET-1), which is a PUBLIC address, so leaving it
+// alone would make each of these assert the WAN 404 path by accident. Tests that
+// do care about the source network use davRequestFromAddr.
 func davRequest(t *testing.T, h http.Handler, method, target string, auth bool) *httptest.ResponseRecorder {
 	t.Helper()
+	return davRequestFromAddr(t, h, method, target, testDAVLANAddr, auth)
+}
+
+// davRequestFromAddr is davRequest with an explicit source address, for the
+// local-network gate on /dav/ (see remoteIsLocalNetwork).
+func davRequestFromAddr(t *testing.T, h http.Handler, method, target, remoteAddr string, auth bool) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest(method, target, nil)
+	req.RemoteAddr = remoteAddr
 	if auth {
 		req.SetBasicAuth(testDAVUser, testDAVPass)
 	}
@@ -77,6 +95,7 @@ func TestWebDAVGuardRequiresAuth(t *testing.T) {
 
 	// Wrong password → 401.
 	req := httptest.NewRequest(http.MethodGet, "/dav/movie.mkv", nil)
+	req.RemoteAddr = testDAVLANAddr
 	req.SetBasicAuth(testDAVUser, "wrong-password")
 	wrong := httptest.NewRecorder()
 	h.ServeHTTP(wrong, req)
@@ -86,6 +105,7 @@ func TestWebDAVGuardRequiresAuth(t *testing.T) {
 
 	// Wrong username → 401.
 	req2 := httptest.NewRequest(http.MethodGet, "/dav/movie.mkv", nil)
+	req2.RemoteAddr = testDAVLANAddr
 	req2.SetBasicAuth("intruder", testDAVPass)
 	wrongUser := httptest.NewRecorder()
 	h.ServeHTTP(wrongUser, req2)
@@ -111,6 +131,7 @@ func TestWebDAVReadWithAuth(t *testing.T) {
 
 	// PROPFIND Depth:1 on the collection → 207 Multi-Status listing the file.
 	req := httptest.NewRequest("PROPFIND", "/dav/", nil)
+	req.RemoteAddr = testDAVLANAddr
 	req.Header.Set("Depth", "1")
 	req.SetBasicAuth(testDAVUser, testDAVPass)
 	rec := httptest.NewRecorder()
