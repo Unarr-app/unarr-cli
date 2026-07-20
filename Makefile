@@ -20,11 +20,22 @@ lint:
 	golangci-lint run ./...
 
 ## Architectural / SOLID gate — file size (<500), func length, cyclomatic + cognitive
-## complexity (15), nesting, dup, max-params (5). Scoped to NEW/CHANGED code vs origin/main
-## (legacy god-files grandfathered). Keeps the LLM from producing spaghetti / god-files.
+## complexity (15), nesting, dup, max-params (5). Scoped to NEW/CHANGED code vs the base
+## rev below (legacy god-files grandfathered). Keeps the LLM from producing spaghetti.
+##
+## The base rev is resolved here rather than hardcoded in .golangci.arch.yml: golangci-lint
+## does NOT error on an unresolvable new-from-rev, it silently falls back to reporting the
+## ENTIRE legacy codebase (~165 issues), which reads as a catastrophic regression and makes
+## the gate unusable. Clones name the remote differently (origin vs github), so try both
+## before falling back to the local branch. Empty means "no base" → check-arch.sh degrades
+## to checking every file, and golangci-lint is run unscoped.
+ARCH_BASE := $(shell git rev-parse --verify --quiet origin/main \
+	|| git rev-parse --verify --quiet github/main \
+	|| git rev-parse --verify --quiet main)
+
 arch:
-	@bash scripts/check-arch.sh
-	@golangci-lint run -c .golangci.arch.yml ./...
+	@bash scripts/check-arch.sh $(ARCH_BASE)
+	@golangci-lint run -c .golangci.arch.yml $(if $(ARCH_BASE),--new-from-rev=$(ARCH_BASE),) ./...
 
 ## Run tests with coverage report (excludes CLI layer — cmd/ is glue code)
 COVER_PKGS = $(shell go list ./... | grep -v '/cmd')

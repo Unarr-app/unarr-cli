@@ -77,7 +77,12 @@ linters:
         path: '(\.pb\.go|_gen\.go|mock_.*\.go)$'
 
 issues:
-  # Grandfather legacy: only flag issues introduced relative to origin/main.
-  new-from-rev: origin/main
+  # Grandfather legacy: only flag issues introduced relative to the main branch.
+  # `make arch` overrides this with --new-from-rev=$(ARCH_BASE), which resolves the
+  # remote's actual name (origin vs github) first. This value is only the fallback for
+  # a bare `golangci-lint run -c .golangci.arch.yml`. It is a local ref on purpose:
+  # an unresolvable rev makes golangci-lint silently report the whole legacy codebase
+  # instead of failing, so the ref must be one that always exists in a clone.
+  new-from-rev: main
   max-issues-per-linter: 0
   max-same-issues: 0
