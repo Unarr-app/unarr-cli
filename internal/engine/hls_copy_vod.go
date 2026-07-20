@@ -139,6 +139,14 @@ func renderVideoPlaylistCopyVOD(starts []float64) string {
 // the caller falls back to the legacy EVENT copy path. No video ffmpeg is
 // spawned here — segments are produced lazily on first request.
 func startCopyVOD(ctx context.Context, s *HLSSession) bool {
+	// Cast-targeted sessions must use fMP4 (the Default Media Receiver plays
+	// fMP4 HLS, not mpegts). Skip the MPEG-TS copy-vod path → fall back to the
+	// fMP4 EVENT-copy (buildHLSCopyArgs).
+	if s.cfg.Fmp4Only {
+		log.Printf("[hls %s] copy-vod skipped: Fmp4Only (cast) — using fMP4 EVENT copy",
+			shortHLSID(s.cfg.SessionID))
+		return false
+	}
 	// MPEG-TS transport carries H.264 universally but not HEVC/AV1 (see package
 	// comment). Non-H.264 copy → legacy EVENT path (no regression).
 	if !mediainfo.CopyVODEligibleCodec(s.probe.VideoCodec) {

@@ -588,6 +588,11 @@ type StreamSession struct {
 	// works on a GPU-less NAS), but in the segmented transport every player
 	// handles. Set by webs that know this agent supports it (gate: HLS_COPY_MIN_VERSION web-side).
 	VideoCopy bool `json:"videoCopy,omitempty"`
+	// Fmp4Only forces fMP4 HLS segments (skips the on-demand MPEG-TS copy-vod
+	// path) so the session is Google-Cast-compatible — the Default Media Receiver
+	// plays fMP4 HLS but not mpegts HLS. Set by the web for cast sessions. No
+	// effect on the transcode path (already fMP4). Older daemons ignore it.
+	Fmp4Only bool `json:"fmp4Only,omitempty"`
 	// DirectURL, when set, is an HTTPS link to the media resolved server-side
 	// from the user's debrid account (hueco #2 / 2a). The source has no local
 	// file: the daemon streams /stream from this URL via ranged GETs
