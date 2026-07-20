@@ -262,6 +262,10 @@ func runDaemonStart() error {
 	// Create daemon
 	d := agent.NewDaemon(daemonCfg, agentClient)
 
+	// Single owner for the credential. cfg stays the boot snapshot from here on:
+	// read-only, so nothing races on it.
+	creds := newCredentialStore(cfg, resolvedConfigPath())
+
 	// A terminal failure parks the daemon instead of exiting it (see
 	// agent.waitOutBlock). Tell the user once, where they will see it.
 	d.OnBlocked = func(b *agent.Blocked) { reportBlocked(b) }
@@ -273,34 +277,24 @@ func runDaemonStart() error {
 	// The server tombstoned this agent: the stored credential is dead for good,
 	// so it is cleared and a fresh sign-in mints a new identity. The daemon
 	// stays parked meanwhile — its retry is what picks that new key up.
-	d.OnCredentialRejected = func() { wipeAgentCredential(&cfg) }
+	d.OnCredentialRejected = func() { creds.wipe() }
 
 	// While parked, re-read the credential each attempt: signing in from the
 	// tray rewrites config.toml, and the daemon must pick that up on its own —
 	// otherwise a successful sign-in looks like it did nothing, which is exactly
 	// the dead end this whole path exists to remove.
 	d.ReloadCredential = func() {
-		fresh, lerr := config.Load(resolvedConfigPath())
-		if lerr != nil {
-			log.Printf("[agent] blocked: could not re-read config: %v", lerr)
+		key, agentID, changed := creds.reload()
+		if !changed {
 			return
 		}
-		fresh.ApplyEnvOverrides()
-		if fresh.Auth.APIKey == "" || fresh.Auth.APIKey == cfg.Auth.APIKey {
-			return
-		}
-		log.Printf("[agent] blocked: picked up a new credential from %s", resolvedConfigPath())
-		cfg.Auth.APIKey = fresh.Auth.APIKey
-		d.Client().SetAPIKey(fresh.Auth.APIKey)
+		log.Printf("[agent] blocked: picked up a new credential from %s", creds.path)
+		d.Client().SetAPIKey(key)
 		// A sign-in after a revocation mints a new agent ID too. Without this
 		// the daemon would authenticate with the new key but keep announcing the
 		// tombstoned identity, which the server rejects forever — the recovery
 		// would silently never happen.
-		if fresh.Agent.ID != "" && fresh.Agent.ID != cfg.Agent.ID {
-			log.Printf("[agent] blocked: this machine has a new agent id")
-			cfg.Agent.ID = fresh.Agent.ID
-			d.SetAgentID(fresh.Agent.ID)
-		}
+		d.SetAgentID(agentID)
 	}
 
 
@@ -1215,7 +1209,7 @@ func runDaemonStart() error {
 				scanInterval = parsed
 			}
 		}
-		go runAutoScan(ctx, cfg, scanInterval, agentClient, d.ScanNow, scanPaths)
+		go runAutoScan(ctx, cfg, creds, scanInterval, agentClient, d.ScanNow, scanPaths)
 	}
 
 	// Start reporter only for stream task handling
@@ -1225,7 +1219,7 @@ func runDaemonStart() error {
 	// stored key + agentId so a supervisor restart can't loop on a rejected
 	// identity, then stop the daemon. Reconnecting needs a fresh `unarr login`.
 	d.SyncClient().OnRevoked = func(err error) {
-		reportAgentRevoked(cfg, err)
+		reportAgentRevoked(creds, err)
 		cancel()
 	}
 
@@ -1233,12 +1227,8 @@ func runDaemonStart() error {
 	// the next start authenticates with the bound agent key (one-time migration;
 	// also stops the server re-minting on every restart).
 	d.OnAgentKeyMinted = func(newKey string) {
-		cfg.Auth.APIKey = newKey
-		if serr := config.Save(cfg, resolvedConfigPath()); serr != nil {
-			log.Printf("[agent] could not persist per-machine key: %v", serr)
-		} else {
-			log.Printf("[agent] migrated to a per-machine agent key")
-		}
+		creds.adoptKey(newKey)
+		log.Printf("[agent] migrated to a per-machine agent key")
 	}
 
 	// Start daemon (blocks — runs sync loop)
@@ -1284,39 +1274,10 @@ func runDaemonStart() error {
 		// (deleted from the dashboard). Wipe it and exit cleanly so the service
 		// supervisor doesn't restart-loop against a 410; user must re-login.
 		if agent.IsRevoked(err) {
-			reportAgentRevoked(cfg, err)
+			reportAgentRevoked(creds, err)
 			return nil
 		}
 		return err
-	}
-}
-
-// wipeAgentCredential clears a credential the server has tombstoned, so the
-// next sign-in mints a fresh identity instead of re-offering one that will
-// never be accepted again. One implementation for both callers (the parked
-// daemon and the mid-run revocation) so they can never diverge on what
-// "forget this machine" means.
-//
-// A failure to save is logged, not swallowed: the dead key survives on disk and
-// the daemon will be rejected again, which is worth seeing in the logs.
-func wipeAgentCredential(cfg *config.Config) {
-	cfg.Auth.APIKey = ""
-	cfg.Agent.ID = ""
-
-	// Saved from a FRESH read of the file, not from the in-memory snapshot this
-	// process booted with. Writing the snapshot back would silently revert every
-	// edit the user has made to config.toml since the daemon started — clearing
-	// a credential must not cost them their settings.
-	path := resolvedConfigPath()
-	onDisk, err := config.Load(path)
-	if err != nil {
-		log.Printf("[agent] could not re-read config before clearing the credential (%v) — writing the in-memory copy", err)
-		onDisk = *cfg
-	}
-	onDisk.Auth.APIKey = ""
-	onDisk.Agent.ID = ""
-	if err := config.Save(onDisk, path); err != nil {
-		log.Printf("[agent] could not clear the revoked credential (it stays on disk): %v", err)
 	}
 }
 
@@ -1343,9 +1304,9 @@ func reportBlocked(b *agent.Blocked) {
 // stored credential (api key + agentId) so the next start requires a fresh
 // `unarr login` (which mints a new per-machine key bound to a new agentId)
 // instead of looping against a server that keeps rejecting the old identity.
-func reportAgentRevoked(cfg config.Config, err error) {
+func reportAgentRevoked(creds *credentialStore, err error) {
 	log.Printf("[agent] credential revoked by server (%v) — this machine was removed from your account", err)
-	wipeAgentCredential(&cfg)
+	creds.wipe()
 	fmt.Println()
 	fmt.Println("  This agent was removed from your account.")
 	fmt.Println("  Run `unarr login` on this machine to reconnect it.")
@@ -1629,7 +1590,7 @@ func basePathChanged(existing *library.LibraryCache, scanPaths []string) bool {
 	return true
 }
 
-func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration, ac *agent.Client, scanNow <-chan struct{}, scanPaths []string) {
+func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore, interval time.Duration, ac *agent.Client, scanNow <-chan struct{}, scanPaths []string) {
 	log.Printf("[auto-scan] enabled: every %s, paths: %v", interval, scanPaths)
 
 	select {
@@ -1731,7 +1692,10 @@ func runAutoScan(ctx context.Context, cfg config.Config, interval time.Duration,
 		totalSynced := 0
 		if len(syncItems) > 0 {
 			res, err := library.SyncBatches(ctx, ac, syncItems, library.SyncOptions{
-				AgentID:   cfg.Agent.ID,
+				// Asked at sync time, not captured at boot: a revocation and a
+				// fresh sign-in change this machine's identity, and a scan that
+				// kept the old one would sync a library to a dead agent.
+				AgentID:   creds.agent(),
 				ScanPath:  coveredRoots[0],
 				ScanRoots: coveredRoots,
 				FullCycle: fullCycle,
