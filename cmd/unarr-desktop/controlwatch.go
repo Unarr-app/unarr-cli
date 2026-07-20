@@ -178,6 +178,16 @@ func dedupeScopes(msg string) string {
 // verbatim rather than flattened into a generic message.
 func describeControlFailure(action string, err error) controlFailure {
 	reason := err.Error()
+	// An agent that predates `login --browser` rejects the flag outright. The
+	// two binaries ship in the same release, so this only happens on a mixed
+	// install — and "unknown flag: --browser" tells the user nothing they can
+	// act on, while "update the agent" does.
+	if isMissingBrowserFlag(reason) {
+		return controlFailure{
+			title:  "Agent: update needed",
+			detail: "This unarr agent is too old to sign in from the menu. Update it (re-run the unarr installer), then try Sign in again.",
+		}
+	}
 	if isAuthFailure(reason) {
 		// No terminal in the message: the tray exists precisely so the user
 		// never needs one, and "Sign in…" in this menu does it for them.
@@ -191,6 +201,12 @@ func describeControlFailure(action string, err error) controlFailure {
 		title:  "Agent: " + action + " failed",
 		detail: strings.ToUpper(action[:1]) + action[1:] + " failed: " + reason,
 	}
+}
+
+// isMissingBrowserFlag recognises an agent too old to know `login --browser`.
+func isMissingBrowserFlag(reason string) bool {
+	lower := strings.ToLower(reason)
+	return strings.Contains(lower, "unknown flag") && strings.Contains(lower, "browser")
 }
 
 // isAuthFailure recognises a rejected or missing agent key, whatever layer

@@ -15,6 +15,8 @@ var (
 	errRejectedKey = errors.New("register: API error 401: Invalid API key")
 	// errDiskFull stands for any cause the tray does not recognise.
 	errDiskFull = errors.New("write /var/lib/unarr: no space left on device")
+	// errUnknownBrowserFlag is what an agent older than the flag replies with.
+	errUnknownBrowserFlag = errors.New("unknown flag: --browser")
 )
 
 // daemonStartupFailure is the real output of `unarr start` on a box whose agent
@@ -135,6 +137,23 @@ func TestDescribeControlFailure(t *testing.T) {
 			t.Error("the zero controlFailure must not report failed()")
 		}
 	})
+}
+
+func TestDescribeControlFailureOnAnOldAgent(t *testing.T) {
+	// A mixed install where `unarr` predates `login --browser`. The raw cobra
+	// error names a flag the user never typed, so it must be translated into
+	// the thing they can actually do.
+	got := describeControlFailure(signInAction, errUnknownBrowserFlag)
+
+	if strings.Contains(got.detail, "--browser") {
+		t.Errorf("detail = %q, must not quote a flag the user never typed", got.detail)
+	}
+	if !strings.Contains(strings.ToLower(got.detail), "update") {
+		t.Errorf("detail = %q, want it to say the agent needs updating", got.detail)
+	}
+	if got.authRequired {
+		t.Error("an outdated agent is not an auth problem: the menu must not collapse to Sign in")
+	}
 }
 
 func TestIsAuthFailure(t *testing.T) {
