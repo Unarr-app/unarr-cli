@@ -64,23 +64,40 @@ func TestIsAllowedStreamPathResolved(t *testing.T) {
 	})
 }
 
-// TestWebDAVOverUPnPExposed: the advisory fires ONLY when the read-only WebDAV
-// export and UPnP WAN port-mapping are BOTH on (that combination exposes /dav/
-// over cleartext to the public internet); any other combination is quiet.
+// TestWebDAVOverUPnPExposed: the advisory fires only when /dav/ is genuinely
+// reachable from the internet — the mount is on, webdav_allow_wan lifted the
+// local-network guard, AND something published the stream port (enable_upnp for
+// the cleartext listener, auto_https_upnp for the TLS one).
+//
+// webdav_allow_wan is the term that matters. It used to be webdav+upnp alone,
+// which is now a false alarm: with the guard in place, publishing the port
+// exposes playback while /dav/ still 404s anything off the local network. A
+// warning that cries wolf on the default config teaches operators to ignore it.
 func TestWebDAVOverUPnPExposed(t *testing.T) {
 	cases := []struct {
-		webdav, upnp, want bool
+		name                            string
+		webdav, allowWAN, upnp, autoTLS bool
+		want                            bool
 	}{
-		{true, true, true},
-		{true, false, false},
-		{false, true, false},
-		{false, false, false},
+		{"mount published over cleartext UPnP", true, true, true, false, true},
+		{"mount published over the TLS listener", true, true, false, true, true},
+		{"allow_wan but no port published at all", true, true, false, false, false},
+		{"port published, guard still on", true, false, true, true, false},
+		{"no mount at all", false, true, true, true, false},
+		{"stock config: mount on, guard on, TLS auto-publish on", true, false, false, true, false},
 	}
 	for _, c := range cases {
-		cfg := config.Config{Download: config.DownloadConfig{WebDAVEnabled: c.webdav, EnableUPnP: c.upnp}}
-		if got := webDAVOverUPnPExposed(cfg); got != c.want {
-			t.Errorf("webDAVOverUPnPExposed(webdav=%v upnp=%v) = %v, want %v", c.webdav, c.upnp, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			cfg := config.Config{Download: config.DownloadConfig{
+				WebDAVEnabled:  c.webdav,
+				WebDAVAllowWAN: c.allowWAN,
+				EnableUPnP:     c.upnp,
+				AutoHTTPSUpnp:  c.autoTLS,
+			}}
+			if got := webDAVOverUPnPExposed(cfg); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
 	}
 }
 

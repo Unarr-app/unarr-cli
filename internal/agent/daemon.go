@@ -99,6 +99,12 @@ type Daemon struct {
 	// so the web can prefer it over Tailscale/LAN for in-browser playback.
 	funnelURL string
 
+	// httpsWanMapped: the stream server auto-published its HTTPS port to the WAN
+	// via UPnP (external port matches). Written by the stream server's mapping
+	// maintainer goroutine (SetWanMappedCallback → SetHTTPSWanMapped) and read by
+	// the sync loop — atomic to avoid a data race across those goroutines.
+	httpsWanMapped atomic.Bool
+
 	// Watching tracks whether a user is viewing download progress in the web UI.
 	Watching atomic.Bool
 
@@ -131,6 +137,13 @@ func (d *Daemon) SetFunnelURL(url string) {
 	d.funnelURL = url
 	d.State.FunnelURL = url
 	WriteState(&d.State)
+}
+
+// SetHTTPSWanMapped records whether the stream server's HTTPS port is currently
+// published to the WAN via UPnP, so the sync heartbeat carries it to the web.
+// Fired (on change only) by the stream server's mapping maintainer.
+func (d *Daemon) SetHTTPSWanMapped(mapped bool) {
+	d.httpsWanMapped.Store(mapped)
 }
 
 // UpdateStreamSecret sets the hex HMAC key reported on register so the web can
@@ -389,6 +402,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.sync.GetFunnelURL = func() string {
 		return d.funnelURL
+	}
+	d.sync.GetHTTPSWanMapped = func() bool {
+		return d.httpsWanMapped.Load()
 	}
 	d.sync.GetAgentStatus = func() string {
 		return d.State.Status

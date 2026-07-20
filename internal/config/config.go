@@ -89,6 +89,7 @@ type DownloadConfig struct {
 	StreamPort      int     `toml:"stream_port"`       // fixed port for streaming HTTP server (default: 11818)
 	HTTPSStreamPort int     `toml:"https_stream_port"` // HTTPS stream listener for direct valid-cert playback (default: 11819, 0 = disabled). Only serves once a certificate is present (agent-TLS feature).
 	EnableUPnP      bool    `toml:"enable_upnp"`       // map StreamPort to the WAN via UPnP/NAT-PMP (default: false; opt-in)
+	AutoHTTPSUpnp   bool    `toml:"auto_https_upnp"`   // auto-publish+renew the TLS+token HTTPS port via UPnP for remote direct-TLS (default: true; opt-out)
 	// MaxStreamSessions caps simultaneous in-browser HLS stream sessions on this
 	// daemon. Default 1 = the personal-agent model (one daemon == one viewer ==
 	// one stream; a new session evicts the previous). Raise it on a SHARED /
@@ -131,8 +132,9 @@ type DownloadConfig struct {
 	WebDAVPassword string `toml:"webdav_password"`
 	// WebDAVAllowWAN lets /dav/ answer callers outside the local network
 	// (loopback / RFC1918 / link-local / Tailscale CGNAT). Default false: the
-	// stream port is reachable from the internet whenever UPnP publishes it, and
-	// /dav/ shares that mux, but its Basic auth has NO rate limiting — so an
+	// stream port is reachable from the internet whenever it is published — by
+	// auto_https_upnp on the TLS listener or enable_upnp on the cleartext one —
+	// and /dav/ shares that mux, but its Basic auth has NO rate limiting, so an
 	// exposed mount is an unthrottled password-guessing target. Remote playback
 	// does not go through WebDAV, so leaving this off costs it nothing.
 	WebDAVAllowWAN bool            `toml:"webdav_allow_wan"`
@@ -402,6 +404,8 @@ func Default() Config {
 			HTTPSStreamPort:    11819,
 			MaxStreamSessions:  1,    // personal-agent default: one stream at a time
 			RequireStreamToken: true, // secure by default; loopback exempt
+			AutoHTTPSUpnp:      true, // auto-publish the TLS+token HTTPS port for remote direct-TLS
+
 			Transcode: TranscodeConfig{
 				Enabled: true,
 				HWAccel: "auto",
@@ -515,6 +519,12 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	}
 	if !meta.IsDefined("downloads", "https_stream_port") {
 		cfg.Download.HTTPSStreamPort = 11819
+	}
+	// Auto-publish the TLS+token HTTPS port to the WAN defaults ON for configs
+	// predating the key, so remote browsers get the stable direct-TLS host instead
+	// of the fragile CF funnel. Explicit `auto_https_upnp = false` opts out.
+	if !meta.IsDefined("downloads", "auto_https_upnp") {
+		cfg.Download.AutoHTTPSUpnp = true
 	}
 	if cfg.Download.MaxStreamSessions <= 0 {
 		// Predates the key (or set to 0/negative) → personal-agent default of 1.

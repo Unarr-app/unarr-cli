@@ -86,6 +86,11 @@ type RegisterRequest struct {
 	// CloudFlare Quick Tunnel hostname when enabled; the web prefers it over
 	// Tailscale/LAN for in-browser playback because it works on any network.
 	FunnelURL string `json:"funnelUrl,omitempty"`
+	// HTTPSWanMapped: the agent auto-published its HTTPS stream port to the WAN via
+	// UPnP (external port matches). A HINT the web uses to gate a non-blocking
+	// reachability probe — it prefers the stable direct-TLS host over the funnel
+	// only after that probe confirms. Omitted (false) on agents without UPnP.
+	HTTPSWanMapped bool `json:"httpsWanMapped,omitempty"`
 	// IsDocker tells the web the agent runs inside a container, so it shows a
 	// `docker pull` command instead of the in-app update button (the binary
 	// self-update refuses to run in Docker). No omitempty: false (a binary
@@ -514,6 +519,9 @@ type SyncRequest struct {
 	VPNServer string `json:"vpnServer,omitempty"`
 	// CloudFlare Quick Tunnel hostname when enabled, else empty.
 	FunnelURL string `json:"funnelUrl,omitempty"`
+	// HTTPSWanMapped — see RegisterRequest.HTTPSWanMapped. Sent every sync so the
+	// web keeps the direct-TLS reachability hint fresh as the UPnP lease renews.
+	HTTPSWanMapped bool `json:"httpsWanMapped,omitempty"`
 	// IsDocker — see RegisterRequest.IsDocker. Sent every sync so the web keeps
 	// the flag fresh even if the agent migrated binary↔docker between restarts.
 	IsDocker bool `json:"isDocker"`

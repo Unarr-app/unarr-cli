@@ -66,6 +66,9 @@ type SyncClient struct {
 	// GetFunnelURL returns the CloudFlare Quick Tunnel public hostname if one
 	// is active, else "". Sent on every sync so the web picks it up live.
 	GetFunnelURL func() string
+	// GetHTTPSWanMapped returns whether the HTTPS stream port is currently
+	// published to the WAN via UPnP. Sent on every sync as a reachability hint.
+	GetHTTPSWanMapped func() bool
 	// OnDeleteFiles is called when the server requests file deletion from disk.
 	// It returns the IDs successfully deleted plus the ones that failed, with a
 	// reason. Both halves must be reported: an unreported failure leaves the
@@ -246,6 +249,9 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 	}
 	if sc.GetFunnelURL != nil {
 		req.FunnelURL = sc.GetFunnelURL()
+	}
+	if sc.GetHTTPSWanMapped != nil {
+		req.HTTPSWanMapped = sc.GetHTTPSWanMapped()
 	}
 	// Flush confirmed deletions from previous cycle.
 	// Once flushed, remove IDs from deleteInFlight — the server will stop sending

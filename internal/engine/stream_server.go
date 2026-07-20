@@ -88,6 +88,21 @@ type StreamServer struct {
 	// would let any scanner enumerate active downloads. LAN and Tailscale
 	// access keep working without UPnP.
 	enableUPnP bool
+	// autoHTTPSUpnp: when a stream token is required (TLS + mandatory token = safe
+	// WAN exposure), auto-publish + renew the HTTPS port via UPnP so remote
+	// browsers reach the stable direct-TLS host instead of the fragile CF funnel.
+	// Default true; an operator can opt out via config (downloads.auto_https_upnp).
+	autoHTTPSUpnp bool
+	// httpsWanMapped is the last-known result of the HTTPS-port UPnP mapping:
+	// true only when the gateway mapped the port AND the external port matches the
+	// internal httpsPort (so the web-encoded direct-TLS host is correct). Guarded
+	// by mu. Pushed to the daemon via wanMappedCB so it rides the sync heartbeat.
+	// NOTE: "mapped" is a HINT, not proof of external reachability (CGNAT/ISP
+	// filtering can still block it) — the web verifies with a non-blocking probe.
+	httpsWanMapped bool
+	wanMappedCB    func(bool) // set by cmd before Listen; fired on mapped-state change
+	maintainCancel context.CancelFunc
+	maintainWG     sync.WaitGroup
 	// corsExtraOrigins are operator-configured origins added to the default
 	// allowlist defined in validate.go. Set before Listen().
 	corsExtraOrigins []string
@@ -174,19 +189,50 @@ const maxStreamReaders = 32
 // 1 = personal-agent single-viewer).
 // Call Listen() to start accepting connections, then SetFile() to serve content.
 //
-// UPnP is opt-in: call SetUPnPEnabled(true) before Listen() to publish the
-// stream port on the WAN. Without it, only LAN and Tailscale clients can
-// reach the server. This matches the security default — /stream and /hls
-// have no auth, so exposing them to the public internet is something the
-// operator must explicitly request.
+// Two independent things can put a port on the WAN, and they differ because the
+// listeners they publish differ:
+//
+//   - The CLEARTEXT stream port stays opt-in via SetUPnPEnabled(true). Nothing
+//     about it is safe to expose by default.
+//   - The TLS listener auto-publishes via SetAutoHTTPSUpnp (default ON), but only
+//     when a stream token is required. TLS plus a mandatory per-request token is
+//     what makes that exposure defensible, and it buys a stable, valid-cert
+//     direct-TLS host instead of the CF quick-tunnel funnel, which rotates its
+//     hostname on every restart and rate-limits. SetAutoHTTPSUpnp(false) opts out.
+//
+// Publishing a port exposes playback, not the library mount: /dav/ answers only
+// callers on the local network unless SetWebDAVAllowWAN(true) says otherwise.
 func NewStreamServer(port, maxStreamSessions int) *StreamServer {
 	return &StreamServer{
-		port:         port,
-		hls:          NewHLSSessionRegistry(maxStreamSessions),
-		usenet:       newUsenetSourceRegistry(),
-		streamSecret: newStreamSecret(),
-		requireToken: true, // secure by default; the agent self-mints tokens
+		port:          port,
+		hls:           NewHLSSessionRegistry(maxStreamSessions),
+		usenet:        newUsenetSourceRegistry(),
+		streamSecret:  newStreamSecret(),
+		requireToken:  true, // secure by default; the agent self-mints tokens
+		autoHTTPSUpnp: true, // auto-publish the TLS+token HTTPS port unless opted out
 	}
+}
+
+// SetAutoHTTPSUpnp toggles auto-publishing the HTTPS port to the WAN via UPnP
+// (only active when a stream token is required). Call before Listen(). Default
+// true; set false from config to keep the port off the router.
+func (ss *StreamServer) SetAutoHTTPSUpnp(enabled bool) {
+	ss.autoHTTPSUpnp = enabled
+}
+
+// SetWanMappedCallback registers a callback fired whenever the HTTPS-port WAN
+// mapping state changes (true = mapped with matching external port). Call before
+// Listen(). cmd wires this to the daemon so the flag rides the sync heartbeat.
+func (ss *StreamServer) SetWanMappedCallback(cb func(bool)) {
+	ss.wanMappedCB = cb
+}
+
+// HTTPSWanMapped reports the last-known HTTPS-port WAN-mapping state (hint, not a
+// reachability guarantee — see the field doc).
+func (ss *StreamServer) HTTPSWanMapped() bool {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	return ss.httpsWanMapped
 }
 
 // StreamSecretHex returns the daemon's stream-token signing key as hex, so it
@@ -510,13 +556,19 @@ func (ss *StreamServer) listenTLS(ctx context.Context, mux http.Handler) error {
 	// known — so the web (which encodes the reported httpsPort) and the router
 	// agree. If UPnP/NAT-PMP isn't available the remote path just falls back to
 	// the CloudFlare funnel; the LAN direct path is unaffected.
-	if ss.enableUPnP {
-		if m, err := SetupUPnP(ss.httpsPort); err != nil {
-			log.Printf("[stream] HTTPS UPnP failed: %v (remote direct-TLS falls back to the funnel)", err)
-		} else {
-			ss.httpsUpnpMapping = m
-			log.Printf("[stream] HTTPS UPnP: published port %d to WAN via %s:%d", ss.httpsPort, m.ExternalIP, m.ExternalPort)
-		}
+	if ss.shouldAutoPublishHTTPS() {
+		mctx, cancel := context.WithCancel(ctx)
+		ss.maintainCancel = cancel
+		ss.maintainWG.Add(1)
+		go func() {
+			// The maintainer owns the context for its whole life: cancel on the way
+			// out releases it however the goroutine ends, including when the PARENT
+			// ctx is what stopped it (Shutdown may never run in that path, so relying
+			// on ss.maintainCancel alone would leak the context).
+			defer cancel()
+			defer ss.maintainWG.Done()
+			ss.maintainHTTPSPortMapping(mctx)
+		}()
 	}
 
 	tlsCfg := &tls.Config{
@@ -723,8 +775,30 @@ func (ss *StreamServer) ReadIdleSince() time.Duration {
 // Shutdown gracefully stops the HTTP server and removes the UPnP port mapping.
 // Call only at daemon shutdown — NOT between file swaps.
 func (ss *StreamServer) Shutdown(ctx context.Context) error {
+	// Stop the WAN-mapping maintainer FIRST so no ticker re-publishes the port
+	// after we Remove() it below. Bound the wait: SetupUPnP's SOAP calls have no
+	// context/timeout, so a wedged gateway could otherwise block Shutdown forever
+	// (→ systemd SIGKILL, no graceful drain). After the bound, proceed anyway — a
+	// still-running probe dies with the process; the mapping expires with its lease.
+	if ss.maintainCancel != nil {
+		ss.maintainCancel()
+		done := make(chan struct{})
+		go func() {
+			ss.maintainWG.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			log.Printf("[stream] HTTPS UPnP maintainer didn't stop in 3s (SOAP stall?) — proceeding with shutdown")
+		}
+	}
+
 	ss.upnpMapping.Remove()
-	ss.httpsUpnpMapping.Remove()
+	ss.mu.Lock()
+	httpsMap := ss.httpsUpnpMapping
+	ss.mu.Unlock()
+	httpsMap.Remove()
 	if ss.hls != nil {
 		ss.hls.CloseAll()
 	}
