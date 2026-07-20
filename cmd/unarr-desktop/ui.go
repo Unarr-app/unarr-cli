@@ -16,6 +16,7 @@ import (
 	"fyne.io/systray"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/notify"
 	"github.com/Unarr-app/unarr-cli/internal/upgrade"
 )
 
@@ -40,6 +41,12 @@ type trayUI struct {
 	// specific items only on transition; cliModeInit forces the first apply.
 	prevHasCLI  bool
 	cliModeInit bool
+
+	// controlFail is the last daemon control that failed, kept so the status
+	// row keeps explaining it after the notification is gone (zero value =
+	// none). atomic because the supervising goroutine stores it while refresh
+	// reads it.
+	controlFail atomic.Value // controlFailure
 
 	// shownTooltip diffs the app-level tooltip so a task-count change updates it
 	// (SetTooltip only when the text actually changed — the DBus/Cocoa spam guard
@@ -81,6 +88,7 @@ func newTrayUI() *trayUI {
 		accountKick: make(chan struct{}, 1),
 	}
 	ui.upgradeTarget.Store(upgradeURL(webBase()))
+	ui.controlFail.Store(controlFailure{})
 
 	systray.SetIcon(trayIcon)
 	systray.SetTitle("unarr")
@@ -255,6 +263,7 @@ func (ui *trayUI) renderDaemonStatus() {
 	ui.setTooltip(trayTooltip(st, s))
 	switch st {
 	case stateRunning, stateDownloading:
+		ui.controlFail.Store(controlFailure{}) // it is up: any past failure is moot
 		// Downloads are what the user cares about; the PID is diagnostic, so it
 		// moves to the row tooltip. No active tasks → the plain "running" line.
 		if s.tasks > 0 {
@@ -281,28 +290,63 @@ func (ui *trayUI) renderDaemonStatus() {
 		ui.mResume.Enable()
 		ui.mRestart.Disable()
 	default:
-		ui.mStatus.SetTitle("Agent: stopped")
+		ui.applyStoppedStatus()
 		ui.mPause.Disable()
 		ui.mResume.Enable()
 		ui.mRestart.Disable()
 	}
 }
 
+// applyStoppedStatus labels the stopped row, preferring the reason the last
+// control failed. A bare "stopped" after pressing Resume is exactly what made a
+// rejected agent key look like nothing happening at all.
+func (ui *trayUI) applyStoppedStatus() {
+	if fail, _ := ui.controlFail.Load().(controlFailure); fail.failed() {
+		ui.mStatus.SetTitle(fail.title)
+		ui.mStatus.SetTooltip(fail.detail)
+		return
+	}
+	ui.mStatus.SetTitle("Agent: stopped")
+	ui.mStatus.SetTooltip("")
+}
+
 // control execs a daemon command, surfaces spawn errors, and nudges a refresh
 // shortly after (the state file updates asynchronously) on top of the ticker.
 // Stops/restarts remember the targeted PID so a state file the old daemon
 // failed to clean up is recognized as our stop, not a crash.
-func (ui *trayUI) control(args ...string) {
+// action names the command for the user ("start"/"stop"/"restart"). The command
+// is supervised on its own goroutine, so a failing one never blocks the click
+// loop — and never fails silently the way a bare spawn did.
+func (ui *trayUI) control(action string, args ...string) {
 	if args[0] == "stop" || args[0] == "daemon" {
 		if s := readStatus(); s.running {
 			ui.lastStopPID = s.pid
 		}
 	}
 	ui.suppressCrashUntil = time.Now().Add(crashSuppressWindow)
-	if err := runUnarr(args...); err != nil {
-		fmt.Fprintln(os.Stderr, "unarr-desktop: control:", err)
+	ui.controlFail.Store(controlFailure{}) // a fresh attempt clears the last failure
+	cmd, out, err := startUnarr(args...)
+	if err != nil {
+		ui.reportControlFailure(action, err)
+		return
 	}
+	go func() {
+		if waitErr := awaitControl(cmd, out); waitErr != nil {
+			ui.reportControlFailure(action, waitErr)
+		}
+	}()
 	time.AfterFunc(1500*time.Millisecond, ui.refresh)
+}
+
+// reportControlFailure surfaces a failed control twice over, because a tray has
+// no terminal: a desktop notification for the moment it happens, and the status
+// row for afterwards — a notification the user misses would leave the menu
+// reading "stopped" with no hint that anything went wrong.
+func (ui *trayUI) reportControlFailure(action string, err error) {
+	fail := describeControlFailure(action, err)
+	ui.controlFail.Store(fail)
+	notify.Send("unarr agent", fail.detail)
+	ui.refresh()
 }
 
 func (ui *trayUI) statusLoop() {
@@ -418,13 +462,13 @@ func (ui *trayUI) clickLoop() {
 		select {
 		case <-ui.mPause.ClickedCh:
 			markPaused(true)
-			ui.control("stop")
+			ui.control("stop", "stop")
 		case <-ui.mResume.ClickedCh:
 			markPaused(false)
-			ui.control("start")
+			ui.control("start", "start")
 		case <-ui.mRestart.ClickedCh:
 			markPaused(false)
-			ui.control("daemon", "restart")
+			ui.control("restart", "daemon", "restart")
 		case <-ui.mUpgrade.ClickedCh:
 			ui.upgradeCTA()
 		case <-ui.mAutostart.ClickedCh:

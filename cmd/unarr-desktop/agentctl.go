@@ -43,13 +43,6 @@ func unarrBin() string { p, _ := resolveUnarrBin(); return p }
 // menu without a restart.
 func hasCLI() bool { _, ok := resolveUnarrBin(); return ok }
 
-// runUnarr execs `unarr <args…>` DETACHED — the daemon's lifetime must not be
-// tied to the tray process. Returns only the spawn error, not the exit status
-// (stop/restart hand off to the daemon's own service/PID-aware control logic).
-func runUnarr(args ...string) error {
-	return exec.Command(unarrBin(), args...).Start()
-}
-
 // runUnarrOutput execs `unarr <args…>` and returns its combined output —
 // for short, synchronous queries (version, log dump), never for control.
 // Bounded: a binary on a hung network mount (or blocked by AV) must not hang
