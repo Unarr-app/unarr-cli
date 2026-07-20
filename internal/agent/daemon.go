@@ -146,6 +146,17 @@ func (d *Daemon) UpdateStreamPort(port int) {
 	d.sync.cfg.StreamPort = port
 }
 
+// UpdateHTTPSStreamPort updates the ACTUAL bound HTTPS stream port reported in
+// register/sync, so the web encodes the direct-TLS host on the port the agent is
+// really listening on. listenTLS bumps the port when the configured one is busy,
+// and it stays 0 when no cert was issued — reporting the config value in either
+// case points every direct-TLS URL at a port nothing is serving. 0 is the honest
+// answer there, and directTLSWire already means "clear the columns" by it.
+func (d *Daemon) UpdateHTTPSStreamPort(port int) {
+	d.cfg.HTTPSStreamPort = port
+	d.sync.cfg.HTTPSStreamPort = port
+}
+
 // directTLSWire renders the per-agent direct-TLS pair for the wire. The daemon
 // read the config, so it always reports explicitly: &0/&"" when the feature is
 // off, which tells the server to clear the columns instead of keeping a port
