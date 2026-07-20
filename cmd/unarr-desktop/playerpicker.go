@@ -57,7 +57,6 @@ func configuredPlayer() string {
 // whose selects are already at the complexity ceiling.
 func (ui *trayUI) startPlayerWatchers() {
 	for _, pc := range ui.playerChoices {
-		pc := pc
 		go func() {
 			for range pc.item.ClickedCh {
 				ui.setPlayer(pc.value)
