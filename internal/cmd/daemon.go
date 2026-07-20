@@ -532,6 +532,10 @@ func runDaemonStart() error {
 		return fmt.Errorf("start stream server: %w", err)
 	}
 	d.UpdateStreamPort(streamSrv.Port())
+	// Report the ACTUAL bound HTTPS port: listenTLS bumps it when the configured
+	// one is busy, and leaves it 0 when no cert was issued. Either way the config
+	// value would advertise a direct-TLS host nothing listens on.
+	d.UpdateHTTPSStreamPort(streamSrv.HTTPSPort())
 
 	// Per-agent direct-TLS renewal: re-fetch the cert ahead of expiry and
 	// hot-swap it into the live listener (no restart). Only meaningful once the
