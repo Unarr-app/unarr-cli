@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,12 +13,13 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
-// unarrBin resolves the headless `unarr` daemon binary: PATH first, then a
+// resolveUnarrBin locates the headless `unarr` daemon binary: PATH first, then a
 // sibling of this executable (installers drop `unarr` + `unarr-desktop`
-// together), then a bare name as a last resort.
-func unarrBin() string {
+// together). The bool reports whether it was actually found — false means only
+// the bare-name fallback is returned, i.e. no CLI is installed (player-only).
+func resolveUnarrBin() (string, bool) {
 	if p, err := exec.LookPath("unarr"); err == nil {
-		return p
+		return p, true
 	}
 	if self, err := os.Executable(); err == nil {
 		cand := filepath.Join(filepath.Dir(self), "unarr")
@@ -25,11 +27,21 @@ func unarrBin() string {
 			cand += ".exe"
 		}
 		if _, statErr := os.Stat(cand); statErr == nil {
-			return cand
+			return cand, true
 		}
 	}
-	return "unarr"
+	return "unarr", false
 }
+
+// unarrBin is the path to exec the daemon with (bare "unarr" if not found).
+func unarrBin() string { p, _ := resolveUnarrBin(); return p }
+
+// hasCLI reports whether the `unarr` daemon binary is installed. When it isn't,
+// the tray runs in player-only mode: no daemon to control, so the pause/resume/
+// restart + account rows are hidden and an "Enable downloads & library" CTA is
+// shown instead. Re-checked every tick, so installing the CLI later promotes the
+// menu without a restart.
+func hasCLI() bool { _, ok := resolveUnarrBin(); return ok }
 
 // runUnarr execs `unarr <args…>` DETACHED — the daemon's lifetime must not be
 // tied to the tray process. Returns only the spawn error, not the exit status
@@ -88,6 +100,21 @@ func readStatus() agentStatus {
 // configPath is the active config.toml (honors UNARR_CONFIG_DIR / --config the
 // same way the daemon does).
 func configPath() string { return config.FilePath() }
+
+// openDownloadsFolder opens the agent's configured download directory in the OS
+// file manager. It reads the same config the daemon uses (honoring
+// UNARR_DOWNLOAD_DIR); a load error or an unset/missing dir degrades to a
+// stderr line (openFile stats the path), never a crash — the tray runs where a
+// CLI is installed, but a half-configured install must not take the menu down.
+func openDownloadsFolder() {
+	cfg, err := config.Load(config.FilePath())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: downloads dir:", err)
+		return
+	}
+	cfg.ApplyEnvOverrides()
+	openFile(cfg.Download.Dir)
+}
 
 // reapStaleState removes the state file a dead daemon left behind, but only
 // when it still names the given PID (never races a freshly started daemon).

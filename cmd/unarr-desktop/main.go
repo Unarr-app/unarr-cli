@@ -58,8 +58,9 @@ func webBase() string {
 
 // hubURL is the in-app agents hub: status, paths, codecs, hardware + config — the
 // authoritative view, so "Configure agent" can never drift from what the web shows.
-func hubURL() string  { return webBase() + "/profile?tab=agents" }
-func docsURL() string { return webBase() + "/docs" }
+func hubURL() string     { return webBase() + "/profile?tab=agents" }
+func docsURL() string    { return webBase() + "/docs" }
+func libraryURL() string { return webBase() + "/library" }
 
 func openURL(url string) {
 	if err := browser.OpenURL(url); err != nil {
@@ -195,6 +196,8 @@ func onReady() {
 	go ui.accountLoop()
 	go ui.updateLoop()
 	go ui.clickLoop()
+	go ui.navLoop()
+	ui.startPlayerWatchers() // spawns one goroutine per Player submenu entry
 }
 
 // toggleAutostart flips "Start at login" to the opposite of the checkbox

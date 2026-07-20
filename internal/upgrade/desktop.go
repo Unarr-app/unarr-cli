@@ -188,7 +188,14 @@ func downloadDesktopAsset(ctx context.Context, version, assetName string) (strin
 // ships no signed desktop assets (ErrNoDesktopAssets), and a manifest without
 // a valid signature is an explicit hard failure — never applied.
 func verifyDesktopAsset(ctx context.Context, version, assetPath, base, assetName string) error {
-	err := verifyAssetAgainstChecksums(ctx, version, assetPath, base, desktopChecksums, assetName, true)
+	err := verifyAssetAgainstChecksums(ctx, checksumVerifyReq{
+		version:         version,
+		assetPath:       assetPath,
+		base:            base,
+		manifest:        desktopChecksums,
+		expectedName:    assetName,
+		verifySignature: true,
+	})
 	switch {
 	case err == nil:
 		return nil

@@ -164,7 +164,25 @@ const cliChecksums = "checksums.txt"
 // archive we actually downloaded, never another mirror's (possibly differently
 // built) artifacts.
 func verifyChecksumWithOptions(ctx context.Context, version, archivePath, base string, verifySignature bool) error {
-	return verifyAssetAgainstChecksums(ctx, version, archivePath, base, cliChecksums, archiveName(version), verifySignature)
+	return verifyAssetAgainstChecksums(ctx, checksumVerifyReq{
+		version:         version,
+		assetPath:       archivePath,
+		base:            base,
+		manifest:        cliChecksums,
+		expectedName:    archiveName(version),
+		verifySignature: verifySignature,
+	})
+}
+
+// checksumVerifyReq bundles the inputs to verifyAssetAgainstChecksums so the
+// shared verifier stays a two-argument function (ctx + request).
+type checksumVerifyReq struct {
+	version         string
+	assetPath       string
+	base            string
+	manifest        string
+	expectedName    string
+	verifySignature bool
 }
 
 // verifyAssetAgainstChecksums is the manifest-agnostic core shared by the CLI
@@ -173,9 +191,9 @@ func verifyChecksumWithOptions(ctx context.Context, version, archivePath, base s
 // verify its ed25519 signature (over "<manifest>.sig", derived — the two
 // names can never drift apart), then compare the asset's SHA256 against the
 // manifest entry for expectedName.
-func verifyAssetAgainstChecksums(ctx context.Context, version, assetPath, base, manifest, expectedName string, verifySignature bool) error {
+func verifyAssetAgainstChecksums(ctx context.Context, req checksumVerifyReq) error {
 	// Download the manifest from the asset's mirror (no cross-host failover).
-	resp, err := getReleaseAssetFromBase(ctx, base, version, manifest)
+	resp, err := getReleaseAssetFromBase(ctx, req.base, req.version, req.manifest)
 	if err != nil {
 		return fmt.Errorf("fetch checksums: %w", err)
 	}
@@ -192,8 +210,8 @@ func verifyAssetAgainstChecksums(ctx context.Context, version, assetPath, base, 
 	// contents. Skipped silently when no key is embedded (handled by the
 	// caller via SignatureVerificationConfigured) or when the caller
 	// explicitly opts out via --allow-unsigned (CLI archives only).
-	if verifySignature {
-		if err := verifySignedChecksums(ctx, version, base, manifest, checksumsContent); err != nil {
+	if req.verifySignature {
+		if err := verifySignedChecksums(ctx, req.version, req.base, req.manifest, checksumsContent); err != nil {
 			return fmt.Errorf("verify signature: %w", err)
 		}
 	}
@@ -205,7 +223,7 @@ func verifyAssetAgainstChecksums(ctx context.Context, version, assetPath, base, 
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.Fields(line)
-		if len(parts) >= 2 && parts[1] == expectedName {
+		if len(parts) >= 2 && parts[1] == req.expectedName {
 			expectedHash = parts[0]
 			break
 		}
@@ -215,11 +233,11 @@ func verifyAssetAgainstChecksums(ctx context.Context, version, assetPath, base, 
 	}
 
 	if expectedHash == "" {
-		return fmt.Errorf("no checksum found for %s in %s", expectedName, manifest)
+		return fmt.Errorf("no checksum found for %s in %s", req.expectedName, req.manifest)
 	}
 
 	// Compute SHA256 of the downloaded asset
-	f, err := os.Open(assetPath)
+	f, err := os.Open(req.assetPath)
 	if err != nil {
 		return err
 	}

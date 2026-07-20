@@ -25,9 +25,26 @@ type trayUI struct {
 
 	mStatus, mAccount, mVersion, mUpgrade *systray.MenuItem
 	mPause, mResume, mRestart             *systray.MenuItem
-	mOpen, mConfigure, mEdit              *systray.MenuItem
+	mEnableDownloads                      *systray.MenuItem
+	mOpen, mLibrary, mDownloads           *systray.MenuItem
+	mConfigure, mEdit, mPlayer            *systray.MenuItem
 	mLogs, mSendLogs, mDocs               *systray.MenuItem
 	mAutostart, mUpdate, mQuit            *systray.MenuItem
+
+	// playerChoices are the Player submenu entries (playerpicker.go), each
+	// bound to the config value it writes.
+	playerChoices []playerChoice
+
+	// hasCLI-mode tracking: the tray adapts between the full daemon UI and a
+	// player-only menu (no `unarr` installed). applyMode toggles the mode-
+	// specific items only on transition; cliModeInit forces the first apply.
+	prevHasCLI  bool
+	cliModeInit bool
+
+	// shownTooltip diffs the app-level tooltip so a task-count change updates it
+	// (SetTooltip only when the text actually changed — the DBus/Cocoa spam guard
+	// applyState uses for the icon, applied here to the tooltip).
+	shownTooltip string
 
 	// Crash-watcher state — touched only from refresh()/control(); systray
 	// delivers those on independent goroutines but never concurrently in
@@ -69,6 +86,11 @@ func newTrayUI() *trayUI {
 	systray.SetTitle("unarr")
 	systray.SetTooltip("unarr agent")
 
+	// Left button opens the web app, right button opens this menu — everywhere
+	// but macOS, which keeps its native "click opens the menu" gesture. See
+	// traytap_other.go / traytap_darwin.go for why the split exists.
+	installTapHandler()
+
 	ui.mStatus = systray.AddMenuItem("Checking…", "Agent status")
 	ui.mStatus.Disable()
 	ui.mAccount = systray.AddMenuItem("Account: …", "Signed-in unarr account")
@@ -81,10 +103,25 @@ func newTrayUI() *trayUI {
 	ui.mPause = systray.AddMenuItem("Pause agent", "Stop the agent (downloads and streams halt)")
 	ui.mResume = systray.AddMenuItem("Resume agent", "Start the agent")
 	ui.mRestart = systray.AddMenuItem("Restart agent", "Restart the agent")
+	// Shown only in player-only mode (no CLI): the upgrade path from "just a
+	// player" to the full downloads+library agent, handled entirely on the web.
+	ui.mEnableDownloads = systray.AddMenuItem("Enable downloads & library…",
+		"Install the unarr agent to download and build your library")
+	ui.mEnableDownloads.Hide()
 	systray.AddSeparator()
 	ui.mOpen = systray.AddMenuItem("Open unarr.app", "Open the unarr web app")
+	ui.mLibrary = systray.AddMenuItem("Open library (web)", "Your unarr library on the web")
+	ui.mDownloads = systray.AddMenuItem("Open downloads folder", "Open the agent's download directory")
 	ui.mConfigure = systray.AddMenuItem("Configure agent (web)", "Paths, codecs, hardware — on the web")
 	ui.mEdit = systray.AddMenuItem("Edit config.toml", "Open the agent config file")
+	// Player submenu: pick which local player unarr:// links open in (writes
+	// [desktop] player). Checkmark reflects the current config value.
+	ui.mPlayer = systray.AddMenuItem("Player", "Which player unarr:// links open in")
+	current := configuredPlayer()
+	for _, opt := range playerMenuOptions() {
+		it := ui.mPlayer.AddSubMenuItemCheckbox(opt.label, "Use "+opt.label, opt.value == current)
+		ui.playerChoices = append(ui.playerChoices, playerChoice{it, opt.value})
+	}
 	systray.AddSeparator()
 	ui.mLogs = systray.AddMenuItem("View logs", "Open the agent log file")
 	ui.mSendLogs = systray.AddMenuItem("Send logs to support", "Send agent logs to the developers")
@@ -106,23 +143,99 @@ func newTrayUI() *trayUI {
 	ui.mUpdate = systray.AddMenuItem("Update desktop app", "Install the latest unarr-desktop version")
 	ui.mUpdate.Hide()
 	ui.mQuit = systray.AddMenuItem("Quit", "Close the tray (the agent keeps running)")
+	ui.applyMenuIcons()
 	return ui
 }
 
-// applyState swaps the tray icon + tooltip only on transitions (SetIcon on
-// every 5s tick would spam DBus/Cocoa for nothing).
+// applyState swaps the tray icon only on transitions (SetIcon on every 5s tick
+// would spam DBus/Cocoa for nothing). The tooltip is driven separately by
+// setTooltip so it can also reflect the download count, which changes without a
+// state transition.
 func (ui *trayUI) applyState(st trayState) {
 	if st == ui.shown {
 		return
 	}
 	ui.shown = st
 	systray.SetIcon(ui.icons[st])
-	systray.SetTooltip("unarr agent — " + st.label())
 }
 
-// refresh reflects daemon state into the status row + pause/resume/restart
-// enablement. Read from the same state file `unarr status` uses (no drift).
+// setTooltip updates the tray tooltip only when the text changed — same
+// transition-only discipline as applyState, so a 5s tick with nothing new is a
+// no-op instead of a DBus/Cocoa write.
+func (ui *trayUI) setTooltip(s string) {
+	if s == ui.shownTooltip {
+		return
+	}
+	ui.shownTooltip = s
+	systray.SetTooltip(s)
+}
+
+// trayTooltip is the icon hover text: the download count when the agent is
+// actively working, else the plain state label.
+func trayTooltip(st trayState, s agentStatus) string {
+	if st == stateDownloading {
+		return fmt.Sprintf("unarr — %d download(s) active", s.tasks)
+	}
+	return "unarr agent — " + st.label()
+}
+
+// refresh picks the mode (full daemon UI vs player-only) each tick and renders
+// it. Installing/removing the `unarr` CLI while the tray runs flips the menu
+// without a restart. applyMode does the one-time Show/Hide on transition.
 func (ui *trayUI) refresh() {
+	cli := hasCLI()
+	if !ui.cliModeInit || cli != ui.prevHasCLI {
+		ui.applyMode(cli)
+		ui.prevHasCLI = cli
+		ui.cliModeInit = true
+		if cli {
+			ui.kickAccount() // CLI just appeared — fetch account for the full UI
+		}
+	}
+	if cli {
+		ui.renderDaemonStatus()
+	} else {
+		ui.renderPlayerStatus()
+	}
+}
+
+// applyMode Show/Hides the mode-specific menu items. Called only on the
+// full<->player transition (systray Show/Hide every tick would spam the host).
+func (ui *trayUI) applyMode(cli bool) {
+	// Rows that only make sense with a daemon: control, account/version, and
+	// the download dir + config file (player-only installs neither). The Player
+	// submenu + Open unarr.app / library / docs stay in both modes.
+	daemon := []*systray.MenuItem{
+		ui.mPause, ui.mResume, ui.mRestart, ui.mAccount, ui.mVersion,
+		ui.mDownloads, ui.mEdit,
+	}
+	for _, it := range daemon {
+		if cli {
+			it.Show()
+		} else {
+			it.Hide()
+		}
+	}
+	if cli {
+		ui.mEnableDownloads.Hide()
+	} else {
+		ui.mEnableDownloads.Show()
+		ui.mUpgrade.Hide() // no account fetched in player-only mode
+	}
+}
+
+// renderPlayerStatus is the player-only status row: no daemon to report on, so
+// the icon is the plain (stopped) logo and the row states the handler is live.
+func (ui *trayUI) renderPlayerStatus() {
+	ui.applyState(stateStopped)
+	ui.setTooltip("unarr — player handler active")
+	ui.mStatus.SetTitle("Player handler active")
+	ui.mStatus.SetTooltip("unarr:// links open in your local player")
+}
+
+// renderDaemonStatus reflects daemon state into the status row + pause/resume/
+// restart enablement. Read from the same state file `unarr status` uses.
+func (ui *trayUI) renderDaemonStatus() {
 	s := readStatus()
 	if s.running && isPausedMarker() {
 		markPaused(false) // resumed outside the tray (CLI/web) — self-heal
@@ -139,13 +252,17 @@ func (ui *trayUI) refresh() {
 	}
 	st := displayState(s, isPausedMarker())
 	ui.applyState(st)
+	ui.setTooltip(trayTooltip(st, s))
 	switch st {
-	case stateRunning:
-		title := fmt.Sprintf("Agent: running (PID %d)", s.pid)
+	case stateRunning, stateDownloading:
+		// Downloads are what the user cares about; the PID is diagnostic, so it
+		// moves to the row tooltip. No active tasks → the plain "running" line.
 		if s.tasks > 0 {
-			title += fmt.Sprintf(" · %d task(s)", s.tasks)
+			ui.mStatus.SetTitle(fmt.Sprintf("Downloading %d item(s)", s.tasks))
+		} else {
+			ui.mStatus.SetTitle("Agent: running")
 		}
-		ui.mStatus.SetTitle(title)
+		ui.mStatus.SetTooltip(fmt.Sprintf("Agent running · PID %d", s.pid))
 		ui.mPause.Enable()
 		ui.mResume.Disable()
 		ui.mRestart.Enable()
@@ -245,8 +362,18 @@ func (ui *trayUI) accountLoop() {
 // a transient error — or a revoked key would freeze the old email/plan/CTA on
 // screen forever. Transient errors keep the last good title.
 func (ui *trayUI) refreshAccount() {
+	if !hasCLI() {
+		return // player-only: no daemon, no credential — account rows stay hidden
+	}
 	ui.mVersion.SetTitle(versionTitle(resolveAgentVersion(), version))
 	info, base, err := fetchAccount()
+	if !hasCLI() {
+		// The CLI was removed while the (blocking) fetch was in flight — the
+		// ticker has already switched to player-only mode and hidden these
+		// rows. Applying the result now would re-Show() a stray upgrade CTA
+		// that then persists (no further applyMode until the mode flips again).
+		return
+	}
 	var httpErr *agent.HTTPError
 	authDead := errors.As(err, &httpErr) &&
 		(httpErr.StatusCode == 401 || httpErr.StatusCode == 410)
@@ -282,6 +409,10 @@ func (ui *trayUI) upgradeCTA() {
 	time.AfterFunc(5*time.Minute, ui.kickAccount)
 }
 
+// clickLoop handles the lifecycle/control items (agent start/stop, plan CTA,
+// autostart, self-update, quit). The pure "open a URL/file" items run in
+// navLoop so neither select grows past the complexity gate — each item has its
+// own channel, so splitting across goroutines is safe.
 func (ui *trayUI) clickLoop() {
 	for {
 		select {
@@ -294,8 +425,32 @@ func (ui *trayUI) clickLoop() {
 		case <-ui.mRestart.ClickedCh:
 			markPaused(false)
 			ui.control("daemon", "restart")
+		case <-ui.mUpgrade.ClickedCh:
+			ui.upgradeCTA()
+		case <-ui.mAutostart.ClickedCh:
+			toggleAutostart(ui.mAutostart)
+		case <-ui.mUpdate.ClickedCh:
+			go traySelfUpdate(ui.mUpdate)
+		case <-ui.mQuit.ClickedCh:
+			systray.Quit()
+			return
+		}
+	}
+}
+
+// navLoop handles the navigation items — each just opens a URL, file, or the
+// downloads folder. Split out of clickLoop to keep both selects small.
+func (ui *trayUI) navLoop() {
+	for {
+		select {
 		case <-ui.mOpen.ClickedCh:
 			openURL(webBase())
+		case <-ui.mLibrary.ClickedCh:
+			openURL(libraryURL())
+		case <-ui.mDownloads.ClickedCh:
+			openDownloadsFolder()
+		case <-ui.mEnableDownloads.ClickedCh:
+			openURL(hubURL()) // player-only → the web installs the full agent
 		case <-ui.mConfigure.ClickedCh:
 			openURL(hubURL())
 		case <-ui.mEdit.ClickedCh:
@@ -304,17 +459,8 @@ func (ui *trayUI) clickLoop() {
 			openLogs()
 		case <-ui.mSendLogs.ClickedCh:
 			go sendLogsToSupport()
-		case <-ui.mUpgrade.ClickedCh:
-			ui.upgradeCTA()
 		case <-ui.mDocs.ClickedCh:
 			openURL(docsURL())
-		case <-ui.mAutostart.ClickedCh:
-			toggleAutostart(ui.mAutostart)
-		case <-ui.mUpdate.ClickedCh:
-			go traySelfUpdate(ui.mUpdate)
-		case <-ui.mQuit.ClickedCh:
-			systray.Quit()
-			return
 		}
 	}
 }

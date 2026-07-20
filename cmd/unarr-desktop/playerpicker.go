@@ -1,0 +1,99 @@
+package main
+
+// The Player submenu lets the user pick which local player unarr:// links open
+// in, without hand-editing config.toml. It writes the same [desktop] player key
+// the dispatcher reads (player.go) via the config package's Load/Save round-trip
+// — the exact path `unarr init` and the interactive config menu already use.
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"fyne.io/systray"
+
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/notify"
+)
+
+// playerOption is one Player-submenu entry: a label and the config value it
+// writes ("" = autodetect).
+type playerOption struct{ label, value string }
+
+// playerChoice binds a submenu item to the value it selects.
+type playerChoice struct {
+	item  *systray.MenuItem
+	value string
+}
+
+// playerMenuOptions returns the OS-relevant choices in menu order. mpv/VLC run
+// everywhere; IINA is macOS-only and MPC-HC Windows-only — resolvePlayer would
+// reject a wrong-OS pick anyway, so only offering the ones that can work keeps
+// the menu honest. "Auto-detect" (empty value) is always first.
+func playerMenuOptions() []playerOption {
+	opts := []playerOption{{"Auto-detect", ""}, {"mpv", "mpv"}, {"VLC", "vlc"}}
+	switch hostGOOS {
+	case "darwin":
+		opts = append(opts, playerOption{"IINA", "iina"})
+	case "windows":
+		opts = append(opts, playerOption{"MPC-HC", "mpc"})
+	}
+	return opts
+}
+
+// configuredPlayer reads the player set in config.toml ("" = auto). Unlike
+// playerOverride it ignores UNARR_DESKTOP_PLAYER: the picker edits the file, so
+// the checkmark must reflect the file, not a one-off env override.
+func configuredPlayer() string {
+	cfg, err := config.Load(config.FilePath())
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(cfg.Desktop.Player))
+}
+
+// startPlayerWatchers wires each submenu entry to setPlayer. One goroutine per
+// item (each has its own ClickedCh) keeps the picks out of clickLoop/navLoop,
+// whose selects are already at the complexity ceiling.
+func (ui *trayUI) startPlayerWatchers() {
+	for _, pc := range ui.playerChoices {
+		pc := pc
+		go func() {
+			for range pc.item.ClickedCh {
+				ui.setPlayer(pc.value)
+			}
+		}()
+	}
+}
+
+// setPlayer persists the chosen player into config.toml [desktop] and reflects
+// it in the checkmarks. An empty value clears the key (omitempty) → autodetect.
+// A load/save failure surfaces on stderr AND a desktop notification (the menu is
+// closed by the time it runs, so stderr alone would be invisible).
+func (ui *trayUI) setPlayer(value string) {
+	path := config.FilePath()
+	cfg, err := config.Load(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: set player:", err)
+		notify.Send("Could not change player", err.Error())
+		return
+	}
+	cfg.Desktop.Player = value
+	if err := config.Save(cfg, path); err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: set player:", err)
+		notify.Send("Could not change player", err.Error())
+		return
+	}
+	ui.checkPlayer(value)
+}
+
+// checkPlayer ticks the selected entry and unticks the rest.
+func (ui *trayUI) checkPlayer(value string) {
+	for _, pc := range ui.playerChoices {
+		if pc.value == value {
+			pc.item.Check()
+		} else {
+			pc.item.Uncheck()
+		}
+	}
+}

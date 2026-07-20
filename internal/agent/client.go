@@ -338,6 +338,9 @@ type AccountInfo struct {
 	Plan        string `json:"plan"`
 	IsPro       bool   `json:"isPro"`
 	TrialActive bool   `json:"trialActive"`
+	// TrialDaysLeft is whole days remaining in an active trial (0 otherwise),
+	// computed server-side so the tray's countdown can't drift from our clock.
+	TrialDaysLeft int `json:"trialDaysLeft,omitempty"`
 }
 
 // Me fetches the signed-in account's email and subscription state.
