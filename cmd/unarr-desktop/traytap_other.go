@@ -2,8 +2,6 @@
 
 package main
 
-import "fyne.io/systray"
-
 // installTapHandler gives the tray icon one uniform gesture outside macOS:
 // left button opens the web app, right button opens the menu.
 //
@@ -18,11 +16,6 @@ import "fyne.io/systray"
 // ignores ItemIsMenu and unconditionally routes the left button to Activate —
 // with no handler registered that call failed with UnknownMethod, which is why
 // the left button did nothing there.
-//
-// The handler runs inside the platform's click path (the Activate DBus method
-// on Linux, the UI thread on Windows) and browser.OpenURL waits for the process
-// it spawns, so the URL opens on its own goroutine rather than holding that
-// path open — the same reason sendLogsToSupport is spawned.
 func installTapHandler() {
-	systray.SetOnTapped(func() { go openURL(webBase()) })
+	setOnTapped(trayTapped)
 }
