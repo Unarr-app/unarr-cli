@@ -13,8 +13,10 @@ package agent
 //
 // A rejected key is not a crash. It is a question for the user. So terminal
 // failures are recorded here as a state on disk — reason, what happened, what to
-// do about it — which the daemon writes before exiting cleanly, and which the
-// tray reads to show the user an action instead of a flickering error.
+// do about it — which the daemon writes and then STAYS UP for, because exiting
+// under a Restart=always supervisor only brings the process back to fail the
+// same way. The tray reads it to show the user an action instead of a
+// flickering error.
 
 import (
 	"context"
@@ -46,13 +48,10 @@ const (
 	// BlockConflict: another active agent already claims this machine's
 	// identity (duplicated config, restored backup).
 	BlockConflict BlockReason = "identity_conflict"
-	// BlockConfig: the daemon cannot work with its own configuration (bad
-	// api_url, unwritable download dir). Not the server's doing.
-	BlockConfig BlockReason = "config_error"
 )
 
 // Blocked is the on-disk record of a terminal failure. Written by the daemon on
-// the way out, read by the tray and by `unarr status`.
+// the way out and read by the tray.
 type Blocked struct {
 	Reason BlockReason `json:"reason"`
 	// Message says what happened, in the words the user should read. The
@@ -76,9 +75,6 @@ type Blocked struct {
 func blockedFilePath() string {
 	return filepath.Join(filepath.Dir(StateFilePath()), "blocked.json")
 }
-
-// BlockedFilePath returns the path of the terminal-failure record.
-func BlockedFilePath() string { return blockedFilePath() }
 
 // WriteBlocked records a terminal failure. Best-effort: failing to write it must
 // not stop the daemon from exiting, and an unreadable record simply degrades the
@@ -133,6 +129,49 @@ func ClearBlocked() {
 	os.Remove(blockedFilePath())
 }
 
+// StatusBlocked is the daemon lifecycle state for a process that is up but
+// cannot work until the user resolves something. Distinct from "running" so
+// nothing mistakes a parked daemon for a working one, and distinct from absent
+// so `unarr stop` can still find it.
+const StatusBlocked = "blocked"
+
+// publishBlockedState writes just enough state for the rest of the CLI to see a
+// parked daemon: which process to signal, and that it is not working. It does
+// not pretend to be a heartbeat — there is nothing to report until the block
+// clears.
+func (d *Daemon) publishBlockedState() {
+	d.State.AgentID = d.cfg.AgentID
+	d.State.Status = StatusBlocked
+	d.State.Version = d.cfg.Version
+	d.State.PID = os.Getpid()
+	if d.State.StartedAt.IsZero() {
+		d.State.StartedAt = time.Now()
+	}
+	WriteState(&d.State)
+}
+
+// ambiguousRetries is how many ordinary retries an ambiguous rejection gets
+// before the daemon accepts it as real and tells the user.
+const ambiguousRetries = 2
+
+// ambiguousEnoughToRetry reports whether a terminal-looking failure deserves
+// another ordinary retry first.
+//
+// A bare 401 is the only one: it can mean a dead credential, but equally a
+// deploy blip or a load-balancer hiccup on our side (which is exactly why it
+// never wipes anything — see IsRevoked). Parking on the first one would, during
+// any auth wobble, simultaneously pop a critical desktop notification on every
+// machine in the fleet telling perfectly fine users to sign in again. A couple
+// of quick retries cost seconds and cover the blip; the explicit rejections
+// (revoked, plan limit, identity conflict) are unambiguous and park at once.
+func ambiguousEnoughToRetry(b *Blocked, attempt int) bool {
+	return b.Reason == BlockSignIn && attempt < ambiguousRetries
+}
+
+// registerBackoff is the first retry delay when registration fails. A var so
+// tests can drive the retry ladder without sleeping through it.
+var registerBackoff = 5 * time.Second
+
 // blockedRetry is how often a blocked daemon re-checks. Slow on purpose: it is
 // waiting for a human, and a tight loop against a server that keeps saying no is
 // what got the client rate-limited in the first place.
@@ -151,6 +190,12 @@ var blockedRetry = 60 * time.Second
 // freed machine slot starts working without anyone restarting anything.
 func (d *Daemon) waitOutBlock(ctx context.Context, b *Blocked, req RegisterRequest) (*RegisterResponse, error) {
 	WriteBlocked(b)
+	// A parked daemon is still a live process holding the lock file, so it must
+	// publish state like any other. Without this it is invisible to `unarr
+	// stop` (which finds the PID here) while `unarr start` still refuses to run
+	// because the flock is held — telling the user at once that no daemon is
+	// running and that one already is.
+	d.publishBlockedState()
 	log.Printf("[agent] blocked: %s (%s) — %s", b.Message, b.Reason, b.Remedy)
 	// A revoked agent is tombstoned server-side: that exact credential will
 	// never be accepted again, so it is wiped here as it always was. Parking
@@ -180,6 +225,11 @@ func (d *Daemon) waitOutBlock(ctx context.Context, b *Blocked, req RegisterReque
 			// rejected one forever and the sign-in would look like it failed.
 			d.ReloadCredential()
 		}
+		// Rebuilt from d.cfg every attempt, not reused from the failed one: a
+		// sign-in after a revocation mints a new AGENT ID as well as a new key,
+		// and re-sending the tombstoned id would be rejected forever no matter
+		// how good the credential.
+		req.AgentID = d.cfg.AgentID
 		resp, err := d.client.Register(ctx, req)
 		if err == nil {
 			log.Printf("[agent] recovered from %s — registered", b.Reason)

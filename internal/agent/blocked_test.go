@@ -155,7 +155,7 @@ func TestBlockedFileIsNotWorldReadable(t *testing.T) {
 	withTempStateDir(t)
 	WriteBlocked(&Blocked{Reason: BlockPlan, Message: "m", Remedy: "r"})
 
-	fi, err := os.Stat(BlockedFilePath())
+	fi, err := os.Stat(blockedFilePath())
 	if err != nil {
 		t.Fatal(err)
 	}

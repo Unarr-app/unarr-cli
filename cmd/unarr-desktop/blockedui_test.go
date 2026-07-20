@@ -26,6 +26,21 @@ func TestBlockedOutranksAnActiveDownloadCount(t *testing.T) {
 	}
 }
 
+func TestAStaleBlockNeverStrandsTheUser(t *testing.T) {
+	// A record left behind by a daemon that has since stopped is stale by
+	// definition. Letting it win disabled every control — including Resume, the
+	// ONLY one that starts the agent — so the user's way out was deleting a file
+	// by hand. Starting it is exactly right: it either re-registers and clears
+	// the record, or parks again and re-states the problem with fresh facts.
+	got := displayState(agentStatus{}, false, false, true)
+	if got == stateBlocked {
+		t.Fatal("a block with no live daemon still wins, leaving no control that can start the agent")
+	}
+	if got != stateStopped {
+		t.Errorf("displayState(stopped, stale block) = %v, want %v", got, stateStopped)
+	}
+}
+
 func TestNotBlockedKeepsTheOldBehaviour(t *testing.T) {
 	if got := displayState(agentStatus{running: true}, false, false, false); got != stateRunning {
 		t.Errorf("displayState(running) = %v, want %v", got, stateRunning)

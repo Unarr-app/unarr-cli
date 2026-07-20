@@ -57,6 +57,11 @@ type SyncClient struct {
 	OnScan           func()
 	OnWatchingChange func(watching bool)
 	OnSyncSuccess    func() // called after each successful sync (e.g. to update state file)
+	// OnBlocked fires once when the server starts rejecting this agent mid-run.
+	// The daemon keeps running (downloads in flight must not be dropped), but
+	// the user has to hear about it: without this the agent went on looking
+	// perfectly healthy while it could not accept a single new task.
+	OnBlocked func(b *Blocked)
 	GetFreeSlots     func() int
 	GetTaskStates    func() []TaskState // returns current state of all active + recently finished tasks
 	// GetVPNState returns the live managed-VPN split-tunnel state (whether the
@@ -211,10 +216,16 @@ func (sc *SyncClient) doSync(ctx context.Context) {
 			// that could not accept a single download — the worst state in the
 			// product, because every indicator says it is fine. Record it so
 			// the tray can say what is actually wrong.
-			if b, terminal := Classify(err); terminal {
+			// Recorded ONCE, not every tick: this loop runs every few seconds,
+			// and rewriting the same record thousands of times a day is pure
+			// disk churn. The user is told once too — the same failure repeating
+			// is one problem, not one per cycle.
+			if b, terminal := Classify(err); terminal && sc.blocked.CompareAndSwap(false, true) {
 				b.Version = sc.cfg.Version
 				WriteBlocked(b)
-				sc.blocked.Store(true)
+				if sc.OnBlocked != nil {
+					sc.OnBlocked(b)
+				}
 			}
 			log.Printf("sync failed: %v", err)
 		}

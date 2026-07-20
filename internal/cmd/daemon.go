@@ -262,6 +262,48 @@ func runDaemonStart() error {
 	// Create daemon
 	d := agent.NewDaemon(daemonCfg, agentClient)
 
+	// A terminal failure parks the daemon instead of exiting it (see
+	// agent.waitOutBlock). Tell the user once, where they will see it.
+	d.OnBlocked = func(b *agent.Blocked) { reportBlocked(b) }
+	// Same treatment when the rejection starts mid-run rather than at startup:
+	// the sync loop keeps going, but the user is told once instead of the agent
+	// quietly going useless behind a healthy-looking icon.
+	d.SyncClient().OnBlocked = func(b *agent.Blocked) { reportBlocked(b) }
+
+	// The server tombstoned this agent: the stored credential is dead for good,
+	// so it is cleared and a fresh sign-in mints a new identity. The daemon
+	// stays parked meanwhile — its retry is what picks that new key up.
+	d.OnCredentialRejected = func() { wipeAgentCredential(&cfg) }
+
+	// While parked, re-read the credential each attempt: signing in from the
+	// tray rewrites config.toml, and the daemon must pick that up on its own —
+	// otherwise a successful sign-in looks like it did nothing, which is exactly
+	// the dead end this whole path exists to remove.
+	d.ReloadCredential = func() {
+		fresh, lerr := config.Load(resolvedConfigPath())
+		if lerr != nil {
+			log.Printf("[agent] blocked: could not re-read config: %v", lerr)
+			return
+		}
+		fresh.ApplyEnvOverrides()
+		if fresh.Auth.APIKey == "" || fresh.Auth.APIKey == cfg.Auth.APIKey {
+			return
+		}
+		log.Printf("[agent] blocked: picked up a new credential from %s", resolvedConfigPath())
+		cfg.Auth.APIKey = fresh.Auth.APIKey
+		d.Client().SetAPIKey(fresh.Auth.APIKey)
+		// A sign-in after a revocation mints a new agent ID too. Without this
+		// the daemon would authenticate with the new key but keep announcing the
+		// tombstoned identity, which the server rejects forever — the recovery
+		// would silently never happen.
+		if fresh.Agent.ID != "" && fresh.Agent.ID != cfg.Agent.ID {
+			log.Printf("[agent] blocked: this machine has a new agent id")
+			cfg.Agent.ID = fresh.Agent.ID
+			d.SetAgentID(fresh.Agent.ID)
+		}
+	}
+
+
 	// Start SIGUSR1 reload watcher (unix only, no-op on Windows)
 	startReloadWatcher(&ReloadableConfig{Daemon: d})
 
@@ -484,7 +526,10 @@ func runDaemonStart() error {
 			// first (the agent_hash must live on THIS user's agent_registration
 			// row). Register now — best-effort — so a fresh agent can get its cert
 			// on the first boot; d.Run() registers again later (idempotent upsert).
-			if err := d.Register(ctx); err != nil {
+			// Best-effort by design (the comment above): must NOT park, or a
+			// rejected credential would strand the daemon here — before the
+			// signal handlers and before the recovery callbacks are wired.
+			if err := d.RegisterBestEffort(ctx); err != nil {
 				log.Printf("[acme] pre-cert registration failed (%v) — cert will arrive on a later renewal tick", err)
 			} else {
 				fetchAgentCert(ctx, agentClient, cfg.Agent.Hash)
@@ -1196,34 +1241,6 @@ func runDaemonStart() error {
 		}
 	}
 
-	// A terminal failure parks the daemon instead of exiting it (see
-	// agent.waitOutBlock). Tell the user once, where they will see it.
-	d.OnBlocked = func(b *agent.Blocked) { reportBlocked(b) }
-
-	// The server tombstoned this agent: the stored credential is dead for good,
-	// so it is cleared and a fresh sign-in mints a new identity. The daemon
-	// stays parked meanwhile — its retry is what picks that new key up.
-	d.OnCredentialRejected = func() { wipeAgentCredential(&cfg) }
-
-	// While parked, re-read the credential each attempt: signing in from the
-	// tray rewrites config.toml, and the daemon must pick that up on its own —
-	// otherwise a successful sign-in looks like it did nothing, which is exactly
-	// the dead end this whole path exists to remove.
-	d.ReloadCredential = func() {
-		fresh, lerr := config.Load(resolvedConfigPath())
-		if lerr != nil {
-			log.Printf("[agent] blocked: could not re-read config: %v", lerr)
-			return
-		}
-		fresh.ApplyEnvOverrides()
-		if fresh.Auth.APIKey == "" || fresh.Auth.APIKey == cfg.Auth.APIKey {
-			return
-		}
-		log.Printf("[agent] blocked: picked up a new credential from %s", resolvedConfigPath())
-		cfg.Auth.APIKey = fresh.Auth.APIKey
-		d.Client().SetAPIKey(fresh.Auth.APIKey)
-	}
-
 	// Start daemon (blocks — runs sync loop)
 	errCh := make(chan error, 1)
 	go func() {
@@ -1285,7 +1302,20 @@ func runDaemonStart() error {
 func wipeAgentCredential(cfg *config.Config) {
 	cfg.Auth.APIKey = ""
 	cfg.Agent.ID = ""
-	if err := config.Save(*cfg, resolvedConfigPath()); err != nil {
+
+	// Saved from a FRESH read of the file, not from the in-memory snapshot this
+	// process booted with. Writing the snapshot back would silently revert every
+	// edit the user has made to config.toml since the daemon started — clearing
+	// a credential must not cost them their settings.
+	path := resolvedConfigPath()
+	onDisk, err := config.Load(path)
+	if err != nil {
+		log.Printf("[agent] could not re-read config before clearing the credential (%v) — writing the in-memory copy", err)
+		onDisk = *cfg
+	}
+	onDisk.Auth.APIKey = ""
+	onDisk.Agent.ID = ""
+	if err := config.Save(onDisk, path); err != nil {
 		log.Printf("[agent] could not clear the revoked credential (it stays on disk): %v", err)
 	}
 }

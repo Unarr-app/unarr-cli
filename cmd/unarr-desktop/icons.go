@@ -63,9 +63,17 @@ func (s trayState) label() string {
 // user already knows — why is the part they are missing.
 func displayState(s agentStatus, paused, failed, blocked bool) trayState {
 	switch {
-	case blocked:
+	case blocked && s.running:
 		// Checked before "running" on purpose: the daemon IS running, which is
 		// exactly why this needs to outrank it.
+		//
+		// But ONLY while it is running. A record left behind by a daemon that
+		// has since stopped is stale by definition, and letting it win would
+		// disable every control — including Resume, the only one that starts the
+		// agent — leaving the user with no way out but deleting a file by hand.
+		// Starting the agent is exactly the right move there: it either
+		// re-registers and clears the record, or parks again and re-states the
+		// problem with fresh information.
 		return stateBlocked
 	case s.running && s.tasks > 0:
 		return stateDownloading

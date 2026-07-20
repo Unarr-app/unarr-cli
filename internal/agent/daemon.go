@@ -145,6 +145,11 @@ func (d *Daemon) SyncClient() *SyncClient { return d.sync }
 // re-authorized while the daemon was parked on a rejected one.
 func (d *Daemon) Client() *Client { return d.client }
 
+// SetAgentID adopts the identity a fresh sign-in minted, so a daemon parked on
+// a revoked agent re-registers as the new machine rather than the tombstoned
+// one. Only called while parked, before the sync loop exists.
+func (d *Daemon) SetAgentID(id string) { d.cfg.AgentID = id }
+
 // SetVPNState + vpnSnapshot — the managed-VPN split-tunnel / P2P kill-switch state
 // accessors — live in daemon_vpn.go to keep this file within the size budget.
 
@@ -237,7 +242,20 @@ func (d *Daemon) ApplyReloadedConfig(allowDelete bool, methodOrder []string) {
 
 // Register registers the agent and fetches user info + features.
 // Retries with exponential backoff on transient errors (429, 5xx, network).
-func (d *Daemon) Register(ctx context.Context) error {
+func (d *Daemon) Register(ctx context.Context) error { return d.register(ctx, true) }
+
+// RegisterBestEffort registers WITHOUT parking on a terminal failure.
+//
+// For callers that run before the daemon is fully wired and whose failure is
+// survivable — the ACME pre-cert bootstrap is one: it registers early so a
+// fresh agent can obtain a certificate, and simply logs if that does not work.
+// Parking there would strand the process before the signal handlers exist and
+// before the recovery callbacks are set, so it could neither be stopped nor
+// ever recover. Parking belongs to the one call that owns the daemon's
+// lifetime: Register, from Run.
+func (d *Daemon) RegisterBestEffort(ctx context.Context) error { return d.register(ctx, false) }
+
+func (d *Daemon) register(ctx context.Context, park bool) error {
 	vpnActive, vpnRequired, vpnMode, vpnServer := d.vpnSnapshot()
 	// The daemon read config.toml, so it always reports an explicit preference.
 	// nil means "auto" locally, but on the wire it must be [] — a missing key
@@ -280,7 +298,7 @@ func (d *Daemon) Register(ctx context.Context) error {
 	}
 
 	const maxRetries = 5
-	backoff := 5 * time.Second
+	backoff := registerBackoff
 
 	var resp *RegisterResponse
 	var err error
@@ -289,7 +307,7 @@ func (d *Daemon) Register(ctx context.Context) error {
 		if err == nil {
 			break
 		}
-		if b, terminal := Classify(err); terminal {
+		if b, terminal := Classify(err); terminal && !ambiguousEnoughToRetry(b, attempt) {
 			// Retrying on our own cannot fix this — the user has to. Exiting
 			// cannot fix it either: the supervisor is Restart=always, so a
 			// process that quits (with ANY status) is back in ten seconds to
@@ -297,13 +315,17 @@ func (d *Daemon) Register(ctx context.Context) error {
 			// restart loop. So the daemon stays up, says what is wrong, and
 			// waits for the user to resolve it.
 			b.Version = d.cfg.Version
+			if !park {
+				WriteBlocked(b)
+				return fmt.Errorf("register: %w", err)
+			}
 			resp, err = d.waitOutBlock(ctx, b, req)
 			if err != nil {
 				return err
 			}
 			break
 		}
-		if !isTransientError(err) {
+		if _, terminal := Classify(err); !terminal && !isTransientError(err) {
 			return fmt.Errorf("register: %w", err)
 		}
 		log.Printf("Register failed (attempt %d/%d): %v - retrying in %v", attempt+1, maxRetries, err, backoff)
