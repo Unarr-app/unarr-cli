@@ -109,10 +109,13 @@ func TestE2EDownload(t *testing.T) {
 		fmt.Fprintln(os.Stderr)
 	}()
 
-	downloadedFiles, err := dl.DownloadNZB(ctx, nzbFile, outputDir, nil, progressCh)
+	downloadedFiles, missing, err := dl.DownloadNZB(ctx, nzbFile, outputDir, nil, progressCh)
 	close(progressCh)
 	if err != nil {
 		t.Fatalf("download: %v", err)
+	}
+	if len(missing) > 0 {
+		t.Logf("%d segments unavailable (tolerated, par2 would repair)", len(missing))
 	}
 
 	t.Logf("Downloaded %d files:", len(downloadedFiles))

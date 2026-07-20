@@ -29,6 +29,19 @@ type Result struct {
 	// re-downloads — distinct from VerifyNote's softer "unverified but delivered"
 	// (e.g. no parity shipped, or a transient probe error).
 	Corrupt bool
+	// DamagedFiles names the target files par2 reported as damaged or missing.
+	// The engine invalidates the resume state of exactly these, so a retry
+	// re-fetches the broken files and keeps the ones parity confirmed intact.
+	DamagedFiles []string
+	// Verified is true ONLY when par2 actually ran and vouched for the payload
+	// (clean verify, or a repair that succeeded).
+	//
+	// It exists because VerifyNote cannot answer the question: an empty note
+	// means "verified OK" OR "no parity was available to check", and a caller
+	// that deliberately downloaded with holes must distinguish those. Inferring
+	// verification from an empty note delivered a zero-filled file as complete
+	// whenever the par2 index failed to download.
+	Verified bool
 }
 
 // Options configures post-processing behavior.
@@ -160,8 +173,22 @@ func Process(dir string, downloadedFiles map[string]string, opts Options) (*Resu
 func runPar2Step(par2File string, downloadedFiles map[string]string, opts Options, result *Result) {
 	err := par2VerifyFn(par2File)
 	if err == nil {
+		result.Verified = true
 		return
 	}
+	// Record par2's per-file verdict from whichever attempt produced it, so a
+	// Corrupt result always names the files worth re-fetching.
+	noteDamaged := func(e error) {
+		var unrep *Par2UnrepairableError
+		var rep *Par2RepairableError
+		switch {
+		case errors.As(e, &unrep) && len(unrep.Damaged) > 0:
+			result.DamagedFiles = unrep.Damaged
+		case errors.As(e, &rep) && len(rep.Damaged) > 0:
+			result.DamagedFiles = rep.Damaged
+		}
+	}
+	noteDamaged(err)
 
 	var repairable *Par2RepairableError
 	damaged := errors.As(err, &repairable) || errors.Is(err, ErrPar2Unrepairable)
@@ -186,8 +213,12 @@ func runPar2Step(par2File string, downloadedFiles map[string]string, opts Option
 		}
 		err = par2VerifyFn(par2File)
 		if err == nil {
+			result.Verified = true
 			return
 		}
+		// The post-parity verdict is the authoritative one — it saw the full
+		// recovery set, so its damaged-file list supersedes the index-only pass.
+		noteDamaged(err)
 	}
 
 	repairable = nil
@@ -201,6 +232,7 @@ func runPar2Step(par2File string, downloadedFiles map[string]string, opts Option
 		switch {
 		case repairErr == nil:
 			result.Repaired = true // Par2Repair already logged the success
+			result.Verified = true // a successful repair IS a positive verification
 		case errors.Is(repairErr, ErrPar2NotInstalled):
 			// Damage confirmed by parity, but no binary to repair it — the
 			// delivered file IS corrupt. Mark it so the engine re-downloads.
@@ -209,6 +241,7 @@ func runPar2Step(par2File string, downloadedFiles map[string]string, opts Option
 			log.Printf("[usenet] WARNING: %s", result.VerifyNote)
 		default:
 			// Repair attempted and failed — the data is damaged beyond recovery.
+			noteDamaged(repairErr)
 			result.Corrupt = true
 			result.VerifyNote = fmt.Sprintf("par2 repair failed — file is corrupt: %v", repairErr)
 			log.Printf("[usenet] WARNING: %s", result.VerifyNote)

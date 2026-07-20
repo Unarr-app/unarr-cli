@@ -15,15 +15,23 @@ import (
 )
 
 // Binary progress file format:
-//   [4B magic "UNRP"] [1B version=1] [1B reserved] [2B fileCount]
+//   [4B magic "UNRP"] [1B version=2] [1B reserved] [2B fileCount]
 //   [32B SHA-256 fingerprint]
-//   Per file: [4B segCount] [ceil(segCount/8) bytes bitset]
+//   Per file: [4B segCount] [8B knownSize] [ceil(segCount/8) bytes bitset]
+//
+// v1 → v2 is a DELIBERATE hard break, not just a field addition. v1 progress
+// files were written by an assembler that placed decoded segment data at
+// ENCODED (yEnc, ~3% inflated) offsets, so every "done" bit in a v1 file
+// vouches for bytes sitting at the wrong place in the partial file. Resuming
+// from one would preserve that corruption forever. Load() rejects any version
+// != progressVersion, so an old file silently degrades to a clean re-download.
 
 var progressMagic = [4]byte{'U', 'N', 'R', 'P'}
 
 const (
-	progressVersion  = 1
+	progressVersion  = 2
 	headerSize       = 4 + 1 + 1 + 2 + 32 // 40 bytes
+	fileHeaderSize   = 4 + 8              // segCount + knownSize
 	flushInterval    = 2 * time.Second
 	flushSegmentFreq = 100 // flush every N segment completions
 )
@@ -33,6 +41,14 @@ type fileProgress struct {
 	segCount  int
 	completed []byte // bitset: ceil(segCount/8) bytes
 	doneCount atomic.Int32
+
+	// knownSize is the highest end-offset written for this file so far, i.e.
+	// the assembled size implied by the segments completed to date. It is
+	// persisted because the final Truncate needs the REAL decoded size, and a
+	// resumed run only observes the =ypart offsets of the segments it fetches
+	// itself — if the tail segment landed in an earlier run, this is the only
+	// record of where the file actually ends.
+	knownSize atomic.Int64
 }
 
 // ProgressTracker tracks segment-level download progress for resumable usenet downloads.
@@ -147,14 +163,24 @@ func (p *ProgressTracker) Load() (bool, error) {
 		return false, nil
 	}
 
-	// Read per-file bitsets
+	// Parse every file into locals FIRST, commit only once the whole payload
+	// validates. Writing straight into p.files as we go left a rejected file
+	// half-applied: a later "return false, nil" reads as a clean start to the
+	// caller while the earlier entries kept their loaded knownSize, which then
+	// seeded the final Truncate with a stale (possibly larger) size and padded
+	// the file with zeros that par2 reports as damage.
+	sizes := make([]int64, len(p.files))
+	bitsets := make([][]byte, len(p.files))
+	counts := make([]int32, len(p.files))
+
 	offset := headerSize
 	for i := range p.files {
-		if offset+4 > len(data) {
+		if offset+fileHeaderSize > len(data) {
 			return false, nil
 		}
 		segCount := int(binary.LittleEndian.Uint32(data[offset : offset+4]))
-		offset += 4
+		sizes[i] = int64(binary.LittleEndian.Uint64(data[offset+4 : offset+fileHeaderSize]))
+		offset += fileHeaderSize
 
 		if segCount != p.files[i].segCount {
 			return false, nil
@@ -164,18 +190,21 @@ func (p *ProgressTracker) Load() (bool, error) {
 		if offset+bitsetLen > len(data) {
 			return false, nil
 		}
-
-		copy(p.files[i].completed, data[offset:offset+bitsetLen])
+		bitsets[i] = data[offset : offset+bitsetLen]
 		offset += bitsetLen
 
 		// Count completed segments
-		var count int32
 		for seg := 0; seg < segCount; seg++ {
-			if p.files[i].completed[seg/8]&(1<<uint(seg%8)) != 0 {
-				count++
+			if bitsets[i][seg/8]&(1<<uint(seg%8)) != 0 {
+				counts[i]++
 			}
 		}
-		p.files[i].doneCount.Store(count)
+	}
+
+	for i := range p.files {
+		copy(p.files[i].completed, bitsets[i])
+		p.files[i].doneCount.Store(counts[i])
+		p.files[i].knownSize.Store(sizes[i])
 	}
 
 	return true, nil
@@ -268,6 +297,61 @@ func (p *ProgressTracker) CompletedBytes(fileIndex int, segments []nzb.Segment) 
 	return total
 }
 
+// NoteFileSize records that data was written up to end (exclusive) in the
+// given file, keeping the running maximum. Callers pass the end offset derived
+// from the yEnc =ypart header, so the tracked value converges on the file's
+// true decoded size as segments land — in any order, across runs.
+func (p *ProgressTracker) NoteFileSize(fileIndex int, end int64) {
+	if fileIndex < 0 || fileIndex >= len(p.files) || end <= 0 {
+		return
+	}
+	fp := &p.files[fileIndex]
+	for {
+		cur := fp.knownSize.Load()
+		if end <= cur {
+			return
+		}
+		if fp.knownSize.CompareAndSwap(cur, end) {
+			p.mu.Lock()
+			p.dirty = true
+			p.mu.Unlock()
+			return
+		}
+	}
+}
+
+// KnownSize returns the highest end-offset recorded for a file, or 0 when
+// nothing has been written yet.
+func (p *ProgressTracker) KnownSize(fileIndex int) int64 {
+	if fileIndex < 0 || fileIndex >= len(p.files) {
+		return 0
+	}
+	return p.files[fileIndex].knownSize.Load()
+}
+
+// ResetFile clears every completed bit (and the recorded size) for one file, so
+// the next run re-fetches it from scratch while the REST of the NZB keeps its
+// resume state. This is what makes an integrity retry honest: par2 reports
+// damage per file, so only the files it names are discarded — a 40 GB release
+// whose single bad RAR volume needs re-fetching does not re-download the other
+// 39 GB, and the retry is genuinely clean rather than a no-op replay of the
+// same bits (the old behaviour: every segment still marked done, so the
+// "re-download clean" pass fetched nothing and failed par2 identically 3×).
+func (p *ProgressTracker) ResetFile(fileIndex int) {
+	if fileIndex < 0 || fileIndex >= len(p.files) {
+		return
+	}
+	fp := &p.files[fileIndex]
+	p.mu.Lock()
+	for i := range fp.completed {
+		fp.completed[i] = 0
+	}
+	fp.doneCount.Store(0)
+	fp.knownSize.Store(0)
+	p.dirty = true
+	p.mu.Unlock()
+}
+
 // TotalCompleted returns total completed segments across all files.
 func (p *ProgressTracker) TotalCompleted() int {
 	var total int
@@ -302,7 +386,7 @@ func (p *ProgressTracker) flushLocked() error {
 	// dirty here only marks the snapshotted work as persisted-in-progress.
 	size := headerSize
 	for i := range p.files {
-		size += 4 + (p.files[i].segCount+7)/8
+		size += fileHeaderSize + (p.files[i].segCount+7)/8
 	}
 
 	buf := make([]byte, size)
@@ -319,7 +403,8 @@ func (p *ProgressTracker) flushLocked() error {
 	for i := range p.files {
 		fp := &p.files[i]
 		binary.LittleEndian.PutUint32(buf[offset:offset+4], uint32(fp.segCount))
-		offset += 4
+		binary.LittleEndian.PutUint64(buf[offset+4:offset+fileHeaderSize], uint64(fp.knownSize.Load()))
+		offset += fileHeaderSize
 		bitsetLen := (fp.segCount + 7) / 8
 		copy(buf[offset:offset+bitsetLen], fp.completed[:bitsetLen])
 		offset += bitsetLen
@@ -337,15 +422,29 @@ func (p *ProgressTracker) flushLocked() error {
 
 	tmpPath := p.progressPath() + ".tmp"
 	if err := os.WriteFile(tmpPath, buf, 0o644); err != nil {
+		p.markDirty()
 		return fmt.Errorf("write progress tmp: %w", err)
 	}
 
 	if err := os.Rename(tmpPath, p.progressPath()); err != nil {
 		os.Remove(tmpPath)
+		p.markDirty()
 		return fmt.Errorf("rename progress: %w", err)
 	}
 
 	return nil
+}
+
+// markDirty re-arms the dirty flag after a failed write. flushLocked clears it
+// at snapshot time, before the I/O, so without this a flush that fails (ENOSPC
+// is entirely plausible on the very path that handles a failed download) leaves
+// dirty=false and turns every later flush into a no-op — silently discarding
+// the snapshot. That matters most for ResetFile: a lost invalidation means the
+// retry reloads an all-done bitset and re-downloads nothing.
+func (p *ProgressTracker) markDirty() {
+	p.mu.Lock()
+	p.dirty = true
+	p.mu.Unlock()
 }
 
 // Remove deletes both the progress file and cached NZB file (best-effort).

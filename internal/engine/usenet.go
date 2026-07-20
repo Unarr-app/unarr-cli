@@ -178,6 +178,23 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	if resumed {
 		log.Printf("[%s] resuming usenet download (%d/%d segments completed)",
 			shortID, tracker.TotalCompleted(), totalSegs)
+
+		// Publish the resumed position IMMEDIATELY. Everything between here and
+		// the downloader's first 500 ms progress tick — credential fetch, NNTP
+		// connect+TLS+AUTH, mkdir — can take seconds, and until then the web
+		// only has the zeroes that the resolving/downloading transitions
+		// reported. A user who hits Retry on a download that is 80 % on disk
+		// must not watch it claim 0 %.
+		var resumedBytes int64
+		for i, f := range nzbFile.Files {
+			resumedBytes += tracker.CompletedBytes(i, f.Segments)
+		}
+		p := Progress{DownloadedBytes: resumedBytes, TotalBytes: totalBytes}
+		task.UpdateProgress(p)
+		select {
+		case progressCh <- p:
+		default:
+		}
 	} else {
 		// Pre-flight disk-space guard on a fresh download (a resume already has
 		// its partial bytes on disk; ENOSPC stays the backstop there).
@@ -219,6 +236,16 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	// Step 6: Download all files via NNTP
 	segDl := download.NewDownloader(nntpClient)
 
+	// Articles age off retention unevenly, so a mature release commonly has a
+	// few dead segments. When the poster shipped parity, those holes are
+	// exactly what par2 reconstructs — aborting the entire download on the
+	// first 430 throws away a recoverable release and wastes everything already
+	// fetched. Without parity there is nothing to repair with, so the default
+	// zero tolerance (fail fast) stands.
+	if nzbFile.HasPar2() {
+		segDl.MissingTolerance = missingSegmentTolerance
+	}
+
 	// Bridge download.Progress to engine.Progress
 	dlProgressCh := make(chan download.Progress, 16)
 	go func() {
@@ -240,7 +267,14 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		}
 	}()
 
-	downloadedFiles, err := segDl.DownloadNZB(dlCtx, nzbFile, taskDir, tracker, dlProgressCh)
+	downloadedFiles, missingSegs, err := segDl.DownloadNZB(dlCtx, nzbFile, taskDir, tracker, dlProgressCh)
+	if len(missingSegs) > 0 {
+		// Name a few: "which articles died" is the first thing needed to tell a
+		// provider-retention problem from a bad post, and it never reaches the
+		// server (only the count does).
+		log.Printf("[%s] %d/%d segments unavailable on the server — relying on par2 recovery (first: %s)",
+			shortID, len(missingSegs), totalSegs, describeMissing(missingSegs, 3))
+	}
 
 	// Step 6.5: parity index — fetch the main .par2 up front (small: file
 	// checksums, no recovery data) so post-processing can actually verify the
@@ -298,7 +332,29 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		// loudly so the delivered file isn't silently assumed good.
 		log.Printf("[%s] WARNING: %s", shortID, ppResult.VerifyNote)
 	}
+	// We KNOWINGLY left holes in the payload, so anything short of par2 actively
+	// vouching for the result is a corrupt delivery.
+	//
+	// The test is Verified, NOT an empty VerifyNote: an empty note also means
+	// "no parity was checked at all", which is exactly what happens when the
+	// par2 index fails to download (downloadPar2Index degrades to a warning) —
+	// runPar2Step never runs, nothing is flagged, and a zero-filled file would
+	// sail through as complete.
+	if len(missingSegs) > 0 && !ppResult.Verified {
+		ppResult.Corrupt = true
+		ppResult.VerifyNote = fmt.Sprintf(
+			"%d segments were unavailable and par2 did not confirm a repair (%s)",
+			len(missingSegs), verifyStateNote(ppResult))
+	}
 	if ppResult.Corrupt {
+		// Invalidate the resume state of the files par2 named as broken — and
+		// ONLY those. Without this the manager's "re-download clean" retry was a
+		// no-op: every segment was still marked done, so the next attempt
+		// fetched nothing and failed par2 identically, three times over. With
+		// it, the retry re-fetches the damaged files while a multi-file release
+		// keeps every volume parity confirmed intact.
+		invalidateDamaged(tracker, nzbFile, ppResult.DamagedFiles, shortID)
+
 		// par2 DEFINITIVELY confirmed unrepairable damage — fail as an integrity
 		// error so the manager re-downloads clean instead of completing a corrupt
 		// release (symmetric with the debrid/torrent guards).
@@ -530,6 +586,96 @@ func (u *UsenetDownloader) getOrCreateNNTP(ctx context.Context, creds *agent.Use
 
 	u.nntpClient = client
 	return client, nil
+}
+
+// missingSegmentTolerance is the fraction of a file's segments allowed to be
+// unavailable before the download is abandoned, applied only when the NZB ships
+// par2. Posters typically include 5-10% recovery, so 5% stays inside what
+// parity can actually reconstruct: past that, finishing the download only to
+// fail verification wastes the user's bandwidth.
+const missingSegmentTolerance = 0.05
+
+// describeMissing renders up to max unavailable segments as "file#number
+// (message-id)", for the operator log.
+func describeMissing(missing []download.MissingSegment, max int) string {
+	if len(missing) > max {
+		missing = missing[:max]
+	}
+	parts := make([]string, 0, len(missing))
+	for _, m := range missing {
+		parts = append(parts, fmt.Sprintf("%s#%d (%s: %v)", m.File, m.Number, m.MessageID, m.Err))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// verifyStateNote describes why a delivery is unverified, for the error message.
+func verifyStateNote(r *postprocess.Result) string {
+	if r.VerifyNote != "" {
+		return r.VerifyNote
+	}
+	return "no par2 verification ran — parity was unavailable"
+}
+
+// resetAllContent invalidates the resume state of every non-parity file, for a
+// genuinely clean retry. Parity is excluded: those files are re-fetched on
+// demand and self-verifying.
+func resetAllContent(tracker *download.ProgressTracker, nzbFile *nzb.NZB) {
+	for i, f := range nzbFile.Files {
+		if strings.EqualFold(filepath.Ext(f.Filename()), ".par2") {
+			continue
+		}
+		tracker.ResetFile(i)
+	}
+}
+
+// invalidateDamaged clears the resume bits of the NZB files par2 reported as
+// damaged, so the next attempt re-fetches exactly those and keeps the rest.
+//
+// It falls back to invalidating EVERY content file both when par2 named no file
+// and when none of the names it gave matched the NZB. That second case is not
+// hypothetical: obfuscated posts (the ones maybeDeobfuscate exists for) carry
+// hex filenames in the NZB while par2 reports the original names, so the match
+// finds nothing. Without the fallback the retry resets nothing, re-fetches
+// nothing and fails par2 identically three times — the exact no-op bug this
+// function was added to kill. Re-downloading too much still converges;
+// re-downloading nothing never does.
+func invalidateDamaged(tracker *download.ProgressTracker, nzbFile *nzb.NZB, damaged []string, shortID string) {
+	if tracker == nil {
+		return
+	}
+
+	hit := 0
+	if len(damaged) > 0 {
+		want := make(map[string]bool, len(damaged))
+		for _, name := range damaged {
+			want[strings.ToLower(filepath.Base(name))] = true
+		}
+		for i, f := range nzbFile.Files {
+			if want[strings.ToLower(filepath.Base(f.Filename()))] {
+				tracker.ResetFile(i)
+				hit++
+			}
+		}
+	}
+
+	switch {
+	case hit > 0:
+		log.Printf("[%s] par2 reported %d damaged file(s); invalidated %d for re-download: %s",
+			shortID, len(damaged), hit, strings.Join(damaged, ", "))
+	case len(damaged) == 0:
+		log.Printf("[%s] par2 named no damaged file — invalidating all content files for a clean retry", shortID)
+		resetAllContent(tracker, nzbFile)
+	default:
+		log.Printf("[%s] par2 named %d damaged file(s) that match no NZB entry (obfuscated post?) — invalidating all content files: %s",
+			shortID, len(damaged), strings.Join(damaged, ", "))
+		resetAllContent(tracker, nzbFile)
+	}
+
+	// The invalidation is only real once it reaches disk: if this write is lost,
+	// the retry reloads the old all-done bitset and is a no-op again.
+	if err := tracker.Flush(); err != nil {
+		log.Printf("[%s] WARNING: could not persist the par2 invalidation — the retry may resume as if intact: %v", shortID, err)
+	}
 }
 
 // downloadPar2Index fetches the main .par2 (small: checksums only, no recovery
