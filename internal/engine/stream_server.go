@@ -116,6 +116,10 @@ type StreamServer struct {
 	webdavUserHash [32]byte
 	webdavPassHash [32]byte
 	webdavEnabled  bool
+	// webdavAllowWAN lets /dav/ answer callers outside the local network. Off by
+	// default — the export's Basic auth is unthrottled, so a WAN-reachable mount
+	// is an online guessing target. See SetWebDAVAllowWAN.
+	webdavAllowWAN bool
 
 	// ffmpegPath is the resolved ffmpeg binary, used by /thumbnail to extract a
 	// single frame on demand. Empty = thumbnails disabled (503). Set once before

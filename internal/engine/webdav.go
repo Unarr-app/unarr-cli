@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"log"
+	"net"
 	"net/http"
 
 	"golang.org/x/net/webdav"
@@ -69,9 +70,59 @@ func (ss *StreamServer) EnableWebDAV(fs webdav.FileSystem, username, password st
 // WebDAVEnabled reports whether the read-only WebDAV export is armed.
 func (ss *StreamServer) WebDAVEnabled() bool { return ss.webdavEnabled }
 
+// SetWebDAVAllowWAN lifts the local-network restriction on /dav/, letting the
+// export answer callers from the public internet. Off by default: /dav/ is
+// protected only by HTTP Basic auth with NO rate limiting, so a reachable mount
+// is an unthrottled online password-guessing target. Call before Listen().
+func (ss *StreamServer) SetWebDAVAllowWAN(allow bool) { ss.webdavAllowWAN = allow }
+
+// remoteIsLocalNetwork reports whether a request came from a network the operator
+// plausibly controls: loopback, RFC1918 / IPv6 ULA, link-local, or the CGNAT
+// range Tailscale hands out (100.64.0.0/10). Everything else — including a
+// carrier-NAT'd mobile client — counts as WAN.
+//
+// A malformed or unparseable RemoteAddr is treated as WAN. Failing closed matters
+// more than serving an odd address: the whole point is that the deny path is the
+// safe one.
+func remoteIsLocalNetwork(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr // some transports hand us a bare address
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	// IsPrivate covers 10/8, 172.16/12, 192.168/16 and fc00::/7. Loopback and
+	// link-local are separate predicates. IsLoopback also accepts the dual-stack
+	// ::ffff:127.0.0.1 form.
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return true
+	}
+	// Tailscale's 100.64.0.0/10 is CGNAT space, so none of the predicates above
+	// match it — but a tailnet peer is exactly the "LAN / Tailscale only" case the
+	// WebDAV docs tell operators to keep the mount on.
+	return tailscaleCGNAT.Contains(ip)
+}
+
+// tailscaleCGNAT is 100.64.0.0/10, the shared-address space Tailscale allocates
+// tailnet IPs from.
+var tailscaleCGNAT = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
 // webdavGuard wraps the webdav.Handler with the read-only + Basic-auth contract.
 func (ss *StreamServer) webdavGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Local-network gate, BEFORE the method/OPTIONS/auth ladder: a WAN caller
+		// gets 404, not 401, so the mount does not even announce itself. The stream
+		// port reaches the public internet whenever it is published (auto_https_upnp
+		// on the TLS listener, or the enable_upnp opt-in on the cleartext one), and
+		// /dav/ rides the same mux — but Basic auth here has no rate limiting, so an
+		// exposed mount is an unthrottled guessing target. Media playback needs no
+		// WebDAV, so restricting it costs remote streaming nothing.
+		if !ss.webdavAllowWAN && !remoteIsLocalNetwork(r.RemoteAddr) {
+			http.NotFound(w, r)
+			return
+		}
 		if !webdavMethodAllowed(r.Method) {
 			w.Header().Set("Allow", webdavAllowHeader)
 			http.Error(w, "read-only WebDAV: method not allowed", http.StatusMethodNotAllowed)

@@ -1295,6 +1295,7 @@ func setupWebDAV(streamSrv *engine.StreamServer, cfg config.Config) {
 		AllowPath: func(p string) bool { return isAllowedStreamPathResolved(filepath.Clean(p), roots...) },
 	})
 	streamSrv.EnableWebDAV(fs, user, pass)
+	streamSrv.SetWebDAVAllowWAN(cfg.Download.WebDAVAllowWAN)
 	log.Printf("[webdav] read-only library export enabled (user %q) at :%d/dav/", user, cfg.Download.StreamPort)
 	if webDAVOverUPnPExposed(cfg) {
 		log.Printf("[webdav] WARNING: enable_upnp is ALSO on — UPnP maps the stream port to the WAN, " +

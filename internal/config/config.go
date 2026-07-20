@@ -128,7 +128,14 @@ type DownloadConfig struct {
 	WebDAVUsername string `toml:"webdav_username"`
 	// WebDAVPassword for Basic auth. Empty = derive a STABLE password from the API
 	// key (survives daemon restarts; shown by `unarr status`). Set to override.
-	WebDAVPassword string          `toml:"webdav_password"`
+	WebDAVPassword string `toml:"webdav_password"`
+	// WebDAVAllowWAN lets /dav/ answer callers outside the local network
+	// (loopback / RFC1918 / link-local / Tailscale CGNAT). Default false: the
+	// stream port is reachable from the internet whenever UPnP publishes it, and
+	// /dav/ shares that mux, but its Basic auth has NO rate limiting — so an
+	// exposed mount is an unthrottled password-guessing target. Remote playback
+	// does not go through WebDAV, so leaving this off costs it nothing.
+	WebDAVAllowWAN bool            `toml:"webdav_allow_wan"`
 	Transcode      TranscodeConfig `toml:"transcode"`
 	HLSCache       HLSCacheConfig  `toml:"hls_cache"`
 	VPN            VPNConfig       `toml:"vpn"`
