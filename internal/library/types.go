@@ -26,6 +26,16 @@ type LibraryItem struct {
 	// ~1.4k good files across the fleet (incident 2026-07-21). They are dropped
 	// from the sync payload instead, leaving the previous verdict untouched.
 	ScanAborted bool `json:"scanAborted,omitempty"`
+	// TailProbePending marks an item whose header probed fine but whose DEEP
+	// truncation check (AssessTruncation) timed out — the file is fully synced
+	// and playable, it simply hasn't been checked for truncation yet. The scan
+	// re-probes these serially at the end of the cycle (retryPendingTails); any
+	// still pending after that are reported as Integrity.Unverified.
+	//
+	// Distinct from ScanAborted: that one has no metadata at all and must be
+	// dropped from the sync payload, while this item is complete and syncs
+	// normally.
+	TailProbePending bool `json:"tailProbePending,omitempty"`
 }
 
 // LibraryCache is the on-disk cache of scanned library items.

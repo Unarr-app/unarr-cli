@@ -149,6 +149,49 @@ func TestBuildSyncItemsSkipsAbortedScans(t *testing.T) {
 	}
 }
 
+// A file whose deep integrity probe never completed (slow storage, even after
+// the serial retry) is UNVERIFIED, not damaged. It must sync as a normal row so
+// the server keeps whatever verdict it already had — turning "we couldn't
+// check" into "damaged" is the exact inversion that flagged ~1.4k healthy files
+// fleet-wide (2026-07-21).
+func TestBuildSyncItemsNeverSyncsUnverifiedAsDamaged(t *testing.T) {
+	cache := &LibraryCache{
+		Path: "/media",
+		Items: []LibraryItem{
+			{
+				FilePath: "/media/slow4k.mkv", FileName: "Slow.2024.2160p.mkv", Title: "Slow", FileSize: 1,
+				MediaInfo: &mediainfo.MediaInfo{
+					Video:     &mediainfo.VideoInfo{Duration: 7200},
+					Integrity: &mediainfo.IntegrityInfo{Unverified: true, Reason: "probe_timeout"},
+				},
+			},
+			{
+				FilePath: "/media/broken.mkv", FileName: "Broken.2024.1080p.mkv", Title: "Broken", FileSize: 1,
+				MediaInfo: &mediainfo.MediaInfo{
+					Video:     &mediainfo.VideoInfo{Duration: 1440},
+					Integrity: &mediainfo.IntegrityInfo{Damaged: true, Reason: "truncated"},
+				},
+			},
+		},
+	}
+
+	items := BuildSyncItems(cache)
+	if len(items) != 2 {
+		t.Fatalf("expected both items to sync, got %d", len(items))
+	}
+
+	byPath := map[string]string{}
+	for _, it := range items {
+		byPath[it.FilePath] = it.Integrity
+	}
+	if got := byPath["/media/slow4k.mkv"]; got != "" {
+		t.Errorf("unverified item synced with integrity=%q, want empty — an unchecked file is not a corrupt one", got)
+	}
+	if got := byPath["/media/broken.mkv"]; got != "damaged" {
+		t.Errorf("genuinely damaged item synced with integrity=%q, want \"damaged\"", got)
+	}
+}
+
 // CountAborted gates the caller's fullCycle claim: omitted items mean the
 // session no longer describes the whole library, and a fullCycle sync would
 // have the server's stale-cleanup DELETE those rows.

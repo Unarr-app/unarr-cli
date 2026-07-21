@@ -2,8 +2,10 @@ package library
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,12 +131,82 @@ scanLoop:
 		return nil, fmt.Errorf("scan of %s interrupted after %d/%d files: %w", dirPath, len(items), total, err)
 	}
 
+	retryPendingTails(ctx, ffprobePath, ffmpegPath, items)
+
 	return &LibraryCache{
 		Version:   cacheVersion,
 		ScannedAt: time.Now().UTC().Format(time.RFC3339),
 		Path:      dirPath,
 		Items:     items,
 	}, nil
+}
+
+// assessTruncation indirects the deep check so tests can drive the retry's
+// branches (expired vs verdict vs clean) without a real ffprobe. Production
+// always uses mediainfo.AssessTruncation.
+var assessTruncation = mediainfo.AssessTruncation
+
+// retryPendingTails re-runs the deep truncation check on the files whose tail
+// probe timed out during the concurrent pass, ONE AT A TIME.
+//
+// Why serial, and why it works: the timeouts are caused by I/O contention, not
+// by file size. Measured on a real NFS library (2026-07-21), the two worst
+// files took 37s and 107s with Workers=8 — and 0.2s and 0.8s when re-probed
+// alone right afterwards, one of them a 20.8GB 4K remux. Running the leftovers
+// with no competing readers therefore converts almost all of them into a real
+// verdict for a negligible cost, because by construction only the few files
+// that already timed out reach this stage.
+//
+// The retry can only ever ADD information: a file that still can't be checked
+// is marked Unverified (Damaged stays false), never damaged. It walks the
+// items slice in place, so callers keep the same LibraryItem values.
+func retryPendingTails(ctx context.Context, ffprobePath, ffmpegPath string, items []LibraryItem) {
+	pending := 0
+	for i := range items {
+		if items[i].TailProbePending {
+			pending++
+		}
+	}
+	if pending == 0 {
+		return
+	}
+	log.Printf("[scan] %d file(s) had their integrity check time out — retrying serially", pending)
+
+	recovered, unverified := 0, 0
+	for i := range items {
+		it := &items[i]
+		if !it.TailProbePending {
+			continue
+		}
+		// Shutdown mid-retry: leave the rest pending rather than mislabelling
+		// them. They are simply files we didn't get to, exactly as before.
+		if ctx.Err() != nil {
+			break
+		}
+		if it.MediaInfo == nil || it.MediaInfo.Video == nil {
+			it.TailProbePending = false
+			continue
+		}
+
+		integ, err := assessTruncation(ctx, ffprobePath, ffmpegPath, it.FilePath, it.MediaInfo.Video.Duration)
+		switch {
+		case integ != nil:
+			it.MediaInfo.Integrity = integ
+			it.TailProbePending = false
+			recovered++
+		case errors.Is(err, mediainfo.ErrProbeExpired):
+			// Slow even without contention. Record that it went unchecked instead
+			// of silently passing it off as healthy — but NEVER as damaged.
+			it.MediaInfo.Integrity = &mediainfo.IntegrityInfo{Unverified: true, Reason: "probe_timeout"}
+			it.TailProbePending = false
+			unverified++
+		default:
+			// Ran to completion and found nothing wrong: a genuinely clean file.
+			it.TailProbePending = false
+			recovered++
+		}
+	}
+	log.Printf("[scan] integrity retry done: %d checked, %d still unverified", recovered, unverified)
 }
 
 func scanSingleFile(ctx context.Context, ffprobePath, ffmpegPath, filePath string, cacheIdx map[string]int, existing *LibraryCache, incremental bool) LibraryItem {
@@ -199,6 +271,12 @@ func scanSingleFile(ctx context.Context, ffprobePath, ffmpegPath, filePath strin
 	// an identical size+mtime (some torrent clients preserve the torrent's
 	// mtime), so trusting the cached "damaged" verdict would pin a now-healthy
 	// file as broken forever. Re-probing damaged items is cheap (they're few).
+	//
+	// An Unverified item also carries a non-nil Integrity, so it falls through
+	// here too — deliberately: a file we never managed to check gets another
+	// chance next cycle, when the storage may be idle. It can't loop forever
+	// because each pass recomputes the verdict from scratch, so the first
+	// uncontended run resolves it.
 	if incremental && unchanged &&
 		cached.MediaInfo != nil && cached.MediaInfo.Integrity == nil {
 		item.MediaInfo = cached.MediaInfo
@@ -223,8 +301,14 @@ func scanSingleFile(ctx context.Context, ffprobePath, ffmpegPath, filePath strin
 	// ebml_corrupt, no_duration) is never overwritten — and we have a real video
 	// duration to compare the tail against.
 	if mi.Integrity == nil && mi.Video != nil && mi.Video.Duration > 0 {
-		if integ := mediainfo.AssessTruncation(ctx, ffprobePath, ffmpegPath, filePath, mi.Video.Duration); integ != nil {
+		integ, err := mediainfo.AssessTruncation(ctx, ffprobePath, ffmpegPath, filePath, mi.Video.Duration)
+		if integ != nil {
 			mi.Integrity = integ
+		} else if errors.Is(err, mediainfo.ErrProbeExpired) {
+			// The deep check ran out of time on slow storage. The file itself is
+			// fine as far as we know — keep every bit of metadata we extracted and
+			// just remember that the truncation check still owes us an answer.
+			item.TailProbePending = true
 		}
 	}
 	item.MediaInfo = mi

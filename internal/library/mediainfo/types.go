@@ -24,6 +24,14 @@ type MediaInfo struct {
 type IntegrityInfo struct {
 	Damaged bool   `json:"damaged"`
 	Reason  string `json:"reason,omitempty"`
+	// Unverified marks a file the deep probe never managed to check (its tail
+	// demux ran past truncProbeTimeout on slow/contended storage) even after the
+	// deferred serial retry. It is NOT a verdict: such a file is neither known
+	// healthy nor damaged, and Damaged stays false, so it can never be synced as
+	// corrupt. It exists so "checked and clean" stops being indistinguishable
+	// from "we never got to look" — before this, both were a plain nil verdict
+	// and nothing upstream could tell a user what was still unverified.
+	Unverified bool `json:"unverified,omitempty"`
 }
 
 // VideoInfo represents the primary video stream metadata.
