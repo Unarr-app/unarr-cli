@@ -639,10 +639,10 @@ func (ui *trayUI) clickLoop() {
 		select {
 		case <-ui.mPause.ClickedCh:
 			markPaused(true)
-			ui.control("stop", "stop")
+			ui.control("stop", daemonCtl("stop")...)
 		case <-ui.mResume.ClickedCh:
 			markPaused(false)
-			ui.control("start", "start")
+			ui.control("start", daemonCtl("start")...)
 		case <-ui.mRestart.ClickedCh:
 			markPaused(false)
 			ui.control("restart", "daemon", "restart")

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/service"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -260,6 +261,21 @@ func runDaemonReload() error {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// runStop is what `unarr stop` does: stop the daemon and have it STAY stopped.
+//
+// Under a respawning supervisor (systemd Restart=always, launchd KeepAlive)
+// signalling the PID is not a stop: the unit comes back RestartSec later. That
+// is exactly what a tray "Pause" looked like to users — the agent went green
+// again ~10s after they paused it — because the tray also ran this command. So
+// delegate to the service manager whenever one is installed, and keep the PID
+// path only for a daemon started in the foreground.
+func runStop() error {
+	if service.Respawns() {
+		return runDaemonSvcStop()
+	}
+	return stopDaemonByPID()
+}
+
 // stopDaemonByPID reads the state file and sends a graceful stop to the daemon PID.
 // Used as fallback on platforms without a service manager (and as Windows implementation).
 func stopDaemonByPID() error {
@@ -304,9 +320,7 @@ func reapStateAfterExit(pid int) {
 	}
 }
 
-func launchdPlistPath(home string) string {
-	return filepath.Join(home, "Library", "LaunchAgents", "com.torrentclaw.unarr.plist")
-}
+func launchdPlistPath(home string) string { return service.PlistPath(home) }
 
 // printDaemonStatusDarwin shows launchd service state by filtering launchctl output.
 func printDaemonStatusDarwin() {

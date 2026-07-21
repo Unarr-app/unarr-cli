@@ -11,6 +11,7 @@ import (
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/service"
 )
 
 // resolveUnarrBin locates the headless `unarr` daemon binary: PATH first, then a
@@ -125,6 +126,19 @@ func reapStaleState(pid int) {
 	if st != nil && st.PID == pid && !agent.IsProcessAlive(pid) {
 		agent.RemoveState()
 	}
+}
+
+// daemonCtl maps a tray control ("stop"/"start") to the argv that actually
+// achieves it. Under a respawning supervisor both must go through the service
+// manager: `unarr stop` on an old CLI only kills a PID that systemd revives 10s
+// later (Restart=always) — the "I pause it and it turns itself back on" bug —
+// and `unarr start` would spawn a daemon outside the unit that dies with the
+// tray and fights the one systemd owns.
+func daemonCtl(action string) []string {
+	if service.Respawns() {
+		return []string{"daemon", action}
+	}
+	return []string{action}
 }
 
 // pausedMarkerPath marks a tray-initiated pause. Pause and stop are the same

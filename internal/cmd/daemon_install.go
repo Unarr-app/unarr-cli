@@ -12,6 +12,7 @@ import (
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/service"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -141,7 +142,8 @@ func installSystemd(data serviceData, green *color.Color) error {
 		return fmt.Errorf("create systemd dir: %w", err)
 	}
 
-	path := filepath.Join(dir, "unarr.service")
+	// Same path service.Respawns() probes — detection and install must never drift.
+	path := service.SystemdUnitPathIn(data.Home)
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create service file: %w", err)
@@ -178,10 +180,9 @@ func installSystemd(data serviceData, green *color.Color) error {
 func installLaunchd(data serviceData, green *color.Color) error {
 	os.MkdirAll(data.LogDir, 0o755)
 
-	dir := filepath.Join(data.Home, "Library", "LaunchAgents")
-	os.MkdirAll(dir, 0o755)
+	path := service.PlistPath(data.Home)
+	os.MkdirAll(filepath.Dir(path), 0o755)
 
-	path := filepath.Join(dir, "com.torrentclaw.unarr.plist")
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create plist: %w", err)
@@ -223,13 +224,13 @@ func runDaemonUninstall() error {
 	case "linux":
 		exec.Command("systemctl", "--user", "stop", "unarr").Run()
 		exec.Command("systemctl", "--user", "disable", "unarr").Run()
-		path := filepath.Join(home, ".config", "systemd", "user", "unarr.service")
+		path := service.SystemdUnitPathIn(home)
 		os.Remove(path)
 		exec.Command("systemctl", "--user", "daemon-reload").Run()
 		green.Printf("  ✓ Removed %s\n", path)
 
 	case "darwin":
-		path := filepath.Join(home, "Library", "LaunchAgents", "com.torrentclaw.unarr.plist")
+		path := service.PlistPath(home)
 		exec.Command("launchctl", "unload", path).Run()
 		os.Remove(path)
 		green.Printf("  ✓ Removed %s\n", path)
