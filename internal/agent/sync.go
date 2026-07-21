@@ -61,9 +61,9 @@ type SyncClient struct {
 	// The daemon keeps running (downloads in flight must not be dropped), but
 	// the user has to hear about it: without this the agent went on looking
 	// perfectly healthy while it could not accept a single new task.
-	OnBlocked func(b *Blocked)
-	GetFreeSlots     func() int
-	GetTaskStates    func() []TaskState // returns current state of all active + recently finished tasks
+	OnBlocked     func(b *Blocked)
+	GetFreeSlots  func() int
+	GetTaskStates func() []TaskState // returns current state of all active + recently finished tasks
 	// GetVPNState returns the live managed-VPN split-tunnel state (whether the
 	// WireGuard tunnel is up, the mode, and the exit server) so the web can track
 	// which agent holds the single WG slot.

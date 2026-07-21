@@ -297,7 +297,6 @@ func runDaemonStart() error {
 		d.SetAgentID(agentID)
 	}
 
-
 	// Start SIGUSR1 reload watcher (unix only, no-op on Windows)
 	startReloadWatcher(&ReloadableConfig{Daemon: d})
 
