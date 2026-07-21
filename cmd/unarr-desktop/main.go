@@ -17,6 +17,7 @@ package main
 import (
 	_ "embed"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -58,7 +59,24 @@ func webBase() string {
 
 // hubURL is the in-app agents hub: status, paths, codecs, hardware + config — the
 // authoritative view, so "Configure agent" can never drift from what the web shows.
-func hubURL() string     { return webBase() + "/profile?tab=agents" }
+//
+// agentID, when known, deep-links to THIS machine's card (the web scrolls to it
+// and highlights it) — on an account with several agents the generic hub left
+// the user guessing which card was the box they clicked from. An empty id keeps
+// the historical plain-hub URL, so a install whose daemon has never run (no
+// state file, no id in config.toml) still gets a working menu item.
+//
+// The path stays UNLOCALIZED on purpose: next-intl's middleware
+// (localePrefix "as-needed") redirects /profile → /es/perfil preserving the
+// query string, which is exactly what the current tray URL already relies on.
+// Replicating the route map in Go would be a second source of truth to drift.
+func hubURL(agentID string) string {
+	if agentID == "" {
+		return webBase() + "/profile?tab=agents"
+	}
+	return webBase() + "/profile?tab=agents&agent=" + url.QueryEscape(agentID)
+}
+
 func docsURL() string    { return webBase() + "/docs" }
 func libraryURL() string { return webBase() + "/library" }
 

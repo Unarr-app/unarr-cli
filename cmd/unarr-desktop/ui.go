@@ -671,9 +671,13 @@ func (ui *trayUI) navLoop() {
 		case <-ui.mDownloads.ClickedCh:
 			openDownloadsFolder()
 		case <-ui.mEnableDownloads.ClickedCh:
-			openURL(hubURL()) // player-only → the web installs the full agent
+			// player-only → the web installs the full agent. No agent exists
+			// yet, so there is no card to deep-link to: plain hub.
+			openURL(hubURL(""))
 		case <-ui.mConfigure.ClickedCh:
-			openURL(hubURL())
+			// Read the id at click time, not at menu-build time: the agent may
+			// have registered (or been re-registered) since the tray started.
+			openURL(hubURL(currentAgentID()))
 		case <-ui.mEdit.ClickedCh:
 			openFile(configPath())
 		case <-ui.mLogs.ClickedCh:

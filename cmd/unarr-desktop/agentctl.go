@@ -100,6 +100,39 @@ func readStatus() agentStatus {
 // same way the daemon does).
 func configPath() string { return config.FilePath() }
 
+// currentAgentID identifies THIS install to the web, for the "Configure agent"
+// deep-link:
+//
+//  1. config.toml (`agent.id`) — the id is written there at registration and is
+//     stable across restarts;
+//  2. the daemon state file — fallback for the edge where the config is
+//     unreadable but a daemon is up.
+//
+// config.toml FIRST, deliberately, even though the state file is the "fresher"
+// source: config.toml is scoped by UNARR_CONFIG_DIR, the state file is NOT.
+// StateFilePath lives under config.DataDir() (~/.local/share/unarr on Linux),
+// which UNARR_CONFIG_DIR does not redirect — only LockPath is config-scoped, on
+// purpose, so a dev agent and the production agent can run CONCURRENTLY. Those
+// two daemons then share one daemon.state.json, last writer wins. Reading the
+// state file first would make a tray launched with
+// UNARR_CONFIG_DIR=~/.config/unarr-dev deep-link to the PRODUCTION agent's card
+// — exactly the wrong-machine bug this deep-link exists to remove.
+//
+// Empty means "never registered" (fresh install, player-only box): callers fall
+// back to the generic hub rather than inventing an id.
+func currentAgentID() string {
+	cfg, err := config.Load(config.FilePath())
+	if err == nil {
+		cfg.ApplyEnvOverrides()
+		if cfg.Agent.ID != "" {
+			return cfg.Agent.ID
+		}
+	}
+	// Missing/unreadable config is the normal player-only case, not an error
+	// worth a stderr line on every menu click.
+	return readStatus().agentID
+}
+
 // openDownloadsFolder opens the agent's configured download directory in the OS
 // file manager. It reads the same config the daemon uses (honoring
 // UNARR_DOWNLOAD_DIR); a load error or an unset/missing dir degrades to a

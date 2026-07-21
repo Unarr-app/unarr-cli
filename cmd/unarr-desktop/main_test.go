@@ -43,3 +43,59 @@ func TestDispatchArgs(t *testing.T) {
 		})
 	}
 }
+
+// TestHubURL pins the "Configure agent (web)" deep-link. The tray menu can't be
+// clicked in CI/headless, so the URL construction is the contract that gets
+// tested: with an id the web lands on THAT machine's card; without one it must
+// degrade to the historical generic hub rather than emitting `&agent=`, which
+// would make every card a non-match and silently break the plain flow.
+func TestHubURL(t *testing.T) {
+	t.Setenv("UNARR_API_URL", "http://localhost:3028")
+
+	tests := []struct {
+		name    string
+		agentID string
+		want    string
+	}{
+		{
+			name:    "no id falls back to the generic hub",
+			agentID: "",
+			want:    "http://localhost:3028/profile?tab=agents",
+		},
+		{
+			name:    "known id deep-links to its card",
+			agentID: "dev-local-agent-001",
+			want:    "http://localhost:3028/profile?tab=agents&agent=dev-local-agent-001",
+		},
+		{
+			name:    "uuid form",
+			agentID: "f57ff97a-024c-43a2-934d-61c67abd79f8",
+			want:    "http://localhost:3028/profile?tab=agents&agent=f57ff97a-024c-43a2-934d-61c67abd79f8",
+		},
+		{
+			// A malformed id must never be able to inject extra query params
+			// (or a fragment) into the URL the browser is handed.
+			name:    "hostile id is query-escaped",
+			agentID: "a&tab=billing#x y",
+			want:    "http://localhost:3028/profile?tab=agents&agent=a%26tab%3Dbilling%23x+y",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hubURL(tt.agentID); got != tt.want {
+				t.Fatalf("hubURL(%q) = %q, want %q", tt.agentID, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHubURLDefaultBase guards the production default: without UNARR_API_URL the
+// deep-link must point at the public app, not localhost.
+func TestHubURLDefaultBase(t *testing.T) {
+	t.Setenv("UNARR_API_URL", "")
+
+	want := "https://unarr.app/profile?tab=agents&agent=abc"
+	if got := hubURL("abc"); got != want {
+		t.Fatalf("hubURL(\"abc\") = %q, want %q", got, want)
+	}
+}
