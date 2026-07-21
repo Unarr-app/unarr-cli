@@ -31,10 +31,20 @@ import (
 type playerKind string
 
 const (
-	playerMPV  playerKind = "mpv"
-	playerVLC  playerKind = "vlc"
-	playerIINA playerKind = "iina"
-	playerMPC  playerKind = "mpc"
+	playerMPV playerKind = "mpv"
+	// playerCelluloid is the GTK front-end that ships mpv embedded (it installs
+	// NO `mpv` binary of its own — the distro package is just `celluloid`). It
+	// speaks every mpv option as `--mpv-<opt>=<value>`, so it is treated as an
+	// mpv variant rather than a player of its own: a user who configured "mpv"
+	// gets it, instead of silently falling through to VLC.
+	playerCelluloid playerKind = "celluloid"
+	playerVLC       playerKind = "vlc"
+	playerIINA      playerKind = "iina"
+	playerMPC       playerKind = "mpc"
+	// playerWeb is not a local player at all: it hands the stream back to the
+	// browser (the unarr web player when the link carries one). Selectable only
+	// explicitly — autodetect must always prefer a real player.
+	playerWeb playerKind = "web"
 )
 
 // autodetectOrder: mpv first (richest CLI: start/title/lang all supported and
@@ -79,15 +89,31 @@ const iinaAppPath = "/Applications/IINA.app"
 func resolvePlayer(name string) (player, bool) {
 	switch name {
 	case "mpv":
-		return resolveOnPath(playerMPV, "mpv")
+		return resolveMPV()
+	case "celluloid":
+		return resolveOnPath(playerCelluloid, "celluloid")
 	case "vlc":
 		return resolveOnPath(playerVLC, "vlc")
 	case "iina":
 		return resolveIINA()
 	case "mpc", "mpc-hc":
 		return resolveMPC()
+	case "web", "online", "browser":
+		// Always "installed": every desktop that can open a URL has a browser,
+		// and openFallback degrades on its own if it can't.
+		return player{kind: playerWeb}, true
 	}
 	return player{}, false
+}
+
+// resolveMPV resolves mpv proper, then Celluloid — the GTK front-end that
+// EMBEDS mpv and installs no `mpv` binary. Without this, a config asking for
+// mpv on a Celluloid box resolved to nothing and playback fell through to VLC.
+func resolveMPV() (player, bool) {
+	if p, ok := resolveOnPath(playerMPV, "mpv"); ok {
+		return p, true
+	}
+	return resolveOnPath(playerCelluloid, "celluloid")
 }
 
 // resolveOnPath resolves a player that is just a binary on PATH (mpv, vlc).
@@ -147,13 +173,32 @@ func playerOverride() string {
 // selectPlayer picks the player to launch. An override naming a player that
 // can't be resolved (not installed, wrong OS, typo) WARNS and falls through
 // to autodetect — playing through the "wrong" player beats not playing.
+//
+// The warning is a desktop NOTIFICATION, not just a stderr line: the
+// dispatcher is spawned by the protocol handler with no terminal attached, so
+// stderr goes nowhere a user will ever look. Configuring `player = "mpv"`
+// without mpv installed silently played through VLC on every click and read as
+// "the setting is ignored".
 func selectPlayer() (player, bool) {
 	if name := playerOverride(); name != "" {
 		if p, ok := resolvePlayer(name); ok {
 			return p, true
 		}
 		fmt.Fprintf(os.Stderr, "unarr-desktop: configured player %q not available, autodetecting\n", name)
+		if p, ok := autodetectPlayer(); ok {
+			notifySend(fmt.Sprintf("%s is not installed", name),
+				fmt.Sprintf("Playing with %s instead. Install %s, or change [desktop] player in config.toml.",
+					p.kind, name))
+			return p, true
+		}
+		return player{}, false
 	}
+	return autodetectPlayer()
+}
+
+// autodetectPlayer returns the first player from autodetectOrder installed on
+// this host.
+func autodetectPlayer() (player, bool) {
 	for _, k := range autodetectOrder {
 		if p, ok := resolvePlayer(string(k)); ok {
 			return p, true
@@ -171,6 +216,8 @@ func buildPlayerArgv(p player, req playRequest) ([]string, error) {
 	switch p.kind {
 	case playerMPV:
 		return mpvArgv(p, req), nil
+	case playerCelluloid:
+		return celluloidArgv(p, req), nil
 	case playerVLC:
 		return vlcArgv(p, req), nil
 	case playerIINA:
@@ -198,6 +245,27 @@ func mpvArgv(p player, req playRequest) []string {
 	}
 	if len(req.SLang) > 0 {
 		argv = append(argv, "--slang="+strings.Join(req.SLang, ","))
+	}
+	return append(argv, "--", req.URL)
+}
+
+// celluloidArgv builds Celluloid's command line. It exposes every mpv option
+// as `--mpv-<option>=<value>` (GOption), so this is mpvArgv with the flags
+// re-spelled — same values, same `--` terminator before the URL, same single
+// token per flag so a title can never split into a switch.
+func celluloidArgv(p player, req playRequest) []string {
+	argv := []string{p.bin}
+	if req.Start > 0 {
+		argv = append(argv, "--mpv-start="+strconv.Itoa(req.Start))
+	}
+	if req.Title != "" {
+		argv = append(argv, "--mpv-force-media-title="+req.Title)
+	}
+	if len(req.ALang) > 0 {
+		argv = append(argv, "--mpv-alang="+strings.Join(req.ALang, ","))
+	}
+	if len(req.SLang) > 0 {
+		argv = append(argv, "--mpv-slang="+strings.Join(req.SLang, ","))
 	}
 	return append(argv, "--", req.URL)
 }
@@ -239,10 +307,15 @@ func mpcArgv(p player, req playRequest) ([]string, error) {
 func dispatchPlayer(req playRequest) int {
 	p, ok := selectPlayer()
 	if !ok {
-		fmt.Fprintln(os.Stderr, "unarr-desktop: no supported media player found (mpv/vlc/iina/mpc-hc)")
+		fmt.Fprintln(os.Stderr, "unarr-desktop: no supported media player found (mpv/celluloid/vlc/iina/mpc-hc)")
 		notifySend("No media player found",
 			"Install mpv (recommended) or VLC for the best experience. Opening in your browser instead.")
-		return openFallback(req.URL)
+		return openFallback(req.browserURL())
+	}
+	// The deliberate browser choice (`player = "web"`), not a fallback: open the
+	// unarr web player when the link carries one, else the stream itself.
+	if p.kind == playerWeb {
+		return openFallback(req.browserURL())
 	}
 	argv, err := buildPlayerArgv(p, req)
 	if err != nil {
@@ -253,7 +326,7 @@ func dispatchPlayer(req playRequest) int {
 	if err := startProc(argv); err != nil {
 		fmt.Fprintf(os.Stderr, "unarr-desktop: start %s: %v\n", p.kind, err)
 		notifySend("Could not start "+string(p.kind), "Opening the stream in your browser instead.")
-		return openFallback(req.URL)
+		return openFallback(req.browserURL())
 	}
 	return 0
 }

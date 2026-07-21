@@ -29,7 +29,13 @@ type playerChoice struct {
 // playerMenuOptions returns the OS-relevant choices in menu order. mpv/VLC run
 // everywhere; IINA is macOS-only and MPC-HC Windows-only — resolvePlayer would
 // reject a wrong-OS pick anyway, so only offering the ones that can work keeps
-// the menu honest. "Auto-detect" (empty value) is always first.
+// the menu honest. "Auto-detect" (empty value) is always first, the web player
+// last (it needs nothing installed, so it is the always-works escape hatch).
+//
+// Labels are annotated with what is actually on this machine: picking "mpv"
+// without mpv installed silently played through VLC and read as a bug. The
+// annotation is computed when the menu is built, so installing a player after
+// the fact shows up on the next tray start.
 func playerMenuOptions() []playerOption {
 	opts := []playerOption{{"Auto-detect", ""}, {"mpv", "mpv"}, {"VLC", "vlc"}}
 	switch hostGOOS {
@@ -38,7 +44,29 @@ func playerMenuOptions() []playerOption {
 	case "windows":
 		opts = append(opts, playerOption{"MPC-HC", "mpc"})
 	}
+	opts = append(opts, playerOption{"Web player (browser)", "web"})
+	for i, opt := range opts {
+		opts[i].label = annotatePlayerLabel(opt)
+	}
 	return opts
+}
+
+// annotatePlayerLabel appends what this machine can actually do with the
+// choice: nothing for auto-detect/web, the resolved variant when it differs
+// from the name (mpv → Celluloid, the GTK front-end that embeds mpv and
+// installs no `mpv` binary), or "not installed".
+func annotatePlayerLabel(opt playerOption) string {
+	if opt.value == "" || opt.value == "web" {
+		return opt.label
+	}
+	p, ok := resolvePlayer(opt.value)
+	if !ok {
+		return opt.label + " — not installed"
+	}
+	if string(p.kind) != opt.value {
+		return fmt.Sprintf("%s (%s)", opt.label, p.kind)
+	}
+	return opt.label
 }
 
 // configuredPlayer reads the player set in config.toml ("" = auto). Unlike

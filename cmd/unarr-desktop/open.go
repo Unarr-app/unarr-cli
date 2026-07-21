@@ -34,6 +34,21 @@ type playRequest struct {
 	Title string   // display title, control-chars stripped, length-capped
 	ALang []string // preferred audio languages, each validated against langTokenRE
 	SLang []string // preferred subtitle languages, ditto
+	// WebURL is the unarr web-player page for this stream (`web=`), when the
+	// link carries one. Optional: older web builds omit it. Used by the "web"
+	// player choice and by the no-player-installed fallback, both of which
+	// otherwise dump the raw .mkv into the browser.
+	WebURL string
+}
+
+// browserURL is where "open this in the browser" should go: the web player
+// page when the link carried one, else the stream itself (a browser can still
+// play it natively, just without controls/subtitles).
+func (r playRequest) browserURL() string {
+	if r.WebURL != "" {
+		return r.WebURL
+	}
+	return r.URL
 }
 
 // langTokenRE matches a BCP-47-ish language tag: 2-3 letter primary subtag
@@ -91,24 +106,22 @@ func parsePlayURL(raw string) (playRequest, error) {
 	if stream == "" {
 		return req, fmt.Errorf("missing url= parameter")
 	}
-	su, err := url.Parse(stream)
+	normalized, err := validateHTTPURL(stream, "stream url")
 	if err != nil {
-		return req, fmt.Errorf("unparseable stream url: %v", err)
+		return req, err
 	}
-	// Scheme whitelist — the core of the security model. file:// would let a
-	// web page play (and with a hostile player config, read) local files;
-	// javascript:/data: and friends have no business near a media player.
-	switch strings.ToLower(su.Scheme) {
-	case "http", "https":
-	default:
-		return req, fmt.Errorf("stream url must be http(s), got scheme %q", su.Scheme)
+	req.URL = normalized
+
+	// web= is a convenience, never a requirement: a link that carries a broken
+	// one still plays. Same validation as the stream URL — it is handed to the
+	// browser, so file:/javascript: must not survive here either.
+	if web := strings.TrimSpace(q.Get("web")); web != "" {
+		if normalizedWeb, werr := validateHTTPURL(web, "web url"); werr == nil {
+			req.WebURL = normalizedWeb
+		} else {
+			fmt.Fprintln(os.Stderr, "unarr-desktop: ignoring web url:", werr)
+		}
 	}
-	if su.Host == "" {
-		return req, fmt.Errorf("stream url has no host")
-	}
-	// Re-serialize rather than pass the raw query value through: url.String()
-	// yields a normalized form of what we actually validated.
-	req.URL = su.String()
 
 	if s := q.Get("start"); s != "" {
 		// Strict integer seconds, >= 0. Invalid values are dropped, not
@@ -121,6 +134,30 @@ func parsePlayURL(raw string) (playRequest, error) {
 	req.ALang = parseLangCSV(q.Get("alang"))
 	req.SLang = parseLangCSV(q.Get("slang"))
 	return req, nil
+}
+
+// validateHTTPURL enforces the scheme whitelist that IS the security model
+// here: file:// would let a web page play (and with a hostile player config,
+// read) local files; javascript:/data: have no business near a media player or
+// a browser tab we open ourselves. Returns the re-serialized URL, so callers
+// use the normalized form of exactly what was validated. Shared by url= and
+// web= — one gate, no second spelling to keep in sync.
+// label names the field in the error text ("stream url", "web url") — these
+// errors reach the user in a notification.
+func validateHTTPURL(raw, label string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("unparseable %s: %v", label, err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+	default:
+		return "", fmt.Errorf("%s must be http(s), got scheme %q", label, u.Scheme)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("%s has no host", label)
+	}
+	return u.String(), nil
 }
 
 // sanitizeTitle strips control characters (NUL would abort exec outright; ESC

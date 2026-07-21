@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -122,6 +123,65 @@ func TestSelectPlayerOverrides(t *testing.T) {
 		p, ok := selectPlayer()
 		if !ok || p.kind != playerMPV {
 			t.Fatalf("selectPlayer() = (%+v, %v), want mpv fallback", p, ok)
+		}
+	})
+	t.Run("unresolvable override tells the user why", func(t *testing.T) {
+		// The bug: `player = "mpv"` with mpv not installed played through VLC
+		// on every click, warning only on a stderr nobody reads (the handler
+		// has no terminal) — the setting looked ignored.
+		stubPlayers(t, "linux", map[string]string{"vlc": "/usr/bin/vlc"})
+		var notes [][2]string
+		notifySend = func(title, body string) { notes = append(notes, [2]string{title, body}) }
+		t.Setenv("UNARR_DESKTOP_PLAYER", "mpv")
+
+		p, ok := selectPlayer()
+		if !ok || p.kind != playerVLC {
+			t.Fatalf("selectPlayer() = (%+v, %v), want vlc fallback", p, ok)
+		}
+		if len(notes) != 1 {
+			t.Fatalf("notifications = %v, want exactly one", notes)
+		}
+		if !strings.Contains(notes[0][0], "mpv") || !strings.Contains(notes[0][1], "vlc") {
+			t.Fatalf("notification %q / %q must name both the missing and the used player", notes[0][0], notes[0][1])
+		}
+	})
+	t.Run("no notification when the override resolves", func(t *testing.T) {
+		stubPlayers(t, "linux", map[string]string{"mpv": "/usr/bin/mpv", "vlc": "/usr/bin/vlc"})
+		notified := false
+		notifySend = func(string, string) { notified = true }
+		t.Setenv("UNARR_DESKTOP_PLAYER", "mpv")
+		if _, ok := selectPlayer(); !ok || notified {
+			t.Fatalf("ok=%v notified=%v, want a silent successful selection", ok, notified)
+		}
+	})
+	t.Run("mpv resolves celluloid when mpv is not installed", func(t *testing.T) {
+		// Celluloid EMBEDS mpv and installs no `mpv` binary, so a machine with
+		// only Celluloid used to fall through to VLC on `player = "mpv"`.
+		stubPlayers(t, "linux", map[string]string{"celluloid": "/usr/bin/celluloid", "vlc": "/usr/bin/vlc"})
+		t.Setenv("UNARR_DESKTOP_PLAYER", "mpv")
+		p, ok := selectPlayer()
+		if !ok || p.kind != playerCelluloid || p.bin != "/usr/bin/celluloid" {
+			t.Fatalf("selectPlayer() = (%+v, %v), want celluloid", p, ok)
+		}
+	})
+	t.Run("real mpv beats celluloid", func(t *testing.T) {
+		stubPlayers(t, "linux", map[string]string{"mpv": "/usr/bin/mpv", "celluloid": "/usr/bin/celluloid"})
+		t.Setenv("UNARR_DESKTOP_PLAYER", "mpv")
+		if p, ok := selectPlayer(); !ok || p.kind != playerMPV {
+			t.Fatalf("selectPlayer() = (%+v, %v), want mpv", p, ok)
+		}
+	})
+	t.Run("web player needs nothing installed", func(t *testing.T) {
+		stubPlayers(t, "linux", nil)
+		t.Setenv("UNARR_DESKTOP_PLAYER", "web")
+		if p, ok := selectPlayer(); !ok || p.kind != playerWeb {
+			t.Fatalf("selectPlayer() = (%+v, %v), want web", p, ok)
+		}
+	})
+	t.Run("autodetect never picks the web player", func(t *testing.T) {
+		stubPlayers(t, "linux", map[string]string{"vlc": "/usr/bin/vlc"})
+		if p, ok := selectPlayer(); !ok || p.kind != playerVLC {
+			t.Fatalf("selectPlayer() = (%+v, %v), want vlc", p, ok)
 		}
 	})
 	t.Run("config toml [desktop] player honored", func(t *testing.T) {
@@ -307,4 +367,66 @@ func TestDispatchPlayer(t *testing.T) {
 			t.Fatalf("dispatchPlayer() = %d, want 1", code)
 		}
 	})
+}
+
+// The web choice and the no-player fallback must open the unarr web PLAYER
+// page when the link carries one (web=), not dump the raw .mkv in a tab.
+func TestDispatchPlayerWebTarget(t *testing.T) {
+	req := playRequest{
+		URL:    "https://agent.example.com/stream/abc.mkv",
+		WebURL: "https://unarr.app/es/play/abc",
+	}
+	t.Run("player=web opens the web player page", func(t *testing.T) {
+		spawned := stubPlayers(t, "linux", map[string]string{"vlc": "/usr/bin/vlc"})
+		t.Setenv("UNARR_DESKTOP_PLAYER", "web")
+		if code := dispatchPlayer(req); code != 0 {
+			t.Fatalf("dispatchPlayer() = %d, want 0", code)
+		}
+		want := [][]string{{"browser", "https://unarr.app/es/play/abc"}}
+		if !reflect.DeepEqual(*spawned, want) {
+			t.Fatalf("spawned = %v, want %v", *spawned, want)
+		}
+	})
+	t.Run("no player installed falls back to the web player page", func(t *testing.T) {
+		spawned := stubPlayers(t, "linux", nil)
+		if code := dispatchPlayer(req); code != 0 {
+			t.Fatalf("dispatchPlayer() = %d, want 0", code)
+		}
+		want := [][]string{{"browser", "https://unarr.app/es/play/abc"}}
+		if !reflect.DeepEqual(*spawned, want) {
+			t.Fatalf("spawned = %v, want %v", *spawned, want)
+		}
+	})
+	t.Run("without web= it falls back to the stream url", func(t *testing.T) {
+		spawned := stubPlayers(t, "linux", nil)
+		if code := dispatchPlayer(playRequest{URL: req.URL}); code != 0 {
+			t.Fatalf("dispatchPlayer() = %d, want 0", code)
+		}
+		want := [][]string{{"browser", req.URL}}
+		if !reflect.DeepEqual(*spawned, want) {
+			t.Fatalf("spawned = %v, want %v", *spawned, want)
+		}
+	})
+}
+
+func TestCelluloidArgv(t *testing.T) {
+	got := celluloidArgv(player{playerCelluloid, "/usr/bin/celluloid"}, playRequest{
+		URL:   "https://cdn.example.com/v.mkv",
+		Start: 90,
+		Title: "My Show",
+		ALang: []string{"es", "en"},
+		SLang: []string{"es"},
+	})
+	want := []string{
+		"/usr/bin/celluloid",
+		"--mpv-start=90",
+		"--mpv-force-media-title=My Show",
+		"--mpv-alang=es,en",
+		"--mpv-slang=es",
+		"--",
+		"https://cdn.example.com/v.mkv",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("celluloidArgv() = %v, want %v", got, want)
+	}
 }
