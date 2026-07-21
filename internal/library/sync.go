@@ -217,6 +217,12 @@ func BuildSyncItems(cache *LibraryCache) []agent.LibrarySyncItem {
 			si.AudioTracks = item.MediaInfo.Audio
 			si.SubtitleTracks = item.MediaInfo.Subtitles
 			si.VideoInfo = item.MediaInfo.Video
+			// Only an affirmative damaged verdict is ever sent. An Unverified entry
+			// (deep probe timed out even on the serial retry) deliberately falls
+			// through: it carries Damaged=false, so it syncs as a normal healthy-
+			// looking row and the server keeps whatever it already knew. Do NOT
+			// turn "we couldn't check" into "damaged" — that inversion is exactly
+			// what flagged ~1.4k good files fleet-wide (2026-07-21).
 			if integ := item.MediaInfo.Integrity; integ != nil && integ.Damaged {
 				si.Integrity = "damaged"
 				si.IntegrityReason = integ.Reason

@@ -47,10 +47,31 @@ const (
 	truncTailFrac     = 0.06
 	// A: file smaller than this fraction of bit_rate × duration ⇒ shortfall.
 	truncSizeRatio = 0.85
-	// Per-probe timeouts (a demux of a huge container, or a tail decode).
-	truncProbeTimeout  = 30 * time.Second
-	truncDecodeTimeout = 30 * time.Second
 )
+
+// truncDecodeTimeout bounds the tail decode (check C). See truncProbeTimeout for
+// why both are 60s. A var, not a const, only so tests can shorten it.
+var truncDecodeTimeout = 60 * time.Second
+
+// truncProbeTimeout bounds a single tail demux.
+//
+// 60s, not 30s: measured on a real NFS library (2026-07-21), a tail demux of a
+// 4K remote file takes 8-47s with NO concurrency at all, and 7-107s with the
+// default Workers=8. At 30s every one of those healthy files came back "signal:
+// killed" — 70/70 tail-probe failures in the fleet sample were our own timeout,
+// not a single real corruption. The cap still exists to bound a genuinely hung
+// mount; files that exceed it go to the deferred serial retry
+// (library.retryPendingTails), which re-probes them without contention.
+//
+// A var, not a const, only so tests can shorten it; nothing in production
+// reassigns it.
+var truncProbeTimeout = 60 * time.Second
+
+// ErrProbeExpired marks a deep probe that ran out of time rather than reaching
+// a verdict. It is strictly a scheduling signal: the file is NOT damaged and
+// NOT known-healthy — it simply was not checked, so the caller can re-queue it
+// under less pressure. Never map this to a damaged verdict.
+var ErrProbeExpired = errors.New("probe expired")
 
 // AssessTruncation runs the deep (post-header) truncation checks on a LOCAL video
 // file whose header already probed OK. Returns a "damaged" verdict only on a
@@ -59,13 +80,18 @@ const (
 //
 // Conservative by construction: it only flags when the file's own header
 // contradicts its contents, so a healthy file is never marked damaged.
-func AssessTruncation(ctx context.Context, ffprobePath, ffmpegPath, filePath string, headerDur float64) *IntegrityInfo {
+//
+// The error return is ONLY a scheduling signal, never a verdict: ErrProbeExpired
+// means the tail demux ran out of time (slow/contended storage) so the file was
+// left UNCHECKED and deserves a deferred retry. Callers that ignore the error
+// keep exactly the old behaviour — nil verdict, nothing flagged.
+func AssessTruncation(ctx context.Context, ffprobePath, ffmpegPath, filePath string, headerDur float64) (*IntegrityInfo, error) {
 	if headerDur <= 0 || strings.Contains(filePath, "://") {
-		return nil
+		return nil, nil
 	}
 	fi, err := os.Stat(filePath)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	fileSize := fi.Size()
 
@@ -73,19 +99,41 @@ func AssessTruncation(ctx context.Context, ffprobePath, ffmpegPath, filePath str
 	if tailStart < 0 {
 		tailStart = 0
 	}
-	lastPTS, bitRate, ok := probeTail(ctx, ffprobePath, filePath, tailStart)
+	lastPTS, bitRate, expired, ok := probeTail(ctx, ffprobePath, filePath, tailStart)
 	if !ok {
-		return nil // couldn't demux the tail → don't guess
+		// Couldn't demux the tail → don't guess. Only a genuine timeout is worth
+		// re-queueing (measured 107s→0.8s for the same file once probed
+		// serially); a missing ffprobe or an unreadable container would fail the
+		// same way again, so those stay a plain no-verdict.
+		if expired {
+			return nil, ErrProbeExpired
+		}
+		return nil, nil
 	}
 
 	// C (tail decode) is lazy: only the byte-short-but-full-duration branch needs
 	// it, so pass a thunk the pure verdict runs at most once. Nil when ffmpeg is
 	// unavailable — that branch then declines to flag.
+	//
+	// decodeExpired records a decode that ran out of time. tailDecodeFails fails
+	// OPEN (an inconclusive run reports "no failure"), which is what keeps a slow
+	// box from inventing damage — but on its own that makes a timed-out decode
+	// indistinguishable from a clean one, so the file would never be re-checked.
+	// Tracking it lets the caller re-queue instead of silently calling it healthy.
 	var decodeConfirm func() bool
+	decodeExpired := false
 	if ffmpegPath != "" {
-		decodeConfirm = func() bool { return tailDecodeFails(ctx, ffmpegPath, filePath, headerDur) }
+		decodeConfirm = func() bool {
+			failed, expired := tailDecodeFails(ctx, ffmpegPath, filePath, headerDur)
+			decodeExpired = expired
+			return failed
+		}
 	}
-	return truncationVerdict(headerDur, lastPTS, bitRate, fileSize, decodeConfirm)
+	verdict := truncationVerdict(headerDur, lastPTS, bitRate, fileSize, decodeConfirm)
+	if verdict == nil && decodeExpired {
+		return nil, ErrProbeExpired
+	}
+	return verdict, nil
 }
 
 // truncationVerdict is the pure decision core (no I/O), factored out so the
@@ -140,9 +188,11 @@ type tailProbeOutput struct {
 // probeTail demuxes video packets from startSec to EOF and returns the maximum
 // presentation timestamp seen plus the header's overall bit_rate. `-read_intervals`
 // keeps this a bounded tail read (seek + demux the last window), not a full-file
-// pass. ok is false only when ffprobe itself failed to run.
-func probeTail(ctx context.Context, ffprobePath, filePath string, startSec float64) (lastPTS float64, bitRate int64, ok bool) {
-	ctx, cancel := context.WithTimeout(ctx, truncProbeTimeout)
+// pass. ok is false only when ffprobe itself failed to run; expired then says
+// whether that failure was our own per-probe deadline (retryable on quieter
+// storage) rather than a cancelled scan or a probe that could never run.
+func probeTail(parent context.Context, ffprobePath, filePath string, startSec float64) (lastPTS float64, bitRate int64, expired, ok bool) {
+	ctx, cancel := context.WithTimeout(parent, truncProbeTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, ffprobePath,
@@ -154,6 +204,11 @@ func probeTail(ctx context.Context, ffprobePath, filePath string, startSec float
 		"-of", "json",
 		filePath,
 	)
+	// Killing ffprobe on deadline is not enough: Output() keeps waiting on the
+	// inherited pipes, so a probe stuck on a hung NFS mount held a scan worker
+	// long past its timeout (the test for this took the full sleep before
+	// WaitDelay was added). Cap that grace so the deadline is real.
+	cmd.WaitDelay = 5 * time.Second
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -161,13 +216,33 @@ func probeTail(ctx context.Context, ffprobePath, filePath string, startSec float
 		// Surface why the tail demux failed (timeout vs bad -read_intervals vs
 		// unreadable container) instead of a silent skip — matches ExtractMediaInfo
 		// / indexKeyframes, which both include ffprobe's stderr on failure.
-		log.Printf("[integrity] tail probe failed for %s: %v (%s)", filePath, err, strings.TrimSpace(stderr.String()))
-		return 0, 0, false
+		//
+		// Name our own deadline explicitly: a killed ffprobe writes nothing to
+		// stderr, so the old line read "tail probe failed: signal: killed ()" and
+		// was indistinguishable from a real read error. That ambiguity is exactly
+		// what made 70 healthy 4K files look like corruption in the fleet sample.
+		switch {
+		case parent.Err() != nil:
+			// The whole scan is going down; re-queueing would pile up work nobody
+			// will run.
+			log.Printf("[integrity] tail probe cancelled for %s (scan shutting down)", filePath)
+		case ctx.Err() != nil:
+			// Our own deadline: the storage was too slow under load. Worth retrying
+			// serially — measured 107s→0.8s for the same file on NFS.
+			log.Printf("[integrity] tail probe timed out for %s after %s — file left UNCHECKED, queued for a serial retry",
+				filePath, truncProbeTimeout)
+			return 0, 0, true, false
+		default:
+			// ffprobe couldn't start, or the container is unreadable. A retry would
+			// fail identically, so don't queue one.
+			log.Printf("[integrity] tail probe failed for %s: %v (%s)", filePath, err, strings.TrimSpace(stderr.String()))
+		}
+		return 0, 0, false, false
 	}
 
 	var data tailProbeOutput
 	if err := json.Unmarshal(out, &data); err != nil {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	if br, err := strconv.ParseInt(strings.TrimSpace(data.Format.BitRate), 10, 64); err == nil && br > 0 {
 		bitRate = br
@@ -180,7 +255,7 @@ func probeTail(ctx context.Context, ffprobePath, filePath string, startSec float
 	// A successful run with zero tail packets means the seek landed past all real
 	// data — the file ends well before its claimed duration. lastPTS stays 0, so
 	// the caller's gap check flags it.
-	return lastPTS, bitRate, true
+	return lastPTS, bitRate, false, true
 }
 
 // tailDecodeFails decodes a few frames near the claimed end. A genuine decode
@@ -194,8 +269,11 @@ func probeTail(ctx context.Context, ffprobePath, filePath string, startSec float
 // timeout/cancellation (or a can't-start error) as "corrupt" would wrongly mark
 // good files damaged, so those paths return false; only an ffmpeg process that
 // actually ran and reported an error counts.
-func tailDecodeFails(ctx context.Context, ffmpegPath, filePath string, headerDur float64) bool {
-	ctx, cancel := context.WithTimeout(ctx, truncDecodeTimeout)
+// The second return value reports that the decode ran out of time rather than
+// reaching a conclusion; it never affects the verdict (which stays fail-open),
+// it only lets the caller re-queue the file for a quieter retry.
+func tailDecodeFails(parent context.Context, ffmpegPath, filePath string, headerDur float64) (failed, expired bool) {
+	ctx, cancel := context.WithTimeout(parent, truncDecodeTimeout)
 	defer cancel()
 
 	seek := headerDur - 10
@@ -209,22 +287,26 @@ func tailDecodeFails(ctx context.Context, ffmpegPath, filePath string, headerDur
 		"-frames:v", "3",
 		"-f", "null", "-",
 	)
+	cmd.WaitDelay = 5 * time.Second // see probeTail: bound the post-kill pipe wait
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 
-	// Timed out / cancelled under load → inconclusive, don't flag.
+	// Timed out / cancelled under load → inconclusive, don't flag. Our own
+	// deadline expiring is retryable (the storage was busy); a cancelled scan is
+	// not, since nobody would run the retry.
 	if ctx.Err() != nil {
-		return false
+		return false, parent.Err() == nil
 	}
 	// A non-ExitError (ffmpeg couldn't start, I/O error) means it never really
-	// ran the decode → inconclusive, don't flag.
+	// ran the decode → inconclusive, don't flag. Not retryable: it would fail
+	// the same way again.
 	var exitErr *exec.ExitError
 	if err != nil && !errors.As(err, &exitErr) {
 		log.Printf("[integrity] tail decode inconclusive for %s: %v", filePath, err)
-		return false
+		return false, false
 	}
 	// ffmpeg ran: a non-zero exit or an error logged to stderr = real decode
 	// failure at the tail.
-	return err != nil || strings.Contains(strings.ToLower(stderr.String()), "error")
+	return err != nil || strings.Contains(strings.ToLower(stderr.String()), "error"), false
 }
