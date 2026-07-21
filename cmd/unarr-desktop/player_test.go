@@ -181,17 +181,23 @@ func TestSelectPlayerOverrides(t *testing.T) {
 			t.Fatalf("selectPlayer() = (%+v, %v), want mpv", p, ok)
 		}
 	})
-	t.Run("web player needs nothing installed", func(t *testing.T) {
-		stubPlayers(t, "linux", nil)
+	// The browser is no longer a selectable player: playing in the browser is
+	// the web's own button. A legacy `player = "web"` config must therefore
+	// behave like any unavailable name — autodetect to a REAL player rather
+	// than pinning the user to a browser tab.
+	t.Run("legacy web config falls through to a real player", func(t *testing.T) {
+		stubPlayers(t, "linux", map[string]string{"vlc": "/usr/bin/vlc"})
 		t.Setenv("UNARR_DESKTOP_PLAYER", "web")
-		if p, ok := selectPlayer(testReq); !ok || p.kind != playerWeb {
-			t.Fatalf("selectPlayer() = (%+v, %v), want web", p, ok)
+		if p, ok := selectPlayer(testReq); !ok || p.kind != playerVLC {
+			t.Fatalf("selectPlayer() = (%+v, %v), want vlc (web must not resolve)", p, ok)
 		}
 	})
-	t.Run("autodetect never picks the web player", func(t *testing.T) {
-		stubPlayers(t, "linux", map[string]string{"vlc": "/usr/bin/vlc"})
-		if p, ok := selectPlayer(testReq); !ok || p.kind != playerVLC {
-			t.Fatalf("selectPlayer() = (%+v, %v), want vlc", p, ok)
+	t.Run("web is not resolvable under any spelling", func(t *testing.T) {
+		stubPlayers(t, "linux", nil)
+		for _, name := range []string{"web", "online", "browser"} {
+			if p, ok := resolvePlayer(name); ok {
+				t.Fatalf("resolvePlayer(%q) = (%+v, true), want not resolvable", name, p)
+			}
 		}
 	})
 	t.Run("config toml [desktop] player honored", func(t *testing.T) {
@@ -379,20 +385,22 @@ func TestDispatchPlayer(t *testing.T) {
 	})
 }
 
-// The web choice and the no-player fallback must open the unarr web PLAYER
-// page when the link carries one (web=), not dump the raw .mkv in a tab.
+// The no-player fallback must open the unarr web PLAYER page when the link
+// carries one (web=), not dump the raw .mkv in a tab. The browser is ONLY this
+// last resort now — `player = "web"` is no longer a selectable choice, so a
+// machine WITH a local player always uses it (asserted here too).
 func TestDispatchPlayerWebTarget(t *testing.T) {
 	req := playRequest{
 		URL:    "https://agent.example.com/stream/abc.mkv",
 		WebURL: "https://unarr.app/es/play/abc",
 	}
-	t.Run("player=web opens the web player page", func(t *testing.T) {
+	t.Run("a local player always wins over the browser", func(t *testing.T) {
 		spawned := stubPlayers(t, "linux", map[string]string{"vlc": "/usr/bin/vlc"})
 		t.Setenv("UNARR_DESKTOP_PLAYER", "web")
 		if code := dispatchPlayer(req); code != 0 {
 			t.Fatalf("dispatchPlayer() = %d, want 0", code)
 		}
-		want := [][]string{{"browser", "https://unarr.app/es/play/abc"}}
+		want := [][]string{{"/usr/bin/vlc", "--", req.URL}}
 		if !reflect.DeepEqual(*spawned, want) {
 			t.Fatalf("spawned = %v, want %v", *spawned, want)
 		}

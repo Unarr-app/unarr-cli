@@ -29,8 +29,16 @@ type playerChoice struct {
 // playerMenuOptions returns the OS-relevant choices in menu order. mpv/VLC run
 // everywhere; IINA is macOS-only and MPC-HC Windows-only — resolvePlayer would
 // reject a wrong-OS pick anyway, so only offering the ones that can work keeps
-// the menu honest. "Auto-detect" (empty value) is always first, the web player
-// last (it needs nothing installed, so it is the always-works escape hatch).
+// the menu honest. "Auto-detect" (empty value) is always first.
+//
+// The web player is deliberately NOT offered here. This submenu picks which
+// LOCAL player unarr:// links open in; playing in the browser is already one
+// click away on the web itself ("Web player" in the stream picker), and two
+// routes to the same destination meant two code paths to keep working — the
+// desktop one silently regressed to dumping the raw agent stream url into a
+// tab whenever a link arrived without `web=`. The browser remains the
+// last-resort fallback in dispatchPlayer when no local player exists; it is
+// just no longer something the user can deliberately select here.
 //
 // Labels are annotated with what is actually on this machine: picking "mpv"
 // without mpv installed silently played through VLC and read as a bug. The
@@ -44,10 +52,7 @@ func playerMenuOptions() []playerOption {
 	case "windows":
 		opts = append(opts, playerOption{"MPC-HC", "mpc"})
 	}
-	opts = append(opts,
-		playerOption{"System default", "system"},
-		playerOption{"Web player (browser)", "web"},
-	)
+	opts = append(opts, playerOption{"System default", "system"})
 	for i, opt := range opts {
 		opts[i].label = annotatePlayerLabel(opt)
 	}
@@ -55,11 +60,11 @@ func playerMenuOptions() []playerOption {
 }
 
 // annotatePlayerLabel appends what this machine can actually do with the
-// choice: nothing for auto-detect/web, the resolved variant when it differs
+// choice: nothing for auto-detect/system, the resolved variant when it differs
 // from the name (mpv → Celluloid, the GTK front-end that embeds mpv and
 // installs no `mpv` binary), or "not installed".
 func annotatePlayerLabel(opt playerOption) string {
-	if opt.value == "" || opt.value == "web" || opt.value == "system" {
+	if opt.value == "" || opt.value == "system" {
 		return opt.label
 	}
 	p, ok := resolvePlayer(opt.value)

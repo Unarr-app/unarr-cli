@@ -7,7 +7,8 @@ package main
 //	explicit player (UNARR_DESKTOP_PLAYER / [desktop] player)
 //	autodetect      (mpv|celluloid > vlc > iina > mpc-hc)
 //	OS default      (playersystem*.go — whatever the system opens video with)
-//	browser         (the web player, so the click always plays SOMETHING)
+//	browser         (LAST RESORT only — never a selectable choice, so the click
+//	                 always plays SOMETHING even with no player installed)
 //
 // Only the middle layers depend on a name we shipped; the outer ones cover
 // players no list could know (Flatpak/Snap/AppImage, mpv.net, SMPlayer…).
@@ -56,10 +57,6 @@ const (
 	// playerCustom is a user-authored command line (`[desktop]
 	// player_command`), expanded from a template in playercommand.go.
 	playerCustom playerKind = "custom"
-	// playerWeb is not a local player at all: it hands the stream back to the
-	// browser (the unarr web player when the link carries one). Selectable only
-	// explicitly — autodetect must always prefer a real player.
-	playerWeb playerKind = "web"
 )
 
 // autodetectOrder: mpv first (richest CLI: start/title/lang all supported and
@@ -117,11 +114,15 @@ func resolvePlayer(name string) (player, bool) {
 		return resolveIINA()
 	case "mpc", "mpc-hc":
 		return resolveMPC()
-	case "web", "online", "browser":
-		// Always "installed": every desktop that can open a URL has a browser,
-		// and openFallback degrades on its own if it can't.
-		return player{kind: playerWeb}, true
 	}
+	// "web"/"online"/"browser" USED to resolve here, making the browser a
+	// selectable player. It no longer does: playing in the browser is the web's
+	// own job (the "Web player" entry in its stream picker), and keeping a
+	// second route to it meant a second code path to maintain — one that
+	// regressed to dumping the raw agent stream url into a tab whenever a link
+	// arrived without `web=`. An existing `player = "web"` config now falls
+	// through to autodetect (selectPlayer warns), and the browser survives only
+	// as dispatchPlayer's no-local-player fallback.
 	return player{}, false
 }
 
@@ -216,7 +217,7 @@ func playerCommandTemplate() string {
 // Selection order, most specific first:
 //
 //	player_command  → the user's own command line (covers anything at all)
-//	player          → a named dialect, or "system"/"web"
+//	player          → a named dialect, or "system"
 //	autodetect      → known dialects, then whatever the OS opens video with
 //
 // Only the middle layer needs a name we shipped: the outer two make the
@@ -300,10 +301,6 @@ func buildPlayerArgv(p player, req playRequest) ([]string, error) {
 		return []string{p.bin, "-a", "IINA", req.URL}, nil
 	case playerMPC:
 		return mpcArgv(p, req)
-	case playerWeb:
-		// Not a spawn at all — dispatchPlayer hands this one to the browser
-		// before ever asking for an argv. Reaching here is a bug, not a state.
-		return nil, fmt.Errorf("the web player is opened in the browser, not spawned")
 	}
 	return nil, fmt.Errorf("unknown player kind %q", p.kind)
 }
@@ -388,11 +385,6 @@ func dispatchPlayer(req playRequest) int {
 		fmt.Fprintln(os.Stderr, "unarr-desktop: no media player found (none installed, and the OS names no default for video)")
 		notifySend("No media player found",
 			"Install mpv (recommended) or VLC for the best experience. Opening in your browser instead.")
-		return openFallback(req.browserURL())
-	}
-	// The deliberate browser choice (`player = "web"`), not a fallback: open the
-	// unarr web player when the link carries one, else the stream itself.
-	if p.kind == playerWeb {
 		return openFallback(req.browserURL())
 	}
 	argv, err := buildPlayerArgv(p, req)

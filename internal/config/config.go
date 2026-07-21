@@ -33,13 +33,16 @@ type Config struct {
 // neither invent an empty [desktop] section in configs that never set it nor
 // drop a user's setting.
 type DesktopConfig struct {
-	// Player forces which media player `unarr-desktop --open` dispatches to:
-	// "mpv" (also resolves Celluloid, the GTK front-end that embeds mpv and
+	// Player forces which LOCAL media player `unarr-desktop --open` dispatches
+	// to: "mpv" (also resolves Celluloid, the GTK front-end that embeds mpv and
 	// installs no `mpv` binary) | "vlc" | "iina" (macOS only) | "mpc" (Windows
-	// only) | "web" (hand the stream back to the browser — the unarr web
-	// player). Empty = autodetect (mpv > vlc > iina > mpc; never "web").
+	// only) | "system" (whatever the OS opens video with). Empty = autodetect
+	// (mpv > vlc > iina > mpc, then the OS default).
 	// A configured player that isn't installed falls back to autodetect AND
 	// notifies, so the setting never looks silently ignored.
+	// "web" was accepted here until the browser stopped being a selectable
+	// player — playing in the browser is the WEB's own button, not a second
+	// route through the desktop. Such a config now autodetects (with a notice).
 	// The UNARR_DESKTOP_PLAYER env var
 	// overrides this — checked by the desktop binary directly, since
 	// config.Load() deliberately does not apply env overrides.
