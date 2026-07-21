@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-07-21
+
+
+### Added
+
+- **desktop**: deep-link "Configure agent" to this machine's card
+- **desktop**: stop making the player list a requirement
+
+### Documentation
+
+- **scan**: plan for a resumable, storage-aware library scan
+- stop offering the browser as a selectable player
+- document the [desktop] player settings
+
+### Fixed
+
+- **desktop**: drop the web player as a selectable choice
+- **desktop**: honor the configured player, and offer the web one
+- **desktop**: make "Pause agent" actually stop the agent
+- **scan**: check the files whose integrity probe runs out of time
+- **scan**: stop a partial scan from erasing other roots' cached work
+- **scan**: never report an inconclusive probe as a damaged file
 ## [1.6.0] - 2026-07-21
 
 
@@ -49,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **agent**: treat terminal failures as questions for the user, not crashes
 - **agent**: report the HTTPS port the listener actually bound (#25)
 - **arch**: resolve the gate's base rev instead of hardcoding origin/main (#24)
+- **ci**: sign and attach the desktop manifest on the dispatch path
 - **ci**: chain the desktop tray build into the release pipeline
 - **desktop**: keep the tray usable when a daemon control fails
 - **desktop**: report a restart loop once, and name it as one
@@ -62,6 +85,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **usenet**: displace a still-probing prior stream on a new claim
 - **usenet**: serialize progress flushes and reap them on Remove
 - **webdav**: serve the library mount to the local network only
+
+### Other
+
+- **release**: 1.6.0
 
 ### Performance
 
@@ -1258,6 +1285,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.6.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.0...v1.5.1
