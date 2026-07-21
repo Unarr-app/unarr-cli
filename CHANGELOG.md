@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-07-21
+
+
+### Added
+
+- **agent**: coexist multiple downloaded versions instead of overwriting
+- **desktop**: sign in from the tray, without a terminal
+- **desktop**: show a dialog when a control the user asked for fails
+- **desktop**: open the web app on a left click of the tray icon
+- **desktop**: per-item icons for the tray menu
+- **desktop**: adaptive player-only tray menu
+- **desktop**: activity badge, player picker, and trial countdown
+- **desktop**: surface downloads in the tray
+- **desktop**: unarr:// protocol handler + signed self-update channel
+- **desktop**: account, plan and version rows with an upgrade CTA
+- **desktop**: "Start at login" autostart backends
+- **stream**: keep the HTTPS port published so remote playback has a stable host
+- **stream**: fMP4-only cast flag + copy→transcode fallback (#23)
+- **usenet**: stream web-dispatched tasks via the on-the-fly usenet streamer
+
+### CI/CD
+
+- **deps**: bump actions/checkout from 4 to 7 (#19)
+- **deps**: bump actions/download-artifact from 4 to 8 (#18)
+- **deps**: bump actions/setup-go from 5 to 7 (#17)
+- **deps**: bump golangci/golangci-lint-action from 7 to 9 (#13)
+- **deps**: bump docker/login-action from 3 to 4 (#11)
+
+### Changed
+
+- **agent**: give the daemon's credential a single owner
+- **agent**: drop unused LocalState disk persistence
+- **desktop**: make the modeTray case explicit in main's switch
+- **desktop,upgrade**: clear the pre-existing arch-gate debt
+- gofmt sync.go and daemon.go
+
+### Fixed
+
+- **agent**: surface the three failures that still rendered as a healthy agent
+- **agent**: close the gaps a review found in the parking path
+- **agent**: keep wiping a tombstoned credential when the daemon parks
+- **agent**: treat terminal failures as questions for the user, not crashes
+- **agent**: report the HTTPS port the listener actually bound (#25)
+- **arch**: resolve the gate's base rev instead of hardcoding origin/main (#24)
+- **ci**: chain the desktop tray build into the release pipeline
+- **desktop**: keep the tray usable when a daemon control fails
+- **desktop**: report a restart loop once, and name it as one
+- **desktop**: offer sign-in from the account row, whenever there is no account
+- **desktop**: fail sign-in fast, and offer to report every failure
+- **desktop**: translate an outdated agent's flag error into what to do
+- **desktop**: report why a daemon control failed instead of nothing
+- **desktop**: close player-only mode races from code review
+- **engine**: clear a task's stale error when it recovers into a live state
+- **usenet**: assemble segments at their real yEnc offsets
+- **usenet**: displace a still-probing prior stream on a new claim
+- **usenet**: serialize progress flushes and reap them on Remove
+- **webdav**: serve the library mount to the local network only
+
+### Performance
+
+- **usenet**: probe rar-store volume headers concurrently
 ## [1.5.2] - 2026-07-18
 
 
@@ -23,6 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **daemon**: reap orphaned state file after stop
 - **desktop**: reap tray-initiated stop orphans regardless of CLI version
 - **desktop**: build the Windows tray with the GUI subsystem
+
+### Other
+
+- **release**: 1.5.2
 ## [1.5.1] - 2026-07-17
 
 
@@ -1193,6 +1258,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.6.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.4.0...v1.5.0
