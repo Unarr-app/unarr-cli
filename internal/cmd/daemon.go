@@ -60,15 +60,17 @@ func newStopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the running daemon",
-		Long: `Stop the unarr daemon gracefully.
+		Long: `Stop the unarr daemon gracefully — and keep it stopped.
 
-Reads the daemon PID from the state file and sends a graceful stop signal.
-Works regardless of whether the daemon was started in the foreground or as a service.
+When the daemon is installed as a service, this stops the service, so the
+supervisor does not restart it (systemd Restart=always would otherwise bring it
+back within seconds). Otherwise it reads the PID from the state file and sends a
+graceful stop signal to the foreground daemon.
 
-To stop a service-managed daemon and prevent auto-restart, use 'unarr daemon stop' instead.`,
+Start it again with 'unarr daemon start' (service) or 'unarr start'.`,
 		Example: `  unarr stop`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return stopDaemonByPID()
+			return runStop()
 		},
 	}
 }
@@ -1721,7 +1723,11 @@ func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore,
 			log.Printf("[auto-scan] no items under any scan path — skipping sync")
 		}
 
-		// Save merged cache for incremental scanning next time.
+		// Save merged cache for incremental scanning next time. Items under a root
+		// that failed or was interrupted are carried over from the previous cache:
+		// this write would otherwise erase them, and the next cycle would re-probe
+		// that whole root from scratch — the "large library never finishes" trap.
+		mergedItems = library.PreserveUncoveredItems(existing, mergedItems, coveredRoots)
 		if len(mergedItems) > 0 {
 			mergedCache := &library.LibraryCache{
 				ScannedAt: time.Now().UTC().Format(time.RFC3339),

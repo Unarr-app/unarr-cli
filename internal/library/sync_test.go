@@ -166,3 +166,49 @@ func TestCountAborted(t *testing.T) {
 		t.Errorf("CountAborted = %d, want 2 (real scan errors must not count)", got)
 	}
 }
+
+// A root whose scan failed or was interrupted contributes nothing to the merged
+// cache. Saving that merge as-is would erase every item under it, and the next
+// cycle would re-probe the whole root from scratch — on a large library that is
+// the "never finishes" trap. Uncovered roots must be carried over.
+func TestPreserveUncoveredItemsKeepsFailedRoots(t *testing.T) {
+	existing := &LibraryCache{Items: []LibraryItem{
+		{FilePath: "/media/movies/a.mkv", Title: "A"},
+		{FilePath: "/media/movies/gone.mkv", Title: "Gone"},
+		{FilePath: "/media/tv/b.mkv", Title: "B"},
+		{FilePath: "/media/tv-extras/c.mkv", Title: "C"},
+	}}
+	// Only /media/movies scanned this cycle; "gone.mkv" is genuinely deleted.
+	scanned := []LibraryItem{{FilePath: "/media/movies/a.mkv", Title: "A"}}
+
+	out := PreserveUncoveredItems(existing, scanned, []string{"/media/movies"})
+
+	got := map[string]bool{}
+	for _, it := range out {
+		got[it.FilePath] = true
+	}
+	if !got["/media/movies/a.mkv"] {
+		t.Error("scanned item lost")
+	}
+	if got["/media/movies/gone.mkv"] {
+		t.Error("deleted file under a COVERED root must not be resurrected")
+	}
+	if !got["/media/tv/b.mkv"] {
+		t.Error("item under an uncovered root was erased — next cycle would re-probe it")
+	}
+	// Prefix-sibling guard: "/media/tv-extras" must not count as covered by
+	// "/media/tv" (a plain strings.HasPrefix would wrongly drop it).
+	if !got["/media/tv-extras/c.mkv"] {
+		t.Error("prefix sibling wrongly treated as covered")
+	}
+	if len(out) != 3 {
+		t.Errorf("expected 3 items, got %d", len(out))
+	}
+}
+
+func TestPreserveUncoveredItemsNoExistingCache(t *testing.T) {
+	scanned := []LibraryItem{{FilePath: "/media/a.mkv"}}
+	if out := PreserveUncoveredItems(nil, scanned, []string{"/media"}); len(out) != 1 {
+		t.Errorf("nil cache should pass scanned through, got %d", len(out))
+	}
+}

@@ -99,6 +99,55 @@ func CountAborted(cache *LibraryCache) int {
 	return n
 }
 
+// PreserveUncoveredItems returns scanned plus every cached item belonging to a
+// root this cycle did NOT cover, so saving the cache can't erase work a failed
+// or interrupted root had already done.
+//
+// The auto-scan saves ONE merged cache across all roots. A root whose Scan
+// returned an error contributes nothing to that merge, so writing it as-is
+// would drop every item under that root — and the next cycle would re-probe it
+// from scratch. On a large library that is exactly the "never finishes" trap,
+// so an interrupted scan must never cost previously-earned progress.
+//
+// Only UNCOVERED roots are preserved. A root that scanned cleanly is a complete
+// statement of what it holds, so an item missing from it is a deleted file and
+// must stay deleted.
+func PreserveUncoveredItems(existing *LibraryCache, scanned []LibraryItem, coveredRoots []string) []LibraryItem {
+	if existing == nil || len(existing.Items) == 0 {
+		return scanned
+	}
+	covered := func(path string) bool {
+		for _, root := range coveredRoots {
+			if isUnderRoot(root, path) {
+				return true
+			}
+		}
+		return false
+	}
+	seen := make(map[string]struct{}, len(scanned))
+	for _, item := range scanned {
+		seen[item.FilePath] = struct{}{}
+	}
+	out := scanned
+	for _, item := range existing.Items {
+		if _, dup := seen[item.FilePath]; dup || covered(item.FilePath) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// isUnderRoot reports whether path lives inside root. Uses filepath.Rel rather
+// than a string prefix so "/media/tv" doesn't swallow "/media/tv-extras".
+func isUnderRoot(root, path string) bool {
+	if root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // BuildSyncItems converts cached library items to sync request items.
 // Shared between unarr scan (cmd/scan.go) and auto-scan (cmd/daemon.go).
 func BuildSyncItems(cache *LibraryCache) []agent.LibrarySyncItem {

@@ -161,8 +161,15 @@ func runScan(ctx context.Context, cfg config.Config, dirPath string, workers int
 
 	fmt.Fprintf(os.Stderr, "\r\033[K") // clear progress line
 
-	// Save cache
-	if err := library.SaveCache(cache); err != nil {
+	// Save cache. The cache file is GLOBAL but this scan covered one root, so
+	// carry over the items belonging to roots we didn't walk — otherwise
+	// `unarr scan /media/movies` silently discards every other root's cached
+	// work and the next auto-scan re-probes those roots from scratch.
+	if err := library.SaveCache(&library.LibraryCache{
+		ScannedAt: cache.ScannedAt,
+		Path:      cache.Path,
+		Items:     library.PreserveUncoveredItems(existing, cache.Items, []string{dirPath}),
+	}); err != nil {
 		return nil, fmt.Errorf("save cache: %w", err)
 	}
 
