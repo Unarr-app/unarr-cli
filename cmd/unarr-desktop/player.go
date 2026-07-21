@@ -1,9 +1,16 @@
 package main
 
 // Player dispatch for protocol-handler mode (see open.go for the parser and
-// the security model). Selection order: explicit override (UNARR_DESKTOP_PLAYER
-// env, then config.toml `[desktop] player`) → autodetect (mpv > vlc > iina >
-// mpc-hc) → browser fallback so the click always plays SOMETHING.
+// the security model). Selection order:
+//
+//	custom command  (UNARR_DESKTOP_PLAYER_COMMAND / [desktop] player_command)
+//	explicit player (UNARR_DESKTOP_PLAYER / [desktop] player)
+//	autodetect      (mpv|celluloid > vlc > iina > mpc-hc)
+//	OS default      (playersystem*.go — whatever the system opens video with)
+//	browser         (the web player, so the click always plays SOMETHING)
+//
+// Only the middle layers depend on a name we shipped; the outer ones cover
+// players no list could know (Flatpak/Snap/AppImage, mpv.net, SMPlayer…).
 //
 // SECURITY: argv is always an array handed to exec (never a shell), and for
 // players that support it the attacker-influenced URL goes AFTER a `--`
@@ -41,6 +48,14 @@ const (
 	playerVLC       playerKind = "vlc"
 	playerIINA      playerKind = "iina"
 	playerMPC       playerKind = "mpc"
+	// playerSystem is whatever the OS says opens video (playersystem*.go). No
+	// name list can cover Flatpak/Snap/AppImage installs or players nobody
+	// added, so this is the catch-all before giving up — at the cost of
+	// options: it can only pass a URL, so playback starts from the beginning.
+	playerSystem playerKind = "system"
+	// playerCustom is a user-authored command line (`[desktop]
+	// player_command`), expanded from a template in playercommand.go.
+	playerCustom playerKind = "custom"
 	// playerWeb is not a local player at all: it hands the stream back to the
 	// browser (the unarr web player when the link carries one). Selectable only
 	// explicitly — autodetect must always prefer a real player.
@@ -57,6 +72,10 @@ var autodetectOrder = []playerKind{playerMPV, playerVLC, playerIINA, playerMPC}
 type player struct {
 	kind playerKind
 	bin  string
+	// argv is a complete, pre-resolved command line, used by the kinds that
+	// have no dialect of their own: playerCustom (the user's template, still
+	// holding placeholders) and playerSystem (what the OS handed back).
+	argv []string
 }
 
 // Test seams — swapped in tests so player discovery and process spawning can
@@ -119,7 +138,7 @@ func resolveMPV() (player, bool) {
 // resolveOnPath resolves a player that is just a binary on PATH (mpv, vlc).
 func resolveOnPath(kind playerKind, bin string) (player, bool) {
 	if p, err := lookPath(bin); err == nil {
-		return player{kind, p}, true
+		return player{kind: kind, bin: p}, true
 	}
 	return player{}, false
 }
@@ -133,7 +152,7 @@ func resolveIINA() (player, bool) {
 		return player{}, false
 	}
 	if p, err := lookPath("open"); err == nil {
-		return player{playerIINA, p}, true
+		return player{kind: playerIINA, bin: p}, true
 	}
 	return player{}, false
 }
@@ -145,7 +164,7 @@ func resolveMPC() (player, bool) {
 	}
 	for _, cand := range []string{"mpc-hc64.exe", "mpc-hc.exe"} {
 		if p, err := lookPath(cand); err == nil {
-			return player{playerMPC, p}, true
+			return player{kind: playerMPC, bin: p}, true
 		}
 	}
 	return player{}, false
@@ -170,6 +189,21 @@ func playerOverride() string {
 	return strings.ToLower(strings.TrimSpace(cfg.Desktop.Player))
 }
 
+// playerCommandTemplate returns the user's own command line, if any
+// (UNARR_DESKTOP_PLAYER_COMMAND, else `[desktop] player_command`). It wins
+// over every other layer: someone who wrote an exact command line meant it.
+func playerCommandTemplate() string {
+	if v := strings.TrimSpace(os.Getenv("UNARR_DESKTOP_PLAYER_COMMAND")); v != "" {
+		return v
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: config:", err)
+		return ""
+	}
+	return strings.TrimSpace(cfg.Desktop.PlayerCommand)
+}
+
 // selectPlayer picks the player to launch. An override naming a player that
 // can't be resolved (not installed, wrong OS, typo) WARNS and falls through
 // to autodetect — playing through the "wrong" player beats not playing.
@@ -179,13 +213,24 @@ func playerOverride() string {
 // stderr goes nowhere a user will ever look. Configuring `player = "mpv"`
 // without mpv installed silently played through VLC on every click and read as
 // "the setting is ignored".
-func selectPlayer() (player, bool) {
+// Selection order, most specific first:
+//
+//	player_command  → the user's own command line (covers anything at all)
+//	player          → a named dialect, or "system"/"web"
+//	autodetect      → known dialects, then whatever the OS opens video with
+//
+// Only the middle layer needs a name we shipped: the outer two make the
+// built-in list a convenience rather than a requirement.
+func selectPlayer(req playRequest) (player, bool) {
+	if tmpl := splitCommand(playerCommandTemplate()); len(tmpl) > 0 {
+		return player{kind: playerCustom, bin: tmpl[0], argv: tmpl}, true
+	}
 	if name := playerOverride(); name != "" {
-		if p, ok := resolvePlayer(name); ok {
+		if p, ok := resolveNamedPlayer(name, req); ok {
 			return p, true
 		}
 		fmt.Fprintf(os.Stderr, "unarr-desktop: configured player %q not available, autodetecting\n", name)
-		if p, ok := autodetectPlayer(); ok {
+		if p, ok := autodetectPlayer(req); ok {
 			notifySend(fmt.Sprintf("%s is not installed", name),
 				fmt.Sprintf("Playing with %s instead. Install %s, or change [desktop] player in config.toml.",
 					p.kind, name))
@@ -193,18 +238,41 @@ func selectPlayer() (player, bool) {
 		}
 		return player{}, false
 	}
-	return autodetectPlayer()
+	return autodetectPlayer(req)
 }
 
-// autodetectPlayer returns the first player from autodetectOrder installed on
-// this host.
-func autodetectPlayer() (player, bool) {
+// resolveNamedPlayer resolves an explicit choice. "system" needs the request
+// (the OS lookup returns a full command line for a specific URL), so it cannot
+// live in the pure name→binary table.
+func resolveNamedPlayer(name string, req playRequest) (player, bool) {
+	if name == "system" || name == "default" {
+		return resolveSystemPlayer(req)
+	}
+	return resolvePlayer(name)
+}
+
+// autodetectPlayer returns the first known dialect installed on this host, and
+// falls back to the OS default video application. That last step is what saves
+// a machine whose only player is a Flatpak/Snap (invisible to LookPath) or one
+// nobody added to the table: before it existed, such a machine reported "no
+// media player found" and dumped the stream into a browser tab.
+func autodetectPlayer(req playRequest) (player, bool) {
 	for _, k := range autodetectOrder {
 		if p, ok := resolvePlayer(string(k)); ok {
 			return p, true
 		}
 	}
-	return player{}, false
+	return resolveSystemPlayer(req)
+}
+
+// resolveSystemPlayer asks the OS which application opens video and keeps the
+// argv it returned — there is no dialect to rebuild it from later.
+func resolveSystemPlayer(req playRequest) (player, bool) {
+	argv, ok := systemPlayerArgv(req.URL)
+	if !ok || len(argv) == 0 {
+		return player{}, false
+	}
+	return player{kind: playerSystem, bin: argv[0], argv: argv}, true
 }
 
 // buildPlayerArgv builds the exact argv (binary first) for the chosen player.
@@ -214,6 +282,12 @@ func autodetectPlayer() (player, bool) {
 // load-bearing.
 func buildPlayerArgv(p player, req playRequest) ([]string, error) {
 	switch p.kind {
+	case playerCustom:
+		return expandPlayerCommand(p.argv, req), nil
+	case playerSystem:
+		// Already a complete command line for this exact URL; the OS handler
+		// speaks no dialect we could add options to.
+		return p.argv, nil
 	case playerMPV:
 		return mpvArgv(p, req), nil
 	case playerCelluloid:
@@ -226,6 +300,10 @@ func buildPlayerArgv(p player, req playRequest) ([]string, error) {
 		return []string{p.bin, "-a", "IINA", req.URL}, nil
 	case playerMPC:
 		return mpcArgv(p, req)
+	case playerWeb:
+		// Not a spawn at all — dispatchPlayer hands this one to the browser
+		// before ever asking for an argv. Reaching here is a bug, not a state.
+		return nil, fmt.Errorf("the web player is opened in the browser, not spawned")
 	}
 	return nil, fmt.Errorf("unknown player kind %q", p.kind)
 }
@@ -305,9 +383,9 @@ func mpcArgv(p player, req playRequest) ([]string, error) {
 // back to the system browser (the web player can always play the stream) when
 // no player is installed or the spawn fails. Exit codes as in runOpen.
 func dispatchPlayer(req playRequest) int {
-	p, ok := selectPlayer()
+	p, ok := selectPlayer(req)
 	if !ok {
-		fmt.Fprintln(os.Stderr, "unarr-desktop: no supported media player found (mpv/celluloid/vlc/iina/mpc-hc)")
+		fmt.Fprintln(os.Stderr, "unarr-desktop: no media player found (none installed, and the OS names no default for video)")
 		notifySend("No media player found",
 			"Install mpv (recommended) or VLC for the best experience. Opening in your browser instead.")
 		return openFallback(req.browserURL())

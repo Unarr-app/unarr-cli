@@ -44,7 +44,10 @@ func playerMenuOptions() []playerOption {
 	case "windows":
 		opts = append(opts, playerOption{"MPC-HC", "mpc"})
 	}
-	opts = append(opts, playerOption{"Web player (browser)", "web"})
+	opts = append(opts,
+		playerOption{"System default", "system"},
+		playerOption{"Web player (browser)", "web"},
+	)
 	for i, opt := range opts {
 		opts[i].label = annotatePlayerLabel(opt)
 	}
@@ -56,7 +59,7 @@ func playerMenuOptions() []playerOption {
 // from the name (mpv → Celluloid, the GTK front-end that embeds mpv and
 // installs no `mpv` binary), or "not installed".
 func annotatePlayerLabel(opt playerOption) string {
-	if opt.value == "" || opt.value == "web" {
+	if opt.value == "" || opt.value == "web" || opt.value == "system" {
 		return opt.label
 	}
 	p, ok := resolvePlayer(opt.value)
@@ -67,6 +70,31 @@ func annotatePlayerLabel(opt playerOption) string {
 		return fmt.Sprintf("%s (%s)", opt.label, p.kind)
 	}
 	return opt.label
+}
+
+// buildPlayerMenu creates the Player submenu and its entries.
+//
+// When `player_command` is set the picker is shown DISABLED rather than
+// hidden: that command outranks every entry here, so letting the user tick one
+// would promise a change that never happens — while hiding the menu would hide
+// why. The title says where the setting actually lives.
+func (ui *trayUI) buildPlayerMenu() {
+	custom := playerCommandTemplate() != ""
+	title, tooltip := "Player", "Which player unarr:// links open in"
+	if custom {
+		title = "Player: custom command"
+		tooltip = "Set by [desktop] player_command in config.toml — edit the file to change it"
+	}
+	ui.mPlayer = systray.AddMenuItem(title, tooltip)
+
+	current := configuredPlayer()
+	for _, opt := range playerMenuOptions() {
+		it := ui.mPlayer.AddSubMenuItemCheckbox(opt.label, "Use "+opt.label, !custom && opt.value == current)
+		if custom {
+			it.Disable()
+		}
+		ui.playerChoices = append(ui.playerChoices, playerChoice{it, opt.value})
+	}
 }
 
 // configuredPlayer reads the player set in config.toml ("" = auto). Unlike

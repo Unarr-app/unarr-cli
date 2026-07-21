@@ -159,12 +159,7 @@ func newTrayUI() *trayUI {
 	ui.mEdit = systray.AddMenuItem("Edit config.toml", "Open the agent config file")
 	// Player submenu: pick which local player unarr:// links open in (writes
 	// [desktop] player). Checkmark reflects the current config value.
-	ui.mPlayer = systray.AddMenuItem("Player", "Which player unarr:// links open in")
-	current := configuredPlayer()
-	for _, opt := range playerMenuOptions() {
-		it := ui.mPlayer.AddSubMenuItemCheckbox(opt.label, "Use "+opt.label, opt.value == current)
-		ui.playerChoices = append(ui.playerChoices, playerChoice{it, opt.value})
-	}
+	ui.buildPlayerMenu()
 	systray.AddSeparator()
 	ui.mLogs = systray.AddMenuItem("View logs", "Open the agent log file")
 	ui.mSendLogs = systray.AddMenuItem("Send logs to support", "Send agent logs to the developers")

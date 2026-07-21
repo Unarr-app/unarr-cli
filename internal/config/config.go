@@ -44,6 +44,18 @@ type DesktopConfig struct {
 	// overrides this — checked by the desktop binary directly, since
 	// config.Load() deliberately does not apply env overrides.
 	Player string `toml:"player,omitempty"`
+	// PlayerCommand is an explicit command line, for players no name in the
+	// list can reach: a Flatpak/Snap/AppImage (nothing on PATH), mpv.net,
+	// SMPlayer, or just a player invoked with flags of your own. It WINS over
+	// Player. Placeholders: {url} {web} {start} {title} {alang} {slang} — a
+	// token whose placeholder has no value for a given stream is dropped, so
+	// `--start={start}` simply disappears when there is nothing to resume.
+	// Split into arguments here and exec'd directly, never through a shell.
+	//
+	//	player_command = "flatpak run org.videolan.VLC --start-time={start} -- {url}"
+	//
+	// Env override: UNARR_DESKTOP_PLAYER_COMMAND.
+	PlayerCommand string `toml:"player_command,omitempty"`
 }
 
 type AuthConfig struct {

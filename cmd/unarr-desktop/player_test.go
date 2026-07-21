@@ -9,21 +9,31 @@ import (
 	"testing"
 )
 
+// testReq is the request selection is exercised with. Only the URL matters:
+// the system-default layer resolves a command line for a specific URL.
+var testReq = playRequest{URL: "https://cdn.example.com/v.mkv"}
+
 // stubPlayers swaps the discovery/spawn seams for the duration of a test:
 // only binaries in `installed` resolve, hostGOOS is forced, notifications are
-// swallowed, and every spawned argv is captured instead of executed.
+// swallowed, and every spawned argv is captured instead of executed. The
+// system-default lookup answers "no handler" unless a test says otherwise —
+// it would otherwise shell out to the developer's real desktop.
 // Config is isolated to an empty temp dir so a developer's real
 // ~/.config/unarr/config.toml can never leak a [desktop] override into tests.
 func stubPlayers(t *testing.T, goos string, installed map[string]string) *[][]string {
 	t.Helper()
 	origLook, origStat, origGOOS := lookPath, statFile, hostGOOS
 	origStart, origNotify, origBrowser := startProc, notifySend, openInBrowser
+	origSystem := systemPlayerArgv
 	t.Cleanup(func() {
 		lookPath, statFile, hostGOOS = origLook, origStat, origGOOS
 		startProc, notifySend, openInBrowser = origStart, origNotify, origBrowser
+		systemPlayerArgv = origSystem
 	})
+	systemPlayerArgv = func(string) ([]string, bool) { return nil, false }
 	t.Setenv("UNARR_CONFIG_DIR", t.TempDir())
 	t.Setenv("UNARR_DESKTOP_PLAYER", "")
+	t.Setenv("UNARR_DESKTOP_PLAYER_COMMAND", "")
 
 	hostGOOS = goos
 	lookPath = func(name string) (string, error) {
@@ -96,7 +106,7 @@ func TestSelectPlayerAutodetect(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			stubPlayers(t, tt.goos, tt.installed)
-			p, ok := selectPlayer()
+			p, ok := selectPlayer(testReq)
 			if ok != tt.wantOK {
 				t.Fatalf("selectPlayer() ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -111,7 +121,7 @@ func TestSelectPlayerOverrides(t *testing.T) {
 	t.Run("env override wins over autodetect", func(t *testing.T) {
 		stubPlayers(t, "linux", map[string]string{"mpv": "/usr/bin/mpv", "vlc": "/usr/bin/vlc"})
 		t.Setenv("UNARR_DESKTOP_PLAYER", "vlc")
-		p, ok := selectPlayer()
+		p, ok := selectPlayer(testReq)
 		if !ok || p.kind != playerVLC {
 			t.Fatalf("selectPlayer() = (%+v, %v), want vlc", p, ok)
 		}
@@ -120,7 +130,7 @@ func TestSelectPlayerOverrides(t *testing.T) {
 		// iina on linux can never resolve — playing via mpv beats failing.
 		stubPlayers(t, "linux", map[string]string{"mpv": "/usr/bin/mpv"})
 		t.Setenv("UNARR_DESKTOP_PLAYER", "iina")
-		p, ok := selectPlayer()
+		p, ok := selectPlayer(testReq)
 		if !ok || p.kind != playerMPV {
 			t.Fatalf("selectPlayer() = (%+v, %v), want mpv fallback", p, ok)
 		}
@@ -134,7 +144,7 @@ func TestSelectPlayerOverrides(t *testing.T) {
 		notifySend = func(title, body string) { notes = append(notes, [2]string{title, body}) }
 		t.Setenv("UNARR_DESKTOP_PLAYER", "mpv")
 
-		p, ok := selectPlayer()
+		p, ok := selectPlayer(testReq)
 		if !ok || p.kind != playerVLC {
 			t.Fatalf("selectPlayer() = (%+v, %v), want vlc fallback", p, ok)
 		}
@@ -150,7 +160,7 @@ func TestSelectPlayerOverrides(t *testing.T) {
 		notified := false
 		notifySend = func(string, string) { notified = true }
 		t.Setenv("UNARR_DESKTOP_PLAYER", "mpv")
-		if _, ok := selectPlayer(); !ok || notified {
+		if _, ok := selectPlayer(testReq); !ok || notified {
 			t.Fatalf("ok=%v notified=%v, want a silent successful selection", ok, notified)
 		}
 	})
@@ -159,7 +169,7 @@ func TestSelectPlayerOverrides(t *testing.T) {
 		// only Celluloid used to fall through to VLC on `player = "mpv"`.
 		stubPlayers(t, "linux", map[string]string{"celluloid": "/usr/bin/celluloid", "vlc": "/usr/bin/vlc"})
 		t.Setenv("UNARR_DESKTOP_PLAYER", "mpv")
-		p, ok := selectPlayer()
+		p, ok := selectPlayer(testReq)
 		if !ok || p.kind != playerCelluloid || p.bin != "/usr/bin/celluloid" {
 			t.Fatalf("selectPlayer() = (%+v, %v), want celluloid", p, ok)
 		}
@@ -167,20 +177,20 @@ func TestSelectPlayerOverrides(t *testing.T) {
 	t.Run("real mpv beats celluloid", func(t *testing.T) {
 		stubPlayers(t, "linux", map[string]string{"mpv": "/usr/bin/mpv", "celluloid": "/usr/bin/celluloid"})
 		t.Setenv("UNARR_DESKTOP_PLAYER", "mpv")
-		if p, ok := selectPlayer(); !ok || p.kind != playerMPV {
+		if p, ok := selectPlayer(testReq); !ok || p.kind != playerMPV {
 			t.Fatalf("selectPlayer() = (%+v, %v), want mpv", p, ok)
 		}
 	})
 	t.Run("web player needs nothing installed", func(t *testing.T) {
 		stubPlayers(t, "linux", nil)
 		t.Setenv("UNARR_DESKTOP_PLAYER", "web")
-		if p, ok := selectPlayer(); !ok || p.kind != playerWeb {
+		if p, ok := selectPlayer(testReq); !ok || p.kind != playerWeb {
 			t.Fatalf("selectPlayer() = (%+v, %v), want web", p, ok)
 		}
 	})
 	t.Run("autodetect never picks the web player", func(t *testing.T) {
 		stubPlayers(t, "linux", map[string]string{"vlc": "/usr/bin/vlc"})
-		if p, ok := selectPlayer(); !ok || p.kind != playerVLC {
+		if p, ok := selectPlayer(testReq); !ok || p.kind != playerVLC {
 			t.Fatalf("selectPlayer() = (%+v, %v), want vlc", p, ok)
 		}
 	})
@@ -192,7 +202,7 @@ func TestSelectPlayerOverrides(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Setenv("UNARR_CONFIG_DIR", dir)
-		p, ok := selectPlayer()
+		p, ok := selectPlayer(testReq)
 		if !ok || p.kind != playerVLC {
 			t.Fatalf("selectPlayer() = (%+v, %v), want vlc from config", p, ok)
 		}
@@ -205,7 +215,7 @@ func TestSelectPlayerOverrides(t *testing.T) {
 		}
 		t.Setenv("UNARR_CONFIG_DIR", dir)
 		t.Setenv("UNARR_DESKTOP_PLAYER", "mpv")
-		p, ok := selectPlayer()
+		p, ok := selectPlayer(testReq)
 		if !ok || p.kind != playerMPV {
 			t.Fatalf("selectPlayer() = (%+v, %v), want mpv from env", p, ok)
 		}
@@ -231,7 +241,7 @@ func TestBuildPlayerArgv(t *testing.T) {
 	}{
 		{
 			name: "mpv full",
-			p:    player{playerMPV, "/usr/bin/mpv"},
+			p:    player{kind: playerMPV, bin: "/usr/bin/mpv"},
 			req:  full,
 			want: []string{
 				"/usr/bin/mpv",
@@ -245,13 +255,13 @@ func TestBuildPlayerArgv(t *testing.T) {
 		},
 		{
 			name: "mpv minimal keeps terminator",
-			p:    player{playerMPV, "/usr/bin/mpv"},
+			p:    player{kind: playerMPV, bin: "/usr/bin/mpv"},
 			req:  minimal,
 			want: []string{"/usr/bin/mpv", "--", "https://cdn.example.com/v.mkv"},
 		},
 		{
 			name: "vlc full",
-			p:    player{playerVLC, "/usr/bin/vlc"},
+			p:    player{kind: playerVLC, bin: "/usr/bin/vlc"},
 			req:  full,
 			want: []string{
 				"/usr/bin/vlc",
@@ -265,13 +275,13 @@ func TestBuildPlayerArgv(t *testing.T) {
 		},
 		{
 			name: "iina via open, no extras in v1",
-			p:    player{playerIINA, "/usr/bin/open"},
+			p:    player{kind: playerIINA, bin: "/usr/bin/open"},
 			req:  full,
 			want: []string{"/usr/bin/open", "-a", "IINA", "https://cdn.example.com/v.mkv"},
 		},
 		{
 			name: "mpc url plus start in ms",
-			p:    player{playerMPC, `C:\mpc\mpc-hc64.exe`},
+			p:    player{kind: playerMPC, bin: `C:\mpc\mpc-hc64.exe`},
 			req:  full,
 			want: []string{`C:\mpc\mpc-hc64.exe`, "https://cdn.example.com/v.mkv", "/start", "90000"},
 		},
@@ -279,13 +289,13 @@ func TestBuildPlayerArgv(t *testing.T) {
 			// The parser can't produce these URLs (http/https only), but the
 			// builder must hold on its own: mpc-hc has no `--` terminator.
 			name:    "mpc refuses dash url",
-			p:       player{playerMPC, `C:\mpc\mpc-hc64.exe`},
+			p:       player{kind: playerMPC, bin: `C:\mpc\mpc-hc64.exe`},
 			req:     playRequest{URL: "--evil"},
 			wantErr: true,
 		},
 		{
 			name:    "mpc refuses slash url",
-			p:       player{playerMPC, `C:\mpc\mpc-hc64.exe`},
+			p:       player{kind: playerMPC, bin: `C:\mpc\mpc-hc64.exe`},
 			req:     playRequest{URL: "/dvd"},
 			wantErr: true,
 		},
@@ -314,7 +324,7 @@ func TestBuildPlayerArgv(t *testing.T) {
 // whatever optional flags precede them.
 func TestBuildPlayerArgvTerminatorPosition(t *testing.T) {
 	req := playRequest{URL: "https://x.example/v", Start: 5, Title: "t"}
-	for _, p := range []player{{playerMPV, "mpv"}, {playerVLC, "vlc"}} {
+	for _, p := range []player{{kind: playerMPV, bin: "mpv"}, {kind: playerVLC, bin: "vlc"}} {
 		argv, err := buildPlayerArgv(p, req)
 		if err != nil {
 			t.Fatalf("%s: %v", p.kind, err)
@@ -410,7 +420,7 @@ func TestDispatchPlayerWebTarget(t *testing.T) {
 }
 
 func TestCelluloidArgv(t *testing.T) {
-	got := celluloidArgv(player{playerCelluloid, "/usr/bin/celluloid"}, playRequest{
+	got := celluloidArgv(player{kind: playerCelluloid, bin: "/usr/bin/celluloid"}, playRequest{
 		URL:   "https://cdn.example.com/v.mkv",
 		Start: 90,
 		Title: "My Show",
