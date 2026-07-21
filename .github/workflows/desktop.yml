@@ -122,13 +122,20 @@ jobs:
 
   sign:
     name: sign desktop checksums
-    # Release publishes only: hash the four freshly built binaries into
-    # checksums-desktop.txt, sign it with the release ed25519 key (reusing
-    # scripts/sign-checksums — it is artifact-agnostic: -key/-in/-out), and
-    # attach both files to the same release. The artifacts hashed here are the
-    # exact bytes the build jobs uploaded to the release (same files from the
-    # same job), so manifest and assets can never drift.
-    if: github.event_name == 'release'
+    # Hash the four freshly built binaries into checksums-desktop.txt, sign it
+    # with the release ed25519 key (reusing scripts/sign-checksums — it is
+    # artifact-agnostic: -key/-in/-out), and attach both files to the same
+    # release. The artifacts hashed here are the exact bytes the build jobs
+    # uploaded to the release (same files from the same job), so manifest and
+    # assets can never drift.
+    #
+    # MUST match the "Attach to release" condition in build exactly. It used to
+    # be `event_name == 'release'` alone, which never fired: release.yml
+    # dispatches this workflow on the tag because its GITHUB_TOKEN cannot raise
+    # a `release` event (GitHub's recursion guard). So 1.6.0 shipped the four
+    # desktop binaries with no manifest, and every self-updater refused them
+    # with "this release has no signed desktop assets".
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -175,7 +182,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          # Same fallback as build's "Attach to release": on the dispatch path
+          # release.yml uses, github.event.release is empty and the tag only
+          # exists as github.ref_name — without it this uploaded to "".
+          gh release upload "${{ github.event.release.tag_name || github.ref_name }}" \
             assets/checksums-desktop.txt \
             assets/checksums-desktop.txt.sig \
             --clobber
