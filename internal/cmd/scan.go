@@ -54,10 +54,18 @@ to see available quality upgrades.`,
 				}
 				var items []agent.LibrarySyncItem
 				var caches []*library.LibraryCache
+				// Files whose probe was inconclusive (mount blip, timeout, OOM) are
+				// omitted from the payload, so the session no longer describes the
+				// whole library — a fullCycle claim would have the server reap them.
+				fullCycle := true
 				for _, p := range paths {
 					cache, err := runScan(ctx, cfg, p, workers, ffprobe)
 					if err != nil {
 						return err
+					}
+					if n := library.CountAborted(cache); n > 0 {
+						fmt.Fprintf(os.Stderr, "warning: %d file(s) under %s could not be probed — skipping full-cycle cleanup\n", n, p)
+						fullCycle = false
 					}
 					caches = append(caches, cache)
 					items = append(items, library.BuildSyncItems(cache)...)
@@ -65,7 +73,7 @@ to see available quality upgrades.`,
 				if noSync || jsonOut {
 					return nil
 				}
-				if err := syncToServer(ctx, cfg, items, paths, true); err != nil {
+				if err := syncToServer(ctx, cfg, items, paths, fullCycle); err != nil {
 					return err
 				}
 				if ac := scanAPIClient(cfg); ac != nil {

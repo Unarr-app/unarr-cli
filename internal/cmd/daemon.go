@@ -1667,6 +1667,15 @@ func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore,
 			mergedItems = append(mergedItems, cache.Items...)
 			coveredRoots = append(coveredRoots, scanPath)
 
+			// Aborted probes are dropped from the sync payload (they say nothing
+			// about the file — see BuildSyncItems), so this root's statement of
+			// "what exists" is incomplete. Declaring fullCycle anyway would let the
+			// server's stale-cleanup DELETE those rows as gone.
+			if n := library.CountAborted(cache); n > 0 {
+				log.Printf("[auto-scan] %d file(s) under %s could not be probed (mount/timeout) — not a full cycle", n, scanPath)
+				fullCycle = false
+			}
+
 			if prewarmFFmpeg != "" {
 				library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
 					FFmpegPath:           prewarmFFmpeg,

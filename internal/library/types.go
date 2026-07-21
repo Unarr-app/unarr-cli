@@ -19,6 +19,13 @@ type LibraryItem struct {
 	Codec       string               `json:"codec,omitempty"`   // "x265" etc (from filename)
 	MediaInfo   *mediainfo.MediaInfo `json:"mediaInfo,omitempty"`
 	ScanError   string               `json:"scanError,omitempty"`
+	// ScanAborted marks a probe that never reached a verdict about the FILE —
+	// the scan context was cancelled (daemon restart/shutdown), ffprobe timed
+	// out, or it was killed (OOM). The file itself may be perfectly healthy, so
+	// these items must NEVER be synced as damaged/"unreadable": doing so flagged
+	// ~1.4k good files across the fleet (incident 2026-07-21). They are dropped
+	// from the sync payload instead, leaving the previous verdict untouched.
+	ScanAborted bool `json:"scanAborted,omitempty"`
 }
 
 // LibraryCache is the on-disk cache of scanned library items.

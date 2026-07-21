@@ -3,6 +3,7 @@ package mediainfo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -52,6 +53,29 @@ var hdrProfiles = map[[2]string]string{
 	{"bt2020nc", "arib-std-b67"}: "HLG",
 }
 
+// ErrProbeInconclusive wraps a probe failure that says nothing about whether the
+// FILE is healthy: the context was cancelled, ffprobe timed out, was killed
+// (OOM / signal), never started, or the path was momentarily unreachable (a
+// network share blip). Callers must NOT report these as a damaged file — see
+// IsInconclusiveProbeError.
+var ErrProbeInconclusive = errors.New("probe inconclusive")
+
+// IsInconclusiveProbeError reports whether a probe error is inconclusive about
+// the file's integrity — either explicitly wrapped as ErrProbeInconclusive, or
+// because the caller's own context is already done (a scan cancelled between the
+// probe returning and this check).
+func IsInconclusiveProbeError(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, ErrProbeInconclusive) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
+}
+
 // ExtractMediaInfo runs ffprobe on a file and parses audio, subtitle, and video streams.
 func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*MediaInfo, error) {
 	cmd := exec.CommandContext(ctx, ffprobePath,
@@ -74,7 +98,7 @@ func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*Media
 		// the timeout explicitly so the failure is legible in the session-error
 		// channel and logs.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, fmt.Errorf("ffprobe aborted (%w) probing %s", ctxErr, filePath)
+			return nil, fmt.Errorf("ffprobe aborted (%w) probing %s: %w", ctxErr, filePath, ErrProbeInconclusive)
 		}
 		// A remote URL (debrid HLS-from-URL, hueco #2/2b) has no local file to
 		// stat — surface ffprobe's own stderr (e.g. "Protocol not found" when the
@@ -82,12 +106,19 @@ func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*Media
 		// "file not found". Only treat a genuine local path as possibly-missing.
 		if !strings.Contains(filePath, "://") {
 			if _, statErr := os.Stat(filePath); statErr != nil {
-				return nil, fmt.Errorf("ffprobe: file not found: %s", filePath)
+				// The path vanished between discovery and probe — a deleted file, or
+				// (far more often) an NFS/SMB mount that dropped mid-scan. Neither is
+				// evidence the CONTENT is corrupt.
+				return nil, fmt.Errorf("ffprobe: file not found: %s: %w", filePath, ErrProbeInconclusive)
 			}
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
-			msg = err.Error() // e.g. "signal: killed" / "exit status 1" — better than blank
+			// ffprobe died without writing a diagnosis: killed by a signal (OOM
+			// killer on a NAS running 8 concurrent probes) or it never executed.
+			// A file ffprobe genuinely rejects always explains itself on stderr, so
+			// an empty stderr means we learned nothing about the file.
+			return nil, fmt.Errorf("ffprobe failed (file=%s): %v: %w", filePath, err, ErrProbeInconclusive)
 		}
 		return nil, fmt.Errorf("ffprobe failed (file=%s): %s", filePath, msg)
 	}

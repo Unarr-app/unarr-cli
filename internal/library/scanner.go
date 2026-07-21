@@ -86,10 +86,17 @@ func Scan(ctx context.Context, dirPath string, existing *LibraryCache, opts Scan
 	sem := make(chan struct{}, opts.Workers)
 	var wg sync.WaitGroup
 
+scanLoop:
 	for _, filePath := range files {
+		// `break` inside a select only leaves the SELECT, not the loop — the
+		// original code kept spawning a probe for every remaining file after
+		// cancellation, and each one failed instantly with "context canceled",
+		// which BuildSyncItems then synced as damaged/"unreadable". That is how a
+		// single daemon restart mid-scan flagged a whole library as broken
+		// (incident 2026-07-21). Label the loop and break out of it for real.
 		select {
 		case <-ctx.Done():
-			break
+			break scanLoop
 		case sem <- struct{}{}:
 		}
 
@@ -113,6 +120,15 @@ func Scan(ctx context.Context, dirPath string, existing *LibraryCache, opts Scan
 
 	wg.Wait()
 
+	// A cancelled scan saw only PART of the library, so its item list is not a
+	// statement of what exists on disk. Returning it with a nil error let the
+	// caller mark the session fullCycle=true, and the server's stale-cleanup
+	// then DELETEs every row the truncated scan never reached. Fail loudly so
+	// runAutoScan skips the sync (it already clears fullCycle on a scan error).
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("scan of %s interrupted after %d/%d files: %w", dirPath, len(items), total, err)
+	}
+
 	return &LibraryCache{
 		Version:   cacheVersion,
 		ScannedAt: time.Now().UTC().Format(time.RFC3339),
@@ -124,10 +140,15 @@ func Scan(ctx context.Context, dirPath string, existing *LibraryCache, opts Scan
 func scanSingleFile(ctx context.Context, ffprobePath, ffmpegPath, filePath string, cacheIdx map[string]int, existing *LibraryCache, incremental bool) LibraryItem {
 	info, err := os.Stat(filePath)
 	if err != nil {
+		// A stat failure says nothing about the file's CONTENT — the mount went
+		// away, an NFS/SMB share hiccuped, or permissions are wrong. Treating it
+		// as "damaged" told users their files were corrupt every time a network
+		// share blipped. Abort the item instead so the existing verdict stands.
 		return LibraryItem{
-			FilePath:  filePath,
-			FileName:  filepath.Base(filePath),
-			ScanError: err.Error(),
+			FilePath:    filePath,
+			FileName:    filepath.Base(filePath),
+			ScanError:   err.Error(),
+			ScanAborted: true,
 		}
 	}
 
@@ -188,6 +209,11 @@ func scanSingleFile(ctx context.Context, ffprobePath, ffmpegPath, filePath strin
 	mi, err := mediainfo.ExtractMediaInfo(ctx, ffprobePath, filePath)
 	if err != nil {
 		item.ScanError = err.Error()
+		// Only a probe that RAN and rejected the container is evidence the file
+		// is broken. A cancelled context, a timeout, an OOM-kill, or a probe that
+		// never started says nothing about the file — flagging those as damaged
+		// is what marked ~1.4k healthy files across the fleet (2026-07-21).
+		item.ScanAborted = mediainfo.IsInconclusiveProbeError(ctx, err)
 		return item
 	}
 

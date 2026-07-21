@@ -83,11 +83,36 @@ func relToRoot(root, full string) string {
 	return filepath.ToSlash(rel)
 }
 
+// CountAborted returns how many scanned items had an inconclusive probe. Those
+// are omitted from the sync payload, so a caller that declares FullCycle must
+// check this first — otherwise the server reaps the omitted rows as deleted.
+func CountAborted(cache *LibraryCache) int {
+	if cache == nil {
+		return 0
+	}
+	n := 0
+	for _, item := range cache.Items {
+		if item.ScanAborted {
+			n++
+		}
+	}
+	return n
+}
+
 // BuildSyncItems converts cached library items to sync request items.
 // Shared between unarr scan (cmd/scan.go) and auto-scan (cmd/daemon.go).
 func BuildSyncItems(cache *LibraryCache) []agent.LibrarySyncItem {
 	items := make([]agent.LibrarySyncItem, 0, len(cache.Items))
 	for _, item := range cache.Items {
+		if item.ScanAborted {
+			// The probe never reached a verdict about the FILE (context cancelled,
+			// timeout, OOM-kill, mount blip). Syncing these as damaged is what
+			// flagged ~1.4k healthy files fleet-wide (2026-07-21) — a single daemon
+			// restart mid-scan condemned every file left in the queue. Omitting the
+			// row entirely leaves the server's existing verdict (and metadata)
+			// untouched; the next clean scan re-probes it.
+			continue
+		}
 		if item.ScanError != "" {
 			// A file ffprobe can't read is almost always a truncated/corrupt
 			// download (2026-06-15 NFS write-back truncation). Previously these were

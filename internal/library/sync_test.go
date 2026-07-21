@@ -120,3 +120,49 @@ func TestBuildSyncItemsEmpty(t *testing.T) {
 		t.Errorf("expected 0 items, got %d", len(items))
 	}
 }
+
+// An inconclusive probe (cancelled context, timeout, OOM-kill, mount blip) must
+// be OMITTED from the sync payload, never reported as damaged. Syncing these as
+// damaged/"unreadable" flagged ~1.4k healthy files fleet-wide (2026-07-21) —
+// one daemon restart mid-scan condemned every file left in the scan queue.
+func TestBuildSyncItemsSkipsAbortedScans(t *testing.T) {
+	cache := &LibraryCache{
+		Path: "/media",
+		Items: []LibraryItem{
+			{FilePath: "/media/good.mkv", FileName: "Good.2024.1080p.mkv", Title: "Good", FileSize: 1},
+			{FilePath: "/media/aborted.mkv", FileName: "Aborted.2024.1080p.mkv", Title: "Aborted",
+				ScanError: "ffprobe aborted (context canceled)", ScanAborted: true},
+		},
+	}
+
+	items := BuildSyncItems(cache)
+	if len(items) != 1 {
+		t.Fatalf("expected the aborted item to be dropped, got %d items", len(items))
+	}
+	if items[0].FilePath != "/media/good.mkv" {
+		t.Errorf("wrong item survived: %q", items[0].FilePath)
+	}
+	for _, it := range items {
+		if it.Integrity == "damaged" {
+			t.Errorf("aborted scan leaked a damaged verdict for %q", it.FilePath)
+		}
+	}
+}
+
+// CountAborted gates the caller's fullCycle claim: omitted items mean the
+// session no longer describes the whole library, and a fullCycle sync would
+// have the server's stale-cleanup DELETE those rows.
+func TestCountAborted(t *testing.T) {
+	if got := CountAborted(nil); got != 0 {
+		t.Errorf("CountAborted(nil) = %d, want 0", got)
+	}
+	cache := &LibraryCache{Items: []LibraryItem{
+		{FilePath: "/a.mkv"},
+		{FilePath: "/b.mkv", ScanAborted: true},
+		{FilePath: "/c.mkv", ScanError: "invalid data found when processing input"},
+		{FilePath: "/d.mkv", ScanAborted: true},
+	}}
+	if got := CountAborted(cache); got != 2 {
+		t.Errorf("CountAborted = %d, want 2 (real scan errors must not count)", got)
+	}
+}

@@ -1,6 +1,8 @@
 package library
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -89,5 +91,43 @@ func TestDiscoverFilesExcludePatterns(t *testing.T) {
 	}
 	if len(files) != 0 {
 		t.Errorf("expected 0 files (all excluded), got %d: %v", len(files), files)
+	}
+}
+
+// A scan whose context is cancelled must (a) stop spawning probes and (b) report
+// an error instead of returning a partial cache as if it were complete.
+//
+// Both halves are the 2026-07-21 incident. The loop used `break` inside a
+// `select`, which only exits the SELECT — so after cancellation it kept
+// launching a probe per remaining file, each failing instantly with
+// "context canceled", and BuildSyncItems synced every one as damaged/
+// "unreadable". And returning (cache, nil) let runAutoScan claim fullCycle on a
+// truncated scan, whose stale-cleanup DELETEs every row the scan never reached.
+func TestScanCancelledContextFailsInsteadOfFlaggingFiles(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.mkv", "b.mkv", "c.mkv", "d.mkv", "e.mkv"} {
+		f, err := os.Create(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Sparse file over the 100MB discovery floor — no real bytes written.
+		if err := f.Truncate(minFileSize + 1); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already dead before the first iteration
+
+	cache, err := Scan(ctx, dir, nil, ScanOptions{Workers: 2})
+	if err == nil {
+		t.Fatalf("cancelled scan returned nil error (caller would claim fullCycle); cache=%+v", cache)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error should wrap context.Canceled, got %v", err)
+	}
+	if cache != nil {
+		t.Errorf("cancelled scan must not return a cache, got %d items", len(cache.Items))
 	}
 }
