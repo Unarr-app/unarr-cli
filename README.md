@@ -680,7 +680,7 @@ Read by the **unarr desktop companion** (the tray app that registers the
 ```toml
 [desktop]
 # Empty = autodetect. Or: "mpv", "vlc", "iina" (macOS), "mpc" (Windows),
-# "system" (whatever your OS opens video with), "web" (the unarr web player).
+# "system" (whatever your OS opens video with).
 player = ""
 
 # An explicit command line, for players none of those names reach.
@@ -690,7 +690,7 @@ player = ""
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `player` | string | `""` | `""` = autodetect. `"mpv"` also resolves **Celluloid** (it embeds mpv and installs no `mpv` binary). `"system"` uses your OS default video app. `"web"` sends playback back to the unarr web player. A player that isn't installed falls back to autodetect **and notifies you** — the setting is never silently ignored. |
+| `player` | string | `""` | `""` = autodetect. `"mpv"` also resolves **Celluloid** (it embeds mpv and installs no `mpv` binary). `"system"` uses your OS default video app. A player that isn't installed falls back to autodetect **and notifies you** — the setting is never silently ignored. Watching in the browser is not a value here: that's the web's own "Web player" button. |
 | `player_command` | string | `""` | Explicit command line with placeholders (below). Outranks `player`; while it is set, the tray's Player submenu is shown disabled. |
 
 **How the player is chosen**, most specific first:
@@ -699,9 +699,11 @@ player = ""
 2. `player` — a name from the table above
 3. autodetect — mpv/Celluloid → VLC → IINA (macOS) / MPC-HC (Windows)
 4. your OS default video application
-5. the unarr web player, so a click always plays *something*
+5. the browser, as a last resort, so a click always plays *something*
 
-Steps 1 and 4 exist because a name list can never be complete: a
+Step 5 is a fallback, not a choice: if you want to watch in the browser, the
+web has its own "Web player" button, and going through the desktop app to get
+there would be a second route to the same place. Steps 1 and 4 exist because a
 Flatpak/Snap/AppImage install exposes no binary on PATH, and mpv.net or
 SMPlayer are their own spellings. Step 4 asks the system directly
 (freedesktop MIME association on Linux, LaunchServices on macOS, the
