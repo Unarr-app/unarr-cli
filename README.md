@@ -525,6 +525,12 @@ auto_upgrade = true   # apply server-flagged upgrades in-place (since 0.9.6)
 [notifications]
 enabled = true
 
+# Read by the desktop companion (tray app), not the daemon: which player the
+# web's Play button opens. Empty = autodetect. See [desktop] below.
+[desktop]
+player = ""
+# player_command = "flatpak run org.videolan.VLC --start-time={start} -- {url}"
+
 [general]
 country = "US"
 ```
@@ -665,6 +671,69 @@ enabled = false
 If `cloudflared` is not on PATH the daemon logs a warning at startup and
 falls back to LAN/Tailscale-only reachability.
 
+#### `[desktop]` — which player Play opens
+
+Read by the **unarr desktop companion** (the tray app that registers the
+`unarr://` handler), not by the daemon. Pressing Play on the web sends an
+`unarr://play` link to it, and this section decides what opens.
+
+```toml
+[desktop]
+# Empty = autodetect. Or: "mpv", "vlc", "iina" (macOS), "mpc" (Windows),
+# "system" (whatever your OS opens video with), "web" (the unarr web player).
+player = ""
+
+# An explicit command line, for players none of those names reach.
+# Wins over `player`. See below.
+# player_command = "flatpak run org.videolan.VLC --start-time={start} -- {url}"
+```
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `player` | string | `""` | `""` = autodetect. `"mpv"` also resolves **Celluloid** (it embeds mpv and installs no `mpv` binary). `"system"` uses your OS default video app. `"web"` sends playback back to the unarr web player. A player that isn't installed falls back to autodetect **and notifies you** — the setting is never silently ignored. |
+| `player_command` | string | `""` | Explicit command line with placeholders (below). Outranks `player`; while it is set, the tray's Player submenu is shown disabled. |
+
+**How the player is chosen**, most specific first:
+
+1. `player_command` — your own command line
+2. `player` — a name from the table above
+3. autodetect — mpv/Celluloid → VLC → IINA (macOS) / MPC-HC (Windows)
+4. your OS default video application
+5. the unarr web player, so a click always plays *something*
+
+Steps 1 and 4 exist because a name list can never be complete: a
+Flatpak/Snap/AppImage install exposes no binary on PATH, and mpv.net or
+SMPlayer are their own spellings. Step 4 asks the system directly
+(freedesktop MIME association on Linux, LaunchServices on macOS, the
+registered file association on Windows), so it finds those — but it can only
+pass a URL, so playback starts from the beginning. Steps 2 and 3 know the
+player's flags and can pass resume position, title and language preferences.
+
+**`player_command` placeholders.** The template is split into arguments here
+and executed directly — never through a shell — so quoting is the only shell
+syntax that applies. An argument whose placeholder has no value for a given
+stream is dropped whole, so `--start={start}` simply disappears when there is
+nothing to resume.
+
+| Placeholder | Value |
+|---|---|
+| `{url}` | The stream URL. Appended automatically if the template never mentions it. |
+| `{web}` | The unarr web player page for this stream (falls back to `{url}`). |
+| `{start}` | Resume position in seconds. Absent when starting from the beginning. |
+| `{title}` | Display title for the player window/OSD. |
+| `{alang}` / `{slang}` | Preferred audio / subtitle languages, comma-separated. |
+
+```toml
+# Flatpak VLC (no `vlc` on PATH)
+player_command = "flatpak run org.videolan.VLC --start-time={start} -- {url}"
+
+# mpv.net on Windows
+player_command = 'C:\Program Files\mpv.net\mpvnet.exe --start={start} --force-media-title={title} -- {url}'
+
+# SMPlayer (its own flag spellings)
+player_command = "smplayer -media-title {title} -start {start} {url}"
+```
+
 ### Environment variables
 
 Environment variables override config file values:
@@ -674,6 +743,10 @@ export UNARR_API_KEY=tc_your_api_key
 export UNARR_API_URL=https://unarr.app
 export UNARR_COUNTRY=ES
 export UNARR_DOWNLOAD_DIR=~/Media
+
+# Desktop companion — one-off override without editing the TOML
+export UNARR_DESKTOP_PLAYER=vlc
+export UNARR_DESKTOP_PLAYER_COMMAND="flatpak run org.videolan.VLC -- {url}"
 ```
 
 ### Speed limits
