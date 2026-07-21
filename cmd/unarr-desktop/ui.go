@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -61,12 +62,30 @@ type trayUI struct {
 	// applyState uses for the icon, applied here to the tooltip).
 	shownTooltip string
 
-	// Crash-watcher state — touched only from refresh()/control(); systray
-	// delivers those on independent goroutines but never concurrently in
-	// practice (ticker + click loop), and the worst race is a duplicate
-	// notification, so plain fields are fine.
+	// renderMu guards the render state below. It is taken by refresh() (status
+	// ticker, the 1500ms AfterFunc control() arms, reportControlFailure's
+	// repaint, main's first paint) AND by control()'s prologue on the click
+	// loop — the click-vs-ticker overlap is the likely one: the user clicks
+	// Pause while a tick is rendering.
+	//
+	// Not just a duplicate notification if it races: lastStopPID is what tells a
+	// tray-initiated stop apart from a crash and suppressCrashUntil is what
+	// keeps it quiet, so a torn read reports the user's own stop to the
+	// developers as a crash. crashTracker.observe also appends to a slice.
+	//
+	// Held across the whole of refresh() (the render is a read-modify-write that
+	// must stay consistent), but control() takes only a tiny critical section —
+	// never across the exec. See the INVARIANT on refresh(): nothing under this
+	// lock may re-enter it.
+	renderMu           sync.Mutex
 	suppressCrashUntil time.Time
-	reportedCrashPID   int
+	// reporting single-flights the failure dialog. reportControlFailure runs off
+	// the click loop (it blocks on a human), so the loop no longer gates it the
+	// way a synchronous call did: without this, clicking a broken Resume four
+	// times stacks four modal dialogs to dismiss. A loser falls back to an urgent
+	// notification, so the failure still reaches the user.
+	reporting        atomic.Bool
+	reportedCrashPID int
 	// crashes tracks recent crashes so a supervisor's restart loop is reported
 	// once rather than once per restart, and named as a loop in the status row.
 	crashes crashTracker
@@ -211,7 +230,13 @@ func trayTooltip(st trayState, s agentStatus, blocked *agent.Blocked) string {
 // refresh picks the mode (full daemon UI vs player-only) each tick and renders
 // it. Installing/removing the `unarr` CLI while the tray runs flips the menu
 // without a restart. applyMode does the one-time Show/Hide on transition.
+// INVARIANT: nothing reached from here may call refresh() or take renderMu —
+// sync.Mutex is not reentrant, so either is a hard deadlock. Work that needs to
+// re-enter (handleCrash, reportControlFailure) is launched on its own goroutine.
 func (ui *trayUI) refresh() {
+	ui.renderMu.Lock()
+	defer ui.renderMu.Unlock()
+
 	cli := hasCLI()
 	if !ui.cliModeInit || cli != ui.prevHasCLI {
 		ui.applyMode(cli)
@@ -414,16 +439,27 @@ func (ui *trayUI) showLogin(on bool) {
 // is supervised on its own goroutine, so a failing one never blocks the click
 // loop — and never fails silently the way a bare spawn did.
 func (ui *trayUI) control(action string, args ...string) {
+	// Both fields are read by refresh() on the ticker goroutine, and control()
+	// runs on the click loop — the overlap the mutex exists for. A tiny critical
+	// section, deliberately NOT held across startUnarr: an exec under the lock
+	// would stall every refresh, and reportControlFailure below re-enters
+	// refresh() (which takes renderMu, and sync.Mutex is not reentrant).
+	ui.renderMu.Lock()
 	if args[0] == "stop" || args[0] == "daemon" {
 		if s := readStatus(); s.running {
 			ui.lastStopPID = s.pid
 		}
 	}
 	ui.suppressCrashUntil = time.Now().Add(crashSuppressWindow)
+	ui.renderMu.Unlock()
 	ui.controlFail.Store(controlFailure{}) // a fresh attempt clears the last failure
 	cmd, out, err := startUnarr(args...)
 	if err != nil {
-		ui.reportControlFailure(action, err)
+		// Off the click loop, like the late-failure paths below:
+		// reportControlFailure blocks in dialog.Error waiting on a human, and
+		// systray drops clicks that arrive while this loop is not selecting —
+		// so reporting inline froze the whole menu, Quit included.
+		go ui.reportControlFailure(action, err)
 		return
 	}
 	go func() {
@@ -447,10 +483,20 @@ func (ui *trayUI) control(action string, args ...string) {
 // exists — a Linux box with neither zenity nor kdialog — an urgent
 // notification takes its place, so something always reaches the user. The
 // status row and the red-badged icon then keep saying it after either is gone.
+// Runs OFF the click loop (dialog.Error waits on a human), so only one dialog
+// is allowed on screen at a time — see the reporting field.
 func (ui *trayUI) reportControlFailure(action string, err error) {
 	fail := describeControlFailure(action, err)
 	ui.controlFail.Store(fail)
 	ui.refresh() // repaint first: the menu is already right when the dialog appears
+	if !ui.reporting.CompareAndSwap(false, true) {
+		// A dialog is already up for an earlier failure. Stacking a second one
+		// would just be a second thing to dismiss, so this failure goes to the
+		// notification channel instead of being dropped.
+		notify.SendUrgent("unarr agent", fail.detail)
+		return
+	}
+	defer ui.reporting.Store(false)
 	switch dialog.Error("unarr agent", fail.detail) {
 	case dialog.SendReport:
 		go reportFailureToSupport(action, fail.detail, err)
