@@ -287,7 +287,11 @@ func buildPlayerArgv(p player, req playRequest) ([]string, error) {
 		return expandPlayerCommand(p.argv, req), nil
 	case playerSystem:
 		// Already a complete command line for this exact URL; the OS handler
-		// speaks no dialect we could add options to.
+		// speaks no dialect we could add options to. Consequence: req.SubFiles
+		// (and every other option) is dropped SILENTLY here — the file plays,
+		// just with whatever subtitles are embedded in the container. Better
+		// than refusing: this branch is the last-resort path for a host whose
+		// only player is a Flatpak/Snap we can't address by dialect.
 		return p.argv, nil
 	case playerMPV:
 		return mpvArgv(p, req), nil
@@ -297,7 +301,12 @@ func buildPlayerArgv(p player, req playRequest) ([]string, error) {
 		return vlcArgv(p, req), nil
 	case playerIINA:
 		// v1: just hand the URL over. Extras would need `open --args --mpv-*`,
-		// which replaces open's own URL handling — not worth it yet.
+		// which replaces open's own URL handling — not worth it yet. So
+		// req.SubFiles is dropped SILENTLY on this dialect too (as are start/
+		// title/alang/slang, which it has never carried); the stream still
+		// plays with its embedded tracks. Note macOS isn't a target platform
+		// for the unarr:// handler yet, so this path is effectively unreachable
+		// from the web today.
 		return []string{p.bin, "-a", "IINA", req.URL}, nil
 	case playerMPC:
 		return mpcArgv(p, req)
@@ -321,6 +330,12 @@ func mpvArgv(p player, req playRequest) []string {
 	if len(req.SLang) > 0 {
 		argv = append(argv, "--slang="+strings.Join(req.SLang, ","))
 	}
+	// One --sub-file per external subtitle: mpv's option is repeatable and each
+	// occurrence appends a track (there is no list separator that survives URLs
+	// containing commas). All before the `--`, like every other flag here.
+	for _, s := range req.SubFiles {
+		argv = append(argv, "--sub-file="+s)
+	}
 	return append(argv, "--", req.URL)
 }
 
@@ -342,6 +357,9 @@ func celluloidArgv(p player, req playRequest) []string {
 	if len(req.SLang) > 0 {
 		argv = append(argv, "--mpv-slang="+strings.Join(req.SLang, ","))
 	}
+	for _, s := range req.SubFiles {
+		argv = append(argv, "--mpv-sub-file="+s)
+	}
 	return append(argv, "--", req.URL)
 }
 
@@ -359,6 +377,19 @@ func vlcArgv(p player, req playRequest) []string {
 	}
 	if len(req.SLang) > 0 {
 		argv = append(argv, "--sub-language="+strings.Join(req.SLang, ","))
+	}
+	// External subtitles go through --input-slave, NOT --sub-file: VLC's
+	// --sub-file is for a local path, while input-slave takes MRLs and is what
+	// reliably attaches a subtitle served over the network. It accepts several
+	// inputs in ONE option, chained with '#' (VLC's own MRL separator), so this
+	// stays a single token however many subtitles the link carries.
+	//
+	// The '#' is exactly why parseSubFiles REJECTS any sub= entry containing
+	// one: a fragment survives the http(s) whitelist, and VLC would split it
+	// off and open the tail (file://, smb://, …) as a second input. Do not
+	// relax that check without changing the joining scheme here first.
+	if len(req.SubFiles) > 0 {
+		argv = append(argv, "--input-slave="+strings.Join(req.SubFiles, "#"))
 	}
 	return append(argv, "--", req.URL)
 }

@@ -148,3 +148,45 @@ func TestSelectPlayerCustomCommand(t *testing.T) {
 		}
 	})
 }
+
+// TestExpandPlayerCommandSubFile pins the documented {subfile} limitation: a
+// placeholder substitutes inside ONE token (the property that keeps a template
+// from splitting into extra arguments), so a repeatable flag cannot be emitted
+// N times — {subfile} therefore carries the FIRST subtitle only, and the token
+// disappears entirely when there is none.
+func TestExpandPlayerCommandSubFile(t *testing.T) {
+	const (
+		subA = "https://unarr.app/api/internal/subtitles/proxy?token=a"
+		subB = "https://unarr.app/api/internal/subtitles/proxy?token=b"
+	)
+	tmpl := splitCommand("myplayer --sub-file={subfile} -- {url}")
+
+	t.Run("expands to the first sub file only", func(t *testing.T) {
+		req := playRequest{URL: "https://x.example/v.mkv", SubFiles: []string{subA, subB}}
+		got := expandPlayerCommand(tmpl, req)
+		want := []string{"myplayer", "--sub-file=" + subA, "--", "https://x.example/v.mkv"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("expandPlayerCommand() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("drops the whole token when there is no sub file", func(t *testing.T) {
+		req := playRequest{URL: "https://x.example/v.mkv"}
+		got := expandPlayerCommand(tmpl, req)
+		want := []string{"myplayer", "--", "https://x.example/v.mkv"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("expandPlayerCommand() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a sub file url stays inside one token", func(t *testing.T) {
+		// The parser only lets http(s) through, but the one-token guarantee must
+		// hold on its own: a value with spaces/quotes can never become argv.
+		req := playRequest{URL: "https://x.example/v.mkv", SubFiles: []string{"https://x.example/a b.vtt"}}
+		got := expandPlayerCommand(splitCommand("p {subfile} {url}"), req)
+		want := []string{"p", "https://x.example/a b.vtt", "https://x.example/v.mkv"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("expandPlayerCommand() = %q, want %q", got, want)
+		}
+	})
+}
