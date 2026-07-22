@@ -32,6 +32,12 @@ type TranscodeRuntime struct {
 	// → h264_nvenc) instead of round-tripping each frame to the CPU for `scale=`.
 	// Probed functionally (FFmpegSupportsScaleCuda); false ⇒ keep the CPU scale.
 	HasScaleCuda bool
+	// HasQSV10BitDecode: this host's QSV can decode a 10-bit source AND transfer
+	// the frame to system memory for our CPU filter chain. Some Intel drivers
+	// fail that p010 transfer and produce zero output, so 10-bit sources fall
+	// back to a SOFTWARE decoder (QSV encode kept) when this is false. Probed
+	// functionally (FFmpegSupportsQSV10BitDecode). Only consulted on QSV hosts.
+	HasQSV10BitDecode bool
 }
 
 // qualityCap maps a session's Quality label to a (MaxHeight, VideoBitrate)

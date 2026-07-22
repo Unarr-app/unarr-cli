@@ -297,6 +297,13 @@ type HLSSession struct {
 	// after that the run is an ordinary transcode using the normal auto-restart
 	// machinery, never flipping back to copy (no copy↔transcode loop).
 	copyFellBack bool
+	// gaveUp latches when the auto-restart supervisor has exhausted maxRestarts
+	// and will NOT relaunch ffmpeg again — the session is permanently dead. Read
+	// via Failed() by the daemon's ready-watcher so a broken encoder is reported
+	// to the web as a session error instead of silently burning the 60 s
+	// mark-ready timeout (the player showed a generic "your agent is slow" for
+	// what was really "the encoder can't start"). Guarded by s.mu.
+	gaveUp bool
 	// liveURL is the mutable debrid source URL (hueco #2 / 2c). Initialised to
 	// cfg.SourceURL; refreshed in place by waitFFmpeg when the link expires.
 	// Guarded by mu because restartFromSegment reads it from BOTH the supervisor
@@ -962,6 +969,23 @@ func (s *HLSSession) EncodeExited() bool {
 	return s.exited
 }
 
+// Failed reports whether this session is permanently dead: ffmpeg exited
+// non-zero and the auto-restart supervisor has exhausted its retries, so no
+// further segments will ever be produced. Distinct from EncodeExited, which is
+// also true between a crash and its pending restart (and for a clean finish).
+// The returned error is the last ffmpeg exit status, for the reported message.
+func (s *HLSSession) Failed() (bool, error) {
+	s.mu.Lock()
+	gaveUp := s.gaveUp
+	s.mu.Unlock()
+	if !gaveUp {
+		return false, nil
+	}
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
+	return true, s.exitErr
+}
+
 // WriterStartIdx returns the segment index the CURRENT ffmpeg writer started
 // at: 0 for a from-the-beginning encode, the resume segment for a StartSec
 // session, the seek target after a seek-restart. See ReadyCount for the
@@ -1239,6 +1263,9 @@ func (s *HLSSession) waitFFmpeg() {
 		s.restartCount = 0
 	}
 	if s.restartCount >= maxRestarts {
+		// Latch the permanent failure BEFORE unlocking so Failed() can never
+		// observe "still restarting" for a session that is actually dead.
+		s.gaveUp = true
 		s.mu.Unlock()
 		log.Printf("[hls %s] giving up after %d auto-restarts", shortHLSID(s.cfg.SessionID), maxRestarts)
 		return
@@ -1391,6 +1418,10 @@ func (s *HLSSession) fallbackToTranscode(reason string) bool {
 	s.cfg.VideoCopy = false
 	s.restartCount = 0
 	s.lastRestartAt = time.Time{}
+	// Clear the permanent-failure latch along with the retry budget: this is a
+	// fresh transcode run, and a stale gaveUp would have the ready-watcher report
+	// transcode_failed for a session that goes on to produce segments perfectly.
+	s.gaveUp = false
 	s.mu.Unlock()
 
 	log.Printf("[hls %s] copy failed (%s) — falling back to transcode", shortHLSID(s.cfg.SessionID), reason)
@@ -1830,6 +1861,12 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 	s.cmd = cmd
 	s.cancel = cancel
 	s.ffmpegSegStart = targetIdx
+	// A new ffmpeg is running, so the session is no longer permanently dead.
+	// Every relaunch funnels through here (seek-restart AND the auto-restart
+	// supervisor), which makes this the one place that must clear the latch —
+	// otherwise Failed() would keep reporting transcode_failed for a run that
+	// is producing segments just fine.
+	s.gaveUp = false
 	s.mu.Unlock()
 
 	s.readyMu.Lock()
@@ -1946,13 +1983,52 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	// setparams) can't consume VAAPI surfaces. Letting frames flow on CPU
 	// keeps the filter chain working; the encoder still gets HW-accelerated
 	// decode on the input side.
-	if profile.DecodeHwAccel != "" {
+	// QSV needs TWO things the other backends don't. Both were diagnosed on an
+	// Intel iGPU / iHD driver 1.17 (2026-07-22), but the handling is capability-
+	// driven, not host-specific — see HasQSV10BitDecode.
+	//
+	//  1. Omitting -hwaccel_output_format does NOT yield CPU frames for QSV the
+	//     way it does for VAAPI — ffmpeg defaults it to `qsv` for backwards
+	//     compat ("defaulting hwaccel_output_format to qsv … DEPRECATED"), so the
+	//     decoder emits GPU surfaces into our pure-CPU filter chain and ffmpeg
+	//     can't bridge them:
+	//       Impossible to convert between the formats supported by the filter
+	//       'graph -1 input from stream 0:0' (src: qsv) and 'auto_scale_0'
+	//       Error reinitializing filters! … -38 (Function not implemented)
+	//     Fixed unconditionally by pinning nv12 — the CPU chain below already
+	//     assumes system-memory frames.
+	//  2. On SOME drivers the 10-bit (p010) GPU→system transfer is itself broken:
+	//       [AVHWFramesContext] Error synchronizing the operation: -16 (EBUSY)
+	//       [hevc_qsv] Failed to transfer data to output frame: -1313558101
+	//     This is NOT universal (Arc / Tiger Lake+ handle p010 fine), so it is
+	//     gated on a real functional probe rather than a blanket rule that would
+	//     silently cost healthy hosts their HW decode.
+	//
+	// Either defect makes ffmpeg write ZERO bytes and exit 218, so seg-0 never
+	// lands and the player sits on "Preparando…" until the 60 s mark-ready
+	// timeout (affected agent: 4.5% of transcode sessions ever reached ready, vs
+	// 82.7% for copy). Measured there: HW-decode 10-bit HEVC → 0 bytes;
+	// software-decode + QSV encode → 680 KB in 4 s.
+	// The ENCODER stays on QSV in every case — it was never the broken part.
+	// `BitDepth >= 10 || HDR != ""` mirrors DecideAction's tenBitOrHDR: BitDepth
+	// is "0 if unknown" (ffprobe doesn't always report bits_per_raw_sample), and
+	// an HDR source is 10-bit in practice. Gating on BitDepth alone would let an
+	// HDR10 file whose depth probed as 0 take the HW path and reproduce the
+	// original zero-byte failure.
+	qsvSoftwareDecode := profile.DecodeHwAccel == "qsv" &&
+		(probe.BitDepth >= 10 || probe.HDR != "") && !cfg.Transcode.HasQSV10BitDecode
+	if profile.DecodeHwAccel != "" && !qsvSoftwareDecode {
 		args = append(args, "-hwaccel", profile.DecodeHwAccel)
+		switch {
 		// F4: pin decoded frames as CUDA surfaces ONLY on the gated scale_cuda
 		// path, so scale_cuda + h264_nvenc avoid the CPU copy. Off otherwise —
 		// the CPU filter chain can't consume CUDA surfaces.
-		if useCudaScale {
+		case useCudaScale:
 			args = append(args, "-hwaccel_output_format", "cuda")
+		// 8-bit QSV: HW decode is sound, but defect (1) above still applies, so
+		// pin nv12 to get the system-memory frames the CPU chain assumes.
+		case profile.DecodeHwAccel == "qsv":
+			args = append(args, "-hwaccel_output_format", "nv12")
 		}
 	}
 
