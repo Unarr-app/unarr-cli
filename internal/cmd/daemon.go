@@ -228,6 +228,12 @@ func runDaemonStart() error {
 			engine.FFmpegSupportsLibplacebo(ffmpegResolved)
 			engine.FFmpegSupportsZscale(ffmpegResolved)
 			engine.FFmpegSupportsScaleCuda(ffmpegResolved)
+			// QSV only, and the priciest of the set: it runs ffmpeg TWICE
+			// (encode a 10-bit sample, then decode it back), so warming it here
+			// matters even more than the others.
+			if hwAccelPick == engine.HWAccelQSV {
+				engine.FFmpegSupportsQSV10BitDecode(ffmpegResolved)
+			}
 		}()
 	}
 
@@ -964,7 +970,7 @@ func runDaemonStart() error {
 					return // no viewer waiting → no ready-watcher
 				}
 				streamSrv.HLS().Register(hsess)
-				go watchSessionReady(hlsCtx, agentClient, hsess, hlsCfg.SessionID)
+				go watchSessionReady(hlsCtx, agentClient, hsess, hlsCfg.SessionID, failSession)
 			}()
 		}
 
@@ -1493,6 +1499,15 @@ const (
 	// link as an agent transcode/HW ("QSV-class") regression.
 	sessErrSourceUnreachable = "source_unreachable"
 	sessErrStartFailed       = "start_failed"
+	// sessErrTranscodeFailed: the session STARTED fine (source probed, ffmpeg
+	// launched) but the encoder died and the auto-restart supervisor exhausted
+	// its retries without ever producing seg-0 — a local encode/HW problem, not
+	// a source problem. Kept distinct from start_failed so the player can say
+	// "the transcode failed" instead of the generic slow-agent copy, and so the
+	// web's streaming-health watchdog sees it as the LOCAL HW regression it is
+	// (2026-07-22: QSV emitted GPU surfaces into a CPU filter chain, every
+	// transcode session died at exit 218 and the player just spun on "Loading").
+	sessErrTranscodeFailed = "transcode_failed"
 )
 
 // resolvePlayableFile validates and self-heals a web-provided source path into
@@ -1887,8 +1902,10 @@ func mirrorCORSOrigins(parent context.Context, cfg config.Config, userAgent stri
 //
 // Bounded by a 60 s deadline so a permanently stuck encoder doesn't keep
 // a goroutine alive forever; if seg-0 never lands the player falls back
-// to its existing HEAD-probe retry path anyway.
-func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.HLSSession, sessionID string) {
+// to its existing HEAD-probe retry path anyway. An encoder that CRASHED
+// (as opposed to merely being slow) short-circuits that wait: the watcher
+// reports it through failSession so the player gets a real error code.
+func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.HLSSession, sessionID string, failSession func(sessionID, code, message string)) {
 	deadline := time.Now().Add(60 * time.Second)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -1916,6 +1933,24 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 		// a dead HLSSession that's never going to become ready.
 		if hsess.IsClosed() {
 			return
+		}
+		// Encoder is permanently dead (ffmpeg exited non-zero, auto-restarts
+		// exhausted). Report it NOW instead of spinning out the 60 s deadline:
+		// the session will never produce a segment, and a silent return leaves
+		// streaming_session with ready_at + error_code both NULL, which the
+		// player can only render as the generic "your agent is taking too long"
+		// — indistinguishable from a slow network. Only meaningful before the
+		// ready flip; once seg-0 landed the player is already playing and a
+		// late encoder death is the health monitor's business, not ours.
+		if !readyPosted {
+			if failed, exitErr := hsess.Failed(); failed {
+				msg := "transcode produced no output"
+				if exitErr != nil {
+					msg = fmt.Sprintf("transcode failed: %v", exitErr)
+				}
+				failSession(sessionID, sessErrTranscodeFailed, msg)
+				return
+			}
 		}
 		// Phase 1: cache HIT or first segment ready → flip the "Preparando…"
 		// UI now. Compare against WriterStartIdx, not `>= 1`: a resume

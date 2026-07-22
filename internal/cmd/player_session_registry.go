@@ -108,5 +108,10 @@ func buildTranscodeRuntime(ctx context.Context, cfg config.Config) engine.Transc
 		// unconditionally (like libplacebo); fails closed to false on non-CUDA
 		// hosts, where the arg builder keeps the CPU scale path anyway.
 		HasScaleCuda: engine.FFmpegSupportsScaleCuda(ffmpegPath),
+		// Whether QSV can decode 10-bit sources on THIS host: some Intel drivers
+		// fail the p010 GPU→system transfer and emit zero bytes. Probed only on
+		// QSV hosts — it spawns two ffmpeg runs, and the value is meaningless
+		// (and always false) anywhere else.
+		HasQSV10BitDecode: hw == engine.HWAccelQSV && engine.FFmpegSupportsQSV10BitDecode(ffmpegPath),
 	}
 }
