@@ -724,6 +724,15 @@ nothing to resume.
 | `{start}` | Resume position in seconds. Absent when starting from the beginning. |
 | `{title}` | Display title for the player window/OSD. |
 | `{alang}` / `{slang}` | Preferred audio / subtitle languages, comma-separated. |
+| `{subfile}` | URL of an external subtitle file to side-load. **First one only** — see the note below. |
+
+> **`{subfile}` carries a single subtitle.** unarr can side-load several
+> external subtitle files (AI translations and shared provider subtitles), but a
+> placeholder always substitutes inside ONE argument, so a template cannot emit
+> a repeatable flag more than once. `{subfile}` therefore expands to the first
+> subtitle only, and the argument disappears when there is none. The built-in
+> players (mpv, Celluloid, VLC) receive **all** of them — use one of those if
+> you want the full subtitle menu.
 
 ```toml
 # Flatpak VLC (no `vlc` on PATH)

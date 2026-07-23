@@ -2,7 +2,7 @@ package main
 
 // Protocol-handler mode: the web emits deep-links of the form
 //
-//	unarr://play?url=<stream>&start=<sec>&title=<t>&alang=<csv>&slang=<csv>
+//	unarr://play?url=<stream>&start=<sec>&title=<t>&alang=<csv>&slang=<csv>&sub=<url>…
 //
 // and the OS hands them to `unarr-desktop --open <url>` (or as the bare argv —
 // %u / %1 substitution). This file owns argument detection and the PARSER; the
@@ -16,6 +16,13 @@ package main
 // types and invalid values are DROPPED (never forwarded raw), and the title is
 // stripped of control characters and length-capped. The second half of the
 // defense — `--` argv terminators and no shell — is in player.go.
+//
+// COMPATIBILITY: known parameters are read with q.Get / q[...], never by
+// enumerating what the link happens to carry, so a NEWER web that adds a
+// parameter (as `sub=` was added) is played correctly by an OLDER binary — it
+// simply ignores what it doesn't know. That property is load-bearing: the
+// scheme launch is fire-and-forget, so the web can never learn which handler
+// version is installed and cannot gate features on it.
 
 import (
 	"fmt"
@@ -39,7 +46,20 @@ type playRequest struct {
 	// player choice and by the no-player-installed fallback, both of which
 	// otherwise dump the raw .mkv into the browser.
 	WebURL string
+	// SubFiles are EXTERNAL subtitle files to side-load (`sub=`, repeatable) —
+	// http(s) URLs of the web's WebVTT proxy carrying AI translations and the
+	// shared provider-subtitle cache. Distinct from SLang, which only ranks the
+	// tracks ALREADY inside the container: these are files the player fetches.
+	// Same http(s) whitelist as URL/WebURL, capped at maxSubFiles.
+	SubFiles []string
 }
+
+// maxSubFiles bounds how many `sub=` entries one link can carry. Each becomes a
+// player flag, and argv is finite (Windows caps a command line at ~32 KiB), so
+// an unbounded list is a way for a hostile page to make the spawn fail. The web
+// caps at the same number, but this is the cap that MATTERS: the link is
+// attacker-controlled input.
+const maxSubFiles = 8
 
 // browserURL is where "open this in the browser" should go: the web player
 // page when the link carried one, else the stream itself (a browser can still
@@ -133,7 +153,62 @@ func parsePlayURL(raw string) (playRequest, error) {
 	req.Title = sanitizeTitle(q.Get("title"))
 	req.ALang = parseLangCSV(q.Get("alang"))
 	req.SLang = parseLangCSV(q.Get("slang"))
+	req.SubFiles = parseSubFiles(q["sub"])
 	return req, nil
+}
+
+// parseSubFiles validates the repeated `sub=` parameters into side-loadable
+// subtitle URLs. Each goes through the SAME http(s) gate as the stream url —
+// file:// would turn a media player into a local-file reader for any web page.
+// An invalid entry is DROPPED, never fatal: subtitles are an enhancement, and
+// refusing to play a movie over one bad sub link would be the worse failure.
+// Order is preserved (the web sends them ranked) and the list is capped.
+//
+// SECURITY — DO NOT "clean up" the '#' rejection below. VLC chains several MRLs
+// inside ONE --input-slave option using '#' as the separator (see vlcArgv), and
+// a URL fragment is NOT part of what validateHTTPURL's scheme whitelist covers:
+// `https://ok.example/a#file:///etc/passwd` is a perfectly valid https URL, so
+// the whitelist passes it, and VLC then splits on '#' and opens the SECOND MRL
+// (file://, smb://, anything) as a slave input. That smuggles the exact schemes
+// the whitelist exists to keep out — an arbitrary local-file read driven by any
+// web page. Fragments carry no meaning for a subtitle file anyway (the server
+// never mints one), so we REJECT rather than strip: a link carrying one is
+// either a bug or an attack, and dropping the entry keeps the failure loud in
+// stderr instead of silently rewriting attacker input into something we then
+// hand to a player. Rejecting also covers players other than VLC that might
+// give '#' its own meaning, which stripping-per-player would not.
+func parseSubFiles(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out []string
+	for _, s := range raw {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if strings.Contains(s, "#") {
+			fmt.Fprintf(os.Stderr, "unarr-desktop: ignoring subtitle: %q contains '#' (VLC MRL separator — chained inputs are not allowed)\n", s)
+			continue
+		}
+		normalized, err := validateHTTPURL(s, "subtitle url")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "unarr-desktop: ignoring subtitle:", err)
+			continue
+		}
+		// Belt and braces: validateHTTPURL re-serializes, and a fragment could
+		// in principle re-appear from a decoded form. Nothing downstream wants
+		// one, so refuse anything that still carries it after normalization.
+		if strings.Contains(normalized, "#") {
+			fmt.Fprintf(os.Stderr, "unarr-desktop: ignoring subtitle: %q normalizes to a URL with a fragment\n", s)
+			continue
+		}
+		out = append(out, normalized)
+		if len(out) == maxSubFiles {
+			break
+		}
+	}
+	return out
 }
 
 // validateHTTPURL enforces the scheme whitelist that IS the security model

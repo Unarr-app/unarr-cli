@@ -25,18 +25,34 @@ import (
 // request. An empty value drops the whole token containing it, so a template
 // like `--start={start}` simply vanishes when there is nothing to resume —
 // no player has to understand an empty flag.
+//
+// {subfile} is deliberately the FIRST external subtitle only, not the whole
+// list. Substitution happens INSIDE a single token (that's what keeps a
+// template from ever splitting into extra arguments), so a repeatable flag
+// like `--sub-file={subfile}` cannot be emitted N times from one template —
+// the only alternatives would be joining them with a separator no player
+// agrees on, or teaching the template language to repeat, which would break
+// the one-token guarantee. The custom command is an escape hatch for an
+// unsupported player, not the main path: a user who needs every subtitle track
+// should use one of the built-in dialects (mpv/Celluloid/VLC), which get them
+// all. Documented in the config reference alongside the placeholder list.
 func playerPlaceholders(req playRequest) map[string]string {
 	start := ""
 	if req.Start > 0 {
 		start = strconv.Itoa(req.Start)
 	}
+	subFile := ""
+	if len(req.SubFiles) > 0 {
+		subFile = req.SubFiles[0]
+	}
 	return map[string]string{
-		"{url}":   req.URL,
-		"{web}":   req.browserURL(),
-		"{start}": start,
-		"{title}": req.Title,
-		"{alang}": strings.Join(req.ALang, ","),
-		"{slang}": strings.Join(req.SLang, ","),
+		"{url}":     req.URL,
+		"{web}":     req.browserURL(),
+		"{start}":   start,
+		"{title}":   req.Title,
+		"{alang}":   strings.Join(req.ALang, ","),
+		"{slang}":   strings.Join(req.SLang, ","),
+		"{subfile}": subFile,
 	}
 }
 

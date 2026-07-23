@@ -448,3 +448,155 @@ func TestCelluloidArgv(t *testing.T) {
 		t.Fatalf("celluloidArgv() = %v, want %v", got, want)
 	}
 }
+
+// TestBuildPlayerArgvSubFiles pins the per-dialect spelling of external
+// subtitle side-loading. The three that support it disagree on BOTH the flag
+// and the arity, so each is asserted on the exact argv:
+//   - mpv:       --sub-file=<url>, repeated (its option appends a track)
+//   - Celluloid: --mpv-sub-file=<url>, repeated (GOption mirror of mpv's)
+//   - VLC:       --input-slave=<url1>#<url2>, ONE option — its --sub-file is
+//     for local paths, while input-slave takes MRLs and chains them with '#'
+//
+// In every case the flags precede the `--` terminator (the URL must stay the
+// last, unparseable-as-a-switch element).
+func TestBuildPlayerArgvSubFiles(t *testing.T) {
+	const (
+		streamURL = "https://cdn.example.com/v.mkv"
+		subA      = "https://unarr.app/api/internal/subtitles/proxy?token=a"
+		subB      = "https://unarr.app/api/internal/subtitles/proxy?token=b"
+	)
+	req := playRequest{URL: streamURL, Start: 12, SubFiles: []string{subA, subB}}
+
+	tests := []struct {
+		name string
+		p    player
+		want []string
+	}{
+		{
+			name: "mpv repeats --sub-file before the terminator",
+			p:    player{kind: playerMPV, bin: "/usr/bin/mpv"},
+			want: []string{
+				"/usr/bin/mpv", "--start=12",
+				"--sub-file=" + subA,
+				"--sub-file=" + subB,
+				"--", streamURL,
+			},
+		},
+		{
+			name: "celluloid repeats --mpv-sub-file before the terminator",
+			p:    player{kind: playerCelluloid, bin: "/usr/bin/celluloid"},
+			want: []string{
+				"/usr/bin/celluloid", "--mpv-start=12",
+				"--mpv-sub-file=" + subA,
+				"--mpv-sub-file=" + subB,
+				"--", streamURL,
+			},
+		},
+		{
+			name: "vlc joins them into one --input-slave with #",
+			p:    player{kind: playerVLC, bin: "/usr/bin/vlc"},
+			want: []string{
+				"/usr/bin/vlc", "--start-time=12",
+				"--input-slave=" + subA + "#" + subB,
+				"--", streamURL,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := buildPlayerArgv(tt.p, req)
+			if err != nil {
+				t.Fatalf("buildPlayerArgv() unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("buildPlayerArgv() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// Dialects with no way to express extras drop the subtitles SILENTLY —
+	// documented behaviour, asserted so a future edit can't turn it into a
+	// half-applied flag or a hard failure.
+	t.Run("iina drops sub files silently", func(t *testing.T) {
+		got, err := buildPlayerArgv(player{kind: playerIINA, bin: "/usr/bin/open"}, req)
+		if err != nil {
+			t.Fatalf("buildPlayerArgv() unexpected error: %v", err)
+		}
+		want := []string{"/usr/bin/open", "-a", "IINA", streamURL}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("buildPlayerArgv() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("system player keeps the OS argv untouched", func(t *testing.T) {
+		osArgv := []string{"xdg-open", streamURL}
+		got, err := buildPlayerArgv(player{kind: playerSystem, bin: "xdg-open", argv: osArgv}, req)
+		if err != nil {
+			t.Fatalf("buildPlayerArgv() unexpected error: %v", err)
+		}
+		if !reflect.DeepEqual(got, osArgv) {
+			t.Errorf("buildPlayerArgv() = %q, want %q", got, osArgv)
+		}
+	})
+
+	// END-TO-END proof of the MRL-smuggling fix: a hostile link goes through
+	// the REAL parser and the REAL argv builder, and the resulting VLC command
+	// line must not contain a second MRL. Asserting on argv (not just on
+	// parseSubFiles) is the point — '#' only becomes dangerous once vlcArgv
+	// joins the list into one --input-slave option, so this is the assertion
+	// that would actually fail if someone "cleaned up" the rejection in
+	// parseSubFiles.
+	t.Run("fragment-smuggled MRLs never reach the VLC argv", func(t *testing.T) {
+		hostile := []string{
+			"https://ok.example/a.vtt#file:///etc/passwd",
+			"https://ok.example/b.vtt#smb://attacker/share/x",
+			"https://ok.example/c.vtt#",
+			"https://ok.example/d.vtt#https://evil.example/e.vtt",
+		}
+		for _, h := range hostile {
+			req, err := parsePlayURL(linkWithSubs(streamURL, h, subA))
+			if err != nil {
+				t.Fatalf("parsePlayURL(%q) unexpected error: %v", h, err)
+			}
+			got, err := buildPlayerArgv(player{kind: playerVLC, bin: "vlc"}, req)
+			if err != nil {
+				t.Fatalf("buildPlayerArgv() unexpected error: %v", err)
+			}
+			want := []string{"vlc", "--input-slave=" + subA, "--", streamURL}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("vlc argv for %q = %q, want %q", h, got, want)
+			}
+			for _, arg := range got {
+				if strings.Contains(arg, "#") {
+					t.Errorf("vlc argv for %q carries a '#' MRL separator: %q", h, arg)
+				}
+				for _, scheme := range []string{"file://", "smb://", "ftp://", "javascript:", "data:"} {
+					if strings.Contains(arg, scheme) {
+						t.Errorf("vlc argv for %q leaked a %s MRL: %q", h, scheme, arg)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("single sub file emits one flag per dialect", func(t *testing.T) {
+		one := playRequest{URL: streamURL, SubFiles: []string{subA}}
+		cases := []struct {
+			p    player
+			want []string
+		}{
+			{player{kind: playerMPV, bin: "mpv"}, []string{"mpv", "--sub-file=" + subA, "--", streamURL}},
+			{player{kind: playerVLC, bin: "vlc"}, []string{"vlc", "--input-slave=" + subA, "--", streamURL}},
+			{player{kind: playerCelluloid, bin: "cel"}, []string{"cel", "--mpv-sub-file=" + subA, "--", streamURL}},
+		}
+		for _, c := range cases {
+			got, err := buildPlayerArgv(c.p, one)
+			if err != nil {
+				t.Fatalf("%s: %v", c.p.kind, err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("%s argv = %q, want %q", c.p.kind, got, c.want)
+			}
+		}
+	})
+}
