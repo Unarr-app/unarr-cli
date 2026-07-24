@@ -96,6 +96,17 @@ type RegisterRequest struct {
 	// self-update refuses to run in Docker). No omitempty: false (a binary
 	// install) is a meaningful state the server must see to keep the button.
 	IsDocker bool `json:"isDocker"`
+	// InstallType tells the web how this agent was installed so it can measure
+	// CLI-vs-desktop adoption — a split IsDocker can't express, since the
+	// "desktop" build is the SAME unarr binary plus the unarr-desktop tray
+	// companion sitting next to it, not a separate artifact. Values: "desktop"
+	// (unarr-desktop present in the daemon's own dir), "docker" (containerised),
+	// "cli" (bare daemon). No omitempty (same as IsDocker two fields up): the
+	// value is derived fresh each register and DetectInstallType never returns
+	// "", so the field is always present on the wire — no cross-file invariant
+	// to keep the tag honest. The web only overwrites the column when a value
+	// arrives, so a partial registrar (status/doctor) still keeps the last one.
+	InstallType string `json:"installType"`
 	// PreferredMethods is the agent's ordered download-method preference from
 	// config.toml (e.g. ["debrid","usenet"]). The web honours it so a "debrid
 	// only" agent is never handed a torrent task.
