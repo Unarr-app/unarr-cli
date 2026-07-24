@@ -46,7 +46,12 @@ func playerPlaceholders(req playRequest) map[string]string {
 		subFile = req.SubFiles[0]
 	}
 	return map[string]string{
-		"{url}":     req.URL,
+		"{url}": req.URL,
+		// {media} is the sting+feature playlist when the link carried one, else
+		// the bare feature URL (mediaArg). A template that wants the brand sting
+		// uses {media} where it would put {url}; {url} stays the feature alone so
+		// existing templates (and their {subfile} flags) keep their exact behavior.
+		"{media}":   mediaArg(req),
 		"{web}":     req.browserURL(),
 		"{start}":   start,
 		"{title}":   req.Title,
@@ -57,25 +62,27 @@ func playerPlaceholders(req playRequest) map[string]string {
 }
 
 // expandPlayerCommand turns a tokenized template into the argv to spawn.
-// Tokens whose placeholders are all empty are dropped; {url} is appended when
-// the template never mentions it, so a bare `player_command = "myplayer"`
-// still plays something.
+// Tokens whose placeholders are all empty are dropped; the media argument is
+// appended when the template never mentions one, so a bare
+// `player_command = "myplayer"` still plays something — and gets the sting
+// playlist when there is one (mediaArg), so the custom escape hatch shows the
+// ident just like the built-in dialects.
 func expandPlayerCommand(tmpl []string, req playRequest) []string {
 	values := playerPlaceholders(req)
 	argv := make([]string, 0, len(tmpl)+1)
-	mentionsURL := false
+	mentionsMedia := false
 	for _, tok := range tmpl {
 		expanded, ok := expandToken(tok, values)
 		if !ok {
 			continue // placeholder had no value → the flag is not applicable
 		}
-		if strings.Contains(tok, "{url}") || strings.Contains(tok, "{web}") {
-			mentionsURL = true
+		if strings.Contains(tok, "{url}") || strings.Contains(tok, "{media}") || strings.Contains(tok, "{web}") {
+			mentionsMedia = true
 		}
 		argv = append(argv, expanded)
 	}
-	if !mentionsURL {
-		argv = append(argv, req.URL)
+	if !mentionsMedia {
+		argv = append(argv, mediaArg(req))
 	}
 	return argv
 }
