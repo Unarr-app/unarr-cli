@@ -1,10 +1,21 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
+
+// isStorageStatErr reports whether a stat/read error means the DESTINATION mount
+// faulted rather than the file being genuinely absent: an I/O error (EIO) or a
+// stale NFS handle (ESTALE) is a dropped/stalled mount, not corruption or a
+// missing source. Those must be classified as storage (retry once, then fail
+// with the storage message) instead of a generic "file not found".
+func isStorageStatErr(err error) bool {
+	return errors.Is(err, syscall.EIO) || errors.Is(err, syscall.ESTALE)
+}
 
 // verify checks that a downloaded file or directory is valid.
 func verify(result *Result) error {
@@ -14,6 +25,11 @@ func verify(result *Result) error {
 
 	fi, err := os.Stat(result.FilePath)
 	if err != nil {
+		// A mount that dropped between the download and this stat (EIO/ESTALE) is a
+		// storage failure, not a missing/corrupt file — route it to failStorage.
+		if isStorageStatErr(err) {
+			return storageErr("stat_failed", filepath.Dir(result.FilePath), "could not read back the download in %s — is your drive/NAS still connected? (%v)", filepath.Dir(result.FilePath), err)
+		}
 		return fmt.Errorf("file not found: %w", err)
 	}
 

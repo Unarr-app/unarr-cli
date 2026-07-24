@@ -224,7 +224,9 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	// Step 5: Create download directory for this task
 	taskDir := filepath.Join(outputDir, sanitizeDir(task.Title))
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create dir: %w", err)
+		// Download folder gone/read-only/unmounted — a StorageError (retry once,
+		// then pause with a storage message), not a transport failure.
+		return nil, storageErr("mkdir_failed", outputDir, "could not create download folder %s — is your drive/NAS connected and writable? (%v)", taskDir, err)
 	}
 
 	// Register tracker and taskDir for Cancel() cleanup
@@ -380,7 +382,10 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	// (organize, stream, ffprobe) would then see a short file. fsync commits it now
 	// and surfaces a write-back error here, where it's actionable.
 	if err := syncTree(finalPath); err != nil {
-		return nil, fmt.Errorf("flush to disk failed (write-back/network-mount error): %w", err)
+		// Destination failed to persist — a StorageError, not source corruption.
+		// Same handling as the debrid path: retry once, then pause as resumable with
+		// a "check your download folder / NAS" message instead of a generic failure.
+		return nil, storageErr("flush_failed", filepath.Dir(finalPath), "could not save to %s — flush to disk failed (write-back/network-mount error): %v", filepath.Dir(finalPath), err)
 	}
 
 	// Get final file size — after the durable flush, so the size is real. Walk

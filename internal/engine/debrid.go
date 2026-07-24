@@ -181,12 +181,18 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 	}
 
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-		return nil, fmt.Errorf("create directory: %w", err)
+		// Can't even create the target dir — the download folder is gone/read-only/
+		// unmounted (a NAS that dropped, a removed drive). A StorageError, not a
+		// transport failure: another method would write to the same dead folder.
+		// Retry once (a mount can re-appear), then pause with a storage message.
+		return nil, storageErr("mkdir_failed", outputDir, "could not create download folder %s — is your drive/NAS connected and writable? (%v)", filepath.Dir(destPath), err)
 	}
 
 	file, err := os.OpenFile(destPath, flags, 0o644)
 	if err != nil {
-		return nil, fmt.Errorf("open file: %w", err)
+		// Same class: the directory resolved but the file can't be opened for write
+		// (permissions, read-only mount). Storage, not source.
+		return nil, storageErr("open_failed", outputDir, "could not open the download file in %s for writing — check your folder/drive permissions (%v)", filepath.Dir(destPath), err)
 	}
 	// Guarded close: error paths below clean up the fd via defer, while the
 	// success path closes explicitly and inspects the error (a swallowed Close
@@ -292,11 +298,15 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 	if err := file.Sync(); err != nil {
 		_ = closeFile()
 		_ = os.Remove(destPath) // uncertain on-disk state — drop it so the retry starts clean
-		return nil, integrityErr("flush_failed", "flush to disk failed (write-back/network-mount error): %v", err)
+		// The bytes were correct; the DESTINATION failed to persist them. This is a
+		// StorageError, not integrity corruption — re-downloading writes to the same
+		// broken mount. The manager retries once (a mount can briefly stall) then
+		// pauses as resumable with a "check your download folder / NAS" message.
+		return nil, storageErr("flush_failed", outputDir, "could not save to %s — flush to disk failed (write-back/network-mount error): %v", outputDir, err)
 	}
 	if err := closeFile(); err != nil {
 		_ = os.Remove(destPath)
-		return nil, integrityErr("flush_failed", "close file failed (write-back/network-mount error): %v", err)
+		return nil, storageErr("close_failed", outputDir, "could not save to %s — close file failed (write-back/network-mount error): %v", outputDir, err)
 	}
 
 	// Safety net: after a durable flush, the on-disk size must match what we wrote.
@@ -309,8 +319,11 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 		if rmErr := os.Remove(destPath); rmErr != nil {
 			log.Printf("[%s] failed to remove corrupt partial %s: %v", agent.ShortID(task.ID), destPath, rmErr)
 		}
-		return nil, integrityErr("truncated", "post-write size mismatch: wrote %s but file is %s on disk — likely a stalled or failing storage mount (%s)",
-			formatBytes(downloaded), formatBytes(fi.Size()), outputDir)
+		// A post-flush short file means the mount dropped the write-back even though
+		// Sync/Close returned nil — a DESTINATION failure, not source corruption. Same
+		// StorageError path (retry once, then pause) rather than looping re-downloads.
+		return nil, storageErr("flush_failed", outputDir, "could not save to %s — post-write size mismatch: wrote %s but file is %s on disk (likely a stalled or failing storage mount)",
+			outputDir, formatBytes(downloaded), formatBytes(fi.Size()))
 	}
 
 	log.Printf("[%s] debrid download complete: %s (%s)", agent.ShortID(task.ID), fileName, formatBytes(downloaded))
