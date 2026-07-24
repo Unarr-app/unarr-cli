@@ -289,6 +289,7 @@ func (d *Daemon) register(ctx context.Context, park bool) error {
 		VPNServer:          vpnServer,
 		FunnelURL:          d.funnelURL,
 		IsDocker:           RunningInDocker(),
+		InstallType:        DetectInstallType(),
 		PreferredMethods:   &methods,
 		MaxStreamSessions:  d.cfg.MaxStreamSessions,
 	}
