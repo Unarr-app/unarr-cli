@@ -41,7 +41,8 @@ Environment variables override config file values:
   UNARR_API_KEY        API key
   UNARR_API_URL        API URL
   UNARR_COUNTRY        Default country code
-  UNARR_DOWNLOAD_DIR   Download directory`,
+  UNARR_DOWNLOAD_DIR   Download directory
+  UNARR_TELEMETRY      Lifecycle telemetry: off to disable (default on)`,
 		Example: `  unarr config               # Interactive menu
   unarr config downloads     # Jump to downloads settings
   unarr config region        # Jump to region settings`,

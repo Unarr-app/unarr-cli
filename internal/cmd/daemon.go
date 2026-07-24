@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -113,14 +114,28 @@ func runDaemonStart() error {
 	cfg := loadConfig()
 	bold := color.New(color.Bold)
 
-	// Validate config
+	// Validate config. A missing API key / agent ID means we have no credential
+	// to authenticate a telemetry post with, so these two can't be reported —
+	// they're the one blind spot, and inherently so.
 	if cfg.Auth.APIKey == "" {
 		return fmt.Errorf("no API key configured — run 'unarr init' first")
 	}
 	if cfg.Agent.ID == "" {
 		return fmt.Errorf("no agent ID — run 'unarr init' first")
 	}
+	// From here on we have a credential, so a start-failure CAN be reported.
+	// emitStartFailure builds a one-shot emitter (no-op when telemetry is off)
+	// and blocks briefly to land the event before this function returns non-nil
+	// and the process exits. See internal/agent/telemetry.go.
+	emitStartFailure := func(eventType, detail string) {
+		agent.NewEmitter(
+			newAgentClientFromConfig(cfg, "unarr/"+Version),
+			cfg.TelemetryEnabled(), cfg.Agent.ID, Version, runtime.GOOS,
+		).EmitSync(eventType, detail)
+	}
+
 	if cfg.Download.Dir == "" {
+		emitStartFailure(agent.EventConfigError, "no download directory configured")
 		return fmt.Errorf("no download directory — run 'unarr init' first")
 	}
 
@@ -132,14 +147,17 @@ func runDaemonStart() error {
 	// lock path and runs concurrently (this is how the dev agent coexists).
 	lockDir := config.Dir()
 	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		emitStartFailure(agent.EventPermissionDenied, "create config dir: "+err.Error())
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	instanceLock := flock.New(config.LockPath())
 	locked, err := instanceLock.TryLock()
 	if err != nil {
+		emitStartFailure(agent.EventDaemonStartFail, "acquire instance lock: "+err.Error())
 		return fmt.Errorf("acquire instance lock %s: %w", config.LockPath(), err)
 	}
 	if !locked {
+		emitStartFailure(agent.EventDaemonStartFail, "another daemon already running for this config")
 		return fmt.Errorf("another unarr daemon is already running for this config (%s).\n"+
 			"Stop it with 'unarr stop', or use a separate UNARR_CONFIG_DIR to run a second agent", lockDir)
 	}
@@ -151,11 +169,13 @@ func runDaemonStart() error {
 
 	// Validate configured paths are safe
 	if err := cfg.ValidatePaths(); err != nil {
+		emitStartFailure(agent.EventConfigError, "unsafe configuration: "+err.Error())
 		return fmt.Errorf("unsafe configuration: %w", err)
 	}
 
 	// Ensure download dir exists
 	if err := os.MkdirAll(cfg.Download.Dir, 0o755); err != nil {
+		emitStartFailure(agent.EventPermissionDenied, "create download dir: "+err.Error())
 		return fmt.Errorf("create download dir: %w", err)
 	}
 
@@ -269,6 +289,12 @@ func runDaemonStart() error {
 
 	// Create daemon
 	d := agent.NewDaemon(daemonCfg, agentClient)
+
+	// Lifecycle telemetry emitter — onboarding + exit events so the server sees
+	// WHY an agent that registered never came back. No-op when telemetry is
+	// disabled ([telemetry] enabled=false / UNARR_TELEMETRY=off): additive only,
+	// never degrades the daemon. Identity captured once (agentId/version/os).
+	telemetry := agent.NewEmitter(agentClient, cfg.TelemetryEnabled(), cfg.Agent.ID, Version, runtime.GOOS)
 
 	// Single owner for the credential. cfg stays the boot snapshot from here on:
 	// read-only, so nothing races on it.
@@ -1255,6 +1281,10 @@ func runDaemonStart() error {
 	select {
 	case sig := <-sigCh:
 		fmt.Printf("\n  Received %s, shutting down...\n", sig)
+		// User-initiated stop (Ctrl+C, `unarr stop`, service stop). Emit BEFORE
+		// draining so the event lands even if drain takes the full 30s. Sync emit:
+		// the process is exiting, a backgrounded post would be killed first.
+		telemetry.EmitSync(agent.EventExitUserQuit, sig.String())
 		cancelAllStreamContexts()
 		cancelAllPlayerSessions()
 		streamSrv.Shutdown(context.Background())
@@ -1281,9 +1311,16 @@ func runDaemonStart() error {
 		// (deleted from the dashboard). Wipe it and exit cleanly so the service
 		// supervisor doesn't restart-loop against a 410; user must re-login.
 		if agent.IsRevoked(err) {
+			// Clean, expected exit (credential revoked from the dashboard) — not a
+			// crash. exit_normal so the churn view doesn't count a deliberate
+			// dashboard delete as a failure.
+			telemetry.EmitSync(agent.EventExitNormal, "credential revoked")
 			reportAgentRevoked(creds, err)
 			return nil
 		}
+		// The daemon's own run loop returned an error (not a signal, not a
+		// revocation) — the process is going down unexpectedly.
+		telemetry.EmitSync(agent.EventExitCrash, err.Error())
 		return err
 	}
 }

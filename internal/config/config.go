@@ -22,6 +22,7 @@ type Config struct {
 	Notifications NotificationsConfig `toml:"notifications"`
 	General       GeneralConfig       `toml:"general"`
 	Library       LibraryConfig       `toml:"library"`
+	Telemetry     TelemetryConfig     `toml:"telemetry,omitempty"`
 	Desktop       DesktopConfig       `toml:"desktop,omitempty"`
 }
 
@@ -285,6 +286,50 @@ type GeneralConfig struct {
 	Country string `toml:"country"`
 	Locale  string `toml:"locale"`
 	NoColor bool   `toml:"no_color"`
+}
+
+// TelemetryConfig gates the agent's lifecycle telemetry: the onboarding events
+// (login_ok, first_sync, config/port/permission start-failures) and exit events
+// (user_quit, crash, normal) the daemon reports so the server can see WHY an
+// agent that registered never came back — instead of the current black box
+// between register and the first download.
+//
+// Opt-out, off with a single switch. Telemetry is purely additive: disabling it
+// must never degrade the product — the daemon still registers, syncs, and
+// downloads exactly the same. When disabled the agent emits NOTHING (no event
+// posts, and no exitReason on sync).
+type TelemetryConfig struct {
+	// Enabled defaults to true when unset. Pointer-vs-bool because Go's
+	// zero-value bool would collapse "unset" (→ default on) and an explicit
+	// `enabled = false` into the same false — same discipline as
+	// DaemonConfig.AutoUpgrade. Override at runtime with UNARR_TELEMETRY=off
+	// (env wins, applied by TelemetryEnabled — for headless/docker where editing
+	// config.toml is awkward).
+	Enabled *bool `toml:"enabled"`
+}
+
+// TelemetryEnabled resolves whether lifecycle telemetry should be emitted.
+// Precedence (highest first):
+//  1. UNARR_TELEMETRY env var — "off"/"0"/"false"/"no"/"disabled" (any case)
+//     force it OFF; "on"/"1"/"true"/"yes" force it ON. Env wins so a headless
+//     or docker deployment can opt out without editing config.toml.
+//  2. [telemetry] enabled in config.toml.
+//  3. Default: true (unset → on).
+func (c *Config) TelemetryEnabled() bool {
+	if v, ok := os.LookupEnv("UNARR_TELEMETRY"); ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "off", "0", "false", "no", "disabled":
+			return false
+		case "on", "1", "true", "yes", "enabled":
+			return true
+		}
+		// An unrecognised value falls through to the config/default below rather
+		// than silently disabling — a typo must not turn telemetry off unnoticed.
+	}
+	if c.Telemetry.Enabled == nil {
+		return true
+	}
+	return *c.Telemetry.Enabled
 }
 
 type LibraryConfig struct {

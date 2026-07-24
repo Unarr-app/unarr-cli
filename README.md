@@ -771,6 +771,36 @@ max_download_speed = "500KB"   # 500 kilobytes/sec
 max_download_speed = "0"       # unlimited (default)
 ```
 
+### Telemetry
+
+The agent reports a small set of **lifecycle events** to the server — enough to
+see why an agent that connected never came back:
+
+- **Onboarding:** login succeeded, first sync completed, or a start-up failure
+  (missing config, a stream port already in use, a permission error).
+- **Exit:** whether the daemon was stopped by you, crashed, or exited normally.
+
+No file names, library contents, search terms, or download activity are sent —
+only these lifecycle signals plus the agent's version and OS. It helps us fix the
+setup problems that make agents fail on the first run.
+
+**To turn it off completely:**
+
+```toml
+[telemetry]
+enabled = false
+```
+
+or with an environment variable (wins over the config file — handy for
+headless/Docker):
+
+```bash
+UNARR_TELEMETRY=off unarr start
+```
+
+When disabled the agent sends **nothing** — it still registers, syncs, and
+downloads exactly the same. Telemetry is purely additive.
+
 ## Shell Completion
 
 Generate tab-completion scripts for your shell:
