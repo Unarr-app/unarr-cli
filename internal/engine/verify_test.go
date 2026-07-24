@@ -1,8 +1,10 @@
 package engine
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -67,5 +69,26 @@ func TestVerifyNoExpectedSize(t *testing.T) {
 	err := verify(&Result{FilePath: path, Size: 0})
 	if err != nil {
 		t.Errorf("no expected size should pass: %v", err)
+	}
+}
+
+func TestIsStorageStatErr(t *testing.T) {
+	// EIO / ESTALE = the mount faulted → storage.
+	if !isStorageStatErr(syscall.EIO) {
+		t.Error("isStorageStatErr(EIO) = false, want true (I/O error = dropped mount)")
+	}
+	if !isStorageStatErr(syscall.ESTALE) {
+		t.Error("isStorageStatErr(ESTALE) = false, want true (stale NFS handle)")
+	}
+	// Wrapped, as os.Stat returns them.
+	if !isStorageStatErr(&os.PathError{Op: "stat", Path: "/mnt/nas/x", Err: syscall.EIO}) {
+		t.Error("isStorageStatErr(*PathError{EIO}) = false, want true")
+	}
+	// A genuinely missing file (ENOENT) is NOT storage — it stays "file not found".
+	if isStorageStatErr(syscall.ENOENT) {
+		t.Error("isStorageStatErr(ENOENT) = true — a missing file must NOT read as a storage fault")
+	}
+	if isStorageStatErr(errors.New("some other error")) {
+		t.Error("isStorageStatErr(generic) = true, want false")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/notify"
@@ -61,7 +62,26 @@ type Manager struct {
 	// shutdown keeps its store entry (so it resumes), unlike a genuine terminal.
 	taskStore    taskPersister
 	shuttingDown atomic.Bool
+
+	// storageFailedAt records when a task last failed with a StorageError, so
+	// Submit can refuse to re-run it during a cooldown. A storage failure is
+	// terminal on the server, but between the agent reporting `failed` and the
+	// server persisting it, an in-flight sync can re-claim the still-"pending"
+	// row and re-dispatch it — a burst of pointless full re-downloads to the same
+	// broken mount before the failed state settles (incident 2026-07-24). This
+	// agent-side guard closes that window regardless of why the server re-hands
+	// it: a task that just hit storage trouble is not retried until the cooldown
+	// elapses (a manual Retry from the web is a fresh user intent — see the note
+	// in Submit — and is NOT blocked, because the web clears the error first).
+	storageFailMu   sync.Mutex
+	storageFailedAt map[string]time.Time
 }
+
+// storageFailCooldown is how long Submit refuses to re-run a task that just
+// failed with a StorageError. Long enough to outlast the sync/claim race that
+// re-dispatches a not-yet-persisted failure, short enough that a genuine manual
+// retry minutes later is never affected.
+const storageFailCooldown = 60 * time.Second
 
 // taskPersister is the resume store the manager records in-flight downloads to.
 // Satisfied by *agent.ActiveTaskStore; an interface so tests can inject a fake.
@@ -86,17 +106,31 @@ func NewManager(cfg ManagerConfig, reporter *ProgressReporter, downloaders ...Do
 	}
 
 	return &Manager{
-		cfg:         cfg,
-		reporter:    reporter,
-		downloaders: dlMap,
-		active:      make(map[string]*Task),
-		cancels:     make(map[string]context.CancelFunc),
-		sem:         make(chan struct{}, cfg.MaxConcurrent),
+		cfg:             cfg,
+		reporter:        reporter,
+		downloaders:     dlMap,
+		active:          make(map[string]*Task),
+		cancels:         make(map[string]context.CancelFunc),
+		sem:             make(chan struct{}, cfg.MaxConcurrent),
+		storageFailedAt: make(map[string]time.Time),
 	}
 }
 
 // Submit queues a task for download. Non-blocking if capacity available.
 func (m *Manager) Submit(ctx context.Context, at agent.Task) {
+	// Storage-failure cooldown: refuse to re-run a task that just failed writing
+	// to its destination. Between the agent reporting `failed` and the server
+	// persisting it, an in-flight sync can re-claim the still-"pending" row and
+	// re-dispatch it — a burst of full re-downloads to the same broken mount. A
+	// force-started task bypasses this (an explicit user "force start" is fresh
+	// intent). A normal manual Retry from the web clears the error and re-pends
+	// minutes later (after the user fixes storage), well past the cooldown.
+	if !at.ForceStart && m.inStorageCooldown(at.ID) {
+		log.Printf("[%s] skipping re-dispatch — failed writing to storage <%s ago (fix your download folder, then retry)",
+			agent.ShortID(at.ID), storageFailCooldown)
+		return
+	}
+
 	task := NewTaskFromAgent(at)
 	// Event-driven uplink: push every status transition to the server immediately.
 	task.SetOnChange(m.OnStateChange)
@@ -399,12 +433,33 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 	// file. (User-chosen "both" policy: auto-retry, then visible-damaged.)
 	const maxIntegrityAttempts = 3
 
+	// A StorageError (fsync/close I/O error, stalled NFS/SMB mount) means the
+	// DESTINATION failed, not the bytes — re-downloading writes to the same broken
+	// mount and burns bandwidth. Retry just ONCE (a mount can briefly stall and
+	// recover), then PAUSE as resumable with a storage-specific message. Counted
+	// SEPARATELY from integrity attempts so a storage stall never eats the
+	// corruption-retry budget (and vice-versa). Incident 2026-07-24: a debrid
+	// download of a healthy file looped because the NFS server timed out on the
+	// final fsync — the old code mislabeled it flush_failed integrity corruption.
+	const maxStorageAttempts = 2
+	storageAttempt := 0
+
 	for attempt := 1; ; attempt++ {
 		result, err := m.attemptDownload(ctx, task)
 		if err != nil {
 			if IsInsufficientDisk(err) {
 				// Terminal — another source would fill the same disk.
 				m.fail(ctx, task, err.Error())
+				return
+			}
+			if IsStorage(err) {
+				storageAttempt++
+				if storageAttempt < maxStorageAttempts {
+					log.Printf("[%s] storage write failed (attempt %d/%d), retrying once in case the mount recovered: %v",
+						agent.ShortID(task.ID), storageAttempt, maxStorageAttempts, err)
+					continue
+				}
+				m.failStorage(ctx, task, err)
 				return
 			}
 			if IsIntegrity(err) {
@@ -434,6 +489,18 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 			return
 		}
 		if verr := verify(result); verr != nil {
+			// A storage failure during verify (stat over a stalled mount) is the
+			// destination faulting, not corrupt bytes — retry once, then pause.
+			if IsStorage(verr) {
+				storageAttempt++
+				if storageAttempt < maxStorageAttempts {
+					log.Printf("[%s] storage read-back failed on verify (attempt %d/%d), retrying once: %v",
+						agent.ShortID(task.ID), storageAttempt, maxStorageAttempts, verr)
+					continue
+				}
+				m.failStorage(ctx, task, verr)
+				return
+			}
 			if IsIntegrity(verr) {
 				removeBrokenResult(task.ID, result) // clean start so a resume doesn't append to a short file
 				if attempt < maxIntegrityAttempts {
@@ -473,9 +540,10 @@ func (m *Manager) attemptDownload(ctx context.Context, task *Task) (*Result, err
 	result, err := m.runDownload(ctx, task, method)
 	if err != nil {
 		// Disk-full is terminal; an integrity failure is retried in-place by the
-		// caller (same source, clean start) — don't burn the method fallback on
-		// either. Only a plain transport failure tries the next method.
-		if IsInsufficientDisk(err) || IsIntegrity(err) {
+		// caller (same source, clean start); a storage failure means the target
+		// mount faulted (another method writes to the same dir) — don't burn the
+		// method fallback on any of them. Only a plain transport failure tries next.
+		if IsInsufficientDisk(err) || IsIntegrity(err) || IsStorage(err) {
 			return nil, err
 		}
 		// ErrVPNTunnelDown: the tunnel died mid-download (torrent dropped, partial
@@ -643,4 +711,72 @@ const damagedErrorPrefix = "corrupt download: "
 // download_task table has no integrity column, so the message IS the signal.
 func (m *Manager) failDamaged(ctx context.Context, task *Task, err error) {
 	m.fail(ctx, task, damagedErrorPrefix+err.Error())
+}
+
+// storageErrorPrefix is a STABLE marker the web matches on (download_task.error_message)
+// to render a "check your download folder / storage" affordance instead of the
+// "corrupt — re-download" one: the bytes were fine, the DESTINATION failed, so a
+// re-download is the wrong CTA. Keep in sync with the web's detection
+// (src/lib/services/agent.ts / downloads UI).
+const storageErrorPrefix = "storage unavailable: "
+
+// failStorage handles a persistent write failure to the target directory (a
+// stalled/dropped NFS/SMB mount, a read-only or disconnected volume) after the
+// single storage retry didn't recover.
+//
+// It reports a TERMINAL failed state carrying storageErrorPrefix — deliberately
+// NOT a StatusCancelled "pause". A cancelled state is never reported to the
+// server (ToStatusUpdate maps it to an empty apiStatus), so a "storage pause"
+// would leave the task claimable and the server's claimPendingTasks would re-hand
+// it to the agent every sync cycle — a re-download loop with no gate to stop it
+// (unlike pauseForVPN, which the torrent Available() gate holds off). A terminal
+// failed IS reported and persisted, so the loop can't form: the web shows the
+// storage message (amber, "check your drive/NAS") with a Retry button, and the
+// user re-runs it after fixing their storage. Distinct from failDamaged on
+// purpose — the bytes were fine, so the wording must not say "corrupt".
+// (Incident 2026-07-24: NFS soft-mount fsync timeout looping a debrid download.)
+func (m *Manager) failStorage(ctx context.Context, task *Task, cause error) {
+	log.Printf("[%s] storage unavailable — FAILED (retry after fixing your download folder): %s — %s",
+		agent.ShortID(task.ID), task.Title, cause.Error())
+	if m.cfg.Notifications {
+		notify.Send("Download failed — storage unavailable",
+			task.Title+": could not write to your download folder. Check the drive/NAS, then retry.")
+	}
+	// Arm the Submit cooldown BEFORE reporting failed: the server may re-hand this
+	// task on the very next sync (racing the failed it hasn't persisted yet), and
+	// the cooldown must already be in place to refuse it.
+	m.markStorageFailed(task.ID)
+	m.fail(ctx, task, storageErrorPrefix+cause.Error())
+}
+
+// markStorageFailed stamps a task as just-failed-on-storage and opportunistically
+// evicts stamps older than the cooldown, so the map can't grow without bound.
+func (m *Manager) markStorageFailed(taskID string) {
+	now := time.Now()
+	m.storageFailMu.Lock()
+	defer m.storageFailMu.Unlock()
+	for id, t := range m.storageFailedAt {
+		if now.Sub(t) > storageFailCooldown {
+			delete(m.storageFailedAt, id)
+		}
+	}
+	m.storageFailedAt[taskID] = now
+}
+
+// inStorageCooldown reports whether taskID failed on storage within the cooldown
+// window — i.e. Submit should refuse to re-run it right now. An expired stamp is
+// evicted here too (not only in markStorageFailed), so a one-off storage failure
+// with no later failures to trigger the sweep can't linger in the map forever.
+func (m *Manager) inStorageCooldown(taskID string) bool {
+	m.storageFailMu.Lock()
+	defer m.storageFailMu.Unlock()
+	t, ok := m.storageFailedAt[taskID]
+	if !ok {
+		return false
+	}
+	if time.Since(t) >= storageFailCooldown {
+		delete(m.storageFailedAt, taskID)
+		return false
+	}
+	return true
 }
