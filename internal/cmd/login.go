@@ -210,6 +210,14 @@ func runLogin(apiURLOverride string, browserOnly bool) error {
 	}
 	appCfg = cfg
 
+	// Onboarding telemetry: login succeeded, credential minted. First signal in
+	// the agent's lifecycle — lets the server tell "logged in but daemon never
+	// started" from "never got past login". No-op when telemetry is disabled.
+	agent.NewEmitter(
+		newAgentClientFromConfig(cfg, "unarr/"+Version),
+		cfg.TelemetryEnabled(), cfg.Agent.ID, Version, runtime.GOOS,
+	).EmitSync(agent.EventLoginOK, "")
+
 	fmt.Println()
 	green.Println("  ✓ Credentials saved!")
 	fmt.Printf("  Config: %s\n", configPath)

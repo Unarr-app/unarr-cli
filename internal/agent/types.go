@@ -553,6 +553,13 @@ type SyncRequest struct {
 	// "shutting_down"). Lets the web show "agent updating" during an upgrade
 	// restart instead of a hard session error. Empty (older agents) → "running".
 	AgentStatus string `json:"agentStatus,omitempty"`
+	// ExitReason / ExitDetail — lifecycle telemetry reported on the daemon's
+	// LAST sync during a graceful shutdown, so the server records WHY it stopped
+	// ("exit_user_quit" | "exit_crash" | "exit_normal"). A SIGKILL leaves no
+	// last sync — the server infers "exit_lost" from a heartbeat gap instead.
+	// Omitted entirely when telemetry is disabled. See internal/agent/telemetry.go.
+	ExitReason string `json:"exitReason,omitempty"`
+	ExitDetail string `json:"exitDetail,omitempty"`
 }
 
 // ControlAction represents a server-side control signal for a task.
