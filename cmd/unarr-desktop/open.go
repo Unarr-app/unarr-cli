@@ -46,6 +46,15 @@ type playRequest struct {
 	// player choice and by the no-player-installed fallback, both of which
 	// otherwise dump the raw .mkv into the browser.
 	WebURL string
+	// Playlist is a served, signed sting+feature `.m3u` URL (`playlist=`), when
+	// the link carries one. When present, the player opens THIS as its media
+	// (ident → feature back-to-back) instead of URL — so unarr Desktop shows the
+	// same brand sting the other external players get via the served playlist.
+	// Optional and backward-safe: older web builds omit it (URL alone plays);
+	// a player dialect that can't consume a multi-entry .m3u still gets URL (see
+	// mediaArg). Same http(s) whitelist as URL/WebURL — a file:// playlist would
+	// make the player read local files, exactly what the scheme gate exists for.
+	Playlist string
 	// SubFiles are EXTERNAL subtitle files to side-load (`sub=`, repeatable) —
 	// http(s) URLs of the web's WebVTT proxy carrying AI translations and the
 	// shared provider-subtitle cache. Distinct from SLang, which only ranks the
@@ -140,6 +149,17 @@ func parsePlayURL(raw string) (playRequest, error) {
 			req.WebURL = normalizedWeb
 		} else {
 			fmt.Fprintln(os.Stderr, "unarr-desktop: ignoring web url:", werr)
+		}
+	}
+
+	// playlist= is a convenience like web=: a link carrying a broken one still
+	// plays the feature via url=. Same http(s) gate — it becomes the player's
+	// media argument, so file:/javascript: must not survive here either.
+	if pl := strings.TrimSpace(q.Get("playlist")); pl != "" {
+		if normalizedPl, plerr := validateHTTPURL(pl, "playlist url"); plerr == nil {
+			req.Playlist = normalizedPl
+		} else {
+			fmt.Fprintln(os.Stderr, "unarr-desktop: ignoring playlist url:", plerr)
 		}
 	}
 

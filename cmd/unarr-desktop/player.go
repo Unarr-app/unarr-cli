@@ -267,13 +267,45 @@ func autodetectPlayer(req playRequest) (player, bool) {
 }
 
 // resolveSystemPlayer asks the OS which application opens video and keeps the
-// argv it returned — there is no dialect to rebuild it from later.
+// argv it returned — there is no dialect to rebuild it from later. Hands the OS
+// the playlist when present (the system video app opens a remote .m3u as a
+// playlist), else the bare feature URL. buildPlayerArgv returns this argv as-is.
 func resolveSystemPlayer(req playRequest) (player, bool) {
-	argv, ok := systemPlayerArgv(req.URL)
+	argv, ok := systemPlayerArgv(mediaArg(req))
 	if !ok || len(argv) == 0 {
 		return player{}, false
 	}
 	return player{kind: playerSystem, bin: argv[0], argv: argv}, true
+}
+
+// mediaArg is the final positional the player opens: the served sting+feature
+// `.m3u` (`playlist=`) when the link carried one, else the bare feature URL.
+// mpv/celluloid/VLC/MPC-HC and the OS default all open a remote .m3u as a
+// playlist natively, so handing them the playlist makes them play ident →
+// feature back-to-back. Both values passed the http(s) whitelist in open.go.
+func mediaArg(req playRequest) string {
+	if req.Playlist != "" {
+		return req.Playlist
+	}
+	return req.URL
+}
+
+// externalSubArgs returns the per-file subtitle flags to append, or none when a
+// playlist is in play. The served `.m3u` already carries the external subtitles
+// on its FEATURE entry (as #EXTVLCOPT:input-slave, minted server-side); adding
+// them again as player flags would double every track — and worse, attach them
+// to the sting entry too. So when mediaArg is the playlist, subtitles ride
+// inside it; otherwise they travel as the dialect's own repeatable flag. `spell`
+// maps one subtitle URL to its flag ("--sub-file="+s for mpv, etc.).
+func externalSubArgs(req playRequest, spell func(string) string) []string {
+	if req.Playlist != "" {
+		return nil
+	}
+	out := make([]string, 0, len(req.SubFiles))
+	for _, s := range req.SubFiles {
+		out = append(out, spell(s))
+	}
+	return out
 }
 
 // buildPlayerArgv builds the exact argv (binary first) for the chosen player.
@@ -306,8 +338,9 @@ func buildPlayerArgv(p player, req playRequest) ([]string, error) {
 		// title/alang/slang, which it has never carried); the stream still
 		// plays with its embedded tracks. Note macOS isn't a target platform
 		// for the unarr:// handler yet, so this path is effectively unreachable
-		// from the web today.
-		return []string{p.bin, "-a", "IINA", req.URL}, nil
+		// from the web today. mediaArg hands it the playlist when present (IINA
+		// opens a remote .m3u), else the bare feature URL.
+		return []string{p.bin, "-a", "IINA", mediaArg(req)}, nil
 	case playerMPC:
 		return mpcArgv(p, req)
 	}
@@ -333,10 +366,9 @@ func mpvArgv(p player, req playRequest) []string {
 	// One --sub-file per external subtitle: mpv's option is repeatable and each
 	// occurrence appends a track (there is no list separator that survives URLs
 	// containing commas). All before the `--`, like every other flag here.
-	for _, s := range req.SubFiles {
-		argv = append(argv, "--sub-file="+s)
-	}
-	return append(argv, "--", req.URL)
+	// Skipped when a playlist carries them inside its .m3u (see externalSubArgs).
+	argv = append(argv, externalSubArgs(req, func(s string) string { return "--sub-file=" + s })...)
+	return append(argv, "--", mediaArg(req))
 }
 
 // celluloidArgv builds Celluloid's command line. It exposes every mpv option
@@ -357,10 +389,8 @@ func celluloidArgv(p player, req playRequest) []string {
 	if len(req.SLang) > 0 {
 		argv = append(argv, "--mpv-slang="+strings.Join(req.SLang, ","))
 	}
-	for _, s := range req.SubFiles {
-		argv = append(argv, "--mpv-sub-file="+s)
-	}
-	return append(argv, "--", req.URL)
+	argv = append(argv, externalSubArgs(req, func(s string) string { return "--mpv-sub-file=" + s })...)
+	return append(argv, "--", mediaArg(req))
 }
 
 // vlcArgv builds VLC's command line (its own flag spellings, `--` before URL).
@@ -388,19 +418,23 @@ func vlcArgv(p player, req playRequest) []string {
 	// one: a fragment survives the http(s) whitelist, and VLC would split it
 	// off and open the tail (file://, smb://, …) as a second input. Do not
 	// relax that check without changing the joining scheme here first.
-	if len(req.SubFiles) > 0 {
+	// Skipped when a playlist carries the subtitles inside its .m3u feature entry
+	// (that's how the served playlist attaches them — see externalSubArgs).
+	if len(req.SubFiles) > 0 && req.Playlist == "" {
 		argv = append(argv, "--input-slave="+strings.Join(req.SubFiles, "#"))
 	}
-	return append(argv, "--", req.URL)
+	return append(argv, "--", mediaArg(req))
 }
 
 // mpcArgv builds MPC-HC's command line. mpc-hc parses /switches and has no
 // end-of-options terminator, so a URL that even LOOKS like a switch is refused.
 func mpcArgv(p player, req playRequest) ([]string, error) {
-	if strings.HasPrefix(req.URL, "-") || strings.HasPrefix(req.URL, "/") {
-		return nil, fmt.Errorf("refusing stream url %q for mpc-hc (could be parsed as a switch)", req.URL)
+	// mpc-hc opens a remote .m3u as a playlist, so the sting rides in when present.
+	media := mediaArg(req)
+	if strings.HasPrefix(media, "-") || strings.HasPrefix(media, "/") {
+		return nil, fmt.Errorf("refusing media url %q for mpc-hc (could be parsed as a switch)", media)
 	}
-	argv := []string{p.bin, req.URL}
+	argv := []string{p.bin, media}
 	if req.Start > 0 {
 		argv = append(argv, "/start", strconv.Itoa(req.Start*1000)) // mpc-hc takes milliseconds
 	}

@@ -350,6 +350,112 @@ func TestParsePlayURLSubFiles(t *testing.T) {
 	})
 }
 
+// TestParsePlayURLPlaylist covers the `playlist=` param: the signed sting+feature
+// .m3u the web mints for unarr Desktop. Same http(s) gate as url=/web=; an
+// invalid one is dropped (the feature url= still plays), never fatal.
+func TestParsePlayURLPlaylist(t *testing.T) {
+	const stream = "https://x.example/v.mkv"
+	const m3u = "https://unarr.app/api/internal/stream/playlist.m3u?token=aaa.111.mmm"
+
+	t.Run("valid https playlist parsed, feature url kept", func(t *testing.T) {
+		got, err := parsePlayURL(link(map[string]string{"url": stream, "playlist": m3u}))
+		if err != nil {
+			t.Fatalf("parsePlayURL() unexpected error: %v", err)
+		}
+		if got.URL != stream {
+			t.Errorf("URL = %q, want %q (feature must survive as fallback)", got.URL, stream)
+		}
+		if got.Playlist != m3u {
+			t.Errorf("Playlist = %q, want %q", got.Playlist, m3u)
+		}
+	})
+
+	t.Run("absent playlist -> empty, feature plays", func(t *testing.T) {
+		got, err := parsePlayURL(link(map[string]string{"url": stream}))
+		if err != nil {
+			t.Fatalf("parsePlayURL() unexpected error: %v", err)
+		}
+		if got.Playlist != "" {
+			t.Errorf("Playlist = %q, want empty", got.Playlist)
+		}
+	})
+
+	// The whole reason for the http(s) gate: a file:// playlist would make the
+	// player open a local file. Dropped silently, and the feature still plays.
+	for _, bad := range []string{"file:///etc/passwd", "javascript:alert(1)", "data:text/plain,x", "http:///no-host"} {
+		t.Run("invalid playlist dropped: "+bad, func(t *testing.T) {
+			got, err := parsePlayURL(link(map[string]string{"url": stream, "playlist": bad}))
+			if err != nil {
+				t.Fatalf("parsePlayURL() unexpected error: %v", err)
+			}
+			if got.Playlist != "" {
+				t.Errorf("Playlist = %q, want empty (invalid scheme must be dropped)", got.Playlist)
+			}
+			if got.URL != stream {
+				t.Errorf("URL = %q, want %q (feature must still play)", got.URL, stream)
+			}
+		})
+	}
+}
+
+// TestBuildPlayerArgvPlaylist proves the playlist becomes the media argument for
+// every playlist-capable dialect, and that external sub= flags are SUPPRESSED
+// when it does (the served .m3u already carries them on its feature entry, so
+// re-adding them as flags would double every track). start/title/lang prefs are
+// harmless and stay.
+func TestBuildPlayerArgvPlaylist(t *testing.T) {
+	const feature = "https://x.example/v.mkv"
+	const m3u = "https://unarr.app/api/internal/stream/playlist.m3u?token=t.1.m"
+	const sub = "https://subs.example/a.vtt"
+	req := playRequest{URL: feature, Playlist: m3u, Start: 0, SLang: []string{"es"}, SubFiles: []string{sub}}
+
+	cases := []struct {
+		p    player
+		want []string
+	}{
+		{
+			p:    player{kind: playerMPV, bin: "mpv"},
+			want: []string{"mpv", "--slang=es", "--", m3u},
+		},
+		{
+			p:    player{kind: playerCelluloid, bin: "celluloid"},
+			want: []string{"celluloid", "--mpv-slang=es", "--", m3u},
+		},
+		{
+			p:    player{kind: playerVLC, bin: "vlc"},
+			want: []string{"vlc", "--sub-language=es", "--", m3u},
+		},
+	}
+	for _, c := range cases {
+		t.Run(string(c.p.kind), func(t *testing.T) {
+			got, err := buildPlayerArgv(c.p, req)
+			if err != nil {
+				t.Fatalf("buildPlayerArgv() error: %v", err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("argv = %q, want %q", got, c.want)
+			}
+			// No external subtitle flag may appear — the playlist carries them.
+			for _, tok := range got {
+				if strings.Contains(tok, sub) {
+					t.Errorf("argv leaked a sub flag %q — playlist must carry subs, not the flags", tok)
+				}
+			}
+		})
+	}
+
+	t.Run("mpc-hc opens the playlist positionally", func(t *testing.T) {
+		got, err := buildPlayerArgv(player{kind: playerMPC, bin: "mpc-hc64.exe"}, req)
+		if err != nil {
+			t.Fatalf("buildPlayerArgv() error: %v", err)
+		}
+		want := []string{"mpc-hc64.exe", m3u}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("argv = %q, want %q", got, want)
+		}
+	})
+}
+
 // TestParsePlayURLIgnoresUnknownParams is the OLD-BINARY compatibility proof.
 // The parser reads only the params it knows (q.Get / q["sub"]), so a link from
 // a NEWER web carrying parameters this build has never heard of still plays —
