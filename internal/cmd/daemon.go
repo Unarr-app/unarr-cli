@@ -45,7 +45,8 @@ The daemon syncs state with the server every 3s when someone is viewing
 the web dashboard, or every 60s when idle. Press Ctrl+C to stop
 gracefully — active downloads get up to 30 seconds to finish.
 
-Requires: API key, agent ID, and download directory (run 'unarr init' first).
+Requires: API key, agent ID, and download directory — set them up with
+'unarr init' (interactive) or 'unarr up --auth-key=…' (headless/containers).
 
 To run as a background service, use 'unarr daemon install' instead.`,
 		Example: `  unarr start
@@ -118,10 +119,10 @@ func runDaemonStart() error {
 	// to authenticate a telemetry post with, so these two can't be reported —
 	// they're the one blind spot, and inherently so.
 	if cfg.Auth.APIKey == "" {
-		return fmt.Errorf("no API key configured — run 'unarr init' first")
+		return fmt.Errorf("no API key configured — %s", setupHint(cfg.Auth.APIURL))
 	}
 	if cfg.Agent.ID == "" {
-		return fmt.Errorf("no agent ID — run 'unarr init' first")
+		return fmt.Errorf("no agent ID — %s", setupHint(cfg.Auth.APIURL))
 	}
 	// From here on we have a credential, so a start-failure CAN be reported.
 	// emitStartFailure builds a one-shot emitter (no-op when telemetry is off)
@@ -136,7 +137,7 @@ func runDaemonStart() error {
 
 	if cfg.Download.Dir == "" {
 		emitStartFailure(agent.EventConfigError, "no download directory configured")
-		return fmt.Errorf("no download directory — run 'unarr init' first")
+		return fmt.Errorf("no download directory — set UNARR_DOWNLOAD_DIR, or %s", setupHint(cfg.Auth.APIURL))
 	}
 
 	// Single-instance lock: refuse to start if another daemon already holds

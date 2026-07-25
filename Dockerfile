@@ -176,4 +176,9 @@ ENV LIBVA_DRIVER_NAME=iHD
 VOLUME ["/config", "/downloads", "/data"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["start"]
+# `up` is `start` plus one extra ability: if UNARR_AUTHKEY is set it redeems the
+# key first. With CMD=start, `docker run -e UNARR_AUTHKEY=… unarr/cli` ignored the
+# key and died with "no API key configured" — the container has no tty for the
+# wizard, so that was the end of the road. `up` with no key and a stored
+# credential behaves exactly like `start`.
+CMD ["up"]

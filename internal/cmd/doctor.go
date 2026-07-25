@@ -103,7 +103,7 @@ func runDoctor(opts doctorOpts) error {
 	check("Config file", func() (string, error) {
 		path := resolvedConfigPath()
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			return path + " (not found, run unarr init)", fmt.Errorf("missing")
+			return path + " (not found — " + setupHint(cfg.Auth.APIURL) + ")", fmt.Errorf("missing")
 		}
 		if configFileBroken(path) {
 			return path + " (unreadable or invalid TOML — run `unarr doctor --fix`)", fmt.Errorf("corrupt")
@@ -114,7 +114,7 @@ func runDoctor(opts doctorOpts) error {
 	check("API key configured", func() (string, error) {
 		key := effectiveAPIKey(&cfg)
 		if key == "" {
-			return "run unarr init to configure", fmt.Errorf("missing")
+			return setupHint(cfg.Auth.APIURL) + " to configure it", fmt.Errorf("missing")
 		}
 		if len(key) > 8 {
 			return key[:8] + "...", nil
@@ -168,7 +168,7 @@ func runDoctor(opts doctorOpts) error {
 			return "no API key", fmt.Errorf("skipped")
 		}
 		if cfg.Agent.ID == "" {
-			return "no agent ID — run `unarr doctor --fix` (or unarr init)", fmt.Errorf("not registered")
+			return "no agent ID — run `unarr doctor --fix` (or " + setupHint(cfg.Auth.APIURL) + ")", fmt.Errorf("not registered")
 		}
 
 		ac := agent.NewClient(cfg.Auth.APIURL, key, "unarr/"+Version)
@@ -193,7 +193,7 @@ func runDoctor(opts doctorOpts) error {
 	check("Download directory", func() (string, error) {
 		dir := cfg.Download.Dir
 		if dir == "" {
-			return "not configured, run unarr init", fmt.Errorf("missing")
+			return "not configured — set UNARR_DOWNLOAD_DIR or " + setupHint(cfg.Auth.APIURL), fmt.Errorf("missing")
 		}
 		fi, err := os.Stat(dir)
 		if os.IsNotExist(err) {

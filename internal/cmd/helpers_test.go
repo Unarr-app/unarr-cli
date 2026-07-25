@@ -90,3 +90,27 @@ func TestDefaultDownloadDir(t *testing.T) {
 		t.Errorf("defaultDownloadDir() = %q, expected to start with home dir %q", dir, home)
 	}
 }
+
+// setupHint must never send a container user to the interactive wizard: there is
+// no tty and no browser inside, so `unarr init` is a dead end there.
+func TestSetupHintPointsAtAuthKeyInDocker(t *testing.T) {
+	t.Setenv("UNARR_DOCKER", "1")
+	hint := setupHint("https://unarr.app")
+	if !strings.Contains(hint, "UNARR_AUTHKEY") {
+		t.Errorf("docker hint should name UNARR_AUTHKEY, got %q", hint)
+	}
+	if strings.Contains(hint, "unarr init") {
+		t.Errorf("docker hint must not send the user to the wizard, got %q", hint)
+	}
+	if !strings.Contains(hint, "https://unarr.app/profile?tab=agents") {
+		t.Errorf("hint should say where the key comes from, got %q", hint)
+	}
+}
+
+// With no api_url configured the hint still has to name a host the user can open.
+func TestSetupHintFallsBackToDefaultAPIURL(t *testing.T) {
+	t.Setenv("UNARR_DOCKER", "1")
+	if hint := setupHint(""); !strings.Contains(hint, defaultAPIURL()) {
+		t.Errorf("hint should fall back to the default API URL, got %q", hint)
+	}
+}

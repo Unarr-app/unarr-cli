@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
@@ -49,6 +50,27 @@ func isSafeBrowserURL(url string) bool {
 // text can never drift from the value a fresh config is actually written with.
 func defaultAPIURL() string {
 	return config.Default().Auth.APIURL
+}
+
+// setupHint names the command that can ACTUALLY finish setup on this machine.
+//
+// "run unarr init" is a dead end wherever the wizard cannot run: in a container
+// there is no tty and no browser, and telling the user to exec into it to answer
+// prompts is worse than the one thing that does work there — an auth-key from
+// the web, handed to the agent as an environment variable. Same for any other
+// non-interactive host (systemd unit, provisioning script, CI).
+func setupHint(apiURL string) string {
+	if apiURL == "" {
+		apiURL = defaultAPIURL()
+	}
+	where := "get a one-time key at " + apiURL + "/profile?tab=agents"
+	if agent.RunningInDocker() {
+		return "recreate the container with -e UNARR_AUTHKEY=… (" + where + ")"
+	}
+	if !isTerminal() {
+		return "run `unarr up --auth-key=…` (" + where + ")"
+	}
+	return "run `unarr init`"
 }
 
 // defaultDownloadDir returns a sensible default download directory.
