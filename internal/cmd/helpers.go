@@ -60,17 +60,74 @@ func defaultAPIURL() string {
 // the web, handed to the agent as an environment variable. Same for any other
 // non-interactive host (systemd unit, provisioning script, CI).
 func setupHint(apiURL string) string {
+	return setupHintFor(apiURL, agent.RunningInDocker(), isTerminal())
+}
+
+// setupHintFor is the pure form of setupHint, with the two environment probes
+// passed in so every branch can be pinned by a test (isTerminal() is true even
+// under `go test`, whose stdin is the character device /dev/null).
+func setupHintFor(apiURL string, inDocker, interactive bool) string {
 	if apiURL == "" {
 		apiURL = defaultAPIURL()
 	}
 	where := "get a one-time key at " + apiURL + "/profile?tab=agents"
-	if agent.RunningInDocker() {
+	if inDocker {
 		return "recreate the container with -e UNARR_AUTHKEY=… (" + where + ")"
 	}
-	if !isTerminal() {
+	if !interactive {
 		return "run `unarr up --auth-key=…` (" + where + ")"
 	}
 	return "run `unarr init`"
+}
+
+// sudoGuard aborts a command that writes USER-level state — config.toml, the
+// systemd user unit, the download directory — when the only reason we are root
+// is a `sudo` in front of it. All of it would land in /root, invisible to the
+// session the user actually runs the agent from.
+func sudoGuard(command string) error {
+	if !runningUnderSudo() {
+		return nil
+	}
+	return fmt.Errorf("don't run this with sudo — config, the user service and downloads would land in /root\n"+
+		"  Run it as your normal user: unarr %s", command)
+}
+
+// runningUnderSudo reports whether this process is root *because a normal user
+// typed sudo*, as opposed to a legitimately root-only environment (Docker, a NAS
+// shell, a root-owned systemd unit) where root is the only user there is and
+// everything must keep working.
+func runningUnderSudo() bool {
+	return isSudoEnv(os.Geteuid(), os.Getenv("SUDO_USER"), os.Getenv("SUDO_UID"), os.Getenv("HOME"), loginName())
+}
+
+// isSudoEnv is the pure predicate behind runningUnderSudo, split out so the
+// sudo / sudo -i / su - / container matrix can be pinned by tests.
+//
+// SUDO_USER catches plain `sudo unarr …`. `sudo -i` and `sudo su -` start a
+// login shell that scrubs SUDO_USER; what survives is SUDO_UID (kept by
+// `sudo -i`) or, failing that, the mismatch between the root HOME they hand us
+// and the user who actually owns the login session. A genuine root environment
+// has no login name at all (no utmp entry), so it falls through to false.
+func isSudoEnv(euid int, sudoUser, sudoUID, home, login string) bool {
+	if euid != 0 {
+		return false
+	}
+	if sudoUser != "" || sudoUID != "" {
+		return true
+	}
+	return home == "/root" && login != "" && login != "root"
+}
+
+// loginName is the user owning the controlling terminal. su/sudo do not change
+// it, which is what makes it the "who really logged in" signal. Empty when there
+// is no tty or no utmp entry — containers and systemd units, exactly the cases
+// that must NOT be read as sudo.
+func loginName() string {
+	out, err := exec.Command("logname").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // defaultDownloadDir returns a sensible default download directory.

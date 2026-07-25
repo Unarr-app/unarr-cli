@@ -110,7 +110,7 @@ func runMigrate(opts migrateOpts) error {
 
 	// Check unarr is initialized
 	if cfg.Auth.APIKey == "" {
-		return fmt.Errorf("unarr is not configured yet — %s", setupHint(""))
+		return fmt.Errorf("unarr is not configured yet — %s", setupHint(cfg.Auth.APIURL))
 	}
 
 	ln()

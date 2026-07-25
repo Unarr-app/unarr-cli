@@ -243,7 +243,7 @@ func syncToServer(ctx context.Context, cfg config.Config, items []agent.LibraryS
 		apiKey = cfg.Auth.APIKey
 	}
 	if apiKey == "" {
-		color.Yellow("\n  ⚠ No API key configured — %s, or use --no-sync.", setupHint(""))
+		color.Yellow("\n  ⚠ No API key configured — %s, or use --no-sync.", setupHint(cfg.Auth.APIURL))
 		return nil
 	}
 

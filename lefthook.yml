@@ -22,6 +22,17 @@ pre-commit:
         else
           echo "golangci-lint not installed, skipping (install: https://golangci-lint.run/welcome/install/)"
         fi
+    # docker-entrypoint.sh is PID 1 of the published image (privilege drop,
+    # mount ownership) and no Go test executes it — shellcheck is the only gate
+    # it has. Mirrors the "shell" job in .github/workflows/ci.yml.
+    shellcheck:
+      glob: "*.sh"
+      run: |
+        if command -v shellcheck &> /dev/null; then
+          shellcheck docker-entrypoint.sh scripts/check-arch.sh scripts/download-ffmpeg-static.sh
+        else
+          echo "shellcheck not installed, skipping (install: https://www.shellcheck.net/)"
+        fi
     # Architectural / SOLID gate — blocks spaghetti & god-files in NEW/CHANGED code only
     # (legacy grandfathered vs origin/main). File size <500, func length, cyclo + cognitive
     # complexity 15, nesting, dup, max-params 5. See .golangci.arch.yml + scripts/check-arch.sh.

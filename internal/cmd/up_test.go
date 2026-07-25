@@ -29,6 +29,38 @@ func TestIsValidAuthKeyFormat(t *testing.T) {
 	}
 }
 
+// `up` is unattended, so it must always end with a download dir set — a
+// provisioned agent that then dies with "run 'unarr init' first" is the dead end
+// this default exists to close. An explicit choice (config.toml or
+// UNARR_DOWNLOAD_DIR, both already folded into cfg) must never be overridden,
+// and the "we picked it for you" notice must only appear when we actually did.
+func TestResolveUpDownloadDir(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured string
+		wantDir    string
+		wantPicked string
+	}{
+		{"unset falls back to the wizard default", "", defaultDownloadDir(), defaultDownloadDir()},
+		{"configured wins", "/mnt/media", "/mnt/media", ""},
+		{"container default wins", "/downloads", "/downloads", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, picked := resolveUpDownloadDir(tt.configured)
+			if dir != tt.wantDir {
+				t.Errorf("dir = %q, want %q", dir, tt.wantDir)
+			}
+			if picked != tt.wantPicked {
+				t.Errorf("picked = %q, want %q", picked, tt.wantPicked)
+			}
+			if dir == "" {
+				t.Error("dir must never be empty — the daemon refuses to start without one")
+			}
+		})
+	}
+}
+
 func TestRedactAuthKey(t *testing.T) {
 	// Must never echo the full secret.
 	full := "unarr-authkey-supersecretvalue"

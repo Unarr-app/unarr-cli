@@ -48,12 +48,11 @@ use 'unarr config' or edit ~/.config/unarr/config.toml directly.`,
 func runInit(apiURLOverride string) error {
 	// `sudo unarr init` writes config.toml under /root and installs the systemd
 	// USER unit for root — the agent the user then runs as themselves sees none
-	// of it. SUDO_USER is what distinguishes that from a legitimately root-only
-	// environment (Docker, a NAS shell that has no other user), which must keep
+	// of it. sudoGuard tells that apart from a legitimately root-only
+	// environment (Docker, a NAS shell with no other user), which must keep
 	// working.
-	if os.Geteuid() == 0 && os.Getenv("SUDO_USER") != "" {
-		return fmt.Errorf("don't run this with sudo — config and downloads would land in /root\n" +
-			"  Run it as your normal user: unarr init")
+	if err := sudoGuard("init"); err != nil {
+		return err
 	}
 
 	if !isTerminal() {

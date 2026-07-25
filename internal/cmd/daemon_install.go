@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
@@ -116,6 +117,27 @@ func firstLine(out string, err error) string {
 	return strings.SplitN(out, "\n", 2)[0]
 }
 
+// unitSettleDelay is how long we let a freshly started unit run before deciding
+// it came up. It is sized against the unit's own RestartSec=10 only loosely: we
+// just need to outlive the "starts, then dies on a bad config" window, not the
+// first restart. Kept short so a healthy install still feels instant.
+const unitSettleDelay = 3 * time.Second
+
+// unitRestartCount reports how many times systemd has already had to respawn the
+// unit. Returns 0 when the property cannot be read (older systemd predating
+// NRestarts) — never invent a failure out of a missing field.
+func unitRestartCount() int {
+	out, err := svcOutput("systemctl", "--user", "show", "unarr", "-p", "NRestarts", "--value")
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 type serviceData struct {
 	BinPath string
 	User    string
@@ -123,7 +145,32 @@ type serviceData struct {
 	LogDir  string
 }
 
+// writeServiceFile renders a unit/plist template to path, creating its parent
+// directory. Shared by both installers so the file the supervisor reads is
+// written exactly one way.
+func writeServiceFile(path, tmplText string, data serviceData) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create service dir: %w", err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create service file: %w", err)
+	}
+	defer f.Close()
+	if err := template.Must(template.New("service").Parse(tmplText)).Execute(f, data); err != nil {
+		return fmt.Errorf("write service file: %w", err)
+	}
+	return nil
+}
+
 func runDaemonInstall() error {
+	// Same reason as `unarr init`: a sudo install writes the systemd USER unit
+	// (and the config it reads) under /root, where the user's own session never
+	// looks for it.
+	if err := sudoGuard("daemon install"); err != nil {
+		return err
+	}
+
 	binPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("find executable: %w", err)
@@ -163,24 +210,29 @@ func runDaemonInstall() error {
 }
 
 func installSystemd(data serviceData, green *color.Color) error {
-	// User-level systemd service (no sudo needed)
-	dir := filepath.Join(data.Home, ".config", "systemd", "user")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create systemd dir: %w", err)
-	}
-
 	// Same path service.Respawns() probes — detection and install must never drift.
 	path := service.SystemdUnitPathIn(data.Home)
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create service file: %w", err)
+	if err := writeServiceFile(path, systemdTemplate, data); err != nil {
+		return err
 	}
-	defer f.Close()
 
-	tmpl := template.Must(template.New("systemd").Parse(systemdTemplate))
-	if err := tmpl.Execute(f, data); err != nil {
-		return fmt.Errorf("write service file: %w", err)
-	}
+	// A unit file left behind by a FAILED install is worse than no file at all:
+	// service.Respawns() detects a supervisor purely by this path existing, so
+	// `unarr stop` would delegate to `systemctl --user stop` on a box that has no
+	// user bus — erroring, or printing "✓ Stopped" while the detached daemon
+	// keeps running. Every error path below must take the file with it.
+	installed := false
+	defer func() {
+		if installed {
+			return
+		}
+		os.Remove(path)
+		// The unit may already be enabled at this point; removing only the file
+		// would leave a dangling wants/ symlink that makes every later
+		// daemon-reload warn. Both calls are no-ops when we never got that far.
+		exec.Command("systemctl", "--user", "disable", service.SystemdUnitName).Run()
+		exec.Command("systemctl", "--user", "daemon-reload").Run()
+	}()
 
 	fmt.Printf("  Created: %s\n", path)
 
@@ -210,12 +262,27 @@ func installSystemd(data serviceData, green *color.Color) error {
 		color.New(color.FgYellow).Printf("  Note: could not enable lingering (%s) — the service may stop when you log out\n", firstLine(out, err))
 	}
 
-	// enable+start exiting 0 is not proof the unit came up (it can fail seconds
-	// later on a bad ExecStart or a missing config). Ask before claiming success.
-	if state, err := svcOutput("systemctl", "--user", "is-active", "unarr"); err != nil && state != "activating" {
+	// enable+start exiting 0 is not proof the unit came up: Type=simple makes
+	// `systemctl start` return the moment the fork succeeds, so a daemon that
+	// dies 200ms later still reads "active" when polled at t=0. Wait out one
+	// RestartSec-sized window before asking, and require a plain "active" —
+	// with Restart=always, "activating" at this point is the crash-loop
+	// signature, not a slow boot.
+	time.Sleep(unitSettleDelay)
+	state, stateErr := svcOutput("systemctl", "--user", "is-active", "unarr")
+	if state != "active" {
 		return fmt.Errorf("the unarr service did not come up (is-active: %s).\n  Check: journalctl --user -u unarr -n 50\n%s",
-			firstLine(state, err), noServiceManagerHelp)
+			firstLine(state, stateErr), noServiceManagerHelp)
 	}
+	// Restart=always also means a unit that keeps dying reads "active" on any
+	// single poll — it was just respawned. The restart counter is the only
+	// honest signal that ExecStart is failing.
+	if n := unitRestartCount(); n > 0 {
+		return fmt.Errorf("the unarr service keeps restarting (%d restart(s) in its first seconds) — it starts and exits.\n  Check: journalctl --user -u unarr -n 50\n%s",
+			n, noServiceManagerHelp)
+	}
+
+	installed = true
 
 	fmt.Println()
 	green.Println("  ✓ Installed and started!")
@@ -233,18 +300,19 @@ func installLaunchd(data serviceData, green *color.Color) error {
 	os.MkdirAll(data.LogDir, 0o755)
 
 	path := service.PlistPath(data.Home)
-	os.MkdirAll(filepath.Dir(path), 0o755)
-
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create plist: %w", err)
+	if err := writeServiceFile(path, launchdTemplate, data); err != nil {
+		return err
 	}
-	defer f.Close()
 
-	tmpl := template.Must(template.New("launchd").Parse(launchdTemplate))
-	if err := tmpl.Execute(f, data); err != nil {
-		return fmt.Errorf("write plist: %w", err)
-	}
+	// Same reasoning as the systemd unit: service.Respawns() treats this plist's
+	// existence as "a supervisor owns the daemon", so a plist that outlives a
+	// failed install makes `unarr stop` unload an agent that was never loaded.
+	installed := false
+	defer func() {
+		if !installed {
+			os.Remove(path)
+		}
+	}()
 
 	fmt.Printf("  Created: %s\n", path)
 
@@ -253,6 +321,11 @@ func installLaunchd(data serviceData, green *color.Color) error {
 	if _, err := exec.LookPath("launchctl"); err != nil {
 		return fmt.Errorf("launchd is not available here (launchctl not found).\n%s", noServiceManagerHelp)
 	}
+	// `launchctl load` exits non-zero when the label is already bootstrapped, so
+	// on a healthy machine a re-install would hard-fail. Unload first; its error
+	// when nothing is loaded (the normal first install) is expected, not a
+	// problem, so it is deliberately discarded.
+	_, _ = svcOutput("launchctl", "unload", path)
 	if out, err := svcOutput("launchctl", "load", path); err != nil {
 		return fmt.Errorf("launchctl load failed: %w\n  %s\n%s", err, out, noServiceManagerHelp)
 	}
@@ -260,6 +333,8 @@ func installLaunchd(data serviceData, green *color.Color) error {
 		return fmt.Errorf("the unarr agent did not load (launchctl list: %s).\n  Check: %s\n%s",
 			firstLine(out, err), filepath.Join(data.LogDir, "unarr.err.log"), noServiceManagerHelp)
 	}
+
+	installed = true
 
 	fmt.Println()
 	green.Println("  ✓ Installed and loaded!")
