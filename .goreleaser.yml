@@ -58,6 +58,45 @@ archives:
         info:
           mode: 0o755
 
+# Native Linux packages (.deb/.rpm), attached to the same GitHub Release and
+# covered by checksums.txt like every other artifact.
+#
+# DELIBERATELY BINARY-ONLY — no ffmpeg, no systemd unit:
+#
+#   * ffmpeg/ffprobe ship INSIDE the tarballs (adjacent to the binary), but a
+#     package installs into /usr/bin, where writing our own ffmpeg would
+#     overwrite the distro's. ResolveFFmpeg tries PATH BEFORE the adjacent
+#     copy, so `Recommends: ffmpeg` gets the system one; if the user declines
+#     it, the CLI still falls back to its own cached download. No dead end
+#     either way — just never a hijacked /usr/bin/ffmpeg.
+#
+#   * The daemon runs as a systemd --user service that `unarr init` installs
+#     (per-user config, download dir and HOME). Shipping a system unit here
+#     would silently change that ownership model, so setup stays with init.
+nfpms:
+  - id: packages
+    package_name: unarr
+    formats: [deb, rpm]
+    # Matches the archive naming so the two sit together on the release page.
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    vendor: unarr
+    homepage: https://unarr.app
+    maintainer: unarr <ops@unarr.app>
+    description: |-
+      Self-hosted media manager, player and debrid agent.
+      Run `unarr init` after installing to link your account and set up the
+      background service.
+    license: MIT
+    section: net
+    bindir: /usr/bin
+    recommends:
+      - ffmpeg
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/unarr/LICENSE
+      - src: README.md
+        dst: /usr/share/doc/unarr/README.md
+
 checksum:
   name_template: "checksums.txt"
 

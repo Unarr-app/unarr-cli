@@ -38,6 +38,25 @@ irm https://unarr.app/install.ps1 | iex
 brew install unarr-app/tap/unarr
 ```
 
+### Debian/Ubuntu (.deb) and Fedora/RHEL (.rpm)
+
+Published on every release for `amd64` and `arm64`, and covered by the same
+signed `checksums.txt` as the tarballs:
+
+```bash
+# Debian/Ubuntu — replace <version> and <arch> (amd64 | arm64)
+curl -fsSLO https://github.com/Unarr-app/unarr-cli/releases/latest/download/unarr_<version>_linux_<arch>.deb
+sudo apt install ./unarr_<version>_linux_<arch>.deb
+
+# Fedora/RHEL
+sudo dnf install https://github.com/Unarr-app/unarr-cli/releases/latest/download/unarr_<version>_linux_<arch>.rpm
+```
+
+The package installs the `unarr` binary only. Run `unarr init` afterwards to
+link your account, pick a download directory and install the background
+service — the same step the other install methods end with. `ffmpeg` is a
+recommended dependency; without it the agent downloads its own static copy.
+
 ### Docker
 
 ```bash
