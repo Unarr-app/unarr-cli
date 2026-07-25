@@ -65,7 +65,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates tzdata wget xz-utils par2 p7zip-full libvulkan1 \
-      libdrm2 libva2 libva-drm2 && \
+      libdrm2 libva2 libva-drm2 gosu && \
     rm -rf /var/lib/apt/lists/*
 
 # Intel QuickSync (QSV) runtime — amd64 only. The oneVPL dispatcher (libvpl2) +
@@ -135,7 +135,13 @@ RUN groupadd -g 1000 unarr && useradd -u 1000 -g 1000 -m -d /home/unarr unarr
 RUN mkdir -p /config /downloads /data && \
     chown -R unarr:unarr /config /downloads /data
 
-USER unarr
+# The container starts as root ONLY to chown the mounts, then execs as
+# PUID:PGID (default 1000:1000 — identical to the old `USER unarr`). Baking the
+# uid instead made every NAS fail: Synology uids start at 1024, unRAID uses
+# 99:100, so the bind-mounted /config and /downloads were unwritable and the
+# agent died on its first write. See docker-entrypoint.sh.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 COPY --from=builder /unarr /usr/local/bin/unarr
 
@@ -169,5 +175,5 @@ ENV LIBVA_DRIVER_NAME=iHD
 
 VOLUME ["/config", "/downloads", "/data"]
 
-ENTRYPOINT ["unarr"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["start"]

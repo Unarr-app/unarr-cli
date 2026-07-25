@@ -32,6 +32,15 @@ services:
       - UNARR_API_URL=${UNARR_API_URL:-https://unarr.app}
       - TZ=${TZ:-UTC}
 
+      # User the agent runs as, and owner of everything it writes. Defaults
+      # (1000:1000) suit a typical Linux desktop; NAS boxes need their own:
+      #   Synology  → `id <your-user>` in SSH (usually 1024+ / 100)
+      #   unRAID    → 99 / 100
+      #   QNAP      → `id admin`
+      # Wrong values = "permission denied" on /config or /downloads.
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+
     volumes:
       # Config: config.toml is auto-created here on first run.
       # After first start, edit this file to set organize paths, quality, etc.

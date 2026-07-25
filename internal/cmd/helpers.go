@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
 // openBrowser opens a URL in the default browser.
@@ -14,9 +17,13 @@ import (
 // xdg-open/open into interpreting it as a flag (a leading "-" would otherwise
 // match a switch on every helper we shell out to). Where the helper supports
 // it we also append "--" to terminate switch parsing as belt-and-braces.
-func openBrowser(url string) {
+//
+// The error says only that the helper could not be LAUNCHED (no xdg-open, no
+// session to open into over SSH/Docker/WSL); a nil error is not a promise that
+// a window appeared. Callers must print the URL either way.
+func openBrowser(url string) error {
 	if !isSafeBrowserURL(url) {
-		return
+		return fmt.Errorf("refusing to open non-http(s) URL %q", url)
 	}
 	var c *exec.Cmd
 	switch runtime.GOOS {
@@ -28,13 +35,20 @@ func openBrowser(url string) {
 	default: // linux, freebsd
 		c = exec.Command("xdg-open", url)
 	}
-	_ = c.Start() // fire and forget; best-effort
+	return c.Start()
 }
 
 // isSafeBrowserURL accepts only http(s) URLs. Other schemes (file://, javascript:,
 // data:, ...) and flag-shaped strings ("--help") are rejected.
 func isSafeBrowserURL(url string) bool {
 	return strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
+}
+
+// defaultAPIURL is the server used when neither config.toml nor a flag names
+// one. Read from config.Default() so the wizard, `login`, `up` and the help
+// text can never drift from the value a fresh config is actually written with.
+func defaultAPIURL() string {
+	return config.Default().Auth.APIURL
 }
 
 // defaultDownloadDir returns a sensible default download directory.

@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -112,23 +111,20 @@ func browserAuth(apiURL, agentID string) (string, error) {
 		shutdownServer(server)
 		return "", err
 	}
-	openBrowser(authURL)
+	// ALWAYS print the URL. openBrowser is best-effort and on a headless box
+	// (SSH, Docker, WSL, a NAS shell) nothing opens — with only the countdown on
+	// screen the user has nothing to act on and waits out the timeout for no
+	// reason. Printing it also lets them authorize from another machine.
+	if err := openBrowser(authURL); err != nil {
+		fmt.Println("  Could not open a browser here. Open this URL to authorize:")
+	} else {
+		fmt.Println("  If your browser didn't open, visit:")
+	}
+	fmt.Printf("  %s\n\n", authURL)
 
-	// Listen for Enter key to skip to manual fallback
-	skipCh := make(chan struct{}, 1)
-	go func() {
-		buf := make([]byte, 1)
-		for {
-			n, err := os.Stdin.Read(buf)
-			if err != nil || n == 0 {
-				return
-			}
-			if buf[0] == '\n' || buf[0] == '\r' {
-				skipCh <- struct{}{}
-				return
-			}
-		}
-	}()
+	// NOTE: no "Enter to skip" reader here. A goroutine blocked on os.Stdin.Read
+	// cannot be cancelled when this function returns, so it went on to swallow
+	// the first keystroke of the huh form that runs right after in `unarr init`.
 
 	// Wait for callback with countdown
 	ctx, cancel := context.WithTimeout(context.Background(), browserAuthTimeout)
@@ -139,7 +135,7 @@ func browserAuth(apiURL, agentID string) (string, error) {
 	remaining := int(browserAuthTimeout.Seconds())
 
 	// Show initial countdown
-	fmt.Printf("\r  Waiting for browser authorization... %ds (Enter to skip)  ", remaining)
+	fmt.Printf("\r  Waiting for browser authorization... %ds (Ctrl+C to cancel)  ", remaining)
 
 	var token string
 	done := false
@@ -156,14 +152,10 @@ func browserAuth(apiURL, agentID string) (string, error) {
 			fmt.Print("\r\033[K")
 			shutdownServer(server)
 			return "", fmt.Errorf("timed out waiting for browser authorization")
-		case <-skipCh:
-			fmt.Print("\r\033[K")
-			shutdownServer(server)
-			return "", fmt.Errorf("skipped by user")
 		case <-ticker.C:
 			remaining--
 			if remaining >= 0 {
-				fmt.Printf("\r  Waiting for browser authorization... %ds (Enter to skip)  ", remaining)
+				fmt.Printf("\r  Waiting for browser authorization... %ds (Ctrl+C to cancel)  ", remaining)
 			}
 		}
 	}
@@ -221,7 +213,7 @@ const rejectedHTML = `<!DOCTYPE html>
   <div class="card">
     <div class="icon">—</div>
     <h1>Authorization cancelled</h1>
-    <p>You can close this tab. Use <code>unarr init</code> to try again.</p>
+    <p>You can close this tab and run the command again in your terminal.</p>
   </div>
 </body>
 </html>`

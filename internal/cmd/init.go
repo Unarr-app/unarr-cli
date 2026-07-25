@@ -40,12 +40,22 @@ use 'unarr config' or edit ~/.config/unarr/config.toml directly.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&apiURL, "api-url", "", "API URL override (default: https://torrentclaw.com)")
+	cmd.Flags().StringVar(&apiURL, "api-url", "", "API URL override (default: "+defaultAPIURL()+")")
 
 	return cmd
 }
 
 func runInit(apiURLOverride string) error {
+	// `sudo unarr init` writes config.toml under /root and installs the systemd
+	// USER unit for root — the agent the user then runs as themselves sees none
+	// of it. SUDO_USER is what distinguishes that from a legitimately root-only
+	// environment (Docker, a NAS shell that has no other user), which must keep
+	// working.
+	if os.Geteuid() == 0 && os.Getenv("SUDO_USER") != "" {
+		return fmt.Errorf("don't run this with sudo — config and downloads would land in /root\n" +
+			"  Run it as your normal user: unarr init")
+	}
+
 	if !isTerminal() {
 		return fmt.Errorf("interactive mode requires a terminal (use UNARR_API_KEY env var instead)")
 	}
@@ -67,7 +77,7 @@ func runInit(apiURLOverride string) error {
 		apiURL = apiURLOverride
 	}
 	if apiURL == "" {
-		apiURL = "https://torrentclaw.com"
+		apiURL = defaultAPIURL()
 	}
 
 	// ── Step 1/3: Connect account ───────────────────────────────────
@@ -247,7 +257,9 @@ func runInit(apiURLOverride string) error {
 
 	// ── Step 3/3: Install daemon ────────────────────────────────────
 
-	var installDaemon bool
+	// Default YES: the zero value left Enter meaning "no", so the common path
+	// through the wizard produced a fully configured agent that never ran.
+	installDaemon := true
 	err = huh.NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
@@ -301,13 +313,43 @@ func runInit(apiURLOverride string) error {
 
 	// ── Install daemon (if requested) ───────────────────────────────
 
+	daemonRunning := false
 	if installDaemon {
 		fmt.Println()
 		if err := runDaemonInstall(); err != nil {
 			color.New(color.FgYellow).Printf("  Could not install daemon: %s\n", err)
 			fmt.Println()
 			fmt.Println("  You can install it later with: " + bold.Sprint("unarr daemon install"))
-			fmt.Println("  Or run manually with:          " + bold.Sprint("unarr start"))
+			installDaemon = false
+		} else {
+			daemonRunning = true
+		}
+	}
+
+	// Declining the service must not end the wizard with a command to type:
+	// `unarr start` is foreground and dies with the terminal, so a user who just
+	// wanted the agent running is left with nothing running.
+	if !installDaemon {
+		startNow := true
+		err = huh.NewForm(
+			huh.NewGroup(
+				huh.NewConfirm().
+					Title("Start unarr in the background now?").
+					Description("Runs until you stop it or reboot (unarr stop)").
+					Affirmative("Yes, start it").
+					Negative("No, I'll start it myself").
+					Value(&startNow),
+			),
+		).Run()
+		if err == nil && startNow {
+			if err := startDaemonDetached(); err != nil {
+				color.New(color.FgYellow).Printf("  Could not start in the background: %s\n", err)
+				fmt.Println("  Run it in the foreground instead: " + bold.Sprint("unarr start"))
+			} else {
+				daemonRunning = true
+				green.Println("  ✓ Started in the background")
+				dim.Printf("  Logs: %s\n", filepath.Join(config.DataDir(), "unarr.log"))
+			}
 		}
 	}
 
@@ -379,7 +421,7 @@ func runInit(apiURLOverride string) error {
 		cyan.Printf("  Available:  %s\n", line)
 	}
 
-	if !installDaemon {
+	if !daemonRunning {
 		fmt.Println()
 		fmt.Println("  Start the daemon:")
 		fmt.Println("    " + bold.Sprint("unarr start") + "              foreground (Ctrl+C to stop)")

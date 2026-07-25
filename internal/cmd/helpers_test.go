@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
 func TestExpandHome(t *testing.T) {
@@ -54,6 +56,27 @@ func TestIsSafeBrowserURL(t *testing.T) {
 		if isSafeBrowserURL(u) {
 			t.Errorf("isSafeBrowserURL(%q) = true, want false", u)
 		}
+	}
+}
+
+func TestOpenBrowserRejectsUnsafeURL(t *testing.T) {
+	// Only the reject path is exercised — a safe URL would actually spawn a
+	// browser on the test machine.
+	for _, u := range []string{"--help", "file:///etc/passwd", ""} {
+		if err := openBrowser(u); err == nil {
+			t.Errorf("openBrowser(%q) = nil, want error", u)
+		}
+	}
+}
+
+func TestDefaultAPIURLMatchesConfigDefault(t *testing.T) {
+	// The wizard, login and up all fall back through this; drifting from
+	// config.Default() would silently point a fresh install at another server.
+	if got, want := defaultAPIURL(), config.Default().Auth.APIURL; got != want {
+		t.Errorf("defaultAPIURL() = %q, want %q", got, want)
+	}
+	if defaultAPIURL() == "" {
+		t.Error("defaultAPIURL() is empty")
 	}
 }
 

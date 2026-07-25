@@ -55,6 +55,8 @@ services:
     network_mode: host        # recommended — reaches devices on your LAN
     environment:
       - TZ=UTC
+      - PUID=1000               # your host user id — see PUID/PGID below (NAS ≠ 1000)
+      - PGID=1000
       # - UNARR_API_KEY=your_key_here
     volumes:
       - ~/.config/unarr:/config
@@ -90,8 +92,33 @@ docker compose up -d                   # start the daemon
 | `UNARR_CONFIG_DIR`   | Config directory             | `/config`           |
 | `UNARR_COUNTRY`      | Country code (ISO 3166)      | `US`                |
 | `TZ`                 | Timezone                     | `UTC`               |
+| `PUID`               | User id the agent runs as    | `1000`              |
+| `PGID`               | Group id the agent runs as   | `1000`              |
 
 Any config value can be overridden by its matching `UNARR_*` environment variable.
+
+### PUID / PGID (NAS users: read this)
+
+The container runs as `1000:1000` unless you say otherwise, which matches a
+typical Linux desktop but **not** a NAS. If `/config` or `/downloads` is owned
+by a different user on the host, the agent gets *permission denied* on its
+first write. Pass your own ids and the entrypoint takes ownership of the mounts
+before dropping to them:
+
+```bash
+docker run -d --name unarr \
+  -e PUID=1026 -e PGID=100 \
+  -v /volume1/docker/unarr:/config \
+  -v /volume1/media:/downloads \
+  unarr/cli
+```
+
+| Platform    | How to find your ids                                  |
+|-------------|-------------------------------------------------------|
+| Synology    | SSH in, run `id <your-user>` (uids usually start 1024) |
+| unRAID      | `99` / `100` (the standard `nobody:users`)             |
+| QNAP        | SSH in, run `id admin`                                 |
+| Linux/macOS | `id -u` / `id -g` (often already `1000`)               |
 
 ## Networking
 

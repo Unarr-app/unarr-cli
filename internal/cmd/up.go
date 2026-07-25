@@ -97,7 +97,7 @@ func runUp(authKey string, force bool) error {
 
 	apiURL := cfg.Auth.APIURL
 	if apiURL == "" {
-		apiURL = "https://torrentclaw.com"
+		apiURL = defaultAPIURL()
 	}
 
 	hostname, _ := os.Hostname()
@@ -129,12 +129,28 @@ func runUp(authKey string, force bool) error {
 	if resp.APIURL != "" {
 		cfg.Auth.APIURL = resp.APIURL
 	}
+
+	// `up` is unattended: there is no wizard to ask where downloads go, and
+	// runDaemonStart refuses to start without a download dir. Without this the
+	// exchange succeeds and the very next step dies with "run 'unarr init'
+	// first" — a provisioned agent that cannot run. Pick the same default the
+	// wizard offers. UNARR_DOWNLOAD_DIR is already in cfg (ApplyEnvOverrides),
+	// so an explicit choice always wins.
+	pickedDir := ""
+	if cfg.Download.Dir == "" {
+		cfg.Download.Dir = defaultDownloadDir()
+		pickedDir = cfg.Download.Dir
+	}
+
 	if err := config.Save(cfg, resolvedConfigPath()); err != nil {
 		return fmt.Errorf("save credential after exchange: %w", err)
 	}
 	appCfg = cfg // refresh the cached config so runDaemonStart sees the new key
 
 	fmt.Printf("  Provisioned agent %s\n", agentID)
+	if pickedDir != "" {
+		fmt.Printf("  Download directory: %s (set UNARR_DOWNLOAD_DIR or edit config.toml to change it)\n", pickedDir)
+	}
 	fmt.Println()
 	return nil
 }

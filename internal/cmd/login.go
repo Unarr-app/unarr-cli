@@ -53,7 +53,7 @@ settings, or other configuration.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&apiURL, "api-url", "", "API URL override (default: https://torrentclaw.com)")
+	cmd.Flags().StringVar(&apiURL, "api-url", "", "API URL override (default: "+defaultAPIURL()+")")
 	// --browser is what makes signing in possible without a terminal: it is the
 	// same browser flow, minus the interactive paste-your-key fallback that
 	// needs a TTY. The desktop tray drives login through it, so a user who
@@ -86,7 +86,7 @@ func runLogin(apiURLOverride string, browserOnly bool) error {
 		apiURL = apiURLOverride
 	}
 	if apiURL == "" {
-		apiURL = "https://torrentclaw.com"
+		apiURL = defaultAPIURL()
 	}
 
 	// ── Authenticate ────────────────────────────────────────────────

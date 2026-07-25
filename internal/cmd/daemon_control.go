@@ -362,6 +362,37 @@ func printStateInfo() {
 	fmt.Println()
 }
 
+// startDaemonDetached launches `unarr start` as a background process in its own
+// session, so it outlives the terminal that spawned it. Used when no service
+// manager is in play (the wizard's "start it now" path) — plain `unarr start`
+// is foreground and dies with the shell, which is not what "start it" means to
+// a user. Output goes to the same log file the service install uses.
+func startDaemonDetached() error {
+	bin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find executable: %w", err)
+	}
+
+	logDir := config.DataDir()
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return fmt.Errorf("create log dir: %w", err)
+	}
+	logFile, err := os.OpenFile(filepath.Join(logDir, "unarr.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open log file: %w", err)
+	}
+	defer logFile.Close()
+
+	cmd := exec.Command(bin, "start")
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = detachedSysProcAttr()
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start daemon: %w", err)
+	}
+	return cmd.Process.Release()
+}
+
 // svcExec runs a service management command with output flowing to the terminal.
 func svcExec(name string, args ...string) error {
 	cmd := exec.Command(name, args...)

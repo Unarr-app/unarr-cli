@@ -89,6 +89,33 @@ Removes the service file and disables automatic startup on boot.`,
 	}
 }
 
+// noServiceManagerHelp is appended to every install failure. A service manager
+// that isn't there is not a bug the user can fix — but "your NAS has no systemd"
+// is only useful next to the way that box DOES start things at boot.
+const noServiceManagerHelp = `
+  Start it another way:
+    unarr start                    foreground (Ctrl+C to stop)
+    Synology DSM                   Control Panel → Task Scheduler → new triggered task, event "Boot-up"
+    unRAID                         add "unarr start &" to /boot/config/go
+    anything else with cron        crontab -e → @reboot unarr start
+`
+
+// svcOutput runs a service-manager command and returns its combined output, so
+// a failure can be reported verbatim instead of silently discarded.
+func svcOutput(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// firstLine picks the most useful one-liner out of a command's output, falling
+// back to the error when the command printed nothing.
+func firstLine(out string, err error) string {
+	if out == "" {
+		return err.Error()
+	}
+	return strings.SplitN(out, "\n", 2)[0]
+}
+
 type serviceData struct {
 	BinPath string
 	User    string
@@ -157,13 +184,38 @@ func installSystemd(data serviceData, green *color.Color) error {
 
 	fmt.Printf("  Created: %s\n", path)
 
-	// Enable and start
-	exec.Command("systemctl", "--user", "daemon-reload").Run()
-	exec.Command("systemctl", "--user", "enable", "unarr").Run()
-	exec.Command("systemctl", "--user", "start", "unarr").Run()
+	// systemd is not a given: NAS firmwares (Synology, QNAP, unRAID), containers
+	// and minimal distros have no user manager at all. Discarding these errors
+	// printed a green "Installed and started!" over a unit file nothing would
+	// ever run — the worst kind of dead end, because the user has no reason to
+	// look further.
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return fmt.Errorf("systemd is not available here (systemctl not found).\n%s", noServiceManagerHelp)
+	}
+	for _, args := range [][]string{
+		{"--user", "daemon-reload"},
+		{"--user", "enable", "unarr"},
+		{"--user", "start", "unarr"},
+	} {
+		if out, err := svcOutput("systemctl", args...); err != nil {
+			return fmt.Errorf("systemctl %s failed: %w\n  %s\n%s",
+				strings.Join(args, " "), err, out, noServiceManagerHelp)
+		}
+	}
 
-	// Enable lingering so user services run without login session
-	exec.Command("loginctl", "enable-linger", data.User).Run()
+	// Enable lingering so user services run without login session. Best-effort:
+	// loginctl is missing on some systemd-lite systems and the service still
+	// works while the user is logged in, so warn rather than fail.
+	if out, err := svcOutput("loginctl", "enable-linger", data.User); err != nil {
+		color.New(color.FgYellow).Printf("  Note: could not enable lingering (%s) — the service may stop when you log out\n", firstLine(out, err))
+	}
+
+	// enable+start exiting 0 is not proof the unit came up (it can fail seconds
+	// later on a bad ExecStart or a missing config). Ask before claiming success.
+	if state, err := svcOutput("systemctl", "--user", "is-active", "unarr"); err != nil && state != "activating" {
+		return fmt.Errorf("the unarr service did not come up (is-active: %s).\n  Check: journalctl --user -u unarr -n 50\n%s",
+			firstLine(state, err), noServiceManagerHelp)
+	}
 
 	fmt.Println()
 	green.Println("  ✓ Installed and started!")
@@ -196,7 +248,18 @@ func installLaunchd(data serviceData, green *color.Color) error {
 
 	fmt.Printf("  Created: %s\n", path)
 
-	exec.Command("launchctl", "load", path).Run()
+	// Same reasoning as systemd: a discarded launchctl error printed a green
+	// check over a plist nothing had loaded.
+	if _, err := exec.LookPath("launchctl"); err != nil {
+		return fmt.Errorf("launchd is not available here (launchctl not found).\n%s", noServiceManagerHelp)
+	}
+	if out, err := svcOutput("launchctl", "load", path); err != nil {
+		return fmt.Errorf("launchctl load failed: %w\n  %s\n%s", err, out, noServiceManagerHelp)
+	}
+	if out, err := svcOutput("launchctl", "list", service.LaunchdLabel); err != nil {
+		return fmt.Errorf("the unarr agent did not load (launchctl list: %s).\n  Check: %s\n%s",
+			firstLine(out, err), filepath.Join(data.LogDir, "unarr.err.log"), noServiceManagerHelp)
+	}
 
 	fmt.Println()
 	green.Println("  ✓ Installed and loaded!")
@@ -268,24 +331,39 @@ func installWindowsTask(data serviceData, green *color.Color) error {
 	)
 	taskCmd := fmt.Sprintf(`powershell.exe -NonInteractive -WindowStyle Hidden -Command "%s"`, psScript)
 
-	out, err := exec.Command("schtasks",
+	// /rl limited, NOT highest: the daemon needs no elevation, and "highest"
+	// makes schtasks fail outright on a standard (non-admin) Windows account —
+	// the majority of home installs.
+	out, err := svcOutput("schtasks",
 		"/create",
 		"/tn", "unarr",
 		"/tr", taskCmd,
 		"/sc", "onlogon",
 		"/ru", data.User,
-		"/rl", "highest",
+		"/rl", "limited",
 		"/f",
-	).CombinedOutput()
+	)
 	if err != nil {
-		return fmt.Errorf("create scheduled task: %w\n%s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("create scheduled task: %w\n%s", err, out)
+	}
+
+	// Run it now. "Installed, will start at next login" is a dead end for
+	// someone who just finished the wizard and expects a working agent.
+	started := true
+	if out, err := svcOutput("schtasks", "/run", "/tn", "unarr"); err != nil {
+		started = false
+		color.New(color.FgYellow).Printf("  Note: could not start the task now (%s)\n", firstLine(out, err))
 	}
 
 	fmt.Println()
-	green.Println("  ✓ Installed! Service will start automatically at next login.")
-	fmt.Println()
-	fmt.Println("  To start now:")
-	fmt.Println("    unarr daemon start")
+	if started {
+		green.Println("  ✓ Installed and started! It will also start automatically at login.")
+	} else {
+		green.Println("  ✓ Installed! It will start automatically at your next login.")
+		fmt.Println()
+		fmt.Println("  To start now:")
+		fmt.Println("    unarr daemon start")
+	}
 	fmt.Println()
 	fmt.Println("  Manage with:")
 	fmt.Println("    unarr daemon status")
