@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.4] - 2026-07-25
+
+
+### Build
+
+- **desktop**: publish the tray for linux/arm64 and windows/arm64
 ## [1.7.3] - 2026-07-25
 
 
@@ -13,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **onboarding**: make install/start failures honest and stop leaving root behind
 - **onboarding**: stop pointing container users at the interactive wizard
 - **onboarding**: remove install and first-run dead ends
+
+### Other
+
+- **release**: 1.7.3
 ## [1.7.2] - 2026-07-24
 
 
@@ -1342,6 +1352,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.7.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.3...v1.7.4
 [1.7.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.0...v1.7.1
