@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
 func TestExpandHome(t *testing.T) {
@@ -65,5 +67,99 @@ func TestDefaultDownloadDir(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	if !strings.HasPrefix(dir, home) {
 		t.Errorf("defaultDownloadDir() = %q, expected to start with home dir %q", dir, home)
+	}
+}
+
+// setupHint must never send a container user to the interactive wizard: there is
+// no tty and no browser inside, so `unarr init` is a dead end there.
+func TestSetupHintPointsAtAuthKeyInDocker(t *testing.T) {
+	t.Setenv("UNARR_DOCKER", "1")
+	hint := setupHint("https://unarr.app")
+	if !strings.Contains(hint, "UNARR_AUTHKEY") {
+		t.Errorf("docker hint should name UNARR_AUTHKEY, got %q", hint)
+	}
+	if strings.Contains(hint, "unarr init") {
+		t.Errorf("docker hint must not send the user to the wizard, got %q", hint)
+	}
+	if !strings.Contains(hint, "https://unarr.app/profile?tab=agents") {
+		t.Errorf("hint should say where the key comes from, got %q", hint)
+	}
+}
+
+// The non-Docker branches: a headless host (systemd unit, provisioning script,
+// CI) gets the auth-key command, and only a real terminal gets the wizard.
+// Exercised through setupHintFor because isTerminal() is true under `go test`
+// (stdin is /dev/null, itself a character device).
+func TestSetupHintNonDockerBranches(t *testing.T) {
+	tests := []struct {
+		name        string
+		interactive bool
+		want        string
+		notWant     string
+	}{
+		{"headless", false, "unarr up --auth-key", "unarr init"},
+		{"terminal", true, "unarr init", "--auth-key"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hint := setupHintFor("https://mirror.example.com", false, tt.interactive)
+			if !strings.Contains(hint, tt.want) {
+				t.Errorf("hint %q should contain %q", hint, tt.want)
+			}
+			if strings.Contains(hint, tt.notWant) {
+				t.Errorf("hint %q should not contain %q", hint, tt.notWant)
+			}
+		})
+	}
+}
+
+// A user on a mirror or a self-hosted server must be sent to THEIR server —
+// pointing them at unarr.app, where their key does not exist, is the dead end.
+func TestSetupHintUsesConfiguredAPIURL(t *testing.T) {
+	const mirror = "https://unarr.example.net"
+	for _, inDocker := range []bool{true, false} {
+		hint := setupHintFor(mirror, inDocker, false)
+		if !strings.Contains(hint, mirror+"/profile?tab=agents") {
+			t.Errorf("inDocker=%v: hint %q should point at the configured server", inDocker, hint)
+		}
+		if strings.Contains(hint, config.Default().Auth.APIURL) {
+			t.Errorf("inDocker=%v: hint %q leaked the default server", inDocker, hint)
+		}
+	}
+}
+
+// With no api_url configured the hint still has to name a host the user can open.
+func TestSetupHintFallsBackToDefaultAPIURL(t *testing.T) {
+	if hint := setupHintFor("", true, false); !strings.Contains(hint, config.Default().Auth.APIURL) {
+		t.Errorf("hint should fall back to the default API URL, got %q", hint)
+	}
+}
+
+// The sudo guard has to fire for every shape of "a normal user typed sudo" and
+// stay quiet in environments that are legitimately root-only — a false positive
+// bricks Docker/NAS installs, a false negative writes config.toml and the
+// systemd USER unit under /root.
+func TestIsSudoEnv(t *testing.T) {
+	tests := []struct {
+		name                           string
+		euid                           int
+		sudoUser, sudoUID, home, login string
+		want                           bool
+	}{
+		{"normal user", 1000, "", "", "/home/dave", "dave", false},
+		{"sudo unarr init", 0, "dave", "1000", "/root", "dave", true},
+		{"sudo -i (SUDO_USER dropped)", 0, "", "1000", "/root", "dave", true},
+		{"sudo su - (all SUDO_* dropped)", 0, "", "", "/root", "dave", true},
+		{"container as root (no login name)", 0, "", "", "/root", "", false},
+		{"root-owned systemd unit", 0, "", "", "/root", "", false},
+		{"real root login", 0, "", "", "/root", "root", false},
+		{"root with its own HOME (NAS shell)", 0, "", "", "/volume1/homes/admin", "admin", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSudoEnv(tt.euid, tt.sudoUser, tt.sudoUID, tt.home, tt.login); got != tt.want {
+				t.Errorf("isSudoEnv() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

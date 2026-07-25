@@ -51,6 +51,18 @@ jobs:
         with:
           version: v2.11.4
 
+  shell:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # docker-entrypoint.sh is PID 1 of the published image and does the
+      # privilege drop — a quoting slip there is a container that runs as root
+      # or cannot start at all, and nothing else in CI executes it.
+      # scripts/release.sh is deliberately not covered yet (pre-existing
+      # findings); add it once cleaned up.
+      - run: shellcheck docker-entrypoint.sh scripts/check-arch.sh scripts/download-ffmpeg-static.sh
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest

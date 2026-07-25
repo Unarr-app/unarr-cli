@@ -362,6 +362,105 @@ func printStateInfo() {
 	fmt.Println()
 }
 
+// startDaemonDetached launches `unarr start` as a background process in its own
+// session, so it outlives the terminal that spawned it. Used when no service
+// manager is in play (the wizard's "start it now" path) — plain `unarr start`
+// is foreground and dies with the shell, which is not what "start it" means to
+// a user. Output goes to the same log file the service install uses.
+func startDaemonDetached() error {
+	bin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find executable: %w", err)
+	}
+
+	logDir := config.DataDir()
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return fmt.Errorf("create log dir: %w", err)
+	}
+	logPath := filepath.Join(logDir, "unarr.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open log file: %w", err)
+	}
+	defer logFile.Close()
+
+	cmd := exec.Command(bin, "start")
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = detachedSysProcAttr()
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start daemon: %w", err)
+	}
+
+	// Start() returns as soon as fork/exec succeeds, which proves nothing: the
+	// child still validates config, takes the single-instance flock and creates
+	// the download dir, any of which can exit within milliseconds (the likely
+	// one: a daemon is already running for this config dir). Printing "started"
+	// over a process that is already gone is exactly the dead end this path
+	// exists to remove — so wait out the window and report what the log says.
+	//
+	// Wait() runs in a goroutine rather than IsProcessAlive(pid) because an
+	// unwaited child of ours would linger as a zombie, and a zombie answers
+	// signal 0 as if it were alive. The goroutine simply dies with this
+	// short-lived process; the daemon is already in its own session and gets
+	// reparented to init.
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
+	select {
+	case werr := <-exited:
+		return fmt.Errorf("the daemon exited immediately after starting (%s)\n%s",
+			exitReason(werr), tailLogFile(logPath, 15))
+	case <-time.After(detachedStartupProbe):
+		return nil
+	}
+}
+
+// detachedStartupProbe is how long a detached daemon must survive before we call
+// it started. Long enough to cover config validation and the flock, short enough
+// that the wizard does not feel stalled.
+const detachedStartupProbe = 1500 * time.Millisecond
+
+// exitReason describes how a child ended, including the case where it exited 0
+// (a clean but far too early exit is still a failure to start).
+func exitReason(err error) string {
+	if err == nil {
+		return "exit status 0"
+	}
+	return err.Error()
+}
+
+// tailLogFile returns the last n lines of a log file, indented for an error
+// message, so a failed start shows WHY instead of only that it failed.
+// Best-effort: an unreadable log must never mask the original failure.
+func tailLogFile(path string, n int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return "  Log: " + path
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return "  Log: " + path
+	}
+	// The log grows unbounded across runs; only its tail is of interest.
+	const window = 8192
+	off := int64(0)
+	if fi.Size() > window {
+		off = fi.Size() - window
+	}
+	buf := make([]byte, fi.Size()-off)
+	read, _ := f.ReadAt(buf, off)
+	if read == 0 {
+		return "  Log: " + path
+	}
+	lines := strings.Split(strings.TrimRight(string(buf[:read]), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return "  " + path + ":\n    " + strings.Join(lines, "\n    ")
+}
+
 // svcExec runs a service management command with output flowing to the terminal.
 func svcExec(name string, args ...string) error {
 	cmd := exec.Command(name, args...)

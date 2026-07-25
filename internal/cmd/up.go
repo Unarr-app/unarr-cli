@@ -97,7 +97,7 @@ func runUp(authKey string, force bool) error {
 
 	apiURL := cfg.Auth.APIURL
 	if apiURL == "" {
-		apiURL = "https://torrentclaw.com"
+		apiURL = defaultAPIURL()
 	}
 
 	hostname, _ := os.Hostname()
@@ -129,14 +129,38 @@ func runUp(authKey string, force bool) error {
 	if resp.APIURL != "" {
 		cfg.Auth.APIURL = resp.APIURL
 	}
+
+	dir, pickedDir := resolveUpDownloadDir(cfg.Download.Dir)
+	cfg.Download.Dir = dir
+
 	if err := config.Save(cfg, resolvedConfigPath()); err != nil {
 		return fmt.Errorf("save credential after exchange: %w", err)
 	}
 	appCfg = cfg // refresh the cached config so runDaemonStart sees the new key
 
 	fmt.Printf("  Provisioned agent %s\n", agentID)
+	if pickedDir != "" {
+		fmt.Printf("  Download directory: %s (set UNARR_DOWNLOAD_DIR or edit config.toml to change it)\n", pickedDir)
+	}
 	fmt.Println()
 	return nil
+}
+
+// resolveUpDownloadDir decides where an unattended `up` puts downloads.
+//
+// `up` has no wizard to ask, and runDaemonStart refuses to start without a
+// download dir: without a default the exchange succeeds and the very next step
+// dies with "run 'unarr init' first" — a provisioned agent that cannot run. Any
+// configured value wins (config.toml, or UNARR_DOWNLOAD_DIR which
+// ApplyEnvOverrides has already folded into cfg), so an explicit choice is never
+// overridden. picked is non-empty only when this function decided, so the caller
+// only announces a directory the user did not pick.
+func resolveUpDownloadDir(configured string) (dir, picked string) {
+	if configured != "" {
+		return configured, ""
+	}
+	d := defaultDownloadDir()
+	return d, d
 }
 
 // ensureAgentID returns the agent id from config, generating and PERSISTING a

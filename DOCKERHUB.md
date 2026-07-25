@@ -55,6 +55,8 @@ services:
     network_mode: host        # recommended — reaches devices on your LAN
     environment:
       - TZ=UTC
+      - PUID=1000               # your host user id — see PUID/PGID below (NAS ≠ 1000)
+      - PGID=1000
       # - UNARR_API_KEY=your_key_here
     volumes:
       - ~/.config/unarr:/config
@@ -90,8 +92,82 @@ docker compose up -d                   # start the daemon
 | `UNARR_CONFIG_DIR`   | Config directory             | `/config`           |
 | `UNARR_COUNTRY`      | Country code (ISO 3166)      | `US`                |
 | `TZ`                 | Timezone                     | `UTC`               |
+| `PUID`               | User id the agent runs as    | `1000`              |
+| `PGID`               | Group id the agent runs as   | `1000`              |
 
 Any config value can be overridden by its matching `UNARR_*` environment variable.
+
+### PUID / PGID (NAS users: read this)
+
+The container runs as `1000:1000` unless you say otherwise, which matches a
+typical Linux desktop but **not** a NAS. If `/config` or `/downloads` is owned
+by a different user on the host, the agent gets *permission denied* on its
+first write. Pass your own ids:
+
+```bash
+docker run -d --name unarr \
+  -e PUID=1026 -e PGID=100 \
+  -v /volume1/docker/unarr:/config \
+  -v /volume1/media:/downloads \
+  unarr/cli
+```
+
+| Platform    | How to find your ids                                  |
+|-------------|-------------------------------------------------------|
+| Synology    | SSH in, run `id <your-user>` (uids usually start 1024) |
+| unRAID      | `99` / `100` (the standard `nobody:users`)             |
+| QNAP        | SSH in, run `id admin`                                 |
+| Linux/macOS | `id -u` / `id -g` (often already `1000`)               |
+
+**What the entrypoint actually does with the mounts.** It starts as root, then:
+
+- `/config`, `/data` and the home directory are chowned **recursively** to
+  `PUID:PGID` — they are small and entirely owned by the agent.
+- `/downloads` gets **only its mount point** chowned. Your library can be
+  terabytes and a recursive chown on every start would stall the container for
+  minutes.
+- It then drops to `PUID:PGID` and everything unarr **creates** from that point
+  is owned by `PUID:PGID`.
+
+So **files that were already in your library keep their original owner**. If
+they belong to a different uid, unarr can still fail to rename, move or delete
+*those* files. That is fixed once, on the host, not by the container:
+
+```bash
+chown -R 1026:100 /volume1/media     # your PUID:PGID
+```
+
+**Running as root** is opt-in: set `PUID=0` explicitly. Anything else keeps the
+privilege drop, and if privileges cannot be dropped the container refuses to
+start rather than writing root-owned files onto your shares.
+
+**Kubernetes.** The image has no baked `USER`, so a pod with
+`runAsNonRoot: true` must also set `runAsUser` (and `runAsGroup`):
+
+```yaml
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1026
+  runAsGroup: 100
+  supplementalGroups: [100]
+```
+
+With `runAsUser` set, the container is already unprivileged: the entrypoint
+skips the chown and the privilege drop entirely and execs the agent directly, so
+the mount permissions must be right on the host (or via `fsGroup`).
+
+**Supplementary groups.** In the default (root → drop) path the agent ends up in
+exactly one group, `PGID` — extra groups added with `--group-add` are not
+carried over. If a share depends on a secondary group, start the container
+unprivileged instead, which preserves the runtime's full group list:
+
+```bash
+docker run -d --name unarr \
+  --user 1026:100 --group-add 65539 \
+  -v /volume1/docker/unarr:/config \
+  -v /volume1/media:/downloads \
+  unarr/cli
+```
 
 ## Networking
 
@@ -144,7 +220,9 @@ Multi-arch image — Docker pulls the right one automatically:
 
 ## Image details
 
-- **User:** `unarr` (UID 1000, GID 1000) — runs as **non-root**
+- **User:** starts as root only to prepare the mounts, then drops to
+  `PUID:PGID` (default `1000:1000`) — the agent itself runs as **non-root**.
+  Kubernetes `runAsNonRoot` needs an explicit `runAsUser` (see PUID/PGID above)
 - **Entrypoint:** `unarr start` (daemon mode)
 - **Bundled `ffmpeg` / `ffprobe`** for transcode & inspection — nothing else to install
 - **Signed releases** — binaries are published as **[GitHub Releases](https://github.com/Unarr-app/unarr-cli/releases)**;
