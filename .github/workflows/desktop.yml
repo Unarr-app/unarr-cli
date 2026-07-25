@@ -8,7 +8,8 @@ name: desktop
 #
 # Publishing model ("todo hilado" with the CLI): when release.yml publishes the
 # GitHub Release for a v* tag, the `release: published` trigger here builds the
-# four desktop binaries AND ATTACHES THEM TO THAT SAME RELEASE as
+# desktop binaries for every target in the matrix below AND ATTACHES THEM TO
+# THAT SAME RELEASE as
 #   unarr-desktop_<version>_<os>_<arch>[.exe]
 # so /install.sh --desktop and install.ps1 resolve them with the exact same
 # "latest release" logic they already use for the CLI. Older releases simply
@@ -53,11 +54,18 @@ jobs:
       matrix:
         include:
           - { runner: ubuntu-latest, goos: linux, goarch: amd64, cgo: "0", ext: "" }
+          # arm64 legs are CGO-free (systray is pure Go on Linux/DBus and
+          # Windows/syscall), so they cross-compile on the same runners — no
+          # extra machine. Without them an arm64 NAS or a Snapdragon Windows
+          # laptop got no tray at all: the installer resolves the asset by
+          # <os>_<arch> and there was none to resolve.
+          - { runner: ubuntu-latest, goos: linux, goarch: arm64, cgo: "0", ext: "" }
           # macos-13 was retired by GitHub (Dec 2025) — macos-15-intel is the
           # remaining Intel runner for darwin/amd64 builds.
           - { runner: macos-15-intel, goos: darwin, goarch: amd64, cgo: "1", ext: "" }
           - { runner: macos-latest, goos: darwin, goarch: arm64, cgo: "1", ext: "" }
           - { runner: windows-latest, goos: windows, goarch: amd64, cgo: "0", ext: ".exe" }
+          - { runner: windows-latest, goos: windows, goarch: arm64, cgo: "0", ext: ".exe" }
     steps:
       - uses: actions/checkout@v7
 
@@ -122,7 +130,7 @@ jobs:
 
   sign:
     name: sign desktop checksums
-    # Hash the four freshly built binaries into checksums-desktop.txt, sign it
+    # Hash every freshly built binary into checksums-desktop.txt, sign it
     # with the release ed25519 key (reusing scripts/sign-checksums — it is
     # artifact-agnostic: -key/-in/-out), and attach both files to the same
     # release. The artifacts hashed here are the exact bytes the build jobs
