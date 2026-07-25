@@ -25,7 +25,7 @@ func TestFailed_FalseWhenExitedButRestartPending(t *testing.T) {
 	s := &HLSSession{}
 	s.readyMu.Lock()
 	s.exited = true
-	s.exitErr = errFakeExit{}
+	s.exitErr = fakeExitError{}
 	s.readyMu.Unlock()
 
 	if failed, _ := s.Failed(); failed {
@@ -37,7 +37,7 @@ func TestFailed_TrueAfterGivingUp(t *testing.T) {
 	s := &HLSSession{}
 	s.readyMu.Lock()
 	s.exited = true
-	s.exitErr = errFakeExit{}
+	s.exitErr = fakeExitError{}
 	s.readyMu.Unlock()
 	s.mu.Lock()
 	s.gaveUp = true
@@ -75,6 +75,6 @@ func TestFailed_LatchClearedOnRelaunch(t *testing.T) {
 	}
 }
 
-type errFakeExit struct{}
+type fakeExitError struct{}
 
-func (errFakeExit) Error() string { return "exit status 218" }
+func (fakeExitError) Error() string { return "exit status 218" }
