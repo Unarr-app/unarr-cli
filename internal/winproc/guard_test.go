@@ -37,6 +37,8 @@ func TestEveryExecCommandHidesWindow(t *testing.T) {
 		"internal/dialog",
 		"internal/arr",
 		"internal/cmd",
+		"internal/upgrade",
+		"internal/funnel",
 		"cmd/unarr-desktop",
 	}
 

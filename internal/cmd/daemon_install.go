@@ -432,21 +432,22 @@ func installWindowsTask(data serviceData, green *color.Color) error {
 	//     early exit left the agent dead until the user manually resumed it.
 	//   * StartWhenAvailable — recover a missed trigger (asleep/off at logon).
 	xmlPath := filepath.Join(logDir, "unarr-task.xml")
-	if err := os.WriteFile(xmlPath, []byte(buildWindowsTaskXML(data, logDir)), 0o600); err != nil {
+	if err := os.WriteFile(xmlPath, buildWindowsTaskXMLBytes(data, logDir), 0o600); err != nil {
 		return fmt.Errorf("write task definition: %w", err)
 	}
 
-	// With /xml, the run level lives INSIDE the XML (<RunLevel>LeastPrivilege</RunLevel>)
-	// — passing /rl here makes schtasks reject the call ("/RL option can only be
-	// used with ..."), which is what silently broke task creation. /ru is still
-	// valid with /xml (it supplies the run-as credential); LeastPrivilege in the
-	// XML keeps this working on a standard (non-admin) account, the majority of
-	// home installs.
+	// With /xml, both the run level (<RunLevel>LeastPrivilege</RunLevel>) and the
+	// identity (<Principal><UserId>…</UserId><LogonType>InteractiveToken) live
+	// INSIDE the XML. Passing /rl makes schtasks reject the call ("/RL option can
+	// only be used with ..."), which is what silently broke task creation. We
+	// also DON'T pass /ru: with /xml it's redundant (the Principal carries the
+	// user), and on a domain / non-current account /ru with no /rp can block on
+	// an interactive password prompt (svcOutput has no stdin) — the XML's
+	// InteractiveToken avoids that entirely.
 	out, err := svcOutput("schtasks",
 		"/create",
 		"/tn", "unarr",
 		"/xml", xmlPath,
-		"/ru", data.User,
 		"/f",
 	)
 	if err != nil {

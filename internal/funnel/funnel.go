@@ -29,6 +29,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // urlPattern matches the `https://<random>.trycloudflare.com` URL cloudflared
@@ -88,6 +90,7 @@ func Start(ctx context.Context, cfg Config) (*Tunnel, error) {
 		"--metrics", "127.0.0.1:0",
 		"--url", fmt.Sprintf("http://localhost:%d", cfg.Port),
 	)
+	winproc.HideWindow(cmd)
 
 	// cloudflared writes the connect log + assigned URL to stderr.
 	stderr, err := cmd.StderrPipe()

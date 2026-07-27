@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/xml"
 	"fmt"
 	"strings"
+	"unicode/utf16"
 )
 
 // logonDelaySeconds is how long the scheduled task waits after logon before
@@ -22,6 +25,24 @@ const logonDelaySeconds = 20
 // launches) when a transcript is already active or the log file is locked by an
 // AV scan / a lingering process. Here Start-Transcript is best-effort inside a
 // try/catch, so a transcript failure can never stop the agent from starting.
+// buildWindowsTaskXMLBytes renders the task definition and encodes it as
+// UTF-16LE with a BOM — what `schtasks /create /xml` actually requires. The
+// prolog declares UTF-16 to match. (An earlier attempt declared UTF-8 with a
+// UTF-16 prolog and vice-versa; schtasks reads the declared encoding and
+// rejects a mismatch with "The task XML is malformed / unable to switch the
+// encoding". UTF-16LE+BOM + a UTF-16 declaration is the combination it accepts,
+// and it also carries a non-ASCII Windows username correctly.)
+func buildWindowsTaskXMLBytes(data serviceData, logDir string) []byte {
+	s := buildWindowsTaskXML(data, logDir)
+	u16 := utf16.Encode([]rune(s))
+	buf := &bytes.Buffer{}
+	buf.Write([]byte{0xFF, 0xFE}) // UTF-16LE BOM
+	for _, r := range u16 {
+		_ = binary.Write(buf, binary.LittleEndian, r)
+	}
+	return buf.Bytes()
+}
+
 func buildWindowsTaskXML(data serviceData, logDir string) string {
 	logPath := strings.TrimRight(logDir, `\`) + `\unarr.log`
 
@@ -82,9 +103,10 @@ func buildWindowsTaskXML(data serviceData, logDir string) string {
 		return `<?xml version="1.0" encoding="UTF-16"?>` + "\n" +
 			`<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"/>`
 	}
-	// schtasks expects a UTF-16 BOM-less declaration; the string content is
-	// ASCII (paths aside) so a UTF-8 file with this header is accepted in
-	// practice, matching how the wizard has always written task files.
+	// UTF-16 prolog: buildWindowsTaskXMLBytes writes these characters as
+	// UTF-16LE+BOM, which is the encoding schtasks /create /xml requires (it
+	// reads the declared encoding and rejects a mismatch as "task XML is
+	// malformed / unable to switch the encoding").
 	return `<?xml version="1.0" encoding="UTF-16"?>` + "\n" + string(out)
 }
 
@@ -125,16 +147,20 @@ type principal struct {
 	RunLevel  string `xml:"RunLevel"`
 }
 
+// Field order MATTERS: encoding/xml emits elements in struct-field order, and
+// the Task Scheduler settingsType XSD fixes the child-element sequence. A wrong
+// order imports fine on a lenient Windows 11 host but can be rejected by a
+// stricter validator (GPO-locked / future OS). This is the XSD sequence.
 type taskSettings struct {
+	AllowStartOnDemand         bool              `xml:"AllowStartOnDemand"`
+	RestartOnFailure           *restartOnFailure `xml:"RestartOnFailure,omitempty"`
 	MultipleInstancesPolicy    string            `xml:"MultipleInstancesPolicy"`
 	DisallowStartIfOnBatteries bool              `xml:"DisallowStartIfOnBatteries"`
 	StopIfGoingOnBatteries     bool              `xml:"StopIfGoingOnBatteries"`
 	StartWhenAvailable         bool              `xml:"StartWhenAvailable"`
-	AllowStartOnDemand         bool              `xml:"AllowStartOnDemand"`
-	Enabled                    bool              `xml:"Enabled"`
-	RestartOnFailure           *restartOnFailure `xml:"RestartOnFailure,omitempty"`
 	ExecutionTimeLimit         string            `xml:"ExecutionTimeLimit"`
 	Priority                   int               `xml:"Priority"`
+	Enabled                    bool              `xml:"Enabled"`
 }
 
 type restartOnFailure struct {
