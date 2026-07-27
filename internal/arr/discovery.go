@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // appInfo maps app names to their default ports and API versions.
@@ -78,7 +80,9 @@ func discoverDocker() []Instance {
 		return nil
 	}
 
-	out, err := exec.Command(dockerPath, "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Ports}}").Output()
+	cmd := exec.Command(dockerPath, "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Ports}}")
+	winproc.HideWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
@@ -162,7 +166,9 @@ func extractHostPort(portsStr, containerPort string) string {
 }
 
 func readDockerConfigXML(dockerPath, containerName string) string {
-	out, err := exec.Command(dockerPath, "exec", containerName, "cat", "/config/config.xml").Output()
+	cmd := exec.Command(dockerPath, "exec", containerName, "cat", "/config/config.xml")
+	winproc.HideWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}

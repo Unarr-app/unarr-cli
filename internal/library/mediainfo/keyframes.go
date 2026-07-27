@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // Keyframe index sidecar. The COPY-VOD streaming model (engine) needs the sorted
@@ -74,6 +76,7 @@ func IndexKeyframes(ctx context.Context, ffprobePath, mediaPath string) ([]float
 		"-of", "csv=p=0",
 		mediaPath,
 	)
+	winproc.HideWindow(cmd)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	var errBuf bytes.Buffer

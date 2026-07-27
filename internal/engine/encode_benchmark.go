@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strconv"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // benchmarkRung is a candidate transcode-height ceiling plus the 16:9 frame
@@ -111,7 +113,9 @@ func measureEncodeRealtimeFactor(ctx context.Context, ffmpegPath string, rung be
 		"-f", "null", "-",
 	}
 	start := time.Now()
-	err := exec.CommandContext(bctx, ffmpegPath, args...).Run()
+	cmd := exec.CommandContext(bctx, ffmpegPath, args...)
+	winproc.HideWindow(cmd)
+	err := cmd.Run()
 	elapsed := time.Since(start)
 	if err != nil || elapsed <= 0 {
 		return 0, false

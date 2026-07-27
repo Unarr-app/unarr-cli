@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // Hardware downscale filter probes (F4). Mirror the libplacebo probe in
@@ -47,13 +49,15 @@ func FFmpegSupportsScaleCuda(ffmpegPath string) bool {
 	// so format=p010le + hwupload_cuda stands in for a hevc_cuda Main10 decode.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, ffmpegPath,
+	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-hide_banner", "-loglevel", "error", "-nostats",
 		"-init_hw_device", "cuda=cu:0", "-filter_hw_device", "cu",
 		"-f", "lavfi", "-i", "testsrc2=size=256x256:rate=1:duration=1",
 		"-vf", "format=p010le,hwupload_cuda,scale_cuda=64:64:format=yuv420p,hwdownload,format=yuv420p",
 		"-frames:v", "1", "-f", "null", "-",
-	).CombinedOutput()
+	)
+	winproc.HideWindow(cmd)
+	out, err := cmd.CombinedOutput()
 	supported := err == nil
 
 	// Cache a stable yes/no, but not a transient deadline (see libplacebo probe).

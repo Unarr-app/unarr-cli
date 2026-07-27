@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // extractTimeout caps how long a single extractor invocation may run. Without
@@ -89,6 +91,7 @@ func extractUnrar(unrarPath, archivePath, outputDir, password string) ([]string,
 	ctx, cancel := context.WithTimeout(context.Background(), extractTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, unrarPath, args...)
+	winproc.HideWindow(cmd)
 	cmd.Dir = outputDir
 	if password != "" {
 		cmd.Stdin = strings.NewReader(password + "\n")
@@ -129,6 +132,7 @@ func extract7z(szPath, archivePath, outputDir, password string) ([]string, error
 	ctx, cancel := context.WithTimeout(context.Background(), extractTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, szPath, args...)
+	winproc.HideWindow(cmd)
 	cmd.Dir = outputDir
 	if password != "" {
 		cmd.Stdin = strings.NewReader(password + "\n")
@@ -158,6 +162,7 @@ func IsPasswordProtected(archivePath string) bool {
 	switch extType { //nolint:exhaustive // ExtractorNone handled above
 	case ExtractorUnrar:
 		cmd := exec.Command(extPath, "t", "-p-", archivePath)
+		winproc.HideWindow(cmd)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			outStr := string(output)
@@ -165,6 +170,7 @@ func IsPasswordProtected(archivePath string) bool {
 		}
 	case Extractor7z:
 		cmd := exec.Command(extPath, "t", "-p", archivePath)
+		winproc.HideWindow(cmd)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			outStr := string(output)

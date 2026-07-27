@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // Sidecar cache: unarr stores extracted artifacts (WebVTT subtitles, thumbnail
@@ -137,6 +139,7 @@ func ExtractSubtitleVTT(ctx context.Context, ffmpegPath, mediaPath string, index
 		"-",
 	}
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	winproc.HideWindow(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -197,6 +200,7 @@ func ExtractExternalSubtitleVTT(ctx context.Context, ffmpegPath, subPath, langHi
 		"-",
 	}
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	winproc.HideWindow(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -237,6 +241,7 @@ func ExtractSubtitlesVTTMulti(ctx context.Context, ffmpegPath, mediaPath string,
 	}
 
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	winproc.HideWindow(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	// Run it at IDLE I/O priority: this single ~14 min sequential read of a huge
@@ -354,6 +359,7 @@ func thumbnailArgsAccurate(mediaPath string, posSec float64, width int) []string
 // the caller can fall back.
 func runThumbnailFFmpeg(ctx context.Context, ffmpegPath string, args []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	winproc.HideWindow(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

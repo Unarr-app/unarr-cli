@@ -19,6 +19,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // Choice is what the user did with an error dialog.
@@ -46,6 +48,7 @@ const sendLabel = "Send report"
 // notification.
 func Error(title, body string) Choice {
 	for _, c := range candidates(title, body) {
+		winproc.HideWindow(c.cmd)
 		out, err := c.cmd.Output()
 		if err != nil {
 			// Only a process that ran and exited non-zero is an answer. Any

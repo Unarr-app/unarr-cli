@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/engine"
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -79,7 +80,9 @@ func runProbeHWAccel() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-encoders").CombinedOutput()
+	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-encoders")
+	winproc.HideWindow(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		red.Printf("    x ffmpeg -encoders failed: %v\n", err)
 		fmt.Println()

@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 	"github.com/fatih/color"
 )
 
@@ -32,6 +33,7 @@ func sendReloadSignal() error {
 // killPID stops the daemon process on Windows using taskkill.
 func killPID(pid int) error {
 	cmd := exec.Command("taskkill", "/pid", strconv.Itoa(pid), "/f")
+	winproc.HideWindow(cmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

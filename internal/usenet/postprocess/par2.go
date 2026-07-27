@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // ErrPar2NotInstalled is returned by Par2Verify/Par2Repair when parity data is
@@ -120,6 +122,7 @@ func Par2Available() bool { return par2Lookup() }
 // the generic-error branch (deliver UNVERIFIED). LC_ALL=C pins the wording.
 func par2Command(args ...string) *exec.Cmd {
 	cmd := exec.Command("par2", args...)
+	winproc.HideWindow(cmd)
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	return cmd
 }

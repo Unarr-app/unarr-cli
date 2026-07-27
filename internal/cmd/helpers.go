@@ -10,6 +10,7 @@ import (
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // openBrowser opens a URL in the default browser.
@@ -36,6 +37,7 @@ func openBrowser(url string) error {
 	default: // linux, freebsd
 		c = exec.Command("xdg-open", url)
 	}
+	winproc.HideWindow(c)
 	return c.Start()
 }
 
@@ -123,7 +125,9 @@ func isSudoEnv(euid int, sudoUser, sudoUID, home, login string) bool {
 // is no tty or no utmp entry — containers and systemd units, exactly the cases
 // that must NOT be read as sudo.
 func loginName() string {
-	out, err := exec.Command("logname").Output()
+	cmd := exec.Command("logname")
+	winproc.HideWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}

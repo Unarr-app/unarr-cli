@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // QSV 10-bit decode probe. Mirrors the scale_cuda / libplacebo probes: having
@@ -73,13 +75,15 @@ func writeTempProbeFile(ctx context.Context, ffmpegPath string) (string, error) 
 		return "", err
 	}
 	path := filepath.Join(dir, "probe.mp4")
-	out, err := exec.CommandContext(ctx, ffmpegPath,
+	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-hide_banner", "-loglevel", "error", "-nostats",
 		"-f", "lavfi", "-i", "testsrc2=size=256x256:rate=1:duration=1",
 		"-vf", "format=p010le",
 		"-c:v", "hevc_qsv", "-frames:v", "2",
 		"-y", path,
-	).CombinedOutput()
+	)
+	winproc.HideWindow(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		os.RemoveAll(dir)
 		if detail := strings.TrimSpace(lastLine(out)); detail != "" {
@@ -148,13 +152,15 @@ func FFmpegSupportsQSV10BitDecode(ffmpegPath string) bool {
 	}
 	defer removeProbeFile(tmp)
 
-	out, err := exec.CommandContext(ctx, ffmpegPath,
+	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-hide_banner", "-loglevel", "error", "-nostats",
 		"-hwaccel", "qsv", "-hwaccel_output_format", "nv12",
 		"-i", tmp,
 		"-vf", "scale=-2:64,format=yuv420p",
 		"-frames:v", "1", "-f", "null", "-",
-	).CombinedOutput()
+	)
+	winproc.HideWindow(cmd)
+	out, err := cmd.CombinedOutput()
 	// A clean exit is NOT sufficient on its own: inside the HLS pipeline this
 	// same driver bug was observed reporting the transfer failure and producing
 	// zero frames while ffmpeg still exited 0. So require both a clean exit AND

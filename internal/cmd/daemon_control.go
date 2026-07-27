@@ -14,6 +14,7 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/Unarr-app/unarr-cli/internal/service"
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -324,7 +325,9 @@ func launchdPlistPath(home string) string { return service.PlistPath(home) }
 
 // printDaemonStatusDarwin shows launchd service state by filtering launchctl output.
 func printDaemonStatusDarwin() {
-	out, err := exec.Command("launchctl", "list").Output()
+	cmd := exec.Command("launchctl", "list")
+	winproc.HideWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		fmt.Printf("  Could not query launchctl: %v\n", err)
 		return
@@ -464,6 +467,7 @@ func tailLogFile(path string, n int) string {
 // svcExec runs a service management command with output flowing to the terminal.
 func svcExec(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
+	winproc.HideWindow(cmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -472,6 +476,7 @@ func svcExec(name string, args ...string) error {
 // svcExecInteractive is like svcExec but also connects stdin (needed for follow/pager modes).
 func svcExecInteractive(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
+	winproc.HideWindow(cmd)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // HWAccel identifies a hardware-accelerated ffmpeg encoder family.
@@ -79,6 +81,7 @@ func detectHWAccelFresh(ctx context.Context, ffmpegPath string) HWAccel {
 
 func listFFmpegEncoders(ctx context.Context, ffmpegPath string) string {
 	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-encoders")
+	winproc.HideWindow(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return ""
@@ -184,6 +187,7 @@ var hwEncoderNames = []string{
 // binary.
 func ffmpegVersionLine(ctx context.Context, ffmpegPath string) string {
 	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-version")
+	winproc.HideWindow(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil || len(out) == 0 {
 		return ""

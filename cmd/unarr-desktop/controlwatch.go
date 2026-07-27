@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // controlWatch is how long a daemon control is watched for an early exit. Long
@@ -99,6 +101,7 @@ func (c *cappedBuffer) String() string {
 // died early and to reap it.
 func startUnarr(args ...string) (*exec.Cmd, *cappedBuffer, error) {
 	cmd := exec.Command(unarrBin(), args...)
+	winproc.HideWindow(cmd)
 	out := &cappedBuffer{}
 	cmd.Stdout = out
 	cmd.Stderr = out

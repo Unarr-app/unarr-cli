@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // ErrTrickplayInProgress means another worker — possibly an agent on another host
@@ -224,6 +226,7 @@ func GenerateTrickplay(ctx context.Context, ffmpegPath, mediaPath string, interv
 	cmd.Stderr = &stderr
 	// Die-with-parent BEFORE Start so an agent crash can't orphan this decode.
 	hardenCmd(cmd)
+	winproc.HideWindow(cmd)
 	// Start + idle I/O + lowest CPU niceness + Wait (matches the subtitle/thumbnail
 	// extractors): this full-decode pass is the heaviest sidecar job and runs in the
 	// background alongside live streaming on the same box/NFS, so it must yield both
@@ -283,6 +286,7 @@ func GenerateTrickplay(ctx context.Context, ffmpegPath, mediaPath string, interv
 // hard dependency on a separate ffprobe binary here.
 func probeImageDims(ctx context.Context, ffmpegPath, path string) (int, int, error) {
 	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-i", path)
+	winproc.HideWindow(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	_ = cmd.Run() // ffmpeg exits non-zero with no output file; we only want the probe stderr

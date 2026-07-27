@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // OpenPlayer attempts to open a media player with the given stream URL.
@@ -21,6 +23,7 @@ func OpenPlayer(url, override string) (string, *exec.Cmd, error) {
 	}
 	if override != "" {
 		cmd := exec.Command(override, "--", url)
+		winproc.HideWindow(cmd)
 		if err := cmd.Start(); err != nil {
 			return override, nil, fmt.Errorf("start %s: %w", override, err)
 		}
@@ -30,6 +33,7 @@ func OpenPlayer(url, override string) (string, *exec.Cmd, error) {
 	// Try mpv first (best streaming support)
 	if path, err := exec.LookPath("mpv"); err == nil {
 		cmd := exec.Command(path, "--no-terminal", "--", url)
+		winproc.HideWindow(cmd)
 		if err := cmd.Start(); err == nil {
 			return "mpv", cmd, nil
 		}
@@ -38,6 +42,7 @@ func OpenPlayer(url, override string) (string, *exec.Cmd, error) {
 	// Try VLC
 	if path, err := exec.LookPath("vlc"); err == nil {
 		cmd := exec.Command(path, "--", url)
+		winproc.HideWindow(cmd)
 		if err := cmd.Start(); err == nil {
 			return "vlc", cmd, nil
 		}
@@ -46,6 +51,7 @@ func OpenPlayer(url, override string) (string, *exec.Cmd, error) {
 	// Try cvlc (VLC headless)
 	if path, err := exec.LookPath("cvlc"); err == nil {
 		cmd := exec.Command(path, "--", url)
+		winproc.HideWindow(cmd)
 		if err := cmd.Start(); err == nil {
 			return "vlc (headless)", cmd, nil
 		}
@@ -67,17 +73,20 @@ func openBrowser(url string) (string, *exec.Cmd, error) {
 	case "linux":
 		if path, err := exec.LookPath("xdg-open"); err == nil {
 			cmd := exec.Command(path, url)
+			winproc.HideWindow(cmd)
 			if err := cmd.Start(); err == nil {
 				return "browser", cmd, nil
 			}
 		}
 	case "darwin":
 		cmd := exec.Command("/usr/bin/open", "--", url)
+		winproc.HideWindow(cmd)
 		if err := cmd.Start(); err == nil {
 			return "browser", cmd, nil
 		}
 	case "windows":
 		cmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		winproc.HideWindow(cmd)
 		if err := cmd.Start(); err == nil {
 			return "browser", cmd, nil
 		}

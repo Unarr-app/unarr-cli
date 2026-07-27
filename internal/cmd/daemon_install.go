@@ -14,6 +14,7 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/Unarr-app/unarr-cli/internal/service"
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -104,7 +105,9 @@ const noServiceManagerHelp = `
 // svcOutput runs a service-manager command and returns its combined output, so
 // a failure can be reported verbatim instead of silently discarded.
 func svcOutput(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).CombinedOutput()
+	cmd := exec.Command(name, args...)
+	winproc.HideWindow(cmd)
+	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
 
@@ -230,8 +233,12 @@ func installSystemd(data serviceData, green *color.Color) error {
 		// The unit may already be enabled at this point; removing only the file
 		// would leave a dangling wants/ symlink that makes every later
 		// daemon-reload warn. Both calls are no-ops when we never got that far.
-		exec.Command("systemctl", "--user", "disable", service.SystemdUnitName).Run()
-		exec.Command("systemctl", "--user", "daemon-reload").Run()
+		disableCmd := exec.Command("systemctl", "--user", "disable", service.SystemdUnitName)
+		winproc.HideWindow(disableCmd)
+		disableCmd.Run()
+		reloadCmd := exec.Command("systemctl", "--user", "daemon-reload")
+		winproc.HideWindow(reloadCmd)
+		reloadCmd.Run()
 	}()
 
 	fmt.Printf("  Created: %s\n", path)
@@ -360,25 +367,37 @@ func runDaemonUninstall() error {
 
 	switch runtime.GOOS {
 	case "linux":
-		exec.Command("systemctl", "--user", "stop", "unarr").Run()
-		exec.Command("systemctl", "--user", "disable", "unarr").Run()
+		stopCmd := exec.Command("systemctl", "--user", "stop", "unarr")
+		winproc.HideWindow(stopCmd)
+		stopCmd.Run()
+		disableCmd := exec.Command("systemctl", "--user", "disable", "unarr")
+		winproc.HideWindow(disableCmd)
+		disableCmd.Run()
 		path := service.SystemdUnitPathIn(home)
 		os.Remove(path)
-		exec.Command("systemctl", "--user", "daemon-reload").Run()
+		reloadCmd := exec.Command("systemctl", "--user", "daemon-reload")
+		winproc.HideWindow(reloadCmd)
+		reloadCmd.Run()
 		green.Printf("  ✓ Removed %s\n", path)
 
 	case "darwin":
 		path := service.PlistPath(home)
-		exec.Command("launchctl", "unload", path).Run()
+		unloadCmd := exec.Command("launchctl", "unload", path)
+		winproc.HideWindow(unloadCmd)
+		unloadCmd.Run()
 		os.Remove(path)
 		green.Printf("  ✓ Removed %s\n", path)
 
 	case "windows":
 		// Stop the running process if any
 		if state := agent.ReadState(); state != nil {
-			exec.Command("taskkill", "/pid", strconv.Itoa(state.PID), "/f").Run()
+			killCmd := exec.Command("taskkill", "/pid", strconv.Itoa(state.PID), "/f")
+			winproc.HideWindow(killCmd)
+			killCmd.Run()
 		}
-		out, err := exec.Command("schtasks", "/delete", "/tn", "unarr", "/f").CombinedOutput()
+		delCmd := exec.Command("schtasks", "/delete", "/tn", "unarr", "/f")
+		winproc.HideWindow(delCmd)
+		out, err := delCmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "cannot find") {
 			return fmt.Errorf("remove scheduled task: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
@@ -397,25 +416,37 @@ func installWindowsTask(data serviceData, green *color.Color) error {
 	os.MkdirAll(logDir, 0o755)
 
 	// Remove any existing task before (re)installing.
-	exec.Command("schtasks", "/delete", "/tn", "unarr", "/f").Run()
+	delCmd := exec.Command("schtasks", "/delete", "/tn", "unarr", "/f")
+	winproc.HideWindow(delCmd)
+	delCmd.Run()
 
-	// Wrap with PowerShell so stdout/stderr are captured to a log file.
-	psScript := fmt.Sprintf(
-		`Start-Transcript -Path '%s\unarr.log' -Append -NoClobber; & '%s' start`,
-		logDir, data.BinPath,
-	)
-	taskCmd := fmt.Sprintf(`powershell.exe -NonInteractive -WindowStyle Hidden -Command "%s"`, psScript)
+	// Register from an XML definition rather than the flag form of
+	// `schtasks /create`. The CLI flags cannot express the three settings that
+	// make login start-up reliable, and their absence was the root cause of
+	// "sometimes it doesn't start at login":
+	//   * <Delay> on the logon trigger — at logon the network/VPN stack may not
+	//     be up yet; without a delay `unarr start` races it, fails to reach the
+	//     server and exits.
+	//   * RestartOnFailure — the flag-form task is a one-shot with NO supervisor
+	//     (unlike systemd Restart=always / launchd KeepAlive), so a transient
+	//     early exit left the agent dead until the user manually resumed it.
+	//   * StartWhenAvailable — recover a missed trigger (asleep/off at logon).
+	xmlPath := filepath.Join(logDir, "unarr-task.xml")
+	if err := os.WriteFile(xmlPath, []byte(buildWindowsTaskXML(data, logDir)), 0o600); err != nil {
+		return fmt.Errorf("write task definition: %w", err)
+	}
 
-	// /rl limited, NOT highest: the daemon needs no elevation, and "highest"
-	// makes schtasks fail outright on a standard (non-admin) Windows account —
-	// the majority of home installs.
+	// With /xml, the run level lives INSIDE the XML (<RunLevel>LeastPrivilege</RunLevel>)
+	// — passing /rl here makes schtasks reject the call ("/RL option can only be
+	// used with ..."), which is what silently broke task creation. /ru is still
+	// valid with /xml (it supplies the run-as credential); LeastPrivilege in the
+	// XML keeps this working on a standard (non-admin) account, the majority of
+	// home installs.
 	out, err := svcOutput("schtasks",
 		"/create",
 		"/tn", "unarr",
-		"/tr", taskCmd,
-		"/sc", "onlogon",
+		"/xml", xmlPath,
 		"/ru", data.User,
-		"/rl", "limited",
 		"/f",
 	)
 	if err != nil {
