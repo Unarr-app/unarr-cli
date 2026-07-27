@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // copyVODAudioArgs resolves the audio map + codec for a COPY-VOD segment,
@@ -203,6 +205,7 @@ func (s *HLSSession) generateCopySegment(ctx context.Context, idx int) error {
 	genCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(genCtx, s.cfg.Transcode.FFmpegPath, args...)
+	winproc.HideWindow(cmd)
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
 	startedAt := time.Now()

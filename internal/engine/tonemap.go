@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // hdrTonemapChain is the ffmpeg filter segment that maps an HDR source
@@ -81,11 +83,13 @@ func FFmpegSupportsLibplacebo(ffmpegPath string) bool {
 	// Run the EXACT filter we'd use, on a 1-frame synthetic source, discarding
 	// output. testsrc2 is SDR so the tonemap is near-passthrough — the point is
 	// to exercise Vulkan device init + the filter, not the mapping quality.
-	out, err := exec.CommandContext(ctx, ffmpegPath,
+	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-hide_banner", "-loglevel", "error", "-nostats",
 		"-f", "lavfi", "-i", "testsrc2=size=128x128:rate=1:duration=1",
 		"-vf", libplaceboTonemapFilter, "-frames:v", "1", "-f", "null", "-",
-	).CombinedOutput()
+	)
+	winproc.HideWindow(cmd)
+	out, err := cmd.CombinedOutput()
 	supported := err == nil
 
 	// Cache the result — but NOT a timeout. A clean non-zero exit (filter
@@ -145,7 +149,9 @@ func FFmpegSupportsZscale(ffmpegPath string) bool {
 	// cold callers probe the same binary at once — both write the same bool.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-filters").Output()
+	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-filters")
+	winproc.HideWindow(cmd)
+	out, err := cmd.Output()
 	supported := err == nil && bytes.Contains(out, []byte("zscale"))
 
 	zscaleCacheMu.Lock()

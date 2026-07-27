@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // ffprobeOutput matches the JSON structure from `ffprobe -show_streams -show_format`.
@@ -85,6 +87,7 @@ func ExtractMediaInfo(ctx context.Context, ffprobePath, filePath string) (*Media
 		"-show_format",
 		filePath,
 	)
+	winproc.HideWindow(cmd)
 
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

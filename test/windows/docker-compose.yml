@@ -1,0 +1,49 @@
+# Real-Windows test harness for unarr.
+#
+# Boots a genuine Windows 11 VM (KVM-accelerated via QEMU) inside a container so
+# we can verify things that cross-compilation CANNOT: that the -H=windowsgui tray
+# and the daemon spawn console children with NO flashing console window, and that
+# the scheduled-task autostart actually registers and survives a logon.
+#
+# Requires: /dev/kvm on the host, the `kvm` group, and ~/test disk space (~20 GB).
+#
+# Usage:  ./run.sh            # boots Windows, waits, deploys binaries, prints RDP/web info
+#         ./run.sh --smoke    # additionally runs the automated smoke checks over WinRM
+#
+# First boot downloads + installs Windows unattended (~10-20 min); the disk image
+# is cached in the named volume so subsequent boots are ~1 min.
+services:
+  windows:
+    image: dockurr/windows:latest
+    container_name: unarr-win-test
+    environment:
+      VERSION: "11"            # Windows 11 (unattended install)
+      RAM_SIZE: "8G"
+      CPU_CORES: "4"
+      DISK_SIZE: "48G"
+      USERNAME: "tester"
+      PASSWORD: "unarrtest"    # test-only VM, never networked to anything real
+      # Expose WinRM so run.sh can push binaries + run checks headlessly.
+      # 5985 = WinRM HTTP; 3389 = RDP for eyeball verification of the tray.
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "8006:8006"     # noVNC web console — watch the desktop in a browser
+      - "3389:3389/tcp" # RDP
+      - "3389:3389/udp"
+      - "5985:5985/tcp" # WinRM
+    volumes:
+      - unarr_win_storage:/storage
+      # Built binaries are dropped here; the guest picks them up from \\host.lan\Data
+      - ./shared:/data
+      # Ran ONCE at end of unattended install (C:\OEM\install.bat): enables WinRM
+      # + runs smoke.ps1 → smoke-result.txt on the shared volume. Fully headless.
+      - ./oem:/oem
+    stop_grace_period: 2m
+    restart: "no"
+
+volumes:
+  unarr_win_storage:

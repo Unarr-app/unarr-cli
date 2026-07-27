@@ -12,6 +12,7 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/Unarr-app/unarr-cli/internal/service"
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // resolveUnarrBin locates the headless `unarr` daemon binary: PATH first, then a
@@ -51,7 +52,9 @@ func hasCLI() bool { _, ok := resolveUnarrBin(); return ok }
 func runUnarrOutput(args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, unarrBin(), args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, unarrBin(), args...)
+	winproc.HideWindow(cmd)
+	return cmd.CombinedOutput()
 }
 
 // agentStatus is the slice of daemon state the tray surfaces — read from the
@@ -236,12 +239,17 @@ func collectLogs() []byte {
 
 // openPath opens a file or directory with the OS default handler (no terminal).
 func openPath(path string) error {
+	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.Command("open", path).Start()
+		cmd = exec.Command("open", path)
 	case "windows":
-		return exec.Command("cmd", "/c", "start", "", path).Start()
+		// `cmd /c start` itself flashes a console window when spawned from the
+		// -H=windowsgui tray; HideWindow suppresses it (no-op off Windows).
+		cmd = exec.Command("cmd", "/c", "start", "", path)
 	default:
-		return exec.Command("xdg-open", path).Start()
+		cmd = exec.Command("xdg-open", path)
 	}
+	winproc.HideWindow(cmd)
+	return cmd.Start()
 }

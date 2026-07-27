@@ -33,6 +33,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 const desktopBinaryName = "unarr-desktop"
@@ -140,7 +142,9 @@ func FindDesktopSibling(dir string) (string, bool) {
 var desktopSmokeTest = func(binPath, expectedVersion string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), smokeTestTO)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, binPath, "--version").CombinedOutput()
+	cmd := exec.CommandContext(ctx, binPath, "--version")
+	winproc.HideWindow(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to run: %w (output: %s)", err, string(out))
 	}

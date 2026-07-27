@@ -33,6 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // ErrSourceUnreachable marks a probe failure on a REMOTE source (debrid
@@ -827,6 +829,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		args = buildHLSFFmpegArgsAt(cfg, probe, tmpDir, startIdx, segmentStartSec(startIdx))
 	}
 	cmd := exec.CommandContext(ffCtx, cfg.Transcode.FFmpegPath, args...)
+	winproc.HideWindow(cmd)
 	cmd.Stderr = &hlsStderrCapture{owner: s}
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -1849,6 +1852,7 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 
 	ffCtx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
+	winproc.HideWindow(cmd)
 	cmd.Stderr = &hlsStderrCapture{owner: s}
 	if err := cmd.Start(); err != nil {
 		cancel()

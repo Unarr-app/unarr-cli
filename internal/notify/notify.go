@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // spawnAndReap starts a notifier and waits for it on its own goroutine.
@@ -53,10 +55,14 @@ func send(title, body string, urgent bool) {
 		if urgent {
 			args = append(args, "--urgency=critical")
 		}
-		spawnAndReap(exec.Command("notify-send", args...))
+		cmd := exec.Command("notify-send", args...)
+		winproc.HideWindow(cmd)
+		spawnAndReap(cmd)
 	case "darwin":
 		script := `display notification "` + escapeAppleScript(body) + `" with title "` + escapeAppleScript(title) + `"`
-		spawnAndReap(exec.Command("osascript", "-e", script))
+		cmd := exec.Command("osascript", "-e", script)
+		winproc.HideWindow(cmd)
+		spawnAndReap(cmd)
 	case "windows":
 		// Use PowerShell toast notification (Windows 10+)
 		script := `[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;` +
@@ -66,7 +72,9 @@ func send(title, body string, urgent bool) {
 			`$text[1].AppendChild($xml.CreateTextNode('` + escapePowerShell(body) + `')) > $null;` +
 			`$toast = [Windows.UI.Notifications.ToastNotification]::new($xml);` +
 			`[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('unarr').Show($toast)`
-		spawnAndReap(exec.Command("powershell", "-NoProfile", "-Command", script))
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", script)
+		winproc.HideWindow(cmd)
+		spawnAndReap(cmd)
 	}
 }
 

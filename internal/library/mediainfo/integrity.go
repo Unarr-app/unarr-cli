@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // Deep truncation detection (checks A/B/C). The base ffprobe (ExtractMediaInfo)
@@ -204,6 +206,7 @@ func probeTail(parent context.Context, ffprobePath, filePath string, startSec fl
 		"-of", "json",
 		filePath,
 	)
+	winproc.HideWindow(cmd)
 	// Killing ffprobe on deadline is not enough: Output() keeps waiting on the
 	// inherited pipes, so a probe stuck on a hung NFS mount held a scan worker
 	// long past its timeout (the test for this took the full sleep before
@@ -287,6 +290,7 @@ func tailDecodeFails(parent context.Context, ffmpegPath, filePath string, header
 		"-frames:v", "3",
 		"-f", "null", "-",
 	)
+	winproc.HideWindow(cmd)
 	cmd.WaitDelay = 5 * time.Second // see probeTail: bound the post-kill pipe wait
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

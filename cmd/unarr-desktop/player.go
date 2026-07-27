@@ -33,6 +33,7 @@ import (
 
 	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/Unarr-app/unarr-cli/internal/notify"
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // playerKind enumerates the players the dispatcher knows how to drive.
@@ -87,6 +88,7 @@ var (
 	openInBrowser = browser.OpenURL
 	startProc     = func(argv []string) error {
 		cmd := exec.Command(argv[0], argv[1:]...)
+		winproc.HideWindow(cmd)
 		// The dispatcher is ephemeral and window-less; the player's startup
 		// errors should still land somewhere an operator can see.
 		cmd.Stderr = os.Stderr

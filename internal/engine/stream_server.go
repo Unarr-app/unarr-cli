@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 	"github.com/anacrolix/torrent"
 )
 
@@ -1307,6 +1308,7 @@ func (ss *StreamServer) thumbnailHandler(w http.ResponseWriter, r *http.Request)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, ss.ffmpegPath, buildThumbnailArgs(rawPath, pos, width)...)
+	winproc.HideWindow(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -1320,6 +1322,7 @@ func (ss *StreamServer) thumbnailHandler(w http.ResponseWriter, r *http.Request)
 			pos, width, rawPath, err, strings.TrimSpace(stderr.String()))
 		var stderr2 strings.Builder
 		cmd2 := exec.CommandContext(ctx, ss.ffmpegPath, buildThumbnailArgsAccurate(rawPath, pos, width)...)
+		winproc.HideWindow(cmd2)
 		cmd2.Stderr = &stderr2
 		out, err = cmd2.Output()
 		if err != nil || len(out) == 0 {
@@ -1971,7 +1974,9 @@ func LanIP() string {
 
 // TailscaleIP returns the Tailscale IPv4 address, or "" if Tailscale isn't running.
 func TailscaleIP() string {
-	out, err := exec.Command("tailscale", "ip", "-4").Output()
+	cmd := exec.Command("tailscale", "ip", "-4")
+	winproc.HideWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
@@ -2108,12 +2113,14 @@ func probeMediaInfo(filePath string) probeMedia {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "ffprobe",
+	cmd := exec.CommandContext(ctx, "ffprobe",
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_format",
 		filePath,
-	).Output()
+	)
+	winproc.HideWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return probeMedia{}
 	}

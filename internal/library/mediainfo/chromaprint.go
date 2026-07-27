@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // Chromaprint-based shared-audio detection. Episodes of the same season share
@@ -52,8 +54,10 @@ func FingerprintAudioWindow(ctx context.Context, ffmpegPath, fpcalcPath, mediaPa
 		"-ac", "2",
 		"-f", "wav", "-",
 	)
+	winproc.HideWindow(ff)
 	fp := exec.CommandContext(ctx, fpcalcPath,
 		"-raw", "-length", strconv.Itoa(int(lengthSec)), "-")
+	winproc.HideWindow(fp)
 
 	pipe, err := ff.StdoutPipe()
 	if err != nil {
@@ -203,6 +207,7 @@ func DetectBlackFrameRuns(ctx context.Context, ffmpegPath, mediaPath string, sta
 		"-vf", fmt.Sprintf("blackframe=amount=%d:threshold=32", minBlackPct),
 		"-f", "null", "-",
 	)
+	winproc.HideWindow(cmd)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return nil, err

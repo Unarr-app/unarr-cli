@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // TranscodeOpts steers how Transcoder builds its ffmpeg command line.
@@ -64,6 +66,7 @@ func NewTranscoder(ctx context.Context, filePath string, opts TranscodeOpts) (*T
 	}
 	args := buildFFmpegArgs(filePath, opts)
 	cmd := exec.CommandContext(ctx, opts.FFmpegPath, args...)
+	winproc.HideWindow(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("transcoder: stdout pipe: %w", err)
@@ -86,6 +89,7 @@ func startTranscoderToFile(ctx context.Context, ffmpegPath string, args []string
 		return nil, fmt.Errorf("transcoder: empty ffmpeg path")
 	}
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	winproc.HideWindow(cmd)
 	if t == nil {
 		t = &Transcoder{}
 	}

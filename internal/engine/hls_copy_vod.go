@@ -55,6 +55,7 @@ import (
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // copyVODTargetSec is the nominal segment length for COPY-VOD. Larger than the
@@ -333,6 +334,7 @@ func startCopyVODSubtitles(s *HLSSession) {
 		case <-time.After(3 * time.Second):
 		}
 		cmd := exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
+		winproc.HideWindow(cmd)
 		var errBuf bytes.Buffer
 		cmd.Stderr = &errBuf
 		if err := cmd.Run(); err != nil && ffCtx.Err() == nil {
@@ -383,6 +385,7 @@ func launchCopyVODPass(s *HLSSession) bool {
 	args := buildCopyVODPassArgs(s.cfg, s.probe, s.copySegStarts, s.tmpDir)
 	ffCtx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
+	winproc.HideWindow(cmd)
 	errBuf := &bytes.Buffer{}
 	cmd.Stderr = errBuf
 	if err := cmd.Start(); err != nil {
@@ -425,6 +428,7 @@ func (s *HLSSession) waitCopyPass(cmd *exec.Cmd, ffCtx context.Context, errBuf *
 		errBuf.Reset()
 		args := buildCopyVODPassArgs(s.cfg, s.probe, s.copySegStarts, s.tmpDir)
 		cmd = exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
+		winproc.HideWindow(cmd)
 		cmd.Stderr = errBuf
 		if serr := cmd.Start(); serr != nil {
 			err = serr
