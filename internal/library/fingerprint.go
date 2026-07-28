@@ -55,6 +55,67 @@ func ComputeFingerprint(path string, size int64) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// FirstOrLastMiBAllZero reports whether the first 1 MiB AND/OR the last 1 MiB of a
+// file are entirely NUL bytes. It reuses the SAME bounded head/tail reads that
+// ComputeFingerprint performs (first + last 1 MiB) — a corrupt "zero-content"
+// download (right size, but the media payload is a hole of zeros) is unplayable
+// yet passes the size floor and gets a fingerprint that differs from the real
+// copy, so the dedup never collapses it. This flags it.
+//
+// STRONG but NOT ABSOLUTE: a legitimate media file could in theory begin (or end)
+// with a 1 MiB run of zeros, so the reconcile category that consumes this is gated
+// OFF by default and only ever removed by an explicit manual `library clean
+// --apply` — never by the daemon's automatic sweep.
+//
+// A file <= 2*fpChunk is checked whole (its head and tail overlap); a read error
+// returns (false, err) — the caller treats "can't prove corrupt" as not corrupt.
+func FirstOrLastMiBAllZero(path string, size int64) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	if size <= 2*fpChunk {
+		data, err := io.ReadAll(f)
+		if err != nil {
+			return false, err
+		}
+		return len(data) > 0 && isAllZero(data), nil
+	}
+
+	head := make([]byte, fpChunk)
+	if _, err := io.ReadFull(f, head); err != nil {
+		return false, err
+	}
+	if isAllZero(head) {
+		return true, nil
+	}
+
+	if _, err := f.Seek(size-fpChunk, io.SeekStart); err != nil {
+		return false, err
+	}
+	tail := make([]byte, fpChunk)
+	if _, err := io.ReadFull(f, tail); err != nil {
+		return false, err
+	}
+	return isAllZero(tail), nil
+}
+
+// isAllZero reports whether every byte in b is NUL. Cheap linear scan; returns
+// false for an empty slice (nothing to judge).
+func isAllZero(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // sameContentBufSize is the block size for the streaming full compare.
 const sameContentBufSize = 1 << 20 // 1 MiB
 

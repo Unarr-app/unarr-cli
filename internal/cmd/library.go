@@ -50,18 +50,23 @@ Reports (and with --apply, removes):
   - Subtitles/sidecars (.srt, .nfo, .jpg, .par2, …) with no owning video
   - Directories that contain no valid video (empty or only junk)
   - Directories whose NAME is a media filename (e.g. "movie.mkv/")
+  - Suspect zero-content videos — right size (>= floor) but first/last 1 MiB is
+    all zero bytes (unplayable). OPT-IN: only when remove_corrupt_videos = true
+    under [library.cleanup], and only from this manual command (never the daemon's
+    auto-sweep — it's a heuristic, so removal stays a deliberate choice).
 
-A valid video file (>= the floor) is NEVER removed, and duplicates are only
-removed after a full byte-for-byte compare confirms they are identical (a cheap
-fingerprint just finds the candidates). Everything acted upon is confined to the
-configured download/movies/tv directories.
+A valid, playable video file (>= the floor) is NEVER removed, and duplicates are
+only removed after a full byte-for-byte compare confirms they are identical (a
+cheap fingerprint just finds the candidates). Everything acted upon is confined to
+the configured download/movies/tv directories.
 
 The same sweep runs AUTOMATICALLY after each library auto-scan in the daemon
-(configurable under [library.cleanup] in config.toml). This command is the
+(configurable under [library.cleanup] in config.toml) — EXCEPT the suspect
+zero-content category, which the daemon never auto-removes. This command is the
 manual entry point and also lets you preview (dry-run) before applying.
 
 Categories are configured under [library.cleanup]; disabled categories are
-skipped here too.`,
+skipped here too. remove_corrupt_videos defaults OFF.`,
 		Example: `  unarr library clean               # report only (dry-run)
   unarr library clean --apply       # actually remove the orphans
   unarr library clean --dedup-only  # only collapse byte-identical duplicates
@@ -86,6 +91,10 @@ func cleanupOptions(cfg config.Config, apply, dedupOnly bool) library.ReconcileO
 
 	opts := library.OptionsFrom(floor,
 		c.RemoveStubs, c.RemoveOrphanPartials, c.DedupExact, c.RemoveOrphanSubtitles, c.PruneEmptyDirs)
+	// Corrupt-video detection is set separately (kept off OptionsFrom's positional
+	// list, which is already at the arg limit). Default-off heuristic; only ever
+	// applied by this manual command, never the daemon's auto-sweep (not in safeKinds).
+	opts.RemoveCorruptVideos = c.RemoveCorruptVideos
 	opts.Apply = apply
 	opts.DedupOnly = dedupOnly
 	return opts

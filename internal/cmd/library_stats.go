@@ -159,12 +159,52 @@ func printHealthBlock(h library.HealthStats, bold *color.Color) {
 		return
 	}
 	for _, cat := range h.Categories {
-		fmt.Printf("  %-22s%3d   %s\n", cat.Kind, cat.Count, ui.FormatBytes(cat.Bytes))
+		fmt.Printf("  %-22s%3d   %s\n", healthKindLabel(cat.Kind), cat.Count, ui.FormatBytes(cat.Bytes))
 	}
 	fmt.Println()
 	bold.Printf("  %-22s%3d   %s\n", "Reclaimable", h.TotalFindings, ui.FormatBytes(h.ReclaimableBytes))
 	yellow.Println("  run: unarr library clean --apply")
+	// Suspect (zero-content) videos are reported for AWARENESS: they are a
+	// heuristic, not auto-removed by the daemon, and only deleted by
+	// `library clean --apply` with remove_corrupt_videos enabled. Call that out so
+	// the user knows they're in the count above but need opt-in to reclaim.
+	if suspect := healthCategoryCount(h, string(library.KindCorruptVideo)); suspect > 0 {
+		dim.Printf("  (%d suspect zero-content video(s) — enable remove_corrupt_videos to reclaim)\n", suspect)
+	}
 	fmt.Println()
+}
+
+// healthKindLabel maps a raw reconcile kind to a human-readable Health-block label.
+// An unmapped kind falls back to its raw string so a future kind still renders.
+func healthKindLabel(kind string) string {
+	switch library.FindingKind(kind) {
+	case library.KindStubVideo:
+		return "Stubs"
+	case library.KindOrphanPartial:
+		return "Orphan partials"
+	case library.KindOrphanSidecar:
+		return "Orphan sidecars"
+	case library.KindEmptyDir:
+		return "Empty dirs"
+	case library.KindMediaNamedDir:
+		return "Media-named dirs"
+	case library.KindDuplicate:
+		return "Duplicates"
+	case library.KindCorruptVideo:
+		return "Suspect (zero-content)"
+	default:
+		return kind
+	}
+}
+
+// healthCategoryCount returns the finding count for a given kind (0 if absent).
+func healthCategoryCount(h library.HealthStats, kind string) int {
+	for _, c := range h.Categories {
+		if c.Kind == kind {
+			return c.Count
+		}
+	}
+	return 0
 }
 
 func printQualityBlock(q library.QualityStats, bold *color.Color) {

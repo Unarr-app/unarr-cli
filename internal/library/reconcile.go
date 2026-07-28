@@ -51,15 +51,29 @@ const (
 	KindEmptyDir      FindingKind = "empty_dir"       // dir with no video (empty or only junk)
 	KindMediaNamedDir FindingKind = "media_named_dir" // a directory literally named "movie.mkv"
 	KindDuplicate     FindingKind = "duplicate_video" // a byte-identical copy of a kept video
+	// KindCorruptVideo: a video of the RIGHT size (>= floor, so not a stub) whose
+	// first and/or last 1 MiB is all NUL — a "zero-content" download that is
+	// unplayable yet passes the size floor and dodges the dedup (its fingerprint
+	// differs from the real copy). Detection is a STRONG-but-not-absolute heuristic,
+	// so it is gated OFF by default (RemoveCorruptVideos) and deliberately NOT in
+	// safeKinds — the daemon's auto-sweep never removes it; only an explicit manual
+	// `library clean --apply` with the toggle on does.
+	KindCorruptVideo FindingKind = "corrupt_video"
 )
 
 // safeKinds are the deterministic, unambiguous categories the daemon reconciles
-// AUTOMATICALLY (apply) after each scan. Every kind reconcile emits is currently
-// safe: a stub is never real media, an orphan partial/sidecar has no owner, a
-// video-less dir holds nothing to lose, a media-named dir is a mis-created folder,
-// and a duplicate is removed only after a full byte-for-byte compare confirms it
-// (the fingerprint is just the cheap filter), keeping one copy. Kept as an explicit
-// allow-list so a future risky kind is opt-in.
+// AUTOMATICALLY (apply) after each scan. Every kind here is safe: a stub is never
+// real media, an orphan partial/sidecar has no owner, a video-less dir holds
+// nothing to lose, a media-named dir is a mis-created folder, and a duplicate is
+// removed only after a full byte-for-byte compare confirms it (the fingerprint is
+// just the cheap filter), keeping one copy. Kept as an explicit allow-list so a
+// future risky kind is opt-in.
+//
+// KindCorruptVideo is DELIBERATELY ABSENT: zero-content detection is a heuristic
+// (a real file could legitimately begin/end with a 1 MiB zero run), and auto-
+// deleting a big video on a heuristic is too aggressive. A corrupt video is only
+// ever removed by an explicit manual `library clean --apply` with the toggle on —
+// never by the automatic sweep, regardless of the config toggle.
 var safeKinds = map[FindingKind]bool{
 	KindStubVideo:     true,
 	KindOrphanPartial: true,
@@ -118,8 +132,14 @@ type ReconcileOptions struct {
 	DedupExact            bool
 	RemoveOrphanSubtitles bool
 	PruneEmptyDirs        bool // also covers media-named dirs
-	DedupOnly             bool // when true, ONLY the dedup pass runs (ignores the flags above except DedupExact)
-	Apply                 bool // execute removals (false = report only / dry-run)
+	// RemoveCorruptVideos flags videos >= floor whose first/last 1 MiB is all NUL
+	// (zero-content, unplayable). DEFAULT OFF — unlike every other category —
+	// because the signal is a strong heuristic, not proof: the user turns it on
+	// deliberately. Even on, KindCorruptVideo is never in safeKinds, so only a
+	// manual `library clean --apply` removes it, never the daemon's auto-sweep.
+	RemoveCorruptVideos bool
+	DedupOnly           bool // when true, ONLY the dedup pass runs (ignores the flags above except DedupExact)
+	Apply               bool // execute removals (false = report only / dry-run)
 }
 
 // OptionsFrom builds a ReconcileOptions from the per-category toggles + a resolved
@@ -355,11 +375,19 @@ func classifyFile(path string, roots []string, activePartials map[string]bool, o
 
 	switch {
 	case isVideoFile(path):
+		// Order matters: stub (< floor) FIRST, then corrupt-content (>= floor).
 		if opts.RemoveStubs && info.Size() < floor {
 			return fileFinding(path, info, KindStubVideo,
 				fmt.Sprintf("video is only %d bytes (< %d floor) — a download stub", info.Size(), floor))
 		}
-		return nil // a real video — never touch
+		// Zero-content check runs only when explicitly enabled (heuristic, default
+		// off). A right-sized video whose head/tail 1 MiB is all NUL is unplayable.
+		if opts.RemoveCorruptVideos && info.Size() >= floor {
+			if f := classifyCorruptVideo(path, info); f != nil {
+				return f
+			}
+		}
+		return nil // a real, playable video — never touch
 
 	case partialExts[ext]:
 		if !opts.RemoveOrphanPartials {
@@ -384,110 +412,22 @@ func classifyFile(path string, roots []string, activePartials map[string]bool, o
 	return nil
 }
 
-// sidecarHasOwner decides whether a sidecar still belongs to a video. A sidecar is
-// owned if a real video (>= floor) lives in ITS OWN directory OR — when the sidecar
-// sits inside a per-track ".unarr" cache dir — in the PARENT release directory.
-//
-// The .unarr case is why the naive "video in same dir" check produced 107 false
-// orphans in the field: the scanner extracts per-track WebVTT/thumbnails into
-// "<release>/.unarr/*.vtt", where there is no video beside them. Those are only
-// orphaned when the release itself no longer holds the video (it was moved to TV
-// Shows and just .nfo/.txt/.unarr remain).
-func sidecarHasOwner(path string, floor int64) bool {
-	dir := filepath.Dir(path)
-	if dirHasImmediateVideo(dir, floor) {
-		return true
-	}
-	// Per-track sidecars live in a ".unarr" cache dir — fall back to the parent
-	// release dir, which is where the actual media file lives.
-	if strings.EqualFold(filepath.Base(dir), ".unarr") {
-		if dirHasImmediateVideo(filepath.Dir(dir), floor) {
-			return true
-		}
-	}
-	return false
-}
-
-// dirHasImmediateVideo reports whether a real video (>= floor) sits directly in dir
-// (non-recursive). On a read error it returns true (conservative: don't flag a
-// sidecar we can't prove is orphaned).
-func dirHasImmediateVideo(dir string, floor int64) bool {
-	entries, err := os.ReadDir(dir)
+// classifyCorruptVideo returns a KindCorruptVideo finding when the right-sized
+// video's first and/or last 1 MiB is all NUL (zero-content, unplayable), else nil.
+// A read error is logged and treated as "not corrupt" — we never flag a file we
+// could not actually inspect.
+func classifyCorruptVideo(path string, info os.FileInfo) *Finding {
+	zero, err := FirstOrLastMiBAllZero(path, info.Size())
 	if err != nil {
-		log.Printf("reconcile: read %s failed, treating sidecars as attached: %v", dir, err)
-		return true
-	}
-	for _, e := range entries {
-		if e.IsDir() || !isVideoFile(e.Name()) {
-			continue
-		}
-		if info, err := e.Info(); err == nil && info.Size() >= floor {
-			return true
-		}
-	}
-	return false
-}
-
-// findVideolessDirs returns dirs (strictly inside a root, never a CONFIGURED dir
-// itself, never already-flagged) that contain no real video anywhere beneath them.
-//
-// "Configured dir" means any of the reconcile roots (download/movies/tv). Guarding
-// only `path == root` of the current walk is NOT enough: when the download dir is
-// the PARENT of the movies/tv dirs (e.g. download=/media, movies=/media/Movies),
-// the movies/tv dirs are ordinary sub-entries of the download walk, so an empty
-// library would have its Movies/ and TV Shows/ target dirs deleted — a real bug the
-// e2e caught (the daemon auto-sweep removed both on a fresh empty library). These
-// dirs are organize TARGETS and must survive even when momentarily empty.
-func findVideolessDirs(roots []string, skip map[string]bool, floor int64) []Finding {
-	protected := map[string]bool{}
-	for _, r := range roots {
-		protected[filepath.Clean(r)] = true
-	}
-	var out []Finding
-	for _, root := range roots {
-		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-			if err != nil || !d.IsDir() || path == root || protected[filepath.Clean(path)] || skip[path] {
-				return nil
-			}
-			// A ".unarr" cache dir legitimately holds only sidecars for the video in
-			// its PARENT release dir — it is not a videoless orphan when that parent
-			// still has the video. (Orphaned .unarr sidecars are handled per-file by
-			// sidecarHasOwner, which removes them and lets the empty .unarr get pruned.)
-			if strings.EqualFold(d.Name(), ".unarr") && dirHasRealVideo(filepath.Dir(path), floor) {
-				return filepath.SkipDir
-			}
-			if dirHasRealVideo(path, floor) {
-				return nil
-			}
-			out = append(out, dirFinding(path, KindEmptyDir,
-				"directory contains no valid video (empty or only junk/stubs)"))
-			skip[path] = true
-			return filepath.SkipDir // its (also video-less) children are covered by removing this
-		})
-	}
-	return out
-}
-
-// dirHasRealVideo reports whether a real video (>= floor) exists anywhere under dir.
-func dirHasRealVideo(dir string, floor int64) bool {
-	found := false
-	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		if isVideoFile(path) {
-			if info, statErr := os.Stat(path); statErr == nil && info.Size() >= floor {
-				found = true
-				return filepath.SkipAll
-			}
-		}
+		log.Printf("reconcile: zero-content probe of %s failed, not flagging: %v", path, err)
 		return nil
-	})
-	return found
+	}
+	if !zero {
+		return nil
+	}
+	return fileFinding(path, info, KindCorruptVideo,
+		"video is the right size but its first/last 1 MiB is all zero bytes — unplayable, likely a corrupt/zero-filled download")
 }
 
-// isVideoFile mirrors engine.isVideoFile using the library's videoExts set (from
-// scanner.go). Kept here so reconcile does not depend on the engine package.
-func isVideoFile(name string) bool {
-	return videoExts[strings.ToLower(filepath.Ext(name))]
-}
+// Directory/video scanning helpers (sidecarHasOwner, findVideolessDirs,
+// isVideoFile, …) live in reconcile_scan.go.

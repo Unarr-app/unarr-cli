@@ -418,6 +418,15 @@ type CleanupConfig struct {
 	// junk/stubs) and directories whose NAME is itself a media filename (a
 	// mis-created "movie.mkv/" folder). Default true.
 	PruneEmptyDirs bool `toml:"prune_empty_dirs"`
+
+	// RemoveCorruptVideos removes videos of the right size (>= MinVideoBytes, so NOT
+	// stubs) whose first and/or last 1 MiB is all NUL — "zero-content" downloads
+	// that are unplayable yet pass the size floor and dodge the dedup. DEFAULT FALSE,
+	// unlike every other category: the all-zero signal is a STRONG heuristic, not
+	// proof, so the user opts in deliberately. Even enabled it is applied ONLY by the
+	// manual `unarr library clean --apply` — the daemon's auto-sweep never removes a
+	// corrupt video (KindCorruptVideo is intentionally not in reconcile's safeKinds).
+	RemoveCorruptVideos bool `toml:"remove_corrupt_videos"`
 }
 
 // SubtitlesConfig controls scan-time subtitle auto-fetch.
@@ -578,6 +587,7 @@ func Default() Config {
 				DedupExact:            true,
 				RemoveOrphanSubtitles: true,
 				PruneEmptyDirs:        true,
+				RemoveCorruptVideos:   false, // heuristic — opt-in only (see CleanupConfig)
 			},
 		},
 	}

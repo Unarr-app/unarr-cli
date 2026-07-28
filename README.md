@@ -443,7 +443,7 @@ unarr clean --all      # Also remove the data directory
 
 ## Library clean (hygiene sweep)
 
-`unarr library clean` reconciles your **download directory** and **Movies/TV library dirs**, reporting — and with `--apply`, removing — the deterministic junk that accretes there. It **never** removes a valid video (>= the plausibility floor, default 1 MiB), and only removes duplicates after a byte-identity fingerprint match. Everything acted upon is confined to the configured download/movies/tv directories.
+`unarr library clean` reconciles your **download directory** and **Movies/TV library dirs**, reporting — and with `--apply`, removing — the deterministic junk that accretes there. It **never** removes a valid, playable video (>= the plausibility floor, default 1 MiB), and only removes duplicates after a full byte-for-byte compare confirms they are identical (a cheap fingerprint just finds the candidates). Everything acted upon is confined to the configured download/movies/tv directories.
 
 ```bash
 unarr library clean               # report only (DRY-RUN — the default)
@@ -460,6 +460,7 @@ unarr library clean --dedup-only  # only collapse byte-identical duplicate video
 - **Orphaned subtitles/sidecars** — `.srt`/`.nfo`/`.jpg`/`.par2`/… with no owning video. Per-track sidecars in a `.unarr/` cache dir are checked against the **parent** release dir, so they are only removed when the release itself no longer holds the video.
 - **Video-less directories** — empty or holding only junk/stubs.
 - **Media-named directories** — a folder literally named `movie.mkv/` (a mis-created dir).
+- **Suspect zero-content videos** *(opt-in, `remove_corrupt_videos`)* — a video of the right size (>= floor, so not a stub) whose **first and/or last 1 MiB is all zero bytes**: a corrupt/zero-filled download that is unplayable yet passes the floor and dodges the dedup (its fingerprint differs from the real copy). This is a **strong-but-not-absolute heuristic**, so it defaults **off** and is removed **only** by this manual command with the toggle on — never by the daemon's automatic sweep. `unarr library stats` always counts these (shown as **Suspect (zero-content)**) so you can see them even without enabling removal.
 
 ### Automatic cleanup (daemon)
 
@@ -474,9 +475,10 @@ The **same sweep runs automatically after every library auto-scan** in the daemo
   dedup_exact = true               # collapse byte-identical duplicate videos (keeps one canonical copy)
   remove_orphan_subtitles = true   # delete sidecars with no owning video (.unarr → checks parent dir)
   prune_empty_dirs = true          # remove video-less dirs and media-named dirs
+  remove_corrupt_videos = false    # OPT-IN: flag/remove right-sized videos whose first/last 1 MiB is all zeros
 ```
 
-Every category defaults **on** (each is deterministic and non-destructive to valid media). Set `enabled = false` to disable the automatic post-scan sweep — the manual `unarr library clean` command still works regardless.
+Every category **except `remove_corrupt_videos` defaults on** (each of those is deterministic and non-destructive to valid media). `remove_corrupt_videos` defaults **off** because zero-content detection is a heuristic; enable it deliberately, and even then it is applied **only** by the manual `unarr library clean --apply` — the daemon's automatic sweep never removes a suspect video. Set `enabled = false` to disable the automatic post-scan sweep — the manual `unarr library clean` command still works regardless.
 
 ## Library stats (health & composition)
 

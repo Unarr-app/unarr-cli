@@ -328,3 +328,42 @@ func realBytes(t *testing.T, dir string) int64 {
 	_, bytes := walkVideos(dir)
 	return bytes
 }
+
+// TestComputeStatsCountsCorruptVideos verifies stats reports suspect zero-content
+// videos even though RemoveCorruptVideos is OFF in the passed options: computeHealth
+// force-enables the category so the user always SEES the count (#5). Nothing is
+// modified — the corrupt file survives.
+func TestComputeStatsCountsCorruptVideos(t *testing.T) {
+	root := t.TempDir()
+	dl := filepath.Join(root, "downloads")
+	corrupt := filepath.Join(dl, "S01E03 (2).mkv")
+	// Right size (> 2 MiB so head/tail are sampled), first 1 MiB all zero.
+	writeHeadMidTail(t, corrupt, 3*fpChunk, 0x00, 0xAB, 0xCD)
+
+	probe := func(_ context.Context, filePath string) (*mediainfo.VideoInfo, error) {
+		return videoInfoFromName(filepath.Base(filePath)), nil
+	}
+
+	stats, err := ComputeStats(context.Background(), StatsOptions{
+		Paths:     ReconcilePaths{DownloadDir: dl},
+		Reconcile: DefaultReconcileOptions(), // RemoveCorruptVideos is FALSE here
+		Probe:     probe,
+	})
+	if err != nil {
+		t.Fatalf("ComputeStats: %v", err)
+	}
+
+	var corruptCount int
+	for _, cat := range stats.Health.Categories {
+		if cat.Kind == string(KindCorruptVideo) {
+			corruptCount = cat.Count
+		}
+	}
+	if corruptCount != 1 {
+		t.Errorf("corrupt_video count = %d, want 1 (stats must surface suspect videos)", corruptCount)
+	}
+	// Pure dry-run: the corrupt file is NOT removed.
+	if _, err := os.Stat(corrupt); err != nil {
+		t.Errorf("stats modified disk — corrupt file removed: %v", err)
+	}
+}

@@ -23,8 +23,13 @@ func writeVideoWithMarker(t *testing.T, path string, size int, marker byte) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Fill the WHOLE file with the marker (not just the head): two files with the
+	// same size + marker stay byte-identical (dedup fixtures), but — crucially —
+	// the content is non-zero throughout, so a "real video" fixture is never
+	// mistaken for a KindCorruptVideo (whose head/tail 1 MiB would be all NUL). A
+	// partial fill left the tail zeroed, which the zero-content detector flags.
 	buf := make([]byte, size)
-	for i := 0; i < 4096 && i < size; i++ {
+	for i := range buf {
 		buf[i] = marker
 	}
 	if err := os.WriteFile(path, buf, 0o644); err != nil {
