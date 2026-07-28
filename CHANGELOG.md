@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.7] - 2026-07-28
+
+
+### Fixed
+
+- **windows**: stop console window flashing at boot via wscript VBS launcher
 ## [1.7.6] - 2026-07-27
 
 
@@ -12,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **windows**: address code-review findings + fix task-XML encoding regression
 - **windows**: stop console windows flashing on spawned children + harden autostart
+
+### Other
+
+- **release**: 1.7.6
 ## [1.7.5] - 2026-07-25
 
 
@@ -1373,6 +1383,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.7.7]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.6...v1.7.7
 [1.7.6]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.5...v1.7.6
 [1.7.5]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.4...v1.7.5
 [1.7.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.3...v1.7.4
