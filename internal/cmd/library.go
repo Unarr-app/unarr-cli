@@ -25,6 +25,7 @@ func newLibraryCmd() *cobra.Command {
 		Long:    `Maintenance commands for your Movies/TV library and download directory.`,
 	}
 	cmd.AddCommand(newLibraryCleanCmd())
+	cmd.AddCommand(newLibraryStatsCmd())
 	return cmd
 }
 

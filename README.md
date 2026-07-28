@@ -188,6 +188,7 @@ unarr start
 |---------|-------------|
 | `unarr scan <path>` | Scan a folder, analyze video files with ffprobe, sync quality data |
 | `unarr library clean` | Sweep download & library dirs for orphaned files (dry-run by default) |
+| `unarr library stats` | Report library health, composition & quality — read-only (`--json` for scripts) |
 
 ### Daemon Management
 
@@ -476,6 +477,24 @@ The **same sweep runs automatically after every library auto-scan** in the daemo
 ```
 
 Every category defaults **on** (each is deterministic and non-destructive to valid media). Set `enabled = false` to disable the automatic post-scan sweep — the manual `unarr library clean` command still works regardless.
+
+## Library stats (health & composition)
+
+`unarr library stats` reports the health, composition and quality of your **Movies/TV library and download dir**. It is a **pure DRY-RUN — it only READS**, never modifies anything on disk. Confined to the configured download/movies/tv directories.
+
+```bash
+unarr library stats               # readable table (dry-run — reads only)
+unarr library stats --json        # emit the full stats struct as JSON (for scripts)
+unarr library stats --workers 4   # limit concurrent ffprobe workers for the quality pass
+```
+
+**Three blocks:**
+
+- **Composition** — number of movies, shows, seasons and episodes, plus the **real on-disk space** (allocated blocks, like `du` — not apparent size) per category (Movies vs TV Shows vs Downloads) and the average size per title.
+- **Health / reclaimable** — the same sweep `unarr library clean` performs, in dry-run: stubs, orphaned partials, duplicates, orphaned sidecars, empty dirs and media-named dirs — grouped by category with the total space reclaimable. Run `unarr library clean --apply` to actually free it.
+- **Quality** — resolution (2160p/1080p/720p/480p/SD), video codec (h265/h264/av1/other) and HDR breakdown, extracted with ffprobe. A file ffprobe can't read is counted as `unknown` and never aborts the report. Probing a large library end-to-end can take a while (bounded by `--workers`, default 8).
+
+`--json` emits the full `LibraryStats` struct (composition, health, quality) for piping into scripts.
 
 ## Alias (optional)
 
