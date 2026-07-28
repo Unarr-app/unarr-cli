@@ -87,9 +87,59 @@ Check "task has RestartOnFailure (supervisor)"          { $taskXml -match '<Rest
 Check "task has StartWhenAvailable"                     { $taskXml -match '<StartWhenAvailable>true</StartWhenAvailable>' }
 Check "task does NOT use Start-Transcript -NoClobber"   { $taskXml -notmatch '-NoClobber' }
 
-# Cleanup so we don't leave the task/daemon around.
+# --- The reported bug: the boot flash. ---
+# The task action must launch the daemon through a GUI-subsystem host (wscript)
+# so no console window is drawn at logon. Assert the action shape AND — the real
+# test — actually run the task and confirm no console window pops.
+Check "task action launches wscript.exe (GUI-subsystem, no console)" { $taskXml -match '<Command>wscript.exe</Command>' }
+Check "task action does NOT launch powershell (would flash a console)" { $taskXml -notmatch 'powershell' }
+$vbs = Join-Path $env:LOCALAPPDATA 'unarr\unarr-launch.vbs'
+Check "launcher shim unarr-launch.vbs was written" { Test-Path $vbs }
+Check "task action points at the .vbs shim" { $taskXml -match 'unarr-launch\.vbs' }
+Check "shim does NOT run the daemon directly (would be console-subsystem)" {
+  # The action's <Arguments> must be the .vbs, not unarr.exe.
+  $taskXml -notmatch '<Arguments>[^<]*unarr\.exe'
+}
+
+# THE regression test: run the task exactly as logon would, watch for a console
+# window. Before the fix this drew a visible ConsoleWindowClass window.
+$beforeTask = [W]::ConsoleWindows()
+schtasks /run /tn unarr *> $null 2>&1
+Start-Sleep -Seconds 4        # let wscript -> cmd -> unarr.exe fully spin up
+$afterTask = [W]::ConsoleWindows()
+Check "running the boot task pops NO console window (the reported bug)" { $afterTask -le $beforeTask }
+
+# Confirm the boot action actually FIRED (the shim ran), independent of whether
+# the daemon then stayed up — in this bare test VM there's no API key, so the
+# daemon exits immediately and the task returns to Ready. "Did it run" is the
+# honest signal here: a non-empty Last Run Time (not the "never ran" sentinel).
+Check "boot task fired (shim executed at least once)" {
+  $info = schtasks /query /tn unarr /fo LIST /v 2>$null | Out-String
+  ($info -match 'Last Run Time:\s*(.+)') -and ($info -notmatch 'Last Run Time:\s*(N/A|11/30/1999)')
+}
+
+# Stop anything the task started before tearing the task down (best-effort).
+& $unarr stop *> $null 2>&1
+Start-Sleep -Seconds 1
+
+# Also drive the shim directly through wscript — isolates the VBS launcher from
+# Task Scheduler, catching a VBScript syntax error a task run might mask. wscript
+# returns immediately (the shim's blocking Run is on a child), so this can't hang
+# the smoke; still, stop any daemon it spun up afterwards.
+if (Test-Path $vbs) {
+  $beforeVbs = [W]::ConsoleWindows()
+  Start-Process wscript.exe -ArgumentList "`"$vbs`"" | Out-Null
+  Start-Sleep -Seconds 3
+  $afterVbs = [W]::ConsoleWindows()
+  Check "wscript launcher shim pops NO console window" { $afterVbs -le $beforeVbs }
+  & $unarr stop *> $null 2>&1
+  Start-Sleep -Seconds 1
+}
+
+# Cleanup so we don't leave the task/daemon/shim around.
 & $unarr daemon uninstall *> $null 2>&1
 schtasks /delete /tn unarr /f *> $null 2>&1
+Remove-Item $vbs -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 if ($fail -gt 0) { Write-Host "$fail check(s) FAILED" -ForegroundColor Red; exit 1 }

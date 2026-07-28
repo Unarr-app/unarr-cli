@@ -401,6 +401,9 @@ func runDaemonUninstall() error {
 		if err != nil && !strings.Contains(string(out), "cannot find") {
 			return fmt.Errorf("remove scheduled task: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
+		// Drop the launcher shim the task pointed at. Best-effort: a missing file
+		// (never installed, or already cleaned) is not an uninstall failure.
+		os.Remove(filepath.Join(config.DataDir(), launcherVBSName))
 		green.Println("  ✓ Scheduled task removed")
 
 	default:
@@ -434,6 +437,19 @@ func installWindowsTask(data serviceData, green *color.Color) error {
 	xmlPath := filepath.Join(logDir, "unarr-task.xml")
 	if err := os.WriteFile(xmlPath, buildWindowsTaskXMLBytes(data, logDir), 0o600); err != nil {
 		return fmt.Errorf("write task definition: %w", err)
+	}
+
+	// The task action launches this VBScript shim via wscript.exe (GUI-subsystem)
+	// so the console-subsystem daemon starts with no console window at logon —
+	// the boot flash a hidden-PowerShell wrapper could not prevent. Must exist
+	// before the task runs (schtasks /run below fires immediately). Written as
+	// UTF-16LE+BOM: Windows Script Host decodes a BOM-less .vbs via the ANSI code
+	// page, which would corrupt a non-ASCII username in the embedded paths and
+	// silently stop the daemon starting at logon (same encoding lesson as the
+	// task XML).
+	vbsPath := filepath.Join(logDir, launcherVBSName)
+	if err := os.WriteFile(vbsPath, buildLauncherVBSBytes(data.BinPath, logDir), 0o600); err != nil {
+		return fmt.Errorf("write launcher script: %w", err)
 	}
 
 	// With /xml, both the run level (<RunLevel>LeastPrivilege</RunLevel>) and the

@@ -19,12 +19,14 @@ const logonDelaySeconds = 20
 // delay, restart-on-failure, and start-when-available — the settings that make
 // login start-up reliable. It is invoked with `schtasks /create /xml`.
 //
-// The command wraps the daemon in PowerShell so its stdout/stderr are captured
-// to unarr.log. Unlike the previous wrapper it does NOT use
-// `Start-Transcript -NoClobber`: that errors (and aborts before the daemon ever
-// launches) when a transcript is already active or the log file is locked by an
-// AV scan / a lingering process. Here Start-Transcript is best-effort inside a
-// try/catch, so a transcript failure can never stop the agent from starting.
+// The action launches a VBScript shim via wscript.exe rather than the daemon
+// (or a `powershell -WindowStyle Hidden` wrapper) directly. unarr.exe is a
+// console-subsystem binary, so any launcher that hosts a console — including a
+// hidden PowerShell — makes Task Scheduler allocate and momentarily draw a
+// console window at logon before it can be hidden: the flash the user saw
+// before the desktop app started. wscript.exe is GUI-subsystem (never allocates
+// a console) and its WshShell.Run(cmd, 0, …) starts the daemon fully headless.
+// The shim keeps log capture and the no-log fallback (see daemon_launch_vbs.go).
 // buildWindowsTaskXMLBytes renders the task definition and encodes it as
 // UTF-16LE with a BOM — what `schtasks /create /xml` actually requires. The
 // prolog declares UTF-16 to match. (An earlier attempt declared UTF-8 with a
@@ -44,16 +46,13 @@ func buildWindowsTaskXMLBytes(data serviceData, logDir string) []byte {
 }
 
 func buildWindowsTaskXML(data serviceData, logDir string) string {
-	logPath := strings.TrimRight(logDir, `\`) + `\unarr.log`
-
-	// Best-effort logging: if Start-Transcript fails (locked file, active
-	// transcript, roaming profile not mounted), swallow it and start anyway.
-	psScript := fmt.Sprintf(
-		`try { Start-Transcript -Path '%s' -Append -ErrorAction Stop | Out-Null } catch { }; & '%s' start`,
-		logPath, data.BinPath,
-	)
-	command := "powershell.exe"
-	arguments := fmt.Sprintf(`-NonInteractive -NoProfile -WindowStyle Hidden -Command "%s"`, psScript)
+	// The action runs the VBScript shim through wscript.exe (GUI-subsystem, no
+	// console). installWindowsTask writes the shim to this same path before
+	// creating the task. Quote it: the data dir contains the Windows username
+	// and can hold spaces.
+	vbsPath := strings.TrimRight(logDir, `\`) + `\` + launcherVBSName
+	command := "wscript.exe"
+	arguments := fmt.Sprintf(`"%s"`, vbsPath)
 
 	delay := fmt.Sprintf("PT%dS", logonDelaySeconds)
 
