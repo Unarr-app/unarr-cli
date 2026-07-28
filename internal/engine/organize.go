@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/library"
 )
 
 // moveMu serializes the "pick a free destination → move onto it" pair in
@@ -198,7 +200,28 @@ func moveToDir(result *Result, task *Task, destDir, destFileName string, cfg Org
 	// Never destroy an existing file/dir at the destination — redirect to a free,
 	// version-tagged sibling instead (see the function doc). Applies to normal AND
 	// upgrade downloads: the deliberate swap is replaceFile's job afterwards.
+	//
+	// CAUSE-FIX for the duplicate flood (RC-8): before minting a "(N)"/version
+	// sibling, check whether the source is BYTE-IDENTICAL to the file already at the
+	// destination. If so this is a redundant re-download (the same episode grabbed
+	// again), NOT a new version — cloning it would leave two identical copies (the
+	// prod incident: 23 identical BAKI-DOU episodes). Drop the source and return the
+	// existing path instead. Only distinct content falls through to a version sibling.
 	if pathExists(destPath) {
+		// For a single-file result, a byte-identical source is a redundant
+		// re-download (same episode grabbed again), NOT a new version — drop it
+		// instead of cloning a "(N)" sibling. Directories skip this (organizeDir
+		// handles the multi-file case) and distinct content falls through to a
+		// version-tagged sibling.
+		if !srcInfo.IsDir() && sameContent(result.FilePath, destPath) {
+			log.Printf("[organize] %s is byte-identical to existing %s — dropping redundant re-download", result.FilePath, destPath)
+			if err := os.Remove(result.FilePath); err != nil {
+				log.Printf("[organize] warning: failed to remove redundant source %s: %v", result.FilePath, err)
+			}
+			// Clean the now-orphaned source dir (subs/junk) just like a normal move.
+			cleanupSourceDir(result.FilePath, cfg.OutputDir)
+			return destPath, nil
+		}
 		destPath = versionDistinctPath(destDir, fileName, result, task)
 	}
 	// The move may have re-pointed destPath, so subtitles must follow the FINAL
@@ -206,10 +229,7 @@ func moveToDir(result *Result, task *Task, destDir, destFileName string, cfg Org
 	finalFileName := filepath.Base(destPath)
 
 	if srcInfo.IsDir() {
-		if err := os.Rename(result.FilePath, destPath); err != nil {
-			return "", fmt.Errorf("move directory: %w", err)
-		}
-		return destPath, nil
+		return organizeDir(result, destDir, destFileName, cfg)
 	}
 
 	if err := os.Rename(result.FilePath, destPath); err != nil {
@@ -227,6 +247,155 @@ func moveToDir(result *Result, task *Task, destDir, destFileName string, cfg Org
 	cleanupSourceDir(result.FilePath, cfg.OutputDir)
 
 	return destPath, nil
+}
+
+// organizeDir normalizes a multi-file (directory) release. Instead of renaming
+// the raw torrent folder into the library untouched (the old behavior — it left
+// "Show.S01E02.1080p.WEB.x265-GRP/" as a folder with sample.mkv, .nfo and RARs
+// beside the episode), it locates the PRINCIPAL video (largest file with a video
+// extension), moves ONLY that into the canonical path, drags its sibling subs, and
+// cleans the source dir of the remaining junk (sample clips, nfo, screenshots).
+//
+// destDir/destFileName come from the caller's canonical layout. destFileName's
+// stem is authoritative (the TMDB-clean name); its extension is replaced by the
+// real video's extension, since a directory result carries no meaningful ext.
+//
+// Falls back to the raw dir rename (and logs why) when no video is found inside —
+// e.g. an audio-only or an all-archive release we can't safely pick a file from.
+// Runs with moveMu already held by the caller (moveToDir).
+func organizeDir(result *Result, destDir, destFileName string, cfg OrganizeConfig) (string, error) {
+	srcDir := result.FilePath
+
+	videoPath, err := largestVideoIn(srcDir)
+	if err != nil {
+		return "", fmt.Errorf("scan release dir: %w", err)
+	}
+	if videoPath == "" {
+		// No video inside: don't guess — keep the current behavior (move the raw dir)
+		// so nothing is lost, but log it so these releases are visible.
+		fallbackDest := filepath.Join(destDir, filepath.Base(srcDir))
+		if pathExists(fallbackDest) {
+			fallbackDest = versionDistinctPath(destDir, filepath.Base(srcDir), result, nil)
+		}
+		log.Printf("[organize] no video file in release dir %s — moving folder as-is to %s", srcDir, fallbackDest)
+		if err := os.Rename(srcDir, fallbackDest); err != nil {
+			return "", fmt.Errorf("move directory: %w", err)
+		}
+		return fallbackDest, nil
+	}
+
+	// Build the canonical video name: the clean stem from destFileName (or the
+	// inner video's own name in the legacy no-metadata path) + the REAL extension.
+	videoExt := filepath.Ext(videoPath)
+	var finalName string
+	if destFileName != "" {
+		finalName = strings.TrimSuffix(destFileName, filepath.Ext(destFileName)) + videoExt
+	} else {
+		finalName = filepath.Base(videoPath)
+	}
+
+	destPath := filepath.Join(destDir, finalName)
+	if pathExists(destPath) {
+		destPath = versionDistinctPath(destDir, finalName, result, nil)
+	}
+	finalFileName := filepath.Base(destPath)
+
+	if err := os.Rename(videoPath, destPath); err != nil {
+		if err := copyFile(videoPath, destPath); err != nil {
+			return "", fmt.Errorf("move principal video: %w", err)
+		}
+		os.Remove(videoPath)
+	}
+
+	// Drag the principal video's subtitles (same-basename siblings) alongside it.
+	moveSubtitles(videoPath, destDir, finalFileName)
+
+	// Remove the leftover source dir (sample/nfo/screens/RARs). cleanupSourceDir
+	// only removes it when no video/subtitle remains — the principal video and its
+	// subs are already gone, so what's left is junk.
+	cleanupReleaseDir(srcDir, cfg.OutputDir)
+
+	return destPath, nil
+}
+
+// largestVideoIn returns the path to the biggest video file directly inside dir
+// (non-recursive: torrent releases keep the feature file at the top level; a
+// recursive walk would risk pulling an extra from a subfolder). Returns "" when
+// the dir holds no video.
+func largestVideoIn(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	var best string
+	var bestSize int64 = -1
+	for _, e := range entries {
+		if e.IsDir() || !isVideoFile(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			// Don't silently skip: a stat failure on a candidate could hide the real
+			// feature file. Log and keep scanning the rest.
+			log.Printf("[organize] stat %s in %s failed: %v", e.Name(), dir, err)
+			continue
+		}
+		if info.Size() > bestSize {
+			bestSize = info.Size()
+			best = filepath.Join(dir, e.Name())
+		}
+	}
+	return best, nil
+}
+
+// cleanupReleaseDir removes the release dir once its principal video + subs have
+// been moved out. Unlike cleanupSourceDir (which keys off a file's PARENT and
+// refuses when any video/subtitle remains), this targets the release dir itself
+// and tolerates leftover subtitle files that didn't match the video basename —
+// they're orphaned subs for a video we already relocated. It still refuses to
+// delete anything holding another VIDEO (a second feature we didn't move) or a
+// subdirectory, and stays confined to outputDir.
+func cleanupReleaseDir(releaseDir, outputDir string) {
+	if outputDir == "" {
+		return
+	}
+	absOutput, err1 := filepath.Abs(outputDir)
+	absDir, err2 := filepath.Abs(releaseDir)
+	if err1 != nil || err2 != nil {
+		log.Printf("[organize] cleanup: abs path failed for %s / %s", releaseDir, outputDir)
+		return
+	}
+	if absDir == absOutput || !strings.HasPrefix(absDir, absOutput+string(os.PathSeparator)) {
+		return // never delete outputDir itself or anything outside it
+	}
+
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		log.Printf("[organize] cleanup: read %s failed: %v", absDir, err)
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			return // nested content — don't touch
+		}
+		if isVideoFile(e.Name()) {
+			// A leftover video is only a reason to keep the dir if it's a REAL video
+			// (>= the anti-stub floor) — that would be a second feature we didn't move.
+			// Sample clips / decoy stubs are below the floor: they are junk, so they
+			// don't block cleanup (RC-5 leaves sample.mkv behind with the folder).
+			info, err := e.Info()
+			if err != nil {
+				log.Printf("[organize] cleanup: stat %s failed, keeping dir %s: %v", e.Name(), absDir, err)
+				return
+			}
+			if info.Size() >= minPlausibleVideoBytes {
+				return // real second video — keep the dir
+			}
+		}
+	}
+	if err := os.RemoveAll(absDir); err != nil {
+		log.Printf("[organize] cleanup warning: failed to remove release dir %s: %v", absDir, err)
+	}
 }
 
 // cleanupSourceDir removes the parent directory of srcFile if:
@@ -275,14 +444,14 @@ func cleanupSourceDir(srcFile, outputDir string) {
 	}
 }
 
-// isVideoFile checks if a filename has a common video extension.
+// isVideoFile checks if a filename has a common video extension. It delegates to
+// library.IsVideoExt so the organizer and the library scanner / reconcile sweep
+// share ONE canonical extension set — a divergence here (this list once had .m2ts
+// but not .mpg/.mpeg/.vob, while library had the inverse) let reconcile misjudge a
+// legitimate video's directory as "video-less" and delete it. TestVideoExtParity
+// guards against future drift.
 func isVideoFile(name string) bool {
-	ext := strings.ToLower(filepath.Ext(name))
-	switch ext {
-	case ".mkv", ".mp4", ".avi", ".wmv", ".mov", ".flv", ".webm", ".m4v", ".ts", ".m2ts":
-		return true
-	}
-	return false
+	return library.IsVideoExt(name)
 }
 
 // detectSeason extracts the season number from a filename using regex (for fallback).
@@ -330,9 +499,14 @@ func moveSubtitles(srcVideoPath, destDir, destFileName string) {
 		if e.IsDir() || !isSubtitleFile(e.Name()) {
 			continue
 		}
-		// Match: subtitle must start with the video base name
-		// e.g., "Movie.srt", "Movie.en.srt", "Movie.forced.eng.srt"
-		if !strings.HasPrefix(e.Name(), videoBase) {
+		// Match: subtitle must belong to THIS video (boundary-aware). A bare
+		// strings.HasPrefix(e.Name(), videoBase) also matched "Movie Extended.srt"
+		// — the subtitle of a different video "Movie Extended.mkv" in the same
+		// dir — and moved it away from its real owner. SidecarBelongsTo requires a
+		// "." / "-" separator after videoBase ("Movie.srt", "Movie.en.srt"), so a
+		// space-separated different title is excluded. Shared with library's
+		// deleteSidecars so both use one boundary rule.
+		if !library.SidecarBelongsTo(e.Name(), videoBase) {
 			continue
 		}
 
@@ -377,6 +551,13 @@ func isSubtitleFile(name string) bool {
 
 // cleanTitle extracts a clean title from a torrent title string.
 func cleanTitle(title string) string {
+	// Strip a leading media extension first: when the only title available is the
+	// download's filename (e.g. a generic debrid "movie.mkv"), the ".mkv" must not
+	// survive into the folder name — otherwise organize mints a literal "movie.mkv"
+	// directory (the stub-flood folder seen in prod). Real titles have no video ext.
+	if isVideoFile(title) {
+		title = strings.TrimSuffix(title, filepath.Ext(title))
+	}
 	// Remove year and everything after common separators
 	t := title
 	if idx := strings.Index(t, " ("); idx > 0 {
@@ -446,6 +627,52 @@ func replaceFile(oldPath, newPath, backupDir string) error {
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// sameContent reports whether two files are byte-identical, using the same
+// fingerprint scheme as the library/server (size ‖ first 1 MiB ‖ last 1 MiB) so
+// organize's dedup decision matches reconcile's. A mismatched size short-circuits
+// before any hashing. On any stat/fingerprint error it returns false — never treat
+// an unverifiable pair as identical (that could delete a real distinct download).
+func sameContent(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		log.Printf("[organize] dedup: stat %s failed: %v", a, err)
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		log.Printf("[organize] dedup: stat %s failed: %v", b, err)
+		return false
+	}
+	if ai.IsDir() || bi.IsDir() || ai.Size() != bi.Size() {
+		return false // different size (or a dir) → definitely not identical
+	}
+	// Fingerprint is a CHEAP FILTER (size + first/last 1 MiB); it can collide for
+	// two files that match on their extremes but differ in the middle. If the
+	// fingerprints already differ, they are certainly different — cheap reject.
+	fpA, err := library.ComputeFingerprint(a, ai.Size())
+	if err != nil {
+		log.Printf("[organize] dedup: fingerprint %s failed: %v", a, err)
+		return false
+	}
+	fpB, err := library.ComputeFingerprint(b, bi.Size())
+	if err != nil {
+		log.Printf("[organize] dedup: fingerprint %s failed: %v", b, err)
+		return false
+	}
+	if fpA != fpB {
+		return false
+	}
+	// Fingerprints match → CONFIRM byte-for-byte before treating them as identical
+	// (this decides whether organize removes one as redundant). The full read is
+	// only paid on the rare fingerprint match, exactly when being wrong loses data.
+	same, err := library.SameFileContent(a, b)
+	if err != nil {
+		log.Printf("[organize] dedup: full compare %s vs %s failed: %v", a, b, err)
+		return false // can't prove identity → treat as different (never delete on doubt)
+	}
+	return same
 }
 
 var (

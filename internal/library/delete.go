@@ -104,10 +104,100 @@ func deleteOne(filePath string, scanPaths []string) error {
 		return fmt.Errorf("remove file: %w", err)
 	}
 
+	// Remove the video's sidecars (subtitles, .nfo, posters, .par2, etc.) that
+	// share its basename BEFORE pruning — otherwise pruneEmptyDirs never fires (the
+	// dir still holds the orphaned .srt/.nfo) and the library keeps a folder full of
+	// dead metadata for a video that's gone.
+	deleteSidecars(real)
+
 	// Clean up empty parent directories, stopping at the scan path root.
 	pruneEmptyDirs(filepath.Dir(real), scanPaths)
 
 	return nil
+}
+
+// sidecarExts are the non-video companion files a library item accretes: subtitle
+// tracks, metadata, artwork, and par2 recovery. A file in the same directory whose
+// name starts with the video's basename-sans-ext AND carries one of these
+// extensions belongs to that video and is deleted with it. Mirrors organize.go's
+// moveSubtitles prefix-match, extended past subtitles to the full sidecar set.
+var sidecarExts = map[string]bool{
+	".srt": true, ".sub": true, ".ass": true, ".ssa": true, ".vtt": true,
+	".idx": true, ".nfo": true, ".jpg": true, ".jpeg": true, ".png": true,
+	".par2": true,
+}
+
+// deleteSidecars removes companion files of videoPath in the same directory:
+// files whose name begins with the video's basename-sans-ext (e.g.
+// "Movie (2023).es.srt", "Movie (2023).nfo", "Movie (2023)-poster.jpg") and whose
+// extension is a known sidecar type. It NEVER deletes another video (a different
+// feature/episode filed in the same folder), only metadata/subtitle/artwork.
+// Best-effort: a sidecar that can't be removed is logged, never silently dropped,
+// but doesn't fail the primary deletion (the video is already gone).
+func deleteSidecars(videoPath string) {
+	dir := filepath.Dir(videoPath)
+	base := filepath.Base(videoPath)
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	if stem == "" {
+		return
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		log.Printf("library: sidecar scan of %s failed: %v", dir, err)
+		return
+	}
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == base {
+			continue // the video itself (already removed)
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		// Only same-title companions of a known sidecar type. Never touch another
+		// video, even if its name happens to share the prefix.
+		if videoExts[ext] {
+			continue
+		}
+		if !sidecarExts[ext] {
+			continue
+		}
+		// Boundary-aware prefix match — see SidecarBelongsTo. A bare
+		// strings.HasPrefix(name, stem) matched "Movie Extended.srt" (the subtitle
+		// of a DIFFERENT, still-present video "Movie Extended.mkv") and deleted it.
+		if !SidecarBelongsTo(name, stem) {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			log.Printf("library: failed to remove sidecar %s: %v", p, err)
+			continue
+		}
+		log.Printf("library: removed sidecar %s", p)
+	}
+}
+
+// SidecarBelongsTo reports whether a companion file named `name` belongs to the
+// video whose basename-sans-ext is `stem`. A sidecar belongs iff, after the stem,
+// the next character is a SEPARATOR the naming conventions use:
+//   - "." for language/type chains: "Movie.srt", "Movie.es.srt", "Movie.forced.eng.srt", "Movie.nfo"
+//   - "-" for artwork: "Movie-poster.jpg", "Movie-fanart.jpg"
+//
+// Requiring a separator draws the title boundary a bare prefix match lacked:
+// "Movie Extended.srt" continues with a SPACE (it is a different title,
+// "Movie Extended"), so it is correctly excluded and its video's subtitle survives.
+//
+// Exported so the organizer (engine.moveSubtitles) shares the SAME boundary rule
+// instead of duplicating a prefix match — both had the unbounded-prefix bug.
+func SidecarBelongsTo(name, stem string) bool {
+	if !strings.HasPrefix(name, stem) {
+		return false
+	}
+	rest := name[len(stem):]
+	return strings.HasPrefix(rest, ".") || strings.HasPrefix(rest, "-")
 }
 
 // isWithinScanPaths returns true if p is a child of any scan path.

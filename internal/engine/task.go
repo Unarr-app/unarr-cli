@@ -33,8 +33,12 @@ var validTransitions = map[TaskStatus][]TaskStatus{
 	StatusDownloading: {StatusVerifying, StatusFailed, StatusResolving, StatusCancelled},
 	// Verifying → Resolving: the on-disk verify found a truncated/corrupt file and
 	// the manager is re-downloading the same source (bounded integrity retry).
-	StatusVerifying:  {StatusOrganizing, StatusFailed, StatusResolving},
-	StatusOrganizing: {StatusSeeding, StatusCompleted},
+	StatusVerifying: {StatusOrganizing, StatusFailed, StatusResolving},
+	// Organizing → Failed: a failed organize (e.g. the target Movies/TV dir is
+	// unwritable) is a real terminal failure, not a completed download — the file
+	// never got filed into the library. Without this edge the fail() transition was
+	// rejected and the task silently stuck in "organizing" (RC-7).
+	StatusOrganizing: {StatusSeeding, StatusCompleted, StatusFailed},
 	StatusSeeding:    {StatusCompleted},
 }
 

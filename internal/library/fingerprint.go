@@ -1,6 +1,7 @@
 package library
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -52,4 +53,80 @@ func ComputeFingerprint(path string, size int64) (string, error) {
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// sameContentBufSize is the block size for the streaming full compare.
+const sameContentBufSize = 1 << 20 // 1 MiB
+
+// SameFileContent reports whether two files are byte-for-byte identical by
+// streaming both and comparing block by block. Unlike ComputeFingerprint — which
+// only samples size + first/last 1 MiB and can therefore COLLIDE for two files
+// that match on their extremes but differ in the MIDDLE — this is an exact answer.
+//
+// It is the confirmation step before ANY automatic, unconfirmed delete
+// (reconcile's auto-dedup, organize's redundant-copy removal): the fingerprint is
+// a cheap FILTER to find candidates; identity is proven here. The full-read cost
+// is only paid on a fingerprint collision (rare), exactly when being wrong would
+// destroy data. A size mismatch short-circuits immediately (different content).
+func SameFileContent(a, b string) (bool, error) {
+	if a == b {
+		return true, nil // same path — trivially identical
+	}
+	fa, err := os.Open(a)
+	if err != nil {
+		return false, err
+	}
+	defer fa.Close()
+	fb, err := os.Open(b)
+	if err != nil {
+		return false, err
+	}
+	defer fb.Close()
+
+	// Different size → definitely different content (cheap short-circuit).
+	sa, err := fa.Stat()
+	if err != nil {
+		return false, err
+	}
+	sb, err := fb.Stat()
+	if err != nil {
+		return false, err
+	}
+	if sa.Size() != sb.Size() {
+		return false, nil
+	}
+	return streamsEqual(fa, fb)
+}
+
+// streamsEqual compares two readers block-by-block. Callers have already confirmed
+// equal length, so a difference in bytes read or content means "different".
+func streamsEqual(ra, rb io.Reader) (bool, error) {
+	bufA := make([]byte, sameContentBufSize)
+	bufB := make([]byte, sameContentBufSize)
+	for {
+		na, ea := readBlock(ra, bufA)
+		if ea != nil && ea != io.EOF {
+			return false, ea
+		}
+		nb, eb := readBlock(rb, bufB)
+		if eb != nil && eb != io.EOF {
+			return false, eb
+		}
+		if na != nb || !bytes.Equal(bufA[:na], bufB[:nb]) {
+			return false, nil
+		}
+		if ea == io.EOF { // equal length → both end together
+			return true, nil
+		}
+	}
+}
+
+// readBlock fills buf as far as possible, normalising io.ReadFull's short-read
+// signal (ErrUnexpectedEOF) to a plain io.EOF so callers see one end-of-stream code.
+func readBlock(r io.Reader, buf []byte) (int, error) {
+	n, err := io.ReadFull(r, buf)
+	if err == io.ErrUnexpectedEOF {
+		return n, io.EOF
+	}
+	return n, err
 }

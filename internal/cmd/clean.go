@@ -33,6 +33,7 @@ By default, cleans:
   - Log files (unarr.log, unarr.err.log)
   - Daemon state file (daemon.state.json)
   - Stale usenet resume files older than 7 days (.progress, .nzb cache)
+  - Stale replaced-file backups older than 7 days (from library upgrades)
   - Stream temp directory (/tmp/unarr-stream/)
   - Upgrade temp files (/tmp/unarr-download-*.tmp)
   - Stale atomic-write temp files (.tmp)
@@ -174,6 +175,20 @@ func runClean(dryRun, all, yes bool) error {
 		}
 	}
 
+	// Replaced-file backups: organize's replaceFile keeps the OLD file under
+	// ~/.local/share/unarr/replaced/ on every upgrade, and nothing ever reaped them
+	// — so the dir grew without bound (RC-6). Sweep stale backups (>7 days) here,
+	// or everything with --all. Like resume, --all already covers replaced/ via the
+	// whole-dataDir target, so only scan it individually when NOT --all.
+	if !all {
+		replacedDir := filepath.Join(dataDir, "replaced")
+		for _, e := range scanReplacedFiles(replacedDir, false) {
+			totalFiles++
+			totalBytes += e.size
+			found = append(found, e)
+		}
+	}
+
 	// Phase 2: Show what was found
 	fmt.Println()
 	bold.Println("  unarr clean")
@@ -275,6 +290,39 @@ func scanResumeFiles(resumeDir string, all bool) (found []foundEntry, skipped in
 	return found, skipped
 }
 
+// scanReplacedFiles scans the replaced/ backup dir (old files kept by organize's
+// replaceFile on each upgrade). If all is true, returns everything; otherwise only
+// stale backups (>7 days). Same staleness policy as scanResumeFiles so `clean`
+// treats both aging-artifact dirs consistently.
+func scanReplacedFiles(replacedDir string, all bool) []foundEntry {
+	entries, err := os.ReadDir(replacedDir)
+	if err != nil {
+		return nil // dir absent (no upgrades yet) — nothing to sweep
+	}
+
+	const staleAge = 7 * 24 * time.Hour
+	var found []foundEntry
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if !all && time.Since(info.ModTime()) <= staleAge {
+			continue // recent backup — keep it (a just-upgraded file the user may want back)
+		}
+		desc := "stale replaced backup"
+		if all {
+			desc = "replaced backup"
+		}
+		found = append(found, foundEntry{filepath.Join(replacedDir, e.Name()), desc, info.Size(), false})
+	}
+	return found
+}
+
 func shortenHome(path string) string {
 	home, _ := os.UserHomeDir()
 	if home != "" {
@@ -323,6 +371,11 @@ func CleanableBytes() int64 {
 	// Stale resume files only (>7 days)
 	resumeFound, _ := scanResumeFiles(filepath.Join(dataDir, "resume"), false)
 	for _, e := range resumeFound {
+		total += e.size
+	}
+
+	// Stale replaced-file backups only (>7 days) — RC-6: this dir grew unbounded.
+	for _, e := range scanReplacedFiles(filepath.Join(dataDir, "replaced"), false) {
 		total += e.size
 	}
 

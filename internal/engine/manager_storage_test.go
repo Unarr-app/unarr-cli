@@ -52,7 +52,9 @@ func writeFullFile(dir string, size int64) string {
 func TestManagerPipeline_StorageRetry_ThenSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	pr, reporter := captureReporter()
-	dl := &storageFailDownloader{dir: dir, reportedSize: 10000, goodOnAttempt: 2}
+	// Recovered file is a .mkv, so it must clear minPlausibleVideoBytes (1 MiB) or
+	// verify's anti-stub floor would reject the "good" attempt.
+	dl := &storageFailDownloader{dir: dir, reportedSize: minPlausibleVideoBytes + 10000, goodOnAttempt: 2}
 
 	mgr := NewManager(ManagerConfig{MaxConcurrent: 1, OutputDir: dir}, pr, dl)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

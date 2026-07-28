@@ -374,6 +374,50 @@ type LibraryConfig struct {
 	// PRO). The web can always push a hot request (library/player button); this
 	// section only controls SCAN-TIME auto-fetch, which is OFF by default.
 	Subtitles SubtitlesConfig `toml:"subtitles"`
+
+	// Cleanup ("library clean"): after each auto-scan the daemon reconciles the
+	// download + library dirs, removing the deterministic junk that accretes there
+	// (download stubs, orphaned partials/subtitles, byte-identical duplicate videos,
+	// video-less dirs). Also runnable manually via `unarr library clean`.
+	Cleanup CleanupConfig `toml:"cleanup"`
+}
+
+// CleanupConfig controls the library-hygiene sweep (`unarr library clean` and the
+// daemon's automatic post-scan reconcile). Every category is individually
+// toggleable; all default ON because each is deterministic and non-destructive to
+// valid media (a real video >= MinVideoBytes is NEVER removed).
+type CleanupConfig struct {
+	// Enabled runs the sweep automatically after each auto-scan. The manual
+	// `unarr library clean` command works regardless of this. Default true.
+	Enabled bool `toml:"enabled"`
+
+	// MinVideoBytes is the anti-stub floor: a video file smaller than this is a
+	// download stub, not media. Human-readable size ("1MiB", "512KB", "2M"); empty
+	// or unparseable falls back to 1 MiB (mirrors engine.minPlausibleVideoBytes).
+	MinVideoBytes string `toml:"min_video_bytes"`
+
+	// RemoveStubs removes video files below MinVideoBytes. Default true.
+	RemoveStubs bool `toml:"remove_stubs"`
+
+	// RemoveOrphanPartials removes .part/.!qB/.aria2/.tmp/.partial with no active
+	// download task holding them. Default true.
+	RemoveOrphanPartials bool `toml:"remove_orphan_partials"`
+
+	// DedupExact collapses byte-identical copies of the same video within a dir
+	// (verified by fingerprint: size + first/last 1 MiB), keeping one canonical
+	// copy. Never touches files whose content differs (a real 2160p vs 1080p
+	// upgrade coexists). Default true — the biggest space recovery.
+	DedupExact bool `toml:"dedup_exact"`
+
+	// RemoveOrphanSubtitles removes subtitles/sidecars (.srt/.nfo/.jpg/.par2/…)
+	// with no owning video — checking the sidecar's own dir and, for per-track
+	// ".unarr" cache sidecars, the parent release dir. Default true.
+	RemoveOrphanSubtitles bool `toml:"remove_orphan_subtitles"`
+
+	// PruneEmptyDirs removes directories that hold no valid video (empty or only
+	// junk/stubs) and directories whose NAME is itself a media filename (a
+	// mis-created "movie.mkv/" folder). Default true.
+	PruneEmptyDirs bool `toml:"prune_empty_dirs"`
 }
 
 // SubtitlesConfig controls scan-time subtitle auto-fetch.
@@ -526,6 +570,15 @@ func Default() Config {
 				Width:    240,
 			},
 			PrewarmMaxLoadRatio: 0.7,
+			Cleanup: CleanupConfig{
+				Enabled:               true,
+				MinVideoBytes:         "1MiB",
+				RemoveStubs:           true,
+				RemoveOrphanPartials:  true,
+				DedupExact:            true,
+				RemoveOrphanSubtitles: true,
+				PruneEmptyDirs:        true,
+			},
 		},
 	}
 }

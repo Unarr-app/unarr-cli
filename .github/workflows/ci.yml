@@ -15,15 +15,27 @@ permissions:
 
 jobs:
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Run every OS to completion — a Windows-only path regression must not be
+      # masked by an early Linux failure (and vice-versa).
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test -race -count=1 ./...
+      # -race needs cgo; it's on by default on linux/darwin but Windows CI runners
+      # historically lack a C toolchain, so drop -race there and rely on the
+      # linux/darwin race legs for the detector coverage.
+      - if: runner.os != 'Windows'
+        run: go test -race -count=1 ./...
+      - if: runner.os == 'Windows'
+        run: go test -count=1 ./...
 
   vet:
     name: Vet

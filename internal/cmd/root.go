@@ -130,6 +130,7 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 	probeHWAccelCmd.GroupID = "system"
 	cleanCmd := newCleanCmd()
 	cleanCmd.GroupID = "system"
+	libraryCmd := newLibraryCmd()
 	mirrorsCmd := newMirrorsCmd()
 	mirrorsCmd.GroupID = "system"
 	selfUpdateCmd := newSelfUpdateCmd()
@@ -171,6 +172,7 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 		doctorCmd,
 		probeHWAccelCmd,
 		cleanCmd,
+		libraryCmd,
 		mirrorsCmd,
 		selfUpdateCmd,
 		versionCmd,

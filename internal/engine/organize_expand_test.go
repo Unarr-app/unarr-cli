@@ -558,3 +558,35 @@ func TestCleanTitleEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+// TestMoveSubtitlesBoundary is the #2 regression for the organizer: when moving
+// "Movie.mkv"'s subtitles, "Movie Extended.srt" (subtitle of a different video
+// "Movie Extended.mkv" in the same source dir) must NOT be moved away from its
+// owner. Before the boundary fix, the bare-prefix match stole it.
+func TestMoveSubtitlesBoundary(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "torrent")
+	destDir := filepath.Join(tmp, "dest")
+	os.MkdirAll(srcDir, 0o755)
+	os.MkdirAll(destDir, 0o755)
+
+	videoPath := filepath.Join(srcDir, "Movie.mkv")
+	os.WriteFile(videoPath, []byte("video"), 0o644)
+	os.WriteFile(filepath.Join(srcDir, "Movie.srt"), []byte("srt"), 0o644) // belongs to Movie.mkv
+	os.WriteFile(filepath.Join(srcDir, "Movie Extended.mkv"), []byte("v2"), 0o644)
+	os.WriteFile(filepath.Join(srcDir, "Movie Extended.srt"), []byte("srt2"), 0o644) // belongs to the OTHER video
+
+	moveSubtitles(videoPath, destDir, "") // no rename
+
+	// Movie.srt moved out (belongs to Movie.mkv).
+	if _, err := os.Stat(filepath.Join(destDir, "Movie.srt")); err != nil {
+		t.Errorf("Movie.srt should have moved to dest: %v", err)
+	}
+	// Movie Extended.srt must stay with its own video in the source dir.
+	if _, err := os.Stat(filepath.Join(srcDir, "Movie Extended.srt")); err != nil {
+		t.Errorf("Movie Extended.srt (different video's subtitle) must remain in source: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "Movie Extended.srt")); !os.IsNotExist(err) {
+		t.Errorf("Movie Extended.srt must NOT have been moved to dest (err=%v)", err)
+	}
+}

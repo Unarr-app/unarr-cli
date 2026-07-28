@@ -24,7 +24,9 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/library"
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 	"github.com/Unarr-app/unarr-cli/internal/notify"
+	"github.com/Unarr-app/unarr-cli/internal/ui"
 	"github.com/Unarr-app/unarr-cli/internal/usenet/download"
+	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
 	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
@@ -1243,7 +1245,7 @@ func runDaemonStart() error {
 				scanInterval = parsed
 			}
 		}
-		go runAutoScan(ctx, cfg, creds, scanInterval, agentClient, d.ScanNow, scanPaths)
+		go runAutoScan(ctx, cfg, creds, scanInterval, agentClient, d.ScanNow, scanPaths, taskStore)
 	}
 
 	// Start reporter only for stream task handling
@@ -1644,7 +1646,7 @@ func basePathChanged(existing *library.LibraryCache, scanPaths []string) bool {
 	return true
 }
 
-func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore, interval time.Duration, ac *agent.Client, scanNow <-chan struct{}, scanPaths []string) {
+func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore, interval time.Duration, ac *agent.Client, scanNow <-chan struct{}, scanPaths []string, pending pendingDownloadCounter) {
 	log.Printf("[auto-scan] enabled: every %s, paths: %v", interval, scanPaths)
 
 	select {
@@ -1796,6 +1798,14 @@ func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore,
 		}
 
 		log.Printf("[auto-scan] synced %d items across %d path(s)", totalSynced, len(scanPaths))
+
+		// Post-scan hygiene sweep: after the library is scanned/synced, reconcile the
+		// download + library dirs, auto-applying the SAFE deterministic categories
+		// (stubs, orphan partials/subs, byte-identical dedup, video-less dirs). This
+		// is the native replacement for any external cleanup script — the daemon keeps
+		// the library tidy on its own. Configurable + individually toggleable under
+		// [library.cleanup]; skipped entirely when disabled.
+		runPostScanCleanup(cfg, pending)
 	}
 
 	doScan()
@@ -1815,6 +1825,119 @@ func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore,
 			return
 		}
 	}
+}
+
+// runPostScanCleanup runs the library-hygiene sweep after an auto-scan, applying
+// only the SAFE deterministic categories enabled in [library.cleanup]. It is the
+// native, always-on replacement for an external cleanup script.
+//
+// It protects in-flight downloads without plumbing the manager's task list through:
+// any partial (.part/.tmp/…) modified within the last few minutes is treated as
+// ACTIVE (a live download writes to it continuously), so it is never reaped. Cheap
+// and idempotent — a healthy library only fingerprints on a size collision.
+// pendingDownloadCounter reports how many non-terminal downloads the daemon knows
+// about (active + paused + interrupted), from the resume store. A paused download
+// keeps its .part for resume but with a FROZEN mtime, so the mtime<5min heuristic
+// in recentPartials cannot protect it — after 5 min paused the auto-sweep would
+// reap it as an orphan and make resume impossible. When this is > 0 we cannot prove
+// which .part belongs to which paused task (the resume payload has no partial path),
+// so orphan-partial reaping is disabled for the sweep. Defined as an interface so
+// runPostScanCleanup stays testable without the whole daemon.
+type pendingDownloadCounter interface{ Load() []agent.Task }
+
+// orphanPartialRemovalAllowed decides whether the auto-sweep may reap orphan
+// partials this run. It may NOT while the resume store reports any non-terminal
+// download (paused/interrupted): such a task keeps its .part for resume with a
+// FROZEN mtime, so the mtime<5min heuristic can't protect it, and the resume
+// payload carries no partial path to protect precisely — so we disable the whole
+// orphan-partial category rather than risk deleting a paused download's resume data.
+func orphanPartialRemovalAllowed(configured bool, pending pendingDownloadCounter) bool {
+	if !configured || pending == nil {
+		return configured
+	}
+	if n := len(pending.Load()); n > 0 {
+		log.Printf("[cleanup] %d pending download(s) — skipping orphan-partial removal to protect paused/interrupted resume data", n)
+		return false
+	}
+	return true
+}
+
+func runPostScanCleanup(cfg config.Config, pending pendingDownloadCounter) {
+	c := cfg.Library.Cleanup
+	if !c.Enabled {
+		return
+	}
+
+	paths := library.ReconcilePaths{
+		DownloadDir: cfg.Download.Dir,
+		MoviesDir:   cfg.Organize.MoviesDir,
+		TVShowsDir:  cfg.Organize.TVShowsDir,
+	}
+	if paths.DownloadDir == "" && paths.MoviesDir == "" && paths.TVShowsDir == "" {
+		return
+	}
+
+	floor := library.MinPlausibleVideoBytes
+	if c.MinVideoBytes != "" {
+		if n, err := humanize.ParseBytes(c.MinVideoBytes); err == nil && n > 0 {
+			floor = int64(n)
+		} else {
+			log.Printf("[cleanup] invalid library.cleanup.min_video_bytes %q — using 1 MiB: %v", c.MinVideoBytes, err)
+		}
+	}
+
+	opts := library.OptionsFrom(floor,
+		c.RemoveStubs, orphanPartialRemovalAllowed(c.RemoveOrphanPartials, pending),
+		c.DedupExact, c.RemoveOrphanSubtitles, c.PruneEmptyDirs)
+
+	active := recentPartials(paths.DownloadDir, 5*time.Minute)
+
+	applied, freed, summary, err := library.ReconcileSafe(paths, active, opts)
+	if err != nil {
+		log.Printf("[cleanup] reconcile failed: %v", err)
+		return
+	}
+	// Surface each undeletable item with its actionable guidance (permission
+	// denied, read-only mount, disconnected NAS) so the operator can act — one
+	// failed file never blocks the rest, and it must not be swallowed as a bare
+	// count. classifyRemoveError already logged the guidance inside applyFindings;
+	// re-emit under the [cleanup] prefix so it lands in the daemon log context.
+	for _, f := range summary.Failures {
+		log.Printf("[cleanup] %s", f.Guidance)
+	}
+	if summary.Removed == 0 && len(summary.Failures) == 0 {
+		log.Printf("[cleanup] nothing to clean")
+		return
+	}
+	if len(summary.Failures) > 0 {
+		log.Printf("[cleanup] removed %d item(s), freed %s; %d could not be removed (see guidance above)",
+			summary.Removed, ui.FormatBytes(freed), len(summary.Failures))
+		return
+	}
+	log.Printf("[cleanup] removed %d item(s), freed %s", len(applied), ui.FormatBytes(freed))
+}
+
+// recentPartials returns the set of partial-download files under downloadDir that
+// were modified within maxAge — treated as owned by an active download so the
+// cleanup sweep never deletes a live .part out from under a running transfer.
+func recentPartials(downloadDir string, maxAge time.Duration) map[string]bool {
+	active := map[string]bool{}
+	if downloadDir == "" {
+		return active
+	}
+	_ = filepath.WalkDir(downloadDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if !library.IsPartialExt(path) {
+			return nil
+		}
+		if info, statErr := d.Info(); statErr == nil && time.Since(info.ModTime()) < maxAge {
+			active[filepath.Clean(path)] = true
+		}
+		return nil
+	})
+	return active
 }
 
 // superviseFunnel keeps a CloudFlare Quick Tunnel up across cloudflared

@@ -41,9 +41,12 @@ func TestVerifyEmptyFile(t *testing.T) {
 func TestVerifyValidFile(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "movie.mkv")
-	os.WriteFile(path, make([]byte, 1024), 0o644)
+	// Must clear the anti-stub floor (minPlausibleVideoBytes): a .mkv below 1 MiB is
+	// rejected as a stub, so a "valid file" fixture has to be a plausible video size.
+	size := int64(minPlausibleVideoBytes + 1024)
+	os.WriteFile(path, make([]byte, size), 0o644)
 
-	err := verify(&Result{FilePath: path, Size: 1024})
+	err := verify(&Result{FilePath: path, Size: size})
 	if err != nil {
 		t.Errorf("valid file should pass: %v", err)
 	}
@@ -63,7 +66,9 @@ func TestVerifySizeMismatch(t *testing.T) {
 func TestVerifyNoExpectedSize(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "movie.mkv")
-	os.WriteFile(path, make([]byte, 1024), 0o644)
+	// Above the anti-stub floor so the video passes on its own; Size=0 (unknown)
+	// then means only the floor + zero-byte checks apply.
+	os.WriteFile(path, make([]byte, minPlausibleVideoBytes+1024), 0o644)
 
 	// Size=0 means unknown, should pass
 	err := verify(&Result{FilePath: path, Size: 0})

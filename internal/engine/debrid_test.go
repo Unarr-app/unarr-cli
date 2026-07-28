@@ -42,7 +42,9 @@ func TestDebridAvailable(t *testing.T) {
 }
 
 func TestDebridDownloadSuccess(t *testing.T) {
-	fileContent := strings.Repeat("x", 1024*100) // 100KB file
+	// Must exceed minPlausibleVideoBytes (1 MiB): the file is a .mkv, so RC-1's
+	// anti-stub floor would reject anything smaller as a CDN stub.
+	fileContent := strings.Repeat("x", minPlausibleVideoBytes+100*1024)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(fileContent)))
@@ -221,9 +223,12 @@ func TestDebridDownloadUnauthorized(t *testing.T) {
 }
 
 func TestDebridDownloadResume(t *testing.T) {
-	fullContent := "HEADER_ALREADY_DOWNLOADED_REST_OF_FILE"
-	alreadyDownloaded := "HEADER_ALREADY_DOWNLOADED_"
-	remaining := "REST_OF_FILE"
+	// Content must clear minPlausibleVideoBytes (1 MiB): the filename ends in .mkv,
+	// so RC-1's anti-stub floor in Download would otherwise reject the resumed file
+	// as a stub. This test exercises resume mechanics, not stub detection.
+	alreadyDownloaded := "HEADER_ALREADY_DOWNLOADED_" + strings.Repeat("A", 600*1024)
+	remaining := "REST_OF_FILE" + strings.Repeat("B", 600*1024)
+	fullContent := alreadyDownloaded + remaining
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rangeHeader := r.Header.Get("Range")
@@ -374,6 +379,95 @@ func TestDebridDownloadPause(t *testing.T) {
 	if fi.Size() == 0 {
 		t.Error("partial file should have some bytes")
 	}
+}
+
+// TestDebridCancelDeletesPartial (RC-2) asserts the cancel-and-delete contract:
+// Cancel MUST remove the on-disk partial (torrent/usenet Cancel already do, and
+// the manager's CancelAndDeleteFiles routes through Cancel), while Pause MUST
+// leave the partial for resume. The old debrid Cancel kept the file, leaking
+// orphaned partials into the download dir.
+func TestDebridCancelDeletesPartial(t *testing.T) {
+	newSlowServer := func(started chan<- struct{}) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", "1000000")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(strings.Repeat("x", 8192)))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			close(started)
+			<-r.Context().Done()
+		}))
+	}
+
+	t.Run("Cancel removes the partial", func(t *testing.T) {
+		started := make(chan struct{})
+		srv := newSlowServer(started)
+		defer srv.Close()
+
+		d := NewDebridDownloader()
+		outputDir := t.TempDir()
+		task := &Task{
+			ID:             "rc2-cancel-001",
+			DirectURL:      srv.URL + "/slow",
+			DirectFileName: "cancelled.mkv",
+			Status:         StatusDownloading,
+		}
+		partialPath := filepath.Join(outputDir, "cancelled.mkv")
+
+		progressCh := make(chan Progress, 100)
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := d.Download(context.Background(), task, outputDir, progressCh)
+			errCh <- err
+		}()
+
+		<-started
+		time.Sleep(50 * time.Millisecond) // let the first chunk hit disk
+		// Sanity: the partial exists before we cancel.
+		if _, err := os.Stat(partialPath); err != nil {
+			t.Fatalf("partial should exist before cancel: %v", err)
+		}
+
+		d.Cancel("rc2-cancel-001")
+		<-errCh
+
+		if _, err := os.Stat(partialPath); !os.IsNotExist(err) {
+			t.Errorf("Cancel must delete the partial; stat err = %v (want not-exist)", err)
+		}
+	})
+
+	t.Run("Pause keeps the partial", func(t *testing.T) {
+		started := make(chan struct{})
+		srv := newSlowServer(started)
+		defer srv.Close()
+
+		d := NewDebridDownloader()
+		outputDir := t.TempDir()
+		task := &Task{
+			ID:             "rc2-pause-001",
+			DirectURL:      srv.URL + "/slow",
+			DirectFileName: "paused.mkv",
+			Status:         StatusDownloading,
+		}
+		partialPath := filepath.Join(outputDir, "paused.mkv")
+
+		progressCh := make(chan Progress, 100)
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := d.Download(context.Background(), task, outputDir, progressCh)
+			errCh <- err
+		}()
+
+		<-started
+		time.Sleep(50 * time.Millisecond)
+		d.Pause("rc2-pause-001")
+		<-errCh
+
+		if _, err := os.Stat(partialPath); err != nil {
+			t.Errorf("Pause must keep the partial for resume; stat err = %v", err)
+		}
+	})
 }
 
 func TestDebridDownloadFallbackFilename(t *testing.T) {
