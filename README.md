@@ -187,6 +187,8 @@ unarr start
 | Command | Description |
 |---------|-------------|
 | `unarr scan <path>` | Scan a folder, analyze video files with ffprobe, sync quality data |
+| `unarr library clean` | Sweep download & library dirs for orphaned files (dry-run by default) |
+| `unarr library stats` | Report library health, composition & quality — read-only (`--json` for scripts) |
 
 ### Daemon Management
 
@@ -437,7 +439,64 @@ unarr clean --yes      # Skip confirmation
 unarr clean --all      # Also remove the data directory
 ```
 
-**Cleans:** log files, daemon state, stale usenet resume files (> 7 days), stream temp data, upgrade temp files, and stale atomic-write temps. Recent resume files are kept to preserve download progress for paused or interrupted downloads. Never removes your config file, downloaded media, or partial torrent/debrid downloads.
+**Cleans:** log files, daemon state, stale usenet resume files (> 7 days), stale replaced-file backups (> 7 days, kept by library upgrades), stream temp data, upgrade temp files, and stale atomic-write temps. Recent resume files are kept to preserve download progress for paused or interrupted downloads. Never removes your config file, downloaded media, or partial torrent/debrid downloads.
+
+## Library clean (hygiene sweep)
+
+`unarr library clean` reconciles your **download directory** and **Movies/TV library dirs**, reporting — and with `--apply`, removing — the deterministic junk that accretes there. It **never** removes a valid, playable video (>= the plausibility floor, default 1 MiB), and only removes duplicates after a full byte-for-byte compare confirms they are identical (a cheap fingerprint just finds the candidates). Everything acted upon is confined to the configured download/movies/tv directories.
+
+```bash
+unarr library clean               # report only (DRY-RUN — the default)
+unarr library clean --apply       # actually remove the reported orphans
+unarr library clean --dry-run     # force report-only even with --apply (explicit preview)
+unarr library clean --dedup-only  # only collapse byte-identical duplicate videos
+```
+
+**Reports / removes:**
+
+- **Download stubs** — video files below the floor (a CDN/expired-link stub, not media).
+- **Orphaned partials** — `.part`, `.!qB`, `.aria2`, `.tmp`, `.partial` with no active download.
+- **Duplicate videos** — byte-identical copies of the same file in a directory (keeps one canonical copy, verified by fingerprint = size + first/last 1 MiB). Distinct content (a real 2160p next to a 1080p) is never touched.
+- **Orphaned subtitles/sidecars** — `.srt`/`.nfo`/`.jpg`/`.par2`/… with no owning video. Per-track sidecars in a `.unarr/` cache dir are checked against the **parent** release dir, so they are only removed when the release itself no longer holds the video.
+- **Video-less directories** — empty or holding only junk/stubs.
+- **Media-named directories** — a folder literally named `movie.mkv/` (a mis-created dir).
+- **Suspect zero-content videos** *(opt-in, `remove_corrupt_videos`)* — a video of the right size (>= floor, so not a stub) whose **first and/or last 1 MiB is all zero bytes**: a corrupt/zero-filled download that is unplayable yet passes the floor and dodges the dedup (its fingerprint differs from the real copy). This is a **strong-but-not-absolute heuristic**, so it defaults **off** and is removed **only** by this manual command with the toggle on — never by the daemon's automatic sweep. `unarr library stats` always counts these (shown as **Suspect (zero-content)**) so you can see them even without enabling removal.
+
+### Automatic cleanup (daemon)
+
+The **same sweep runs automatically after every library auto-scan** in the daemon — it is the native, always-on replacement for an external cleanup script. It applies only the safe, deterministic categories, protects any partial modified in the last few minutes (a live download), logs every action, and reports the space freed. Configure it under `[library.cleanup]`:
+
+```toml
+[library.cleanup]
+  enabled = true                   # run automatically after each auto-scan (manual command always works)
+  min_video_bytes = "1MiB"         # anti-stub floor; a video smaller than this is a stub
+  remove_stubs = true              # delete videos below min_video_bytes
+  remove_orphan_partials = true    # delete .part/.!qB/.aria2/.tmp/.partial with no active task
+  dedup_exact = true               # collapse byte-identical duplicate videos (keeps one canonical copy)
+  remove_orphan_subtitles = true   # delete sidecars with no owning video (.unarr → checks parent dir)
+  prune_empty_dirs = true          # remove video-less dirs and media-named dirs
+  remove_corrupt_videos = false    # OPT-IN: flag/remove right-sized videos whose first/last 1 MiB is all zeros
+```
+
+Every category **except `remove_corrupt_videos` defaults on** (each of those is deterministic and non-destructive to valid media). `remove_corrupt_videos` defaults **off** because zero-content detection is a heuristic; enable it deliberately, and even then it is applied **only** by the manual `unarr library clean --apply` — the daemon's automatic sweep never removes a suspect video. Set `enabled = false` to disable the automatic post-scan sweep — the manual `unarr library clean` command still works regardless.
+
+## Library stats (health & composition)
+
+`unarr library stats` reports the health, composition and quality of your **Movies/TV library and download dir**. It is a **pure DRY-RUN — it only READS**, never modifies anything on disk. Confined to the configured download/movies/tv directories.
+
+```bash
+unarr library stats               # readable table (dry-run — reads only)
+unarr library stats --json        # emit the full stats struct as JSON (for scripts)
+unarr library stats --workers 4   # limit concurrent ffprobe workers for the quality pass
+```
+
+**Three blocks:**
+
+- **Composition** — number of movies, shows, seasons and episodes, plus the **real on-disk space** (allocated blocks, like `du` — not apparent size) per category (Movies vs TV Shows vs Downloads) and the average size per title.
+- **Health / reclaimable** — the same sweep `unarr library clean` performs, in dry-run: stubs, orphaned partials, duplicates, orphaned sidecars, empty dirs and media-named dirs — grouped by category with the total space reclaimable. Run `unarr library clean --apply` to actually free it.
+- **Quality** — resolution (2160p/1080p/720p/480p/SD), video codec (h265/h264/av1/other) and HDR breakdown, extracted with ffprobe. A file ffprobe can't read is counted as `unknown` and never aborts the report. Probing a large library end-to-end can take a while (bounded by `--workers`, default 8).
+
+`--json` emits the full `LibraryStats` struct (composition, health, quality) for piping into scripts.
 
 ## Alias (optional)
 
@@ -535,6 +594,18 @@ webdav_enabled = false
 enabled = true
 movies_dir = "~/Media/Movies"
 tv_shows_dir = "~/Media/TV Shows"
+
+# Library-hygiene sweep — runs automatically after each auto-scan, and manually
+# via `unarr library clean`. Removes only deterministic junk; a valid video
+# (>= min_video_bytes) is NEVER removed. See the "Library clean" section above.
+[library.cleanup]
+enabled = true                   # run automatically after each auto-scan
+min_video_bytes = "1MiB"         # anti-stub floor; a video below this is a stub
+remove_stubs = true              # delete videos below min_video_bytes
+remove_orphan_partials = true    # delete .part/.!qB/.aria2/.tmp/.partial with no active task
+dedup_exact = true               # collapse byte-identical duplicate videos (keeps one canonical copy)
+remove_orphan_subtitles = true   # delete sidecars with no owning video (.unarr checks the parent dir)
+prune_empty_dirs = true          # remove video-less dirs and media-named dirs
 
 [daemon]
 poll_interval = "30s"

@@ -174,3 +174,48 @@ func TestScanResumeFiles_DescLabels(t *testing.T) {
 		}
 	}
 }
+
+// RC-6: the replaced/ backup dir (old files kept by upgrade replaceFile) must be
+// swept by age so it stops growing unbounded.
+func TestScanReplacedFiles_OnlyStale(t *testing.T) {
+	dir := t.TempDir()
+
+	stalePath := filepath.Join(dir, "Movie.1699999999.mkv")
+	os.WriteFile(stalePath, []byte("old-backup"), 0o644)
+	staleTime := time.Now().Add(-8 * 24 * time.Hour)
+	os.Chtimes(stalePath, staleTime, staleTime)
+
+	// A recent backup (< 7 days) must be kept.
+	os.WriteFile(filepath.Join(dir, "Recent.1700000000.mkv"), []byte("recent"), 0o644)
+
+	found := scanReplacedFiles(dir, false)
+	if len(found) != 1 {
+		t.Fatalf("expected 1 stale replaced backup, got %d", len(found))
+	}
+	if found[0].path != stalePath {
+		t.Errorf("expected stale backup %q, got %q", stalePath, found[0].path)
+	}
+	if found[0].size != int64(len("old-backup")) {
+		t.Errorf("size reported = %d, want %d (CleanableBytes must reflect it)", found[0].size, len("old-backup"))
+	}
+}
+
+func TestScanReplacedFiles_AllMode(t *testing.T) {
+	dir := t.TempDir()
+
+	os.WriteFile(filepath.Join(dir, "old.1.mkv"), []byte("old"), 0o644)
+	staleTime := time.Now().Add(-8 * 24 * time.Hour)
+	os.Chtimes(filepath.Join(dir, "old.1.mkv"), staleTime, staleTime)
+	os.WriteFile(filepath.Join(dir, "new.2.mkv"), []byte("new"), 0o644)
+
+	found := scanReplacedFiles(dir, true)
+	if len(found) != 2 {
+		t.Errorf("expected 2 files with --all (stale + recent), got %d", len(found))
+	}
+}
+
+func TestScanReplacedFiles_NonExistent(t *testing.T) {
+	if found := scanReplacedFiles("/nonexistent-replaced-dir", false); len(found) != 0 {
+		t.Errorf("expected nil for a missing replaced dir, got %d", len(found))
+	}
+}

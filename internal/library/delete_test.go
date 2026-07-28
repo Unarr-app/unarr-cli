@@ -465,3 +465,113 @@ func TestDeleteFiles(t *testing.T) {
 		}
 	})
 }
+
+// TestDeleteOneRemovesSidecars (RC-3) asserts that deleting a video also removes
+// its same-basename sidecars (subtitles, .nfo, artwork) so the folder can be
+// pruned, while leaving a DIFFERENT video (and thus the dir) untouched.
+func TestDeleteOneRemovesSidecars(t *testing.T) {
+	root := t.TempDir()
+	showDir := filepath.Join(root, "Show", "Season 01")
+	if err := os.MkdirAll(showDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	video := filepath.Join(showDir, "Show - S01E02.mkv")
+	sidecars := []string{
+		"Show - S01E02.es.srt",
+		"Show - S01E02.vtt",
+		"Show - S01E02.nfo",
+	}
+	otherVideo := filepath.Join(showDir, "Show - S01E03.mkv")
+
+	if err := os.WriteFile(video, []byte("v"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range sidecars {
+		if err := os.WriteFile(filepath.Join(showDir, s), []byte("s"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(otherVideo, []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := deleteOne(video, []string{root}); err != nil {
+		t.Fatalf("deleteOne returned error: %v", err)
+	}
+
+	// Video gone.
+	if _, err := os.Stat(video); !os.IsNotExist(err) {
+		t.Error("target video should have been deleted")
+	}
+	// All 3 sidecars gone.
+	for _, s := range sidecars {
+		if _, err := os.Stat(filepath.Join(showDir, s)); !os.IsNotExist(err) {
+			t.Errorf("sidecar %s should have been deleted", s)
+		}
+	}
+	// The OTHER video is untouched.
+	if _, err := os.Stat(otherVideo); err != nil {
+		t.Errorf("other video should NOT have been deleted: %v", err)
+	}
+	// The dir is NOT pruned (still holds the other video).
+	if _, err := os.Stat(showDir); err != nil {
+		t.Errorf("season dir should remain (still has another video): %v", err)
+	}
+}
+
+// TestSidecarBelongsTo table-drives the boundary rule that stops deleteSidecars /
+// moveSubtitles from stealing a different video's sidecar (#2 data-loss fix).
+func TestSidecarBelongsTo(t *testing.T) {
+	const stem = "Movie"
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"Movie.srt", true},              // dotted, bare
+		{"Movie.es.srt", true},           // dotted lang chain
+		{"Movie.forced.eng.srt", true},   // dotted multi chain
+		{"Movie.nfo", true},              // dotted metadata
+		{"Movie-poster.jpg", true},       // hyphen artwork
+		{"Movie-fanart.jpg", true},       // hyphen artwork
+		{"Movie Extended.srt", false},    // SPACE → different title, must NOT belong
+		{"Movie Extended.en.srt", false}, // different title with chain
+		{"MovieSpecial.srt", false},      // no separator → different title
+		{"Movie2.srt", false},            // "Movie2" is a different stem
+		{"Other.srt", false},             // unrelated
+	}
+	for _, tt := range tests {
+		if got := SidecarBelongsTo(tt.name, stem); got != tt.want {
+			t.Errorf("SidecarBelongsTo(%q, %q) = %v, want %v", tt.name, stem, got, tt.want)
+		}
+	}
+}
+
+// TestDeleteSidecarsBoundary is the end-to-end #2 regression: deleting Movie.mkv
+// removes only Movie.srt, and leaves Movie Extended.srt (the subtitle of the still
+// present Movie Extended.mkv) untouched.
+func TestDeleteSidecarsBoundary(t *testing.T) {
+	dir := t.TempDir()
+	movie := filepath.Join(dir, "Movie.mkv")
+	movieSub := filepath.Join(dir, "Movie.srt")
+	otherVideo := filepath.Join(dir, "Movie Extended.mkv")
+	otherSub := filepath.Join(dir, "Movie Extended.srt")
+	for _, p := range []string{movie, movieSub, otherVideo, otherSub} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// deleteSidecars is called after the video's own removal.
+	deleteSidecars(movie)
+
+	if _, err := os.Stat(movieSub); !os.IsNotExist(err) {
+		t.Errorf("Movie.srt should have been removed as Movie.mkv's sidecar (err=%v)", err)
+	}
+	if _, err := os.Stat(otherSub); err != nil {
+		t.Errorf("Movie Extended.srt (a DIFFERENT video's subtitle) must survive: %v", err)
+	}
+	if _, err := os.Stat(otherVideo); err != nil {
+		t.Errorf("Movie Extended.mkv must be untouched: %v", err)
+	}
+}

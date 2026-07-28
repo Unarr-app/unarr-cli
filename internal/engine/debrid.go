@@ -27,6 +27,12 @@ var httpClient = &http.Client{
 type DebridDownloader struct {
 	activeMu sync.Mutex
 	active   map[string]context.CancelFunc
+	// destPaths records the on-disk partial path per in-flight taskID so Cancel
+	// can delete it (torrent/usenet know their file from their own handle; a
+	// debrid download is a plain HTTPS fetch, so we must remember destPath here).
+	// Populated in Download once destPath is known; cleared in the same defer that
+	// clears active. Pause deliberately leaves the file — resume needs it.
+	destPaths map[string]string
 
 	minFreeBytes int64 // disk reserve for the pre-flight space check (0 = reserve disabled)
 }
@@ -34,7 +40,8 @@ type DebridDownloader struct {
 // NewDebridDownloader creates a debrid downloader.
 func NewDebridDownloader() *DebridDownloader {
 	return &DebridDownloader{
-		active: make(map[string]context.CancelFunc),
+		active:    make(map[string]context.CancelFunc),
+		destPaths: make(map[string]string),
 	}
 }
 
@@ -82,11 +89,15 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 
 	d.activeMu.Lock()
 	d.active[task.ID] = cancel
+	// Remember the partial path so a cancel-and-delete can remove it. Pause never
+	// consults this map, so pausing keeps the file for resume.
+	d.destPaths[task.ID] = destPath
 	d.activeMu.Unlock()
 
 	defer func() {
 		d.activeMu.Lock()
 		delete(d.active, task.ID)
+		delete(d.destPaths, task.ID)
 		d.activeMu.Unlock()
 		cancel()
 	}()
@@ -326,6 +337,21 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 			outputDir, formatBytes(downloaded), formatBytes(fi.Size()))
 	}
 
+	// Anti-stub floor: a debrid CDN answers 200 with no Content-Length and a tiny
+	// (often all-NUL) body when the link is expired / "still caching" / errored.
+	// With totalBytes==0 the truncation guard above is skipped, so such a body would
+	// otherwise sail through verify() as a "complete" download and organize() would
+	// file it into the library as a movie — the root cause of the movie.mkv/movie (N).mkv
+	// stub flood in prod. A real video file is never this small; reject it as an
+	// integrity failure and remove the stub so the manager gives up cleanly instead
+	// of accreting one version-tagged sibling per failed resolve.
+	if isVideoFile(fileName) && downloaded < minPlausibleVideoBytes {
+		if rmErr := os.Remove(destPath); rmErr != nil {
+			log.Printf("[%s] failed to remove stub download %s: %v", agent.ShortID(task.ID), destPath, rmErr)
+		}
+		return nil, integrityErr("stub_response", "debrid returned only %s for %s — link expired or not ready (not a valid video)", formatBytes(downloaded), fileName)
+	}
+
 	log.Printf("[%s] debrid download complete: %s (%s)", agent.ShortID(task.ID), fileName, formatBytes(downloaded))
 
 	return &Result{
@@ -350,15 +376,38 @@ func (d *DebridDownloader) Pause(taskID string) error {
 	return nil
 }
 
-// Cancel aborts the in-progress HTTP download. Partial file is kept on disk.
+// Cancel aborts the in-progress HTTP download AND removes the partial file, per
+// the Downloader contract (torrent.Cancel/usenet.Cancel delete too). This is the
+// method the manager's CancelAndDeleteFiles invokes; the intent is cancel-and-delete,
+// so leaving the partial behind (as the old debrid Cancel did) leaked orphaned
+// .part-style files into the download dir. Pause keeps the file — it does NOT call
+// this. We read destPath under the same lock that Download populates it: if the
+// entry is still present the download is genuinely in-flight and destPath is a
+// partial safe to delete; if it's gone the download already finished and we must
+// NOT touch what may be a completed file.
 func (d *DebridDownloader) Cancel(taskID string) error {
 	d.activeMu.Lock()
 	cancel, ok := d.active[taskID]
+	destPath, hadPath := d.destPaths[taskID]
 	delete(d.active, taskID)
+	delete(d.destPaths, taskID)
 	d.activeMu.Unlock()
 
 	if ok {
 		cancel()
+	}
+
+	// Delete the partial only when we still had an in-flight destPath — this is a
+	// cancel-and-delete, and the bytes on disk are an incomplete download.
+	if hadPath && destPath != "" {
+		if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
+			// Never silence: an undeletable partial is worth a log line so it can be
+			// reaped later, but it must not fail the cancel (the download is stopped).
+			log.Printf("[%s] debrid cancel: failed to remove partial %s: %v", agent.ShortID(taskID), destPath, err)
+		} else {
+			log.Printf("[%s] debrid download cancelled + partial removed", agent.ShortID(taskID))
+		}
+	} else if ok {
 		log.Printf("[%s] debrid download cancelled", agent.ShortID(taskID))
 	}
 	return nil
@@ -371,6 +420,9 @@ func (d *DebridDownloader) Shutdown(_ context.Context) error {
 	for id, cancel := range d.active {
 		cancel()
 		delete(d.active, id)
+		// Shutdown keeps partials on disk (like Pause) so a daemon restart can resume;
+		// just drop the bookkeeping entry.
+		delete(d.destPaths, id)
 	}
 	return nil
 }

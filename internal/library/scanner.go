@@ -17,11 +17,28 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/parser"
 )
 
-// videoExts are file extensions considered as video files.
+// videoExts is the SINGLE source of truth for what counts as a video file across
+// the whole binary. It is a SUPERSET of every extension any subsystem recognises:
+// the scanner, the organizer (engine.isVideoFile delegates here), and reconcile's
+// hygiene sweep all key off this one map.
+//
+// Keeping them unified is load-bearing for data safety: a divergence once meant
+// reconcile did not recognise a `.m2ts` Blu-ray remux (30 GB) as a video, judged
+// its directory "video-less", and RemoveAll'd a legitimate film. Any new video
+// container goes HERE and nowhere else. engine has a parity test
+// (TestVideoExtParity) that fails if its list drifts from this set.
 var videoExts = map[string]bool{
 	".mkv": true, ".mp4": true, ".avi": true, ".m4v": true,
-	".ts": true, ".wmv": true, ".mov": true, ".webm": true,
-	".flv": true, ".mpg": true, ".mpeg": true, ".vob": true,
+	".ts": true, ".m2ts": true, ".wmv": true, ".mov": true,
+	".webm": true, ".flv": true, ".mpg": true, ".mpeg": true,
+	".vob": true,
+}
+
+// IsVideoExt reports whether name has a recognised video extension (case-insensitive).
+// Exported so other packages (engine) share the ONE canonical set instead of
+// maintaining a divergent copy — see videoExts.
+func IsVideoExt(name string) bool {
+	return videoExts[strings.ToLower(filepath.Ext(name))]
 }
 
 // excludePatterns are path substrings that indicate non-content files.

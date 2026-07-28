@@ -620,8 +620,16 @@ func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Resu
 	}
 	finalPath, err := organize(result, task, m.cfg.Organize)
 	if err != nil {
-		log.Printf("[%s] organize warning: %v (keeping in download dir)", agent.ShortID(task.ID), err)
-		finalPath = result.FilePath
+		// A failed organize is NOT a completed download: the file is stranded in the
+		// download dir under a raw release name (or half-moved), yet the old code
+		// logged a warning and reported "completed" — so the library showed a green
+		// item pointing at a file that was never filed into Movies/TV (a lie to the
+		// user + a source of the junk-in-download-dir the reconcile sweep now cleans).
+		// Surface it as FAILED with the organize error so it's visibly retryable.
+		// (organize returns (path, nil) — same path, no error — when disabled or a
+		// no-op; that path is NOT an error and still completes below.)
+		m.fail(ctx, task, "organize failed: "+err.Error())
+		return
 	}
 	if finalPath == "" {
 		finalPath = result.FilePath

@@ -8,6 +8,14 @@ import (
 	"syscall"
 )
 
+// minPlausibleVideoBytes is the anti-stub floor: any single video file smaller
+// than this is not real media. A debrid/stream CDN can answer 200 with no
+// Content-Length and a tiny (often all-NUL) body when a link is expired or not
+// yet cached; without a size floor such a stub passes verify() and organize()
+// files it as a movie (the movie.mkv/movie (N).mkv flood). 1 MiB is far below any
+// genuine video yet far above every stub observed.
+const minPlausibleVideoBytes = 1 << 20 // 1 MiB
+
 // isStorageStatErr reports whether a stat/read error means the DESTINATION mount
 // faulted rather than the file being genuinely absent: an I/O error (EIO) or a
 // stale NFS handle (ESTALE) is a dropped/stalled mount, not corruption or a
@@ -48,6 +56,15 @@ func verify(result *Result) error {
 		// Integrity, not transport: a zero-byte result is corrupt — let the manager
 		// re-download clean rather than surface an empty file as completed.
 		return integrityErr("empty", "download is empty: %s", result.FilePath)
+	}
+
+	// Anti-stub floor (defense in depth for the debrid stub flood): a single video
+	// file below minPlausibleVideoBytes is a CDN error/expired-link stub, not media.
+	// This is independent of result.Size — for a debrid download result.Size is the
+	// stub's own byte count (self-referential), so the 2% check below can't catch it.
+	// Directories (multi-file torrents) are exempt: their per-file sizes vary.
+	if !fi.IsDir() && isVideoFile(filepath.Base(result.FilePath)) && actualSize < minPlausibleVideoBytes {
+		return integrityErr("stub", "video file too small to be valid: %d bytes (%s)", actualSize, result.FilePath)
 	}
 
 	// If we know the expected size, check within 2% tolerance (container/muxing

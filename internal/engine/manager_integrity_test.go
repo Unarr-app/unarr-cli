@@ -74,7 +74,10 @@ func terminalUpdate(t *testing.T, r *mockStatusReporter, taskID string) agent.St
 func TestManagerPipeline_IntegrityRetry_ThenSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	pr, reporter := captureReporter()
-	dl := &truncatingMockDownloader{dir: dir, reportedSize: 10000, goodOnAttempt: 2}
+	// Good file must clear minPlausibleVideoBytes (1 MiB): it's a .mkv, so a smaller
+	// "clean" file would be rejected by verify's anti-stub floor and the retry would
+	// never be seen as a success.
+	dl := &truncatingMockDownloader{dir: dir, reportedSize: minPlausibleVideoBytes + 10000, goodOnAttempt: 2}
 
 	mgr := NewManager(ManagerConfig{MaxConcurrent: 1, OutputDir: dir}, pr, dl)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
