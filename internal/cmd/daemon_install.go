@@ -174,23 +174,9 @@ func runDaemonInstall() error {
 		return err
 	}
 
-	binPath, err := os.Executable()
+	data, err := resolveServiceData()
 	if err != nil {
-		return fmt.Errorf("find executable: %w", err)
-	}
-	binPath, _ = filepath.EvalSymlinks(binPath)
-
-	home, _ := os.UserHomeDir()
-	user := os.Getenv("USER")
-	if user == "" {
-		user = os.Getenv("USERNAME")
-	}
-
-	data := serviceData{
-		BinPath: binPath,
-		User:    user,
-		Home:    home,
-		LogDir:  filepath.Join(home, ".local", "share", "unarr"),
+		return err
 	}
 
 	bold := color.New(color.Bold)
@@ -414,8 +400,14 @@ func runDaemonUninstall() error {
 	return nil
 }
 
-func installWindowsTask(data serviceData, green *color.Color) error {
-	logDir := config.DataDir()
+// writeAndCreateWindowsTask writes the launcher shim + task XML and registers
+// the scheduled task, WITHOUT running it or printing the install wizard. It is
+// the idempotent core shared by a fresh `daemon install` and the post-upgrade
+// re-registration (reregisterWindowsTaskAfterUpgrade) — the latter needs to
+// rewrite an already-installed task to point at the new launcher, but must not
+// start a second daemon or print "Installed!". `schtasks /create /f` overwrites
+// any existing task, so calling this on an already-installed box is safe.
+func writeAndCreateWindowsTask(data serviceData, logDir string) error {
 	os.MkdirAll(logDir, 0o755)
 
 	// Remove any existing task before (re)installing.
@@ -460,14 +452,22 @@ func installWindowsTask(data serviceData, green *color.Color) error {
 	// user), and on a domain / non-current account /ru with no /rp can block on
 	// an interactive password prompt (svcOutput has no stdin) — the XML's
 	// InteractiveToken avoids that entirely.
-	out, err := svcOutput("schtasks",
+	if out, err := svcOutput("schtasks",
 		"/create",
 		"/tn", "unarr",
 		"/xml", xmlPath,
 		"/f",
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("create scheduled task: %w\n%s", err, out)
+	}
+	return nil
+}
+
+func installWindowsTask(data serviceData, green *color.Color) error {
+	logDir := config.DataDir()
+
+	if err := writeAndCreateWindowsTask(data, logDir); err != nil {
+		return err
 	}
 
 	// Run it now. "Installed, will start at next login" is a dead end for
@@ -495,4 +495,73 @@ func installWindowsTask(data serviceData, green *color.Color) error {
 	fmt.Println()
 
 	return nil
+}
+
+// resolveServiceData resolves the current executable, user, and home into the
+// serviceData every installer needs. Shared by `daemon install` and the
+// post-upgrade task re-registration so both point the service at the SAME
+// resolved binary path.
+func resolveServiceData() (serviceData, error) {
+	binPath, err := os.Executable()
+	if err != nil {
+		return serviceData{}, fmt.Errorf("find executable: %w", err)
+	}
+	binPath, _ = filepath.EvalSymlinks(binPath)
+
+	home, _ := os.UserHomeDir()
+	user := os.Getenv("USER")
+	if user == "" {
+		user = os.Getenv("USERNAME")
+	}
+	return serviceData{
+		BinPath: binPath,
+		User:    user,
+		Home:    home,
+		LogDir:  filepath.Join(home, ".local", "share", "unarr"),
+	}, nil
+}
+
+// windowsTaskInstalled reports whether the `unarr` scheduled task exists.
+// schtasks /query exits non-zero ("ERROR: The system cannot find the ... task")
+// when it does not, which is how we distinguish "user runs at logon" (rewrite
+// it) from "user never installed autostart" (leave them alone).
+func windowsTaskInstalled() bool {
+	cmd := exec.Command("schtasks", "/query", "/tn", "unarr")
+	winproc.HideWindow(cmd)
+	return cmd.Run() == nil
+}
+
+// reregisterWindowsTaskAfterUpgrade rewrites an EXISTING Windows autostart task
+// to point at the current binary's launcher, then returns whether it did so.
+//
+// Why this exists: `unarr update` swaps the binary in place but does NOT touch
+// the scheduled task. A user who installed autostart on an older build (whose
+// task launched the console daemon through `powershell -WindowStyle Hidden`, or
+// directly) and then self-updated keeps that stale task — so the boot console
+// flash the newer launcher fixes STILL happens, because the task never learned
+// about the new wscript/VBS launcher. This closes that gap: after a successful
+// upgrade we re-register the task (idempotently) so it adopts the new launcher
+// without the user having to run `daemon uninstall && daemon install` by hand.
+//
+// It only acts when a task already exists (never installs autostart the user
+// didn't ask for) and is best-effort — a failure here must not fail an upgrade
+// whose binary is already on disk. Returns (rewrote, err).
+func reregisterWindowsTaskAfterUpgrade() (bool, error) {
+	if runtime.GOOS != "windows" {
+		return false, nil
+	}
+	if !windowsTaskInstalled() {
+		return false, nil
+	}
+	data, err := resolveServiceData()
+	if err != nil {
+		return false, err
+	}
+	// Rewrite the shim + task to point at the new binary. Does NOT /run it: the
+	// upgrade path already restarts a running daemon separately, and a fresh
+	// logon will pick up the rewritten task. `schtasks /create /f` overwrites.
+	if err := writeAndCreateWindowsTask(data, config.DataDir()); err != nil {
+		return false, err
+	}
+	return true, nil
 }

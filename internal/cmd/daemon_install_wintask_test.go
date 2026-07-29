@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"runtime"
 	"encoding/xml"
 	"strings"
 	"testing"
@@ -180,5 +181,21 @@ func TestBuildWindowsTaskXMLBytes(t *testing.T) {
 	}
 	if !strings.Contains(text, `José`) {
 		t.Error("non-ASCII username did not round-trip through UTF-16LE")
+	}
+}
+
+// TestReregisterWindowsTaskNoopOffWindows guards the gate: on non-Windows the
+// post-upgrade re-registration must be an inert no-op (no error, no rewrite) so
+// wiring it into the shared self-update path never touches linux/macOS.
+func TestReregisterWindowsTaskNoopOffWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("gate is a no-op only off Windows; on Windows it may touch schtasks")
+	}
+	rewrote, err := reregisterWindowsTaskAfterUpgrade()
+	if err != nil {
+		t.Errorf("expected no error off Windows, got %v", err)
+	}
+	if rewrote {
+		t.Error("must not rewrite a task off Windows")
 	}
 }
