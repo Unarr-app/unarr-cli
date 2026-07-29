@@ -106,6 +106,20 @@ func runSelfUpdate(force, allowUnsigned bool) error {
 
 	updateDesktopSibling(ctx, latest, green, yellow)
 
+	// Re-register the Windows autostart task so it adopts the new launcher.
+	// `unarr update` only swaps the binary; an autostart task installed on an
+	// older build still launches the daemon the OLD way (a hidden-PowerShell
+	// wrapper / the console binary directly), so the boot console-window flash
+	// the new wscript/VBS launcher fixes would persist until the user manually
+	// re-ran `daemon install`. Best-effort: never fail an upgrade already on
+	// disk, and a no-op when no task exists (nothing to adopt).
+	if rewrote, err := reregisterWindowsTaskAfterUpgrade(); err != nil {
+		yellow.Printf("  ! could not refresh the Windows startup task: %v\n", err)
+		fmt.Println("    Re-run once to fix the boot startup: unarr daemon install")
+	} else if rewrote {
+		green.Println("  ✓ Windows startup task refreshed (no more console window at boot)")
+	}
+
 	// Auto-restart daemon if it is running, otherwise the live process keeps
 	// serving the old version (heartbeat reports old version → web gates
 	// features against the wrong version).
