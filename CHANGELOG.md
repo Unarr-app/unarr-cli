@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-07-29
+
+
+### Fixed
+
+- **windows**: re-register the autostart task on update so it adopts the new launcher
 ## [1.8.0] - 2026-07-28
 
 
@@ -13,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **library**: detect zero-content corrupt videos (opt-in)
 - **library**: add `unarr library stats` — health, composition, quality
 - **library**: native hygiene sweep + fix content-management leaks
+
+### Other
+
+- **release**: 1.8.0
 ## [1.7.7] - 2026-07-28
 
 
@@ -1395,6 +1405,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.8.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.7...v1.8.0
 [1.7.7]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.6...v1.7.7
 [1.7.6]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.5...v1.7.6
