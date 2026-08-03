@@ -173,17 +173,52 @@ type serviceData struct {
 // writeServiceFile renders a unit/plist template to path, creating its parent
 // directory. Shared by both installers so the file the supervisor reads is
 // written exactly one way.
+//
+// It renders into a temporary file in the same directory and renames it into
+// place, so path either holds the previous service definition or the new one —
+// never a half-written one. The previous shape opened path with os.Create,
+// which TRUNCATES: a reinstall over a working install destroyed the unit/plist
+// before knowing the template would render, and a failure there (or a crash, or
+// a full disk) left an empty file behind. systemd then refuses to load the unit
+// and launchd rejects the plist, so the daemon does not come back — and the
+// user's next `unarr daemon install` is the only thing that can repair it.
+//
+// Same directory on purpose: a temp file under /tmp could be on another
+// filesystem and the rename would fail with EXDEV.
 func writeServiceFile(path, tmplText string, data serviceData) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create service dir: %w", err)
 	}
-	f, err := os.Create(path)
+
+	tmpl, err := template.New("service").Parse(tmplText)
+	if err != nil {
+		return fmt.Errorf("parse service template: %w", err)
+	}
+
+	f, err := os.CreateTemp(dir, ".unarr-service-*")
 	if err != nil {
 		return fmt.Errorf("create service file: %w", err)
 	}
-	defer f.Close()
-	if err := template.Must(template.New("service").Parse(tmplText)).Execute(f, data); err != nil {
+	tmp := f.Name()
+	// Every path below either renames tmp away or must not leave it behind.
+	defer os.Remove(tmp)
+
+	if err := tmpl.Execute(f, data); err != nil {
+		f.Close()
 		return fmt.Errorf("write service file: %w", err)
+	}
+	// Checked, not deferred: a full disk reports itself on Close, and a service
+	// file that is silently short is exactly what this function exists to avoid.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("write service file: %w", err)
+	}
+	// CreateTemp makes the file 0600; the supervisor has to be able to read it.
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		return fmt.Errorf("write service file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("install service file: %w", err)
 	}
 	return nil
 }
