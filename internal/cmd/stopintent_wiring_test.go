@@ -33,7 +33,7 @@ func readSource(t *testing.T, name string) string {
 // written after the kill (or not at all) the scheduled task would respawn the
 // agent a minute after the user paused it.
 func TestStopByPIDRecordsIntentBeforeKilling(t *testing.T) {
-	src := readSource(t, "daemon_control.go")
+	src := readSource(t, "daemon_stop.go")
 
 	intent := strings.Index(src, "agent.WriteStopIntent()")
 	kill := strings.Index(src, "killPID(state.PID)")
@@ -45,6 +45,17 @@ func TestStopByPIDRecordsIntentBeforeKilling(t *testing.T) {
 	}
 	if intent > kill {
 		t.Error("the stop intent must be recorded BEFORE the kill: taskkill /f leaves no window to record it after")
+	}
+	// Every exit from stopDaemonByPID must record it, not just the one that finds a
+	// live process. Real Windows caught this: after a crash the tray's Pause takes
+	// the "already dead" branch, which recorded nothing — so a pending restart
+	// would have undone the pause. `unarr stop` is a request about the FUTURE, not
+	// just about the process that happens to be alive right now.
+	body := src[strings.Index(src, "func stopDaemonByPID()"):]
+	body = body[:strings.Index(body, "\nfunc ")]
+	if n := strings.Count(body, "agent.WriteStopIntent()"); n < 3 {
+		t.Errorf("stopDaemonByPID records the stop intent on only %d of its 3 exit paths "+
+			"(no state file / stale state file / live process)", n)
 	}
 }
 
