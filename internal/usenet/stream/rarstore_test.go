@@ -169,7 +169,7 @@ func TestReaderVolumeReadAtBoundsHugeLength(t *testing.T) {
 	s.AddArticles(articles)
 	c := dialFake(t, s)
 
-	v, err := newReaderVolume(context.Background(), c, n.Files[0])
+	v, err := newReaderVolume(context.Background(), c, n.Files[0], nil)
 	if err != nil {
 		t.Fatalf("newReaderVolume: %v", err)
 	}
