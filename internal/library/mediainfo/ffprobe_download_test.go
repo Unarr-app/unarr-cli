@@ -34,8 +34,13 @@ func TestFFprobePlatformKey(t *testing.T) {
 			}
 		}
 	case "darwin":
-		if key != "osx-64" {
-			t.Errorf("key = %q, want osx-64", key)
+		// Apple Silicon gets its own build — the CI mac runners are arm64.
+		want := "osx-64"
+		if runtime.GOARCH == "arm64" {
+			want = "osx-arm-64"
+		}
+		if key != want {
+			t.Errorf("key = %q, want %s", key, want)
 		}
 	case "windows":
 		if runtime.GOARCH == "amd64" && key != "windows-64" {

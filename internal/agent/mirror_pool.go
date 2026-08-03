@@ -145,6 +145,16 @@ func IsTransient(err error) bool {
 		return true
 	}
 
+	// A failure at DIAL time means we never reached this mirror at all (refused,
+	// unreachable, host down): always worth the next one. Matching on the op is
+	// platform-independent, unlike the message matching below — Windows words a
+	// refused connect as "connectex: No connection could be made because the
+	// target machine actively refused it.", so agents there never failed over.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		// `connection refused`, `EOF`, `tls: ...` end up as wrapped url.Errors.

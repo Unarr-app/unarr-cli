@@ -630,11 +630,12 @@ func isTransientError(err error) bool {
 	if errors.As(err, &httpErr) {
 		return httpErr.StatusCode == 429 || httpErr.StatusCode >= 500
 	}
-	lower := strings.ToLower(err.Error())
-	for _, keyword := range []string{"connection refused", "no such host", "timeout", "request failed"} {
-		if strings.Contains(lower, keyword) {
-			return true
-		}
+	// Network-level classification lives in IsTransient (dial failures, DNS,
+	// timeouts, TLS) so the platform quirks — Windows words a refused connect as
+	// "connectex: No connection could be made ..." — are handled in ONE place
+	// instead of drifting between two keyword lists.
+	if IsTransient(err) {
+		return true
 	}
-	return false
+	return strings.Contains(strings.ToLower(err.Error()), "request failed")
 }

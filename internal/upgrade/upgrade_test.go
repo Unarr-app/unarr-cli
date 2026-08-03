@@ -128,9 +128,14 @@ func TestInstallBinary(t *testing.T) {
 		t.Errorf("installed binary content = %q, want %q", data, "binary-content")
 	}
 
-	info, _ := os.Stat(dst)
-	if info.Mode().Perm()&0o111 == 0 {
-		t.Error("installed binary is not executable")
+	// Windows has no execute bit — an .exe is executable by extension, and
+	// os.Stat reports 0666 for any writable file. Only assert it where it means
+	// something.
+	if runtime.GOOS != "windows" {
+		info, _ := os.Stat(dst)
+		if info.Mode().Perm()&0o111 == 0 {
+			t.Error("installed binary is not executable")
+		}
 	}
 }
 

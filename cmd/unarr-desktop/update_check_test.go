@@ -177,8 +177,14 @@ func TestMaybeNotifyWordingMatchesInstallShape(t *testing.T) {
 		selfExecutablePath = func() (string, error) { return filepath.Join(dir, "unarr-desktop"), nil }
 		t.Cleanup(func() { selfExecutablePath = prevSelf })
 		// statFile seam (restored by stubPlayers): only the sibling CLI exists.
+		// The sibling carries the platform's executable suffix — cliManagesThisInstall
+		// looks for unarr.exe on Windows, so a bare "unarr" is never found there.
+		sibling := filepath.Join(dir, "unarr")
+		if hostGOOS == "windows" {
+			sibling += ".exe"
+		}
 		statFile = func(name string) (os.FileInfo, error) {
-			if name == filepath.Join(dir, "unarr") {
+			if name == sibling {
 				return nil, nil
 			}
 			return nil, os.ErrNotExist

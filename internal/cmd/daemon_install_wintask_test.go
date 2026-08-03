@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"runtime"
 	"encoding/xml"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf16"

@@ -182,8 +182,10 @@ func TestParentDir(t *testing.T) {
 				}
 				return
 			}
-			if got != tt.expect {
-				t.Errorf("ParentDir = %q, want %q", got, tt.expect)
+			// ParentDir returns native separators; the table is written with
+			// slashes so it reads the same on every OS.
+			if want := filepath.FromSlash(tt.expect); got != want {
+				t.Errorf("ParentDir = %q, want %q", got, want)
 			}
 		})
 	}

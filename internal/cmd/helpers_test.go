@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,7 +16,8 @@ func TestExpandHome(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"~/Documents", home + "/Documents"},
+		// expandHome joins with filepath.Join, so the separator is native.
+		{"~/Documents", filepath.Join(home, "Documents")},
 		{"~/", home},
 		{"/absolute/path", "/absolute/path"},
 		{"relative/path", "relative/path"},

@@ -1,7 +1,8 @@
 package config
 
 import (
-	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -26,8 +27,9 @@ func TestFilePath(t *testing.T) {
 func TestLockPath(t *testing.T) {
 	t.Setenv("UNARR_CONFIG_DIR", "/custom/path")
 	path := LockPath()
-	if path != "/custom/path/unarr.lock" {
-		t.Errorf("LockPath() = %q, want /custom/path/unarr.lock", path)
+	// filepath.Join, so the separator is native: `\custom\path\unarr.lock` on Windows.
+	if want := filepath.Join("/custom/path", "unarr.lock"); path != want {
+		t.Errorf("LockPath() = %q, want %q", path, want)
 	}
 }
 
@@ -50,12 +52,18 @@ func TestDirOverrideEnv(t *testing.T) {
 }
 
 func TestDirXDGOverride(t *testing.T) {
-	// Clear the custom env so XDG takes effect
-	os.Unsetenv("UNARR_CONFIG_DIR")
+	// XDG_CONFIG_HOME is a Linux/BSD convention. macOS and Windows deliberately
+	// use ~/Library/Application Support and %APPDATA% instead — see Dir().
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		t.Skip("XDG_CONFIG_HOME does not apply on " + runtime.GOOS)
+	}
+
+	// Clear the custom env so XDG takes effect (restored by t.Setenv's cleanup).
+	t.Setenv("UNARR_CONFIG_DIR", "")
 	t.Setenv("XDG_CONFIG_HOME", "/xdg/config")
 
 	dir := Dir()
-	if dir != "/xdg/config/unarr" {
-		t.Errorf("Dir() with XDG = %q, want /xdg/config/unarr", dir)
+	if want := filepath.Join("/xdg/config", appName); dir != want {
+		t.Errorf("Dir() with XDG = %q, want %q", dir, want)
 	}
 }

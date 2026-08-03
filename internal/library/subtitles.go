@@ -83,7 +83,9 @@ func fetchSubtitleOne(r agent.SubtitleFetchRequest, scanPaths []string) error {
 	if err != nil {
 		return fmt.Errorf("media file unreachable: %w", err)
 	}
-	if !isWithinScanPaths(real, scanPaths) {
+	// Roots resolved too — a resolved file compared against an unresolved root
+	// rejects every path under a symlinked mount (macOS /var → /private/var).
+	if !isWithinScanPaths(real, resolvedRoots(scanPaths)) {
 		return fmt.Errorf("path %q is outside all scan paths", real)
 	}
 

@@ -64,6 +64,14 @@ func Scan(ctx context.Context, dirPath string, existing *LibraryCache, opts Scan
 		opts.Workers = 8
 	}
 
+	// An already-cancelled scan must report cancellation before ANY setup work:
+	// resolving ffprobe can trigger a network auto-download, and on a host without
+	// ffprobe its failure replaced context.Canceled in the returned error — the
+	// exact signal runAutoScan reads to avoid claiming a fullCycle.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Resolve ffprobe
 	ffprobePath, err := mediainfo.ResolveFFprobe(opts.FFprobePath)
 	if err != nil {

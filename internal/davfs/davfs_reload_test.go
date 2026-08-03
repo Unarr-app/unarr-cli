@@ -25,6 +25,16 @@ func bumpMtime(t *testing.T, path string) {
 	}
 }
 
+// forceRefresh clears the refresh throttle so the next FS call re-stats the cache.
+// A 1ns RefreshInterval is not enough on its own: Windows' monotonic clock ticks
+// at ~15ms, so time.Since(lastStat) reads 0 and the throttle swallows the reload
+// the test is about. Zeroing the timestamp makes the trigger explicit everywhere.
+func forceRefresh(f *FS) {
+	f.mu.Lock()
+	f.lastStat = time.Time{}
+	f.mu.Unlock()
+}
+
 // TestReloadKeepsGoodTreeOnLoadError: the daemon serves WebDAV continuously while
 // auto-scan rewrites library.json, so a corrupt/half-written cache (Load returns
 // an error) must NOT break the mount — the previous good tree is kept and requests
@@ -56,6 +66,7 @@ func TestReloadKeepsGoodTreeOnLoadError(t *testing.T) {
 	// Cache "changes" (mtime bumped) but Load now fails — the previous good tree
 	// must be kept and the mount stays usable.
 	bumpMtime(t, cachePath)
+	forceRefresh(f)
 	loadCache, loadErr = nil, errors.New("corrupt/half-written cache")
 
 	if _, err := f.Stat(context.Background(), "/Movies/Inception (2010)/Inception.2010.mkv"); err != nil {
@@ -88,6 +99,7 @@ func TestReloadNilCacheEmptyTree(t *testing.T) {
 	statDir(t, f, "/Movies/M (2020)") // good cache first
 
 	bumpMtime(t, cachePath)
+	forceRefresh(f)
 	loadCache = nil // (nil, nil) → empty tree
 
 	if _, err := f.Stat(context.Background(), "/Movies/M (2020)"); !errors.Is(err, os.ErrNotExist) {
@@ -130,6 +142,7 @@ func TestReloadSkipsRebuildWhenMtimeUnchanged(t *testing.T) {
 	f.mu.RUnlock()
 
 	// Second access WITHOUT bumping the mtime → early return: no new load, same tree.
+	forceRefresh(f)
 	statDir(t, f, "/Movies/M (2020)")
 	if loadCalls != 1 {
 		t.Errorf("loadCalls after an unchanged-mtime refresh = %d, want still 1 (no rebuild)", loadCalls)

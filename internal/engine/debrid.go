@@ -14,6 +14,10 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
+// cancelDrainTimeout bounds how long Cancel waits for the download goroutine to
+// release the partial's file handle before unlinking it anyway.
+const cancelDrainTimeout = 10 * time.Second
+
 // httpClient is used for debrid HTTPS downloads with a reasonable header timeout.
 var httpClient = &http.Client{
 	Transport: &http.Transport{
@@ -33,6 +37,11 @@ type DebridDownloader struct {
 	// Populated in Download once destPath is known; cleared in the same defer that
 	// clears active. Pause deliberately leaves the file — resume needs it.
 	destPaths map[string]string
+	// done is closed when a task's Download returns, i.e. once its file handle is
+	// released. Cancel waits on it before unlinking: Windows refuses to delete a
+	// file that is still open, so removing the partial straight after cancel() lost
+	// the race and left the orphan behind.
+	done map[string]chan struct{}
 
 	minFreeBytes int64 // disk reserve for the pre-flight space check (0 = reserve disabled)
 }
@@ -42,6 +51,7 @@ func NewDebridDownloader() *DebridDownloader {
 	return &DebridDownloader{
 		active:    make(map[string]context.CancelFunc),
 		destPaths: make(map[string]string),
+		done:      make(map[string]chan struct{}),
 	}
 }
 
@@ -87,19 +97,26 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 	// Create cancellable context
 	dlCtx, cancel := context.WithCancel(ctx)
 
+	// Closed by the cleanup defer below, which runs AFTER the deferred closeFile
+	// (defers are LIFO) — so a waiter is only released once the handle is gone.
+	finished := make(chan struct{})
+
 	d.activeMu.Lock()
 	d.active[task.ID] = cancel
 	// Remember the partial path so a cancel-and-delete can remove it. Pause never
 	// consults this map, so pausing keeps the file for resume.
 	d.destPaths[task.ID] = destPath
+	d.done[task.ID] = finished
 	d.activeMu.Unlock()
 
 	defer func() {
 		d.activeMu.Lock()
 		delete(d.active, task.ID)
 		delete(d.destPaths, task.ID)
+		delete(d.done, task.ID)
 		d.activeMu.Unlock()
 		cancel()
+		close(finished)
 	}()
 
 	// Build request with optional Range header for resume
@@ -389,12 +406,24 @@ func (d *DebridDownloader) Cancel(taskID string) error {
 	d.activeMu.Lock()
 	cancel, ok := d.active[taskID]
 	destPath, hadPath := d.destPaths[taskID]
+	finished := d.done[taskID]
 	delete(d.active, taskID)
 	delete(d.destPaths, taskID)
 	d.activeMu.Unlock()
 
 	if ok {
 		cancel()
+	}
+
+	// Wait for the download goroutine to release the file before unlinking:
+	// Windows refuses to delete an open file, so an immediate Remove here left the
+	// partial on disk. Bounded so a wedged transfer can't block the cancel path.
+	if finished != nil {
+		select {
+		case <-finished:
+		case <-time.After(cancelDrainTimeout):
+			log.Printf("[%s] debrid cancel: download did not stop within %s; removing partial anyway", agent.ShortID(taskID), cancelDrainTimeout)
+		}
 	}
 
 	// Delete the partial only when we still had an in-flight destPath — this is a

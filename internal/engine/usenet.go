@@ -783,10 +783,23 @@ func syncTree(path string) error {
 // syncFile flushes a single file's dirty pages to durable storage. fsync flushes
 // the inode's cached writes regardless of the (read-only) open mode, so it commits
 // data the post-processing library wrote and already closed.
+//
+// The handle is opened READ-WRITE because Windows' FlushFileBuffers rejects a
+// read-only handle with "Access is denied.", which failed every usenet download
+// there. A file we cannot open for writing is one we never dirtied, so its flush
+// is best-effort rather than a durability failure.
 func syncFile(path string) error {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
-		return err
+		if !os.IsPermission(err) {
+			return err
+		}
+		ro, roErr := os.Open(path)
+		if roErr != nil {
+			return roErr
+		}
+		_ = ro.Sync()
+		return ro.Close()
 	}
 	syncErr := f.Sync()
 	closeErr := f.Close()

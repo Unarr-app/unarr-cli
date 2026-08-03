@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/testutil"
 )
 
 // tempVideo writes a stand-in file so os.Stat succeeds and the probe path runs.
@@ -55,6 +57,7 @@ func TestCancelledScanYieldsNoVerdictAndNoRetry(t *testing.T) {
 // The parent context carries NO deadline here, matching production — the scan
 // ctx is cancellation-only, so the sole deadline is truncProbeTimeout's.
 func TestExpiredProbeRequestsRetryWithoutVerdict(t *testing.T) {
+	testutil.RequireShellStubs(t)
 	// A fake ffprobe that outlives the (shortened) per-probe deadline.
 	fake := filepath.Join(t.TempDir(), "slowprobe")
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
@@ -79,6 +82,7 @@ func TestExpiredProbeRequestsRetryWithoutVerdict(t *testing.T) {
 // healthy and never re-checked — the same gap this fix closes for the demux,
 // one level down. It must request a retry, and still never flag the file.
 func TestExpiredDecodeRequestsRetryWithoutVerdict(t *testing.T) {
+	testutil.RequireShellStubs(t)
 	slow := filepath.Join(t.TempDir(), "slowffmpeg")
 	if err := os.WriteFile(slow, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
 		t.Fatal(err)
