@@ -1,6 +1,6 @@
 # unarr
 
-> **⚠️ Beta** — unarr is under active development. Features may change, and bugs are expected. [Report issues here](https://github.com/Unarr-app/unarr-cli/issues).
+> **⚠️ Active development** — unarr is under active development. Features may change, and bugs are expected. [Report issues here](https://github.com/Unarr-app/unarr-cli/issues).
 
 [![CI](https://github.com/Unarr-app/unarr-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/Unarr-app/unarr-cli/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/Unarr-app/unarr-cli)](https://github.com/Unarr-app/unarr-cli/releases)
