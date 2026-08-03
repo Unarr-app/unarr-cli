@@ -23,6 +23,21 @@ type rarVideoReader struct {
 
 	curVol    int           // volume index the current reader serves, -1 if none
 	curReader *readerVolume // open reader for curVol (lazily opened, closed on switch)
+
+	// budget, when set, is the SHARED NNTP byte ceiling handed to every volume
+	// reader this stream opens, so a speculative read cannot escape its cap by
+	// crossing a volume boundary (each crossing mints a fresh Reader).
+	budget *FetchBudget
+}
+
+// SetFetchBudget caps the NNTP bytes this stream may pull across ALL its volumes.
+// Implements BudgetedReader. Applied to the already-open volume reader too, so it
+// takes effect immediately rather than at the next volume switch.
+func (v *rarVideoReader) SetFetchBudget(b *FetchBudget) {
+	v.budget = b
+	if v.curReader != nil {
+		v.curReader.r.SetFetchBudget(b)
+	}
 }
 
 // Read serves bytes at the current position by locating the extent covering it,
@@ -115,7 +130,9 @@ func (v *rarVideoReader) useVolume(volIndex int) error {
 	if err := v.closeCurrent(); err != nil {
 		return err
 	}
-	rv, err := newReaderVolume(v.ctx, v.rs.fetcher, v.rs.volumes[volIndex])
+	// The shared byte ceiling is handed to the fresh volume reader — otherwise a
+	// budgeted speculative read would reset its cost at every volume boundary.
+	rv, err := newReaderVolume(v.ctx, v.rs.fetcher, v.rs.volumes[volIndex], v.budget)
 	if err != nil {
 		return fmt.Errorf("usenet rar reader: open volume %d: %w", volIndex, err)
 	}

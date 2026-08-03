@@ -168,7 +168,7 @@ func probeVolumes(ctx context.Context, fetcher ArticleFetcher, volumes []nzb.Fil
 		go func(i int, f nzb.File) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			vs, err := newReaderVolume(ctx, fetcher, f)
+			vs, err := newProbeVolume(ctx, fetcher, f)
 			if err != nil {
 				setErr(notStreamable("open volume " + f.Filename() + ": " + err.Error()))
 				return

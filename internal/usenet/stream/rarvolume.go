@@ -33,10 +33,38 @@ type readerVolume struct {
 	sz int64
 }
 
-// newReaderVolume builds a Reader over a RAR volume file and establishes its
-// exact size (one article fetch via Seek-to-end). The caller owns closing it.
-func newReaderVolume(ctx context.Context, fetcher ArticleFetcher, f nzb.File) (*readerVolume, error) {
+// newReaderVolume builds a Reader over a RAR volume file for PLAYBACK and
+// establishes its exact size (one article fetch via Seek-to-end). Read-ahead
+// stays on: this reader streams the video out of the container, so it needs the
+// sequential cushion. The caller owns closing it.
+// budget is the shared NNTP byte ceiling (nil = unbounded live playback); it is
+// applied BEFORE the size probe so even that first article is charged.
+func newReaderVolume(ctx context.Context, fetcher ArticleFetcher, f nzb.File, budget *FetchBudget) (*readerVolume, error) {
+	return openReaderVolume(ctx, fetcher, f, true, budget)
+}
+
+// newProbeVolume builds a Reader over a RAR volume for the HEADER PROBE, with
+// read-ahead OFF.
+//
+// The probe does a handful of small RANDOM reads at the front of the container and
+// never streams it, so the sequential-playback cushion fetches ~4 extra articles
+// (~3 MB) PER VOLUME that the parser never looks at. On a 99-volume release that
+// is ~300 MB of billed Usenet traffic burned just to CLASSIFY the release — before
+// anyone has pressed play, and even if the release then turns out not to be
+// streamable at all. Playback keeps its cushion via newReaderVolume.
+func newProbeVolume(ctx context.Context, fetcher ArticleFetcher, f nzb.File) (*readerVolume, error) {
+	return openReaderVolume(ctx, fetcher, f, false, nil)
+}
+
+// openReaderVolume is the shared constructor behind newReaderVolume /
+// newProbeVolume — one code path, one behavioural difference (the read-ahead
+// cushion), so the two call sites can never drift apart.
+func openReaderVolume(ctx context.Context, fetcher ArticleFetcher, f nzb.File, readahead bool, budget *FetchBudget) (*readerVolume, error) {
 	r := NewReader(ctx, fetcher, f, NewOffsetIndex(f))
+	if !readahead {
+		r.DisableReadahead()
+	}
+	r.SetFetchBudget(budget)
 	sz, err := r.Seek(0, io.SeekEnd)
 	if err != nil {
 		_ = r.Close()
