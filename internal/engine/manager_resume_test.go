@@ -35,9 +35,9 @@ func newResumeManager(t *testing.T, p taskPersister) (*Manager, context.Context,
 	return mgr, ctx, cancel
 }
 
-// dlTask builds a download task. IDs mirror production (UUID-length); the engine
-// logs task.ID[:8] in several places, so sub-8-char ids would panic — not a real
-// case since the web always sends UUIDs.
+// dlTask builds a download task. IDs mirror production (UUID-length) because the
+// web always sends UUIDs. Short ids are safe now — the log prefixes go through
+// Task.ShortID(), which clamps instead of slicing — but keep them realistic.
 func dlTask(id string) agent.Task {
 	return agent.Task{
 		ID:              "task-uuid-" + id, // ≥ 8 chars like a real dispatch id
