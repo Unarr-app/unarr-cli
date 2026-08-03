@@ -35,6 +35,13 @@ const (
 // one filter is what makes --level / --grep / --since behave identically on a
 // systemd box and on a NAS reading unarr.log.
 func runJournalLogs(q logging.Query, follow bool) error {
+	return journalTo(os.Stdout, q, follow)
+}
+
+// journalTo is runJournalLogs with the destination as a parameter, so
+// `unarr support-bundle` can capture the same output into a buffer instead of
+// growing a second, subtly different journalctl invocation of its own.
+func journalTo(w io.Writer, q logging.Query, follow bool) error {
 	cmd := exec.Command("journalctl", journalArgs(q, follow)...)
 	winproc.HideWindow(cmd)
 	cmd.Stderr = os.Stderr
@@ -45,15 +52,15 @@ func runJournalLogs(q logging.Query, follow bool) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("run journalctl: %w", err)
 	}
-	return finishJournal(cmd, filterJournal(out, q, follow), follow)
+	return finishJournal(cmd, filterJournal(w, out, q, follow), follow)
 }
 
 // filterJournal pipes journalctl's output through the query's filter.
-func filterJournal(r io.Reader, q logging.Query, follow bool) error {
+func filterJournal(w io.Writer, r io.Reader, q logging.Query, follow bool) error {
 	if follow {
-		return logging.FilterLive(r, q, os.Stdout)
+		return logging.FilterLive(r, q, w)
 	}
-	return logging.FilterTail(r, q, os.Stdout)
+	return logging.FilterTail(r, q, w)
 }
 
 // finishJournal reaps the journalctl child now that the filter is done.

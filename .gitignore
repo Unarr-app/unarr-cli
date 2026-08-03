@@ -54,3 +54,7 @@ CLAUDE.md
 .claude/settings.json
 /unarr-desktop
 /unarr-desktop.exe
+
+# `unarr support-bundle` writes here by default. Redacted, but still a dump of
+# someone's machine — it has no business in a commit.
+unarr-support-*.tar.gz
