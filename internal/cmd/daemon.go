@@ -1320,9 +1320,20 @@ func runDaemonStart() error {
 		manager.Shutdown(shutdownCtx)
 
 		cancel()
-		// A signal IS the user asking for a stop (Ctrl+C, `unarr stop`, service
-		// stop), so record the intent for the supervisor before deregistering.
-		agent.WriteStopIntent()
+		// Deliberately does NOT write the stop-intent marker. Recording intent is
+		// the STOPPER's job (`unarr stop`, uninstall), never the stopped process's,
+		// and a write here is both redundant and actively harmful:
+		//
+		//   - Redundant: the only way this branch is reached on Windows is
+		//     watchStopIntent seeing a marker that is already on disk.
+		//   - Harmful: the drain above takes up to 30s, while `unarr daemon restart`
+		//     waits only ~10s before starting the replacement. The replacement
+		//     clears the marker as it boots; a write here would then re-create it
+		//     AFTER that, and the new daemon's watcher would stop the daemon the
+		//     restart just started.
+		//
+		// It is also the wrong verdict for a signal we did not ask for (Task
+		// Manager, an AV kill): that is a death, and a death should respawn.
 		d.Deregister()
 		fmt.Println("  Daemon stopped.")
 		return nil

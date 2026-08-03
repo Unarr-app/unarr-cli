@@ -130,7 +130,41 @@ func TestDaemonConsumesAndRecordsIntent(t *testing.T) {
 		t.Error("clear the stop intent before the startup work that can fail, not after")
 	}
 	if !strings.Contains(src, "agent.WriteStopIntent()") {
-		t.Error("no deliberate-exit path records the stop intent (revoked credential / signal shutdown)")
+		t.Error("no deliberate-exit path records the stop intent (revoked credential)")
+	}
+	// Exactly one: the revoked-credential branch. See the next test for why the
+	// signal branch must not be a second one.
+	if n := strings.Count(src, "agent.WriteStopIntent()"); n != 1 {
+		t.Errorf("daemon.go records the stop intent %d times, want exactly 1 (revoked credential only)", n)
+	}
+}
+
+// TestSignalShutdownDoesNotRecordIntent guards a self-stop loop that a restart
+// on Windows would otherwise fall into.
+//
+// Recording intent belongs to the STOPPER, never to the process being stopped.
+// The signal branch drains for up to 30s; `unarr daemon restart` waits ~10s for
+// the old daemon and then starts its replacement, which CLEARS the marker as it
+// boots. A write on the way out of the old daemon therefore lands after that
+// clear — and the new daemon's own watcher reads the resurrected marker as a
+// stop request and shuts down the daemon the restart just started.
+//
+// It is also the wrong verdict for a signal nobody asked for (Task Manager, an
+// AV kill): that is a death, and a death should respawn.
+func TestSignalShutdownDoesNotRecordIntent(t *testing.T) {
+	src := readSource(t, "daemon.go")
+
+	sig := strings.Index(src, "Received %s, shutting down")
+	if sig < 0 {
+		t.Fatal("cannot find the signal-shutdown branch in daemon.go")
+	}
+	revoked := strings.Index(src, "agent.IsRevoked(err)")
+	if revoked < 0 || revoked < sig {
+		t.Fatal("cannot delimit the signal branch (expected the revoked branch after it)")
+	}
+	if strings.Contains(src[sig:revoked], "agent.WriteStopIntent()") {
+		t.Error("the signal-shutdown branch records the stop intent — that re-creates the marker " +
+			"after a replacement daemon cleared it, and the replacement then stops itself")
 	}
 }
 
