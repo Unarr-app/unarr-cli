@@ -28,23 +28,75 @@ func readSource(t *testing.T, name string) string {
 	return string(b)
 }
 
-// TestStopByPIDRecordsIntentBeforeKilling: on Windows the kill is taskkill /f,
-// which gives the daemon no chance to record anything itself. If the marker were
-// written after the kill (or not at all) the scheduled task would respawn the
-// agent a minute after the user paused it.
-func TestStopByPIDRecordsIntentBeforeKilling(t *testing.T) {
-	src := readSource(t, "daemon_control.go")
+// TestStopIsNotDecidedByTheStateFile pins the ordering that makes `unarr stop`
+// reliable, and the reason it has to be that way.
+//
+// Stop used to read the state file first and branch on it. That file is written
+// during registration — seconds into startup — and SURVIVES a crash, so between
+// the shim relaunching a crashed daemon and the new one registering it still
+// names the previous, dead PID. Stop then took the "already dead" path, killed
+// nothing, recorded nothing, and a live daemon carried on running (measured on
+// real Windows). The two steps that do not depend on that file being correct —
+// recording the intent, and ending the supervisor — must therefore come FIRST
+// and unconditionally; the PID kill is the best-effort extra afterwards.
+func TestStopIsNotDecidedByTheStateFile(t *testing.T) {
+	src := readSource(t, "daemon_stop.go")
+	body := src[strings.Index(src, "func stopDaemonByPID()"):]
+	body = body[:strings.Index(body, "\nfunc ")]
 
-	intent := strings.Index(src, "agent.WriteStopIntent()")
-	kill := strings.Index(src, "killPID(state.PID)")
-	if intent < 0 {
-		t.Fatal("stopDaemonByPID no longer records the stop intent — a tray pause would be respawned")
+	intent := strings.Index(body, "agent.WriteStopIntent()")
+	supervisor := strings.Index(body, "stopSupervisor()")
+	loadState := strings.Index(body, "agent.LoadState()")
+	kill := strings.Index(body, "killPID(state.PID)")
+
+	for name, idx := range map[string]int{
+		"agent.WriteStopIntent()": intent,
+		"stopSupervisor()":        supervisor,
+		"agent.LoadState()":       loadState,
+		"killPID(state.PID)":      kill,
+	} {
+		if idx < 0 {
+			t.Fatalf("stopDaemonByPID no longer calls %s; this guard needs updating", name)
+		}
 	}
-	if kill < 0 {
-		t.Fatal("stopDaemonByPID no longer kills by PID; this guard needs updating")
+	if intent > loadState {
+		t.Error("the stop intent must be recorded before the state file is even read — " +
+			"a stale file must not be able to skip it")
+	}
+	if supervisor > loadState {
+		t.Error("the supervisor must be stopped before the state file is read — " +
+			"ending the task is what stops a daemon the file does not know about")
 	}
 	if intent > kill {
 		t.Error("the stop intent must be recorded BEFORE the kill: taskkill /f leaves no window to record it after")
+	}
+	// Recorded once, unconditionally. Branch-local copies are how the old version
+	// managed to miss a path.
+	if n := strings.Count(body, "agent.WriteStopIntent()"); n != 1 {
+		t.Errorf("stop intent recorded %d times; want exactly one unconditional call", n)
+	}
+}
+
+// TestStopSupervisorIsPlatformSplit: the escape hatch is Windows-only. On Linux
+// and macOS `unarr stop` already routes through the service manager, and running
+// schtasks there would be nonsense.
+func TestStopSupervisorIsPlatformSplit(t *testing.T) {
+	win := readSource(t, "supervisor_stop_windows.go")
+	other := readSource(t, "supervisor_stop_other.go")
+
+	if !strings.Contains(win, "//go:build windows") {
+		t.Error("supervisor_stop_windows.go is missing its build tag")
+	}
+	if !strings.Contains(other, "//go:build !windows") {
+		t.Error("supervisor_stop_other.go is missing its build tag")
+	}
+	if !strings.Contains(win, `"/end"`) || !strings.Contains(win, `"unarr"`) {
+		t.Errorf("the Windows stop no longer ends the scheduled task:\n%s", win)
+	}
+	// It must stay best-effort: a foreground daemon has no task, and schtasks
+	// erroring there is not a failure of "stop".
+	if !strings.Contains(win, "_ = cmd.Run()") {
+		t.Errorf("ending the task must be best-effort (no task / not installed is fine):\n%s", win)
 	}
 }
 
@@ -78,7 +130,41 @@ func TestDaemonConsumesAndRecordsIntent(t *testing.T) {
 		t.Error("clear the stop intent before the startup work that can fail, not after")
 	}
 	if !strings.Contains(src, "agent.WriteStopIntent()") {
-		t.Error("no deliberate-exit path records the stop intent (revoked credential / signal shutdown)")
+		t.Error("no deliberate-exit path records the stop intent (revoked credential)")
+	}
+	// Exactly one: the revoked-credential branch. See the next test for why the
+	// signal branch must not be a second one.
+	if n := strings.Count(src, "agent.WriteStopIntent()"); n != 1 {
+		t.Errorf("daemon.go records the stop intent %d times, want exactly 1 (revoked credential only)", n)
+	}
+}
+
+// TestSignalShutdownDoesNotRecordIntent guards a self-stop loop that a restart
+// on Windows would otherwise fall into.
+//
+// Recording intent belongs to the STOPPER, never to the process being stopped.
+// The signal branch drains for up to 30s; `unarr daemon restart` waits ~10s for
+// the old daemon and then starts its replacement, which CLEARS the marker as it
+// boots. A write on the way out of the old daemon therefore lands after that
+// clear — and the new daemon's own watcher reads the resurrected marker as a
+// stop request and shuts down the daemon the restart just started.
+//
+// It is also the wrong verdict for a signal nobody asked for (Task Manager, an
+// AV kill): that is a death, and a death should respawn.
+func TestSignalShutdownDoesNotRecordIntent(t *testing.T) {
+	src := readSource(t, "daemon.go")
+
+	sig := strings.Index(src, "Received %s, shutting down")
+	if sig < 0 {
+		t.Fatal("cannot find the signal-shutdown branch in daemon.go")
+	}
+	revoked := strings.Index(src, "agent.IsRevoked(err)")
+	if revoked < 0 || revoked < sig {
+		t.Fatal("cannot delimit the signal branch (expected the revoked branch after it)")
+	}
+	if strings.Contains(src[sig:revoked], "agent.WriteStopIntent()") {
+		t.Error("the signal-shutdown branch records the stop intent — that re-creates the marker " +
+			"after a replacement daemon cleared it, and the replacement then stops itself")
 	}
 }
 

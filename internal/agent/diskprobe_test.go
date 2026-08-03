@@ -19,6 +19,16 @@ func setDiskProbeSeam(fn func(string) (int64, int64, error), timeout time.Durati
 	diskInfoFn, diskProbeTimeout = fn, timeout
 }
 
+// probePath gives each test a private path. A stub probe parked in a syscall
+// outlives the test that started it — when it finally returns it clears the
+// single-flight slot for its path. With a shared path that late write could
+// unlock a LATER test's in-flight probe and let a second one start, which is
+// exactly how TestDiskInfoBoundedSingleFlight flaked (2 probes, want 1).
+func probePath(t *testing.T) string {
+	t.Helper()
+	return "/probe/" + t.Name()
+}
+
 // withStubDiskInfo swaps the syscall seam and the timeout for the duration of a
 // test, restoring both (and the per-path caches) afterwards.
 func withStubDiskInfo(t *testing.T, timeout time.Duration, fn func(string) (int64, int64, error)) {
@@ -43,7 +53,7 @@ func TestDiskInfoBoundedHealthyPassesThrough(t *testing.T) {
 	withStubDiskInfo(t, time.Second, func(string) (int64, int64, error) {
 		return 111, 222, nil
 	})
-	free, total, err := DiskInfoBounded("/data")
+	free, total, err := DiskInfoBounded(probePath(t))
 	if err != nil {
 		t.Fatalf("healthy probe returned an error: %v", err)
 	}
@@ -91,7 +101,7 @@ func TestDiskInfoBoundedTimesOut(t *testing.T) {
 	})
 
 	start := time.Now()
-	if _, _, err := DiskInfoBounded("/dead-mount"); err == nil {
+	if _, _, err := DiskInfoBounded(probePath(t)); err == nil {
 		t.Fatal("a probe that never answers must report an error, not succeed")
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
@@ -105,15 +115,37 @@ func TestDiskInfoBoundedTimesOut(t *testing.T) {
 func TestDiskInfoBoundedSingleFlight(t *testing.T) {
 	var calls atomic.Int32
 	release := make(chan struct{})
+	// Buffered + non-blocking send: the stub must never block on this, only
+	// announce that the probe goroutine actually got scheduled.
+	started := make(chan struct{}, 1)
 	t.Cleanup(func() { close(release) })
 	withStubDiskInfo(t, 20*time.Millisecond, func(string) (int64, int64, error) {
 		calls.Add(1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
 		<-release
 		return 0, 0, nil
 	})
 
-	for range 5 {
-		_, _, _ = DiskInfoBounded("/dead-mount")
+	// Wait for the FIRST probe to be running before counting. The probe runs on
+	// its own goroutine, so reading the counter straight after the call can
+	// observe 0 — which is not the failure this test is about (that would be a
+	// probe that never started, not one that started twice). Waiting here is what
+	// makes the assertion below mean "exactly one", every time.
+	_, _, _ = DiskInfoBounded(probePath(t))
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first probe goroutine never ran")
+	}
+
+	// Now the interesting part: further calls against the same stuck path must be
+	// served without spawning anything, or the heartbeat would leak a thread every
+	// few seconds.
+	for range 4 {
+		_, _, _ = DiskInfoBounded(probePath(t))
 	}
 	if n := calls.Load(); n != 1 {
 		t.Errorf("started %d probes against one stuck path, want exactly 1", n)
@@ -133,11 +165,11 @@ func TestDiskInfoBoundedServesLastGoodSample(t *testing.T) {
 		return 500, 1000, nil
 	})
 
-	if _, _, err := DiskInfoBounded("/share"); err != nil {
+	if _, _, err := DiskInfoBounded(probePath(t)); err != nil {
 		t.Fatalf("warm-up probe failed: %v", err)
 	}
 	stall.Store(true)
-	free, total, err := DiskInfoBounded("/share") // this one wedges
+	free, total, err := DiskInfoBounded(probePath(t)) // this one wedges
 	if err != nil {
 		t.Fatalf("stalled probe with a cached sample must not error: %v", err)
 	}
@@ -145,7 +177,7 @@ func TestDiskInfoBoundedServesLastGoodSample(t *testing.T) {
 		t.Errorf("got free=%d total=%d, want the cached 500/1000", free, total)
 	}
 	// And the in-flight probe must still be single-flighted afterwards.
-	if _, _, err := DiskInfoBounded("/share"); err != nil {
+	if _, _, err := DiskInfoBounded(probePath(t)); err != nil {
 		t.Errorf("follow-up call while stuck must serve the cache, got %v", err)
 	}
 }
@@ -157,7 +189,7 @@ func TestDiskInfoBoundedPropagatesError(t *testing.T) {
 	withStubDiskInfo(t, time.Second, func(string) (int64, int64, error) {
 		return 0, 0, errors.New("no such file or directory")
 	})
-	if _, _, err := DiskInfoBounded("/nope"); err == nil {
+	if _, _, err := DiskInfoBounded(probePath(t)); err == nil {
 		t.Error("a failing probe must return an error")
 	}
 }
@@ -175,7 +207,7 @@ func TestDiskInfoBoundedRecovers(t *testing.T) {
 		return 7, 8, nil
 	})
 
-	if _, _, err := DiskInfoBounded("/flaky"); err == nil {
+	if _, _, err := DiskInfoBounded(probePath(t)); err == nil {
 		t.Fatal("expected the first (stuck) probe to time out")
 	}
 	blocked.Store(false)
@@ -184,7 +216,7 @@ func TestDiskInfoBoundedRecovers(t *testing.T) {
 	// Poll briefly: the unblocked goroutine clears `busy` asynchronously.
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		free, total, err := DiskInfoBounded("/flaky")
+		free, total, err := DiskInfoBounded(probePath(t))
 		if err == nil && free == 7 && total == 8 {
 			return
 		}

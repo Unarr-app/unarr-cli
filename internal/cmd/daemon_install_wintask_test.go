@@ -84,14 +84,21 @@ func TestBuildLauncherVBS(t *testing.T) {
 		t.Errorf("VBS must Run with window style 0 (hidden): %s", vbs)
 	}
 
-	// Log capture + no-log fallback: the daemon must still come up if the log
-	// path can't be opened (locked by AV / a stale handle). Both a redirected
-	// and a plain launch must be present.
+	// Log capture: a failed start must never be silent.
 	if !strings.Contains(vbs, `\unarr.log`) {
 		t.Errorf("VBS missing log redirect: %s", vbs)
 	}
-	if strings.Count(vbs, "sh.Run") < 2 {
-		t.Errorf("VBS has no no-log fallback launch (want 2 Run calls): %s", vbs)
+	// A launch that cannot run at all must be retried, not abandoned. This used to
+	// be a second, duplicated sh.Run; the supervision loop subsumes it — a failed
+	// launch sets rc = -1, falls through to the backoff, and comes round again. So
+	// assert the BEHAVIOUR (retry on launch failure) rather than the old shape.
+	if !strings.Contains(vbs, "If Err.Number <> 0 Then") {
+		t.Errorf("VBS does not detect a failed launch: %s", vbs)
+	}
+	launch := strings.Index(vbs, "sh.Run")
+	loopEnd := strings.LastIndex(vbs, "Loop")
+	if launch < 0 || loopEnd < launch {
+		t.Errorf("the launch is not inside the supervision loop, so it is never retried: %s", vbs)
 	}
 
 	// VBScript escapes an inner double-quote by doubling it. The daemon path is
@@ -154,10 +161,14 @@ func TestBuildLauncherVBSMetacharUsername(t *testing.T) {
 	if strings.Contains(vbs, "^&") || strings.Contains(vbs, "^(") {
 		t.Errorf("path must NOT be caret-escaped — `^` is literal inside cmd quotes: %s", vbs)
 	}
-	// Verbatim path must appear in both the primary launch and its retry.
-	if strings.Count(vbs, `"C:\Users\Tom & Jerry (R&D)\unarr.exe"`) < 2 {
-		t.Errorf("path must appear in both launch and retry (got %d): %s",
-			strings.Count(vbs, `"C:\Users\Tom & Jerry (R&D)\unarr.exe"`), vbs)
+	// The retry is now the supervision loop rather than a duplicated Run call, so
+	// the path appears once — inside the loop, which is what makes it re-used on
+	// every relaunch.
+	if n := strings.Count(vbs, `"C:\Users\Tom & Jerry (R&D)\unarr.exe"`); n != 1 {
+		t.Errorf("metachar path should appear exactly once, inside the loop (got %d): %s", n, vbs)
+	}
+	if idx := strings.Index(vbs, `Tom & Jerry`); idx > strings.LastIndex(vbs, "Loop") {
+		t.Errorf("the launch path is outside the supervision loop: %s", vbs)
 	}
 }
 
@@ -212,32 +223,59 @@ func TestReregisterWindowsTaskNoopOffWindows(t *testing.T) {
 // exit code is always emitted, and that its value is decided by whether a stop
 // was actually requested.
 
-// TestBuildLauncherVBSAlwaysQuitsExplicitly is the core regression guard: the
-// shim must never be able to end without setting an exit code.
-func TestBuildLauncherVBSAlwaysQuitsExplicitly(t *testing.T) {
+// TestBuildLauncherVBSSupervises is the core regression guard, and it exists
+// because the obvious design does NOT work: the task's RestartOnFailure was
+// measured on real Windows (Win11 26200, logon trigger, Count=3 Interval=PT1M)
+// to leave a killed daemon dead at `Status: Ready, Last Result: 1`. Reporting
+// the right exit code is necessary but not sufficient — the shim itself has to
+// bring the daemon back, or nothing will.
+func TestBuildLauncherVBSSupervises(t *testing.T) {
 	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\Users\alice\AppData\Local\unarr`)
 
-	if !strings.Contains(vbs, "WScript.Quit") {
-		t.Fatalf("shim never sets an exit code — Task Scheduler will always see success:\n%s", vbs)
+	if !strings.Contains(vbs, "Do\n") || !strings.Contains(vbs, "Loop\n") {
+		t.Fatalf("shim does not loop — a dead daemon is never relaunched:\n%s", vbs)
 	}
-	// Both verdicts must exist: 0 = the stop was asked for, stay down;
-	// non-zero = it died, bring it back.
+	if !strings.Contains(vbs, "WScript.Sleep") {
+		t.Errorf("relaunch has no backoff — a broken install would spin:\n%s", vbs)
+	}
+	// A failure budget, so a daemon that cannot start does not retry forever...
+	if !strings.Contains(vbs, "tries > maxTries") {
+		t.Errorf("no attempt cap on relaunching:\n%s", vbs)
+	}
+	// ...and a budget that resets after a healthy run, so crashes from hours ago
+	// do not condemn a daemon that has been up all day.
+	if !strings.Contains(vbs, "ran >= healthySecs Then tries = 0") {
+		t.Errorf("failure budget never resets after a healthy run:\n%s", vbs)
+	}
+	// Timer() is seconds-since-midnight; a run spanning midnight goes negative
+	// and would otherwise look like an instant crash.
+	if !strings.Contains(vbs, "ran + 86400") {
+		t.Errorf("run duration does not handle the midnight wrap:\n%s", vbs)
+	}
+	// Both verdicts still exist: 0 = the stop was asked for; 1 = gave up.
 	if !strings.Contains(vbs, "WScript.Quit 0") {
-		t.Errorf("no quit-0 path — a deliberate stop would be respawned:\n%s", vbs)
+		t.Errorf("no quit-0 path — a deliberate stop could never end the loop:\n%s", vbs)
 	}
 	if !strings.Contains(vbs, "WScript.Quit 1") {
-		t.Errorf("no quit-1 path — a crash would never be respawned:\n%s", vbs)
+		t.Errorf("no quit-1 path — giving up would report success:\n%s", vbs)
 	}
-	// The unguarded failure verdict must be the LAST statement, so every path
-	// that is not an explicit "stopped on purpose" falls through to a respawn.
-	lines := []string{}
-	for _, l := range strings.Split(strings.TrimSpace(vbs), "\n") {
-		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "'") {
-			lines = append(lines, l)
-		}
+}
+
+// TestBuildLauncherVBSStopEndsTheLoop: the ONLY way out of the supervision loop
+// short of exhausting the budget is a requested stop, and it must be re-checked
+// after the backoff sleep too — a user who stops the agent during the wait must
+// not have it relaunched on top of them.
+func TestBuildLauncherVBSStopEndsTheLoop(t *testing.T) {
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\unarr`)
+
+	if n := strings.Count(vbs, "FileExists"); n < 2 {
+		t.Errorf("marker checked %d time(s); want it both after the daemon exits "+
+			"AND after the backoff sleep:\n%s", n, vbs)
 	}
-	if last := lines[len(lines)-1]; last != "WScript.Quit 1" {
-		t.Errorf("last statement is %q, want the fall-through `WScript.Quit 1`", last)
+	sleep := strings.Index(vbs, "WScript.Sleep")
+	lastCheck := strings.LastIndex(vbs, "FileExists")
+	if sleep < 0 || lastCheck < sleep {
+		t.Errorf("no stop-marker re-check after the backoff sleep:\n%s", vbs)
 	}
 }
 

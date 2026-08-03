@@ -86,6 +86,61 @@ Without `UNARR_SMOKE_KEY` the network checks SKIP; everything else still runs.
 Note: `--api-key` is a global flag, but the API URL is **not** a subcommand flag
 — it comes from `$env:UNARR_API_URL` (which the script sets from `UNARR_SMOKE_URL`).
 
+### Daemon supervision — `smoke-supervision.ps1`
+
+Verifies what neither cross-compilation nor a Linux lab can: that a killed daemon
+comes BACK, and a stopped one stays stopped. Needs `fakeapi.exe` next to the
+binaries (`cd test/windows && GOOS=windows go build -o shared/fakeapi.exe ...`
+from the lab stub) so the daemon can complete a real registration offline.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File \\host.lan\Data\smoke-supervision.ps1
+```
+
+**What it established (2026-08-03, Win11 26200):** the scheduled task's
+`<RestartOnFailure Count=3 Interval=PT1M>` does **NOT** fire on a non-zero action
+exit code. Killing the daemon leaves the task at `Status: Ready, Last Result: 1`
+and nothing restarts it — measured with a real logon trigger, not just
+`schtasks /run`. That is why supervision lives in the VBScript shim
+(`daemon_launch_vbs.go`) as a relaunch loop, and why the exit code alone was not
+enough. Do not "simplify" that loop back into a bare `WScript.Quit`.
+
+### Gotchas that cost real time here (read before writing a .ps1)
+
+- **Deploy .ps1 as UTF-8 WITH a BOM and CRLF.** Windows PowerShell 5.1 decodes a
+  BOM-less file as CP1252, which turns the UTF-8 bytes of an em dash into a CURLY
+  QUOTE — and PowerShell accepts curly quotes as string delimiters. One em dash
+  inside a double-quoted string silently ends it, every quote after it pairs up
+  wrong, and the parse error surfaces on the LAST line of the file, pointing
+  nowhere near the cause. Keep non-ASCII out of quoted strings too.
+  `{ printf '\xef\xbb\xbf'; sed 's/$/\r/' x.ps1; } > shared/x.ps1`
+- **No here-strings.** PS 5.1 fails to find the `"@` terminator in an LF file and
+  swallows the rest of the script. Build multi-line text as an array and join it.
+- **Write config files without a BOM.** `Set-Content -Encoding UTF8` on 5.1 adds
+  one; three stray bytes in front of the first TOML key make the config parse as
+  empty and the daemon exits with "no API key configured" — which reads exactly
+  like a startup crash. Use `[System.IO.File]::WriteAllText(path, text,
+  (New-Object System.Text.UTF8Encoding($false)))`.
+- **Never time anything with `Get-Date` deltas.** The guest clock resyncs against
+  the host and jumps backwards by hours; a `(Get-Date).AddSeconds(n)` deadline
+  then never arrives and the run hangs. Use
+  `[System.Diagnostics.Stopwatch]::StartNew()`.
+- **"Is the daemon up?" is not "does the state file exist?"** The state file is
+  written during registration, seconds into startup, and survives a crash — so
+  after a respawn it still names the PREVIOUS, dead PID. Match the PID:
+  `(Get-Content state.json -Raw) -match "`"pid`":\s*$want"`. Asserting mere
+  existence produces failures that look like product bugs and are not.
+- **A firewall prompt steals focus** the first time a binary listens, and then
+  `qtype.py` keystrokes go to the dialog instead of your shell. Pre-authorise:
+  `netsh advfirewall firewall add rule name=unarr dir=in action=allow
+  program=C:\unarr\unarr.exe enable=yes`. `sendkey esc` dismisses one.
+- **WinRM is usually NOT up** on an already-installed VM (it is enabled only by
+  `oem/install.bat`, which runs on a fresh install). Do not wait on port 5985 —
+  use the `qtype.py` path below.
+- **Screenshots without vncdotool:** `python3 qmon.py 'screendump /tmp/s.ppm'`
+  against the monitor socket, then `docker cp` + `convert` to PNG. `qmon.py` also
+  sends any other monitor command (`sendkey`, `info status`).
+
 ### Driving the guest headlessly (no WinRM)
 
 WinRM does not auto-enable in `dockurr/windows`, and **vncdotool `type` does not
