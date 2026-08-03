@@ -1,0 +1,15 @@
+
+  unarr Diagnostics
+
+  Config
+  + Config file — /home/u/.config/unarr/config.toml
+  + Config keys
+
+  Connectivity
+  + API reachable — https://unarr.app (42ms)
+
+  Version
+  + unarr version — 1.8.2 (linux/amd64)
+
+  All checks passed!
+

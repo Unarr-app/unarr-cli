@@ -1,0 +1,22 @@
+
+  unarr Diagnostics
+
+  Config
+  + Config file — /home/u/.config/unarr/config.toml
+  + Config keys
+  x API key configured — run `unarr init` to configure it
+
+  Connectivity
+  + API reachable — https://unarr.app (42ms)
+  x Agent registration
+
+  Downloads
+  ! par2 (usenet verify/repair) — not installed — usenet downloads are delivered UNVERIFIED
+
+  Version
+  + unarr version — 1.8.2 (linux/amd64)
+
+  4 passed, 2 failed, 1 warnings
+
+  Tip: run `unarr doctor --fix` to auto-repair common issues.
+
