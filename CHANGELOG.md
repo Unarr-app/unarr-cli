@@ -5,12 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.2] - 2026-08-03
+
+
+### CI/CD
+
+- **deps**: bump actions/upload-artifact from 4 to 7 (#27)
+
+### Fixed
+
+- **docs**: update development status from "Beta" to "Active development" in README
+- **portability**: repair the macOS/Windows bugs the new CI matrix exposed
+- **windows**: do not let a shutting-down daemon stop its own replacement
+- **windows**: stop the daemon that is RUNNING, not the one the state file names
+- **windows**: supervise the daemon in the shim, and check process liveness for real
+- **windows**: make the daemon survivable — respawn on death, and stop faking crashes
 ## [1.8.1] - 2026-07-29
 
 
 ### Fixed
 
 - **windows**: re-register the autostart task on update so it adopts the new launcher
+
+### Other
+
+- **release**: 1.8.1
 ## [1.8.0] - 2026-07-28
 
 
@@ -1405,6 +1424,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.8.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.7...v1.8.0
 [1.7.7]: https://github.com/Unarr-app/unarr-cli/compare/v1.7.6...v1.7.7
