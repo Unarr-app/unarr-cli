@@ -293,7 +293,10 @@ func (d *Daemon) register(ctx context.Context, park bool) error {
 		PreferredMethods:   &methods,
 		MaxStreamSessions:  d.cfg.MaxStreamSessions,
 	}
-	if free, total, err := DiskInfo(d.cfg.DownloadDir); err == nil {
+	// Bounded: register() runs during startup, before the daemon serves anything.
+	// A download dir on a dead network share made the bare DiskInfo block here
+	// forever, wedging the agent mid-boot with no log line to show for it.
+	if free, total, err := DiskInfoBounded(d.cfg.DownloadDir); err == nil {
 		req.DiskFreeBytes = free
 		req.DiskTotalBytes = total
 	}

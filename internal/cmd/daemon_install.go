@@ -375,11 +375,17 @@ func runDaemonUninstall() error {
 		green.Printf("  ✓ Removed %s\n", path)
 
 	case "windows":
-		// Stop the running process if any
+		// Stop the running process if any. Mark the stop as deliberate first, so
+		// the launcher shim does not report a failure the (still-present) task
+		// would act on in the window before /delete lands — and reap the state
+		// file after, so the tray does not read the uninstall as a crash and mail
+		// a report for it.
 		if state := agent.ReadState(); state != nil {
+			agent.WriteStopIntent()
 			killCmd := exec.Command("taskkill", "/pid", strconv.Itoa(state.PID), "/f")
 			winproc.HideWindow(killCmd)
 			killCmd.Run()
+			reapStateAfterExit(state.PID)
 		}
 		delCmd := exec.Command("schtasks", "/delete", "/tn", "unarr", "/f")
 		winproc.HideWindow(delCmd)
@@ -387,9 +393,13 @@ func runDaemonUninstall() error {
 		if err != nil && !strings.Contains(string(out), "cannot find") {
 			return fmt.Errorf("remove scheduled task: %w\n%s", err, strings.TrimSpace(string(out)))
 		}
-		// Drop the launcher shim the task pointed at. Best-effort: a missing file
-		// (never installed, or already cleaned) is not an uninstall failure.
+		// Drop the launcher shim the task pointed at, and the stop-intent marker
+		// only it reads. Best-effort: a missing file (never installed, or already
+		// cleaned) is not an uninstall failure. Removed only after the task is
+		// gone, so the shim still sees the marker while it is deciding its exit
+		// code.
 		os.Remove(filepath.Join(config.DataDir(), launcherVBSName))
+		os.Remove(agent.StopIntentPath())
 		green.Println("  ✓ Scheduled task removed")
 
 	default:

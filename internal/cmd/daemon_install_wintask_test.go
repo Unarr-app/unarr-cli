@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf16"
+
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 func TestBuildWindowsTaskXML(t *testing.T) {
@@ -197,5 +199,124 @@ func TestReregisterWindowsTaskNoopOffWindows(t *testing.T) {
 	}
 	if rewrote {
 		t.Error("must not rewrite a task off Windows")
+	}
+}
+
+// ── Launcher exit code: the shim's respawn signal ────────────────────────────
+//
+// The scheduled task's RestartOnFailure is driven by the exit code of its
+// ACTION — wscript.exe running this shim — not by the daemon's. A shim that
+// falls off the end exits 0, so Task Scheduler always read "succeeded" and the
+// respawn policy was dead code: a daemon that died right after logon stayed
+// dead until the next one. These tests pin the two halves of the fix — that an
+// exit code is always emitted, and that its value is decided by whether a stop
+// was actually requested.
+
+// TestBuildLauncherVBSAlwaysQuitsExplicitly is the core regression guard: the
+// shim must never be able to end without setting an exit code.
+func TestBuildLauncherVBSAlwaysQuitsExplicitly(t *testing.T) {
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\Users\alice\AppData\Local\unarr`)
+
+	if !strings.Contains(vbs, "WScript.Quit") {
+		t.Fatalf("shim never sets an exit code — Task Scheduler will always see success:\n%s", vbs)
+	}
+	// Both verdicts must exist: 0 = the stop was asked for, stay down;
+	// non-zero = it died, bring it back.
+	if !strings.Contains(vbs, "WScript.Quit 0") {
+		t.Errorf("no quit-0 path — a deliberate stop would be respawned:\n%s", vbs)
+	}
+	if !strings.Contains(vbs, "WScript.Quit 1") {
+		t.Errorf("no quit-1 path — a crash would never be respawned:\n%s", vbs)
+	}
+	// The unguarded failure verdict must be the LAST statement, so every path
+	// that is not an explicit "stopped on purpose" falls through to a respawn.
+	lines := []string{}
+	for _, l := range strings.Split(strings.TrimSpace(vbs), "\n") {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "'") {
+			lines = append(lines, l)
+		}
+	}
+	if last := lines[len(lines)-1]; last != "WScript.Quit 1" {
+		t.Errorf("last statement is %q, want the fall-through `WScript.Quit 1`", last)
+	}
+}
+
+// TestBuildLauncherVBSQuitsAfterTheDaemonExits guards the ordering: reading the
+// marker and quitting must happen AFTER the (blocking) launch, never before.
+func TestBuildLauncherVBSQuitsAfterTheDaemonExits(t *testing.T) {
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\unarr`)
+
+	lastRun := strings.LastIndex(vbs, "sh.Run")
+	firstQuit := strings.Index(vbs, "WScript.Quit")
+	if lastRun < 0 || firstQuit < 0 {
+		t.Fatalf("shim is missing a launch or a quit:\n%s", vbs)
+	}
+	if firstQuit < lastRun {
+		t.Errorf("shim quits before launching the daemon — it would exit at logon:\n%s", vbs)
+	}
+	// bWaitOnReturn must stay True, or the shim would quit while the daemon is
+	// still starting and the task would report a bogus result immediately.
+	if !strings.Contains(vbs, ", 0, True)") {
+		t.Errorf("launch must stay hidden AND synchronous (0, True):\n%s", vbs)
+	}
+}
+
+// TestBuildLauncherVBSEmbedsStopMarker pins the shim to the same marker path the
+// daemon side writes (agent.StopIntentFileName, next to the state file). A drift
+// here fails silently and in the worst direction: the shim would never see a
+// requested stop and would resurrect a paused agent every minute.
+func TestBuildLauncherVBSEmbedsStopMarker(t *testing.T) {
+	logDir := `C:\Users\alice\AppData\Local\unarr`
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, logDir)
+
+	want := logDir + `\` + agent.StopIntentFileName
+	if !strings.Contains(vbs, `"`+want+`"`) {
+		t.Errorf("stop marker %q not embedded (quoted) in the shim:\n%s", want, vbs)
+	}
+	if !strings.Contains(vbs, "FileExists") {
+		t.Errorf("shim does not test for the marker:\n%s", vbs)
+	}
+	// A trailing separator on the data dir must not produce a doubled one.
+	vbs2 := buildLauncherVBS(`C:\unarr\unarr.exe`, logDir+`\`)
+	if strings.Contains(vbs2, `\\`+agent.StopIntentFileName) {
+		t.Errorf("doubled path separator before the marker:\n%s", vbs2)
+	}
+}
+
+// TestBuildLauncherVBSMarkerPathQuotedForOddDataDir: the marker path goes
+// through the same usernames as everything else here — spaces and cmd
+// metacharacters — and lives inside a VBScript string literal.
+func TestBuildLauncherVBSMarkerPathQuotedForOddDataDir(t *testing.T) {
+	logDir := `C:\Users\Tom & Jerry (R&D)\AppData\Local\unarr`
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, logDir)
+
+	want := `"` + logDir + `\` + agent.StopIntentFileName + `"`
+	if !strings.Contains(vbs, want) {
+		t.Errorf("marker path not quoted verbatim for a metachar data dir:\n%s", vbs)
+	}
+	if strings.Contains(vbs, "^&") {
+		t.Errorf("marker path must not be caret-escaped:\n%s", vbs)
+	}
+}
+
+// TestBuildLauncherVBSSurvivesCreateObjectFailure: everything runs under
+// On Error Resume Next, so a failed CreateObject must leave the script running
+// all the way to its Quit rather than aborting into an implicit success.
+func TestBuildLauncherVBSSurvivesCreateObjectFailure(t *testing.T) {
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\unarr`)
+
+	errIdx := strings.Index(vbs, "On Error Resume Next")
+	createIdx := strings.Index(vbs, "CreateObject")
+	if errIdx < 0 || createIdx < 0 {
+		t.Fatalf("shim is missing error handling or object creation:\n%s", vbs)
+	}
+	if errIdx > createIdx {
+		t.Errorf("On Error Resume Next must precede CreateObject, else a failure "+
+			"aborts the script before it can set an exit code:\n%s", vbs)
+	}
+	// The marker check must be defended too: with fso == Nothing the shim has to
+	// fall through to "respawn", never to an unhandled error.
+	if !strings.Contains(vbs, "If Not fso Is Nothing Then") {
+		t.Errorf("marker check is not guarded against a failed CreateObject:\n%s", vbs)
 	}
 }

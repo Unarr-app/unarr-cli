@@ -54,7 +54,7 @@ To run as a background service, use 'unarr daemon install' instead.`,
 		Example: `  unarr start
   unarr start --config /path/to/config.toml`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemonStart()
+			return runDaemon()
 		},
 	}
 }
@@ -116,6 +116,12 @@ func newDaemonCmd() *cobra.Command {
 func runDaemonStart() error {
 	cfg := loadConfig()
 	bold := color.New(color.Bold)
+
+	// Consume any previous stop request: the agent is running again, so it has
+	// been served. Done FIRST, before anything that can fail, because a marker
+	// left behind would tell the Windows launcher shim to treat the NEXT death —
+	// including a crash seconds from now — as deliberate and leave the agent down.
+	agent.ClearStopIntent()
 
 	// Validate config. A missing API key / agent ID means we have no credential
 	// to authenticate a telemetry post with, so these two can't be reported —
@@ -559,9 +565,18 @@ func runDaemonStart() error {
 			// Best-effort by design (the comment above): must NOT park, or a
 			// rejected credential would strand the daemon here — before the
 			// signal handlers and before the recovery callbacks are wired.
+			//
+			// The two breadcrumbs around this call are not chatter. This used to be
+			// the ONE stretch of startup that emitted nothing at all, and success
+			// here is silent — so a daemon that died or wedged anywhere between the
+			// [cors] line and the [stream] HTTPS line produced a crash report whose
+			// log tail simply stopped, with ~40 lines of candidate code and no way
+			// to tell which one. One line either side turns that into a fix.
+			log.Printf("[acme] pre-cert registration…")
 			if err := d.RegisterBestEffort(ctx); err != nil {
 				log.Printf("[acme] pre-cert registration failed (%v) — cert will arrive on a later renewal tick", err)
 			} else {
+				log.Printf("[acme] registered — checking certificate")
 				fetchAgentCert(ctx, agentClient, cfg.Agent.Hash)
 			}
 		}
@@ -1301,6 +1316,9 @@ func runDaemonStart() error {
 		manager.Shutdown(shutdownCtx)
 
 		cancel()
+		// A signal IS the user asking for a stop (Ctrl+C, `unarr stop`, service
+		// stop), so record the intent for the supervisor before deregistering.
+		agent.WriteStopIntent()
 		d.Deregister()
 		fmt.Println("  Daemon stopped.")
 		return nil
@@ -1316,7 +1334,11 @@ func runDaemonStart() error {
 		if agent.IsRevoked(err) {
 			// Clean, expected exit (credential revoked from the dashboard) — not a
 			// crash. exit_normal so the churn view doesn't count a deliberate
-			// dashboard delete as a failure.
+			// dashboard delete as a failure. The stop intent carries that same
+			// "deliberate" verdict to the Windows launcher shim: respawning here
+			// would restart-loop against a 410 the user must fix by signing in,
+			// which is the outcome this branch exists to avoid.
+			agent.WriteStopIntent()
 			telemetry.EmitSync(agent.EventExitNormal, "credential revoked")
 			reportAgentRevoked(creds, err)
 			return nil
@@ -2204,11 +2226,18 @@ func fetchAgentCert(ctx context.Context, client *agent.Client, hash string) bool
 	if !acme.NeedsIssue(dataDir, hash, base) {
 		return false
 	}
+	// Breadcrumbs: this runs once per boot (and once per renewal tick), and it is
+	// the only startup step that both writes a file into the data dir and makes a
+	// network call while logging nothing on the way. Naming each step is what
+	// lets a truncated crash-report log tail name the culprit instead of leaving
+	// the whole block suspect.
+	log.Printf("[acme] certificate needed for %s — building CSR", acme.WildcardName(hash, base))
 	csr, err := acme.BuildCSR(dataDir, hash, base)
 	if err != nil {
 		log.Printf("[acme] build CSR failed: %v", err)
 		return false
 	}
+	log.Printf("[acme] requesting certificate from the broker")
 	cctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	cert, err := client.IssueCert(cctx, csr)

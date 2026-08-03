@@ -295,6 +295,14 @@ func stopDaemonByPID() error {
 		fmt.Println("  Daemon was not running — cleaned up stale state file.")
 		return nil
 	}
+	// Record the intent BEFORE the kill. On Windows this is the only thing that
+	// tells the launcher shim (and through it the scheduled task) that the exit
+	// about to happen was requested: taskkill /f gives a stopped daemon exactly
+	// the same exit status as one an AV killed, so without the marker the task
+	// would respawn the daemon a minute after the user paused it — the
+	// "I pause it and it turns itself back on" bug. The next daemon start clears
+	// the marker, so it can never suppress the respawn after a LATER crash.
+	agent.WriteStopIntent()
 	if err := killPID(state.PID); err != nil {
 		return err
 	}

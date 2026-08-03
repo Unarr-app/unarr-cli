@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/config"
@@ -61,8 +63,57 @@ func StateFilePath() string {
 	return stateFilePathFn()
 }
 
+// stateSealed latches at shutdown, after which WriteState is a no-op.
+//
+// Removing the state file is not enough to make a clean stop look clean: the
+// shutdown path cancels the daemon context and deregisters, but the sync loop
+// and the task reporters are still unwinding, and any one of them calling
+// WriteState on its way out RE-CREATES the file from the in-memory snapshot —
+// complete with "status": "running" and the last heartbeat from before the
+// stop. The resurrected file then outlives the process, and unarr-desktop reads
+// "running + PID gone" as a crash and mails a report for a stop the user asked
+// for. (Observed directly: a SIGTERM shutdown that logged "Agent deregistered"
+// and "Daemon stopped." still left a state file behind.)
+//
+// So the removal is paired with a latch. Once sealed, no straggler can undo it.
+//
+// The latch and the write share a mutex rather than being a lone atomic flag,
+// and that is not belt-and-braces: a writer that had ALREADY passed a flag check
+// still has a MkdirAll, a WriteFile and a Rename ahead of it, so its rename can
+// land after the seal and after the final removal. Checking a flag only narrows
+// the window; holding the lock across the whole write closes it. SealState then
+// waits for any write in flight, and every later one returns before touching the
+// disk — so the reap that follows is final.
+var (
+	stateWriteMu sync.Mutex
+	stateSealed  atomic.Bool
+)
+
+// SealState stops this process from ever writing the state file again. It blocks
+// until any write already in progress has finished, so the caller can remove the
+// file afterwards and know nothing will put it back. Called once, at the very
+// end of the daemon's life — see ReapOwnState and cmd.runDaemon.
+func SealState() {
+	stateWriteMu.Lock()
+	defer stateWriteMu.Unlock()
+	stateSealed.Store(true)
+}
+
+// resetStateSeal lifts the latch. Test-only: the seal is deliberately one-way
+// for the life of a real process.
+func resetStateSeal() {
+	stateWriteMu.Lock()
+	defer stateWriteMu.Unlock()
+	stateSealed.Store(false)
+}
+
 // WriteState writes the daemon state to disk (best-effort, never errors).
 func WriteState(state *DaemonState) {
+	stateWriteMu.Lock()
+	defer stateWriteMu.Unlock()
+	if stateSealed.Load() {
+		return // shutting down: see stateSealed
+	}
 	path := StateFilePath()
 	dir := filepath.Dir(path)
 	os.MkdirAll(dir, 0o755)
@@ -109,6 +160,25 @@ func LoadState() (*DaemonState, error) {
 		return nil, fmt.Errorf("decode daemon state %s: %w", StateFilePath(), err)
 	}
 	return &state, nil
+}
+
+// ReapOwnState removes the state file, but ONLY while it still names this
+// process. It is how a deliberate exit stops looking like a crash: the tray
+// reads "state file says running + PID gone" as a death worth mailing a report
+// about, and every non-signal exit path used to leave exactly that behind — a
+// fatal startup error, or the credential-revoked shutdown the daemon itself
+// documents as "clean, expected … not a crash".
+//
+// The PID guard is load-bearing, not defensive: a dev agent and the production
+// agent share one data dir on purpose (only the lock is config-scoped), so an
+// unconditional remove would let either one delete the other's live state.
+//
+// Deliberately NOT deferred by its callers — a panic must unwind past it and
+// leave the state file in place, because that IS the crash the report is for.
+func ReapOwnState() {
+	if st := ReadState(); st != nil && st.PID == os.Getpid() {
+		RemoveState()
+	}
 }
 
 // RemoveState deletes the state file (called on clean shutdown).

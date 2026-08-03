@@ -266,7 +266,10 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 	} else {
 		req.Tasks = sc.state.Snapshot()
 	}
-	if free, total, err := DiskInfo(sc.cfg.DownloadDir); err == nil {
+	// Bounded, and single-flight inside: the heartbeat runs for the life of the
+	// agent, so a download dir on a dead share would otherwise park a fresh OS
+	// thread in an uninterruptible statfs every few seconds, forever.
+	if free, total, err := DiskInfoBounded(sc.cfg.DownloadDir); err == nil {
 		req.DiskFreeBytes = free
 		req.DiskTotalBytes = total
 	}

@@ -54,7 +54,7 @@ and overwrite the stored credential.`,
 			if err := runUp(strings.TrimSpace(authKey), force); err != nil {
 				return err
 			}
-			return runDaemonStart()
+			return runDaemon()
 		},
 	}
 
