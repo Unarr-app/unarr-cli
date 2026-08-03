@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -10,6 +11,13 @@ func TestValidatePaths_Dangerous(t *testing.T) {
 	dangerous := []string{"/", "/etc", "/bin", "/sbin", "/usr", "/lib", "/lib64",
 		"/boot", "/dev", "/proc", "/sys", "/var", "/tmp", "/root",
 		"/System", "/Library", "/private"}
+	if runtime.GOOS == "windows" {
+		// The Unix names are not system dirs there — filepath.Abs("/etc") is just
+		// C:\etc on the current drive. Assert the entries dangerousPaths really
+		// registers for Windows instead of skipping the platform outright.
+		dangerous = []string{`C:\`, `C:\Windows`, `C:\Windows\System32`,
+			`C:\Program Files`, `C:\Program Files (x86)`}
+	}
 
 	for _, d := range dangerous {
 		// Test all three path fields

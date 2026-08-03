@@ -5,6 +5,8 @@ package main
 // per-OS backend is compiled in.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -101,7 +103,9 @@ func TestAutostartDesktopPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("autostartDesktopPath() error: %v", err)
 		}
-		if want := "/custom/cfg/autostart/unarr-desktop.desktop"; got != want {
+		// filepath.Join, so the separator is native — spell the expectation the
+		// same way instead of hardcoding slashes.
+		if want := filepath.Join("/custom/cfg", "autostart", autostartName+".desktop"); got != want {
 			t.Errorf("autostartDesktopPath() = %q, want %q", got, want)
 		}
 	})
@@ -115,7 +119,14 @@ func TestAutostartDesktopPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("autostartDesktopPath() error: %v", err)
 		}
-		if want := "/home/u/.config/autostart/unarr-desktop.desktop"; got != want {
+		// The home comes from os.UserHomeDir, which reads $HOME on Unix but
+		// %USERPROFILE% on Windows — resolve it the same way so the assertion is
+		// about the FALLBACK, not about which env var this OS happens to use.
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("UserHomeDir: %v", err)
+		}
+		if want := filepath.Join(home, ".config", "autostart", autostartName+".desktop"); got != want {
 			t.Errorf("autostartDesktopPath() = %q, want %q", got, want)
 		}
 	})
@@ -127,7 +138,11 @@ func TestLaunchAgentPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launchAgentPath() error: %v", err)
 	}
-	if want := "/Users/u/Library/LaunchAgents/app.unarr.desktop.plist"; got != want {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	if want := filepath.Join(home, "Library", "LaunchAgents", launchAgentLabel+".plist"); got != want {
 		t.Errorf("launchAgentPath() = %q, want %q", got, want)
 	}
 }

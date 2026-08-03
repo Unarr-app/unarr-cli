@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Unarr-app/unarr-cli/internal/testutil"
 )
 
 func hlsArgsFor(hdr string, tonemap bool, hw HWAccel) string {
@@ -152,6 +154,7 @@ func TestFFmpegSupportsLibplacebo_FunctionalProbe(t *testing.T) {
 }
 
 func TestFFmpegSupportsZscale_Stub(t *testing.T) {
+	testutil.RequireShellStubs(t)
 	dir := t.TempDir()
 
 	withZ := filepath.Join(dir, "ffmpeg-with.sh")

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/testutil"
 )
 
 func thumbReq(remoteAddr, query string) *http.Request {
@@ -169,6 +171,7 @@ func TestThumbnailHandler_NoFFmpeg_503(t *testing.T) {
 // "ffmpeg" that writes JPEG magic bytes to stdout — no real ffmpeg/video
 // needed. Validates 200 + image/jpeg + the body is passed through verbatim.
 func TestThumbnailHandler_Success(t *testing.T) {
+	testutil.RequireShellStubs(t)
 	srv := NewStreamServer(0, 1)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "movie.mkv")

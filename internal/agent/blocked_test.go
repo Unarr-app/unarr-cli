@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -152,6 +153,12 @@ func TestBlockedRoundTrip(t *testing.T) {
 func TestBlockedFileIsNotWorldReadable(t *testing.T) {
 	// The record can name the account's plan and limits; a co-tenant on a
 	// shared host has no business reading it. Same 0600 as the config.
+	//
+	// Windows has no Unix mode bits: os.Stat reports 0666 for every writable file
+	// and confinement comes from the ACL Go inherits, so there is nothing to assert.
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not modelled on Windows (os.Stat always reports 0666)")
+	}
 	withTempStateDir(t)
 	WriteBlocked(&Blocked{Reason: BlockPlan, Message: "m", Remedy: "r"})
 
