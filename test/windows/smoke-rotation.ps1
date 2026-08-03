@@ -89,10 +89,39 @@ function WaitFor([scriptblock]$cond, [int]$seconds, [string]$what) {
     }
     return $false
 }
+# Clear the field and WAIT until it is actually clear.
+#
+# A fixed sleep was not enough: `daemon install` runs the task, which starts a
+# daemon, and the next section's daemon then loses the single-instance flock and
+# exits within a second. The symptom is not "two daemons" - it is a section that
+# quietly has NO daemon at all, so every assertion after it reports the absence
+# rather than the behaviour under test.
 function KillDaemons {
     Get-Process unarr   -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Get-Process wscript -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 20) {
+        $left = @(Get-Process unarr, wscript -ErrorAction SilentlyContinue)
+        if ($left.Count -eq 0) { Start-Sleep -Milliseconds 500; return }
+        Start-Sleep -Milliseconds 500
+    }
+    Say "  WARNING: unarr/wscript still running after 20s - the next section may find the flock taken"
+}
+# Everything needed to tell "the product misbehaved" from "the daemon never
+# started". Called on failure only, because that is the moment the distinction
+# costs a whole rerun to recover.
+function DumpDiag($label) {
+    Say "  --- diagnostics ($label) ---"
+    Say "    live processes: $((@(Get-Process unarr -ErrorAction SilentlyContinue) | ForEach-Object { $_.Id }) -join ',')"
+    foreach ($f in @($Log, $Log1, $Boot, "$DataDir\daemon.state.json")) {
+        Say "    $(Split-Path $f -Leaf) = $(SizeOf $f) bytes"
+    }
+    $st = "$DataDir\daemon.state.json"
+    if (Test-Path $st) { Say "    state: $((Get-Content $st -Raw).Trim())" }
+    if (Test-Path $Boot) {
+        Say "    boot log tail:"
+        Get-Content $Boot -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Say "      $_" }
+    }
 }
 # Fill a file with n bytes of printable ASCII, without a BOM.
 function SeedFile($path, $bytes) {
@@ -230,16 +259,21 @@ Say "  live unarr.log after rotation = $(SizeOf $Log) bytes"
 Say "  unarr.log.1 = $(SizeOf $Log1) bytes"
 
 Check $shrank "the live log SHRANK (the old copy-truncate design left it at its seeded size)"
+if (-not $shrank) { DumpDiag "[2] the live log never shrank" }
 Check ((SizeOf $Log1) -ge $seeded) "the rotated slot holds the previous contents"
 
 # The daemon must still be logging INTO the fresh file after the rename: a
 # rotation that leaves the daemon writing to a detached inode is silent death.
-$reopened = WaitFor { (SizeOf $Log) -gt 0 } 60 "the daemon to write into the fresh log"
-Check $reopened "the daemon keeps logging after the rotation"
-if ($reopened) {
-    $head = Get-Content $Log -TotalCount 5 -ErrorAction SilentlyContinue | Out-String
-    Check ($head -match 'starting \(pid') "the fresh log opens with the run marker (the only run delimiter left)"
-}
+#
+# The condition is the RUN MARKER, not a non-zero length. Length proves nothing
+# here: the seeded file is 2 x the budget, so "unarr.log is larger than 0 bytes"
+# is already true before the daemon is even launched, and this assertion used to
+# pass in a run where no rotation happened at all.
+$reopened = WaitFor {
+    ((Get-Content $Log -Raw -ErrorAction SilentlyContinue) -match 'starting \(pid')
+} 60 "the daemon to write its run marker into the fresh log"
+Check $reopened "the daemon keeps logging after the rotation (run marker present in the live file)"
+if (-not $reopened) { DumpDiag "[2] no run marker in the live log" }
 
 # --- 3. what bypasses the writer must land in the boot log ------------------
 Say "[3] the boot log collects what never reaches the daemon's own log"
@@ -307,12 +341,24 @@ $enc = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText("$DataDir\unarr.log.3", 'HISTORY-SLOT-3', $enc)
 SeedFile $Log (2 * $LogBudget)
 
+$seeded6 = SizeOf $Log
 $holder6 = StartLikeShim
 $follower = Start-Process -FilePath "$WorkDir\unarr.exe" -ArgumentList 'logs', '-f' -PassThru -WindowStyle Hidden
 Say "  daemon PID $($holder6.Id), follower (unarr logs -f) PID $($follower.Id)"
 # Give the daemon time to write its run marker, hit the budget and fail the
 # rename several times over.
 Start-Sleep -Seconds 20
+
+# PRECONDITION, not decoration. The three assertions below are "the history is
+# untouched" - which is trivially true when nothing ever tried to rotate. A
+# daemon that never started passes all three. So first prove a rotation was
+# ATTEMPTED and REFUSED: the daemon wrote into the live file (run marker), and
+# the live file is still over budget and larger than the seed, which is only
+# possible if the rename was blocked and the Writer reopened the same file.
+$live6 = Get-Content $Log -Raw -ErrorAction SilentlyContinue
+$attempted = ($live6 -match 'starting \(pid') -and ((SizeOf $Log) -gt $seeded6)
+Check $attempted "a rotation was actually attempted and refused (live log still over budget, with the run marker appended)"
+if (-not $attempted) { DumpDiag "[6] no rotation attempt to observe" }
 
 $slot1 = Get-Content $Log1 -Raw -ErrorAction SilentlyContinue
 $slot2 = Get-Content "$DataDir\unarr.log.2" -Raw -ErrorAction SilentlyContinue
