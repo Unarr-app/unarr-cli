@@ -17,6 +17,23 @@ import (
 // only — the console already prints the same hint once, at the end.
 const remedyDoctorFix = "run `unarr doctor --fix`"
 
+// hasRepairableFailure reports whether any FAILING check is one that
+// `unarr doctor --fix` actually repairs, which is what decides whether the
+// trailing tip is worth printing.
+//
+// It reads the same Remedy field the JSON exposes, so the console hint and the
+// machine-readable advice can never disagree — the alternative, a second list
+// of repairable check names, would be one more thing to forget to update when
+// planRepairs grows a case.
+func hasRepairableFailure(rep doctor.Report) bool {
+	for _, c := range rep.Checks {
+		if c.Status == doctor.StatusFail && c.Remedy == remedyDoctorFix {
+			return true
+		}
+	}
+	return false
+}
+
 // doctorSpecs assembles the ordered check list. The bodies stay in this package
 // because they lean on its config/client helpers; internal/doctor only knows
 // how to run and render them. Order is the display order, and grouping drives
@@ -25,6 +42,7 @@ func doctorSpecs(cfg *config.Config) []doctor.Spec {
 	specs := doctorConfigSpecs(cfg)
 	specs = append(specs, doctorConnectivitySpecs(cfg)...)
 	specs = append(specs, doctorDownloadSpecs(cfg)...)
+	specs = append(specs, doctorMediaSpecs(cfg)...)
 	return append(specs, doctor.Spec{
 		Group: "Version",
 		Name:  "unarr version",

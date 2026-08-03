@@ -1,12 +1,6 @@
 package mediainfo
 
-import (
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
-)
+import "fmt"
 
 // ResolveFFmpeg finds the ffmpeg binary. Search order mirrors ResolveFFprobe
 // so the same operator setup works for both:
@@ -21,38 +15,13 @@ import (
 // ffmpeg is required for the HLS streaming pipeline; ffprobe alone can't
 // transcode HEVC/MKV to browser-friendly H.264/MP4 fragments.
 func ResolveFFmpeg(explicit string) (string, error) {
-	if explicit != "" {
-		if _, err := os.Stat(explicit); err == nil {
-			return explicit, nil
-		}
-		return "", fmt.Errorf("ffmpeg not found at explicit path: %s", explicit)
-	}
-
-	if envPath := os.Getenv("FFMPEG_PATH"); envPath != "" {
-		if _, err := os.Stat(envPath); err == nil {
-			return envPath, nil
-		}
-	}
-
-	if p, err := exec.LookPath("ffmpeg"); err == nil {
+	// Steps 1-5 are LocateFFmpeg — shared verbatim with `unarr doctor`, which
+	// needs the same search WITHOUT step 6.
+	if p, ok := LocateFFmpeg(explicit); ok {
 		return p, nil
 	}
-
-	if exePath, err := os.Executable(); err == nil {
-		name := "ffmpeg"
-		if runtime.GOOS == "windows" {
-			name = "ffmpeg.exe"
-		}
-		adjacent := filepath.Join(filepath.Dir(exePath), name)
-		if _, err := os.Stat(adjacent); err == nil {
-			return adjacent, nil
-		}
-	}
-
-	if cached, err := FFmpegCachePath(); err == nil {
-		if _, err := os.Stat(cached); err == nil {
-			return cached, nil
-		}
+	if explicit != "" {
+		return "", fmt.Errorf("ffmpeg not found at explicit path: %s", explicit)
 	}
 
 	if p, err := DownloadFFmpeg(); err == nil {

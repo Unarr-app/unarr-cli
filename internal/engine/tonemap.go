@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"log"
 	"os/exec"
@@ -149,10 +148,7 @@ func FFmpegSupportsZscale(ffmpegPath string) bool {
 	// cold callers probe the same binary at once — both write the same bool.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-filters")
-	winproc.HideWindow(cmd)
-	out, err := cmd.Output()
-	supported := err == nil && bytes.Contains(out, []byte("zscale"))
+	supported := ffmpegHasFilter(ctx, ffmpegPath, "zscale")
 
 	zscaleCacheMu.Lock()
 	zscaleCache[ffmpegPath] = supported

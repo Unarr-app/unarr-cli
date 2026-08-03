@@ -74,6 +74,34 @@ func (k EncodeBenchKey) Fingerprint() string {
 	return hex.EncodeToString(sum[:])
 }
 
+// DriftedFrom names the key components that differ between two keys, using the
+// words a user would recognise. This is what the readable-fields-next-to-the-
+// fingerprint design (see EncodeBenchKey) is FOR: a stale record can then say
+// "ffmpeg changed" instead of "hash mismatch", which is the difference between
+// an actionable doctor row and a shrug.
+func (k EncodeBenchKey) DriftedFrom(old EncodeBenchKey) []string {
+	var drift []string
+	if old.FFmpegVersion != k.FFmpegVersion {
+		drift = append(drift, "ffmpeg")
+	}
+	if old.CPU != k.CPU {
+		drift = append(drift, "cpu")
+	}
+	if old.CPUCores != k.CPUCores {
+		drift = append(drift, "cpu cores")
+	}
+	if old.Platform != k.Platform {
+		drift = append(drift, "platform")
+	}
+	if old.HWAccel != k.HWAccel {
+		drift = append(drift, "hwaccel")
+	}
+	if old.Schema != k.Schema {
+		drift = append(drift, "cache format")
+	}
+	return drift
+}
+
 // CachedEncodeBench is the on-disk record. MeasuredAt is not part of the
 // freshness rule (a benchmark of unchanged hardware does not rot), but it is
 // what lets a reader say "measured 3 weeks ago" instead of implying it just

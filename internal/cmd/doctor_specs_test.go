@@ -28,6 +28,12 @@ func TestDoctorSpecsOrderAndGroups(t *testing.T) {
 		{"Downloads", "Disk space"},
 		{"Downloads", "par2 (usenet verify/repair)"},
 		{"Downloads", "Managed VPN (P2P kill-switch)"},
+		{"Media", "ffmpeg"},
+		{"Media", "ffprobe"},
+		{"Media", "Encoders (libx264, aac)"},
+		{"Media", "zscale (HDR tonemap)"},
+		{"Media", "Hardware acceleration"},
+		{"Media", "Transcode ceiling"},
 		{"Version", "unarr version"},
 	}
 	if len(specs) != len(want) {

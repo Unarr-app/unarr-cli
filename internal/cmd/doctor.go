@@ -27,6 +27,9 @@ Checks performed:
   - Agent is registered with the server
   - Download directory exists and is writable
   - Disk space is sufficient (warns below 10 GB)
+  - ffmpeg / ffprobe are installed and runnable (the whole streaming path
+    depends on them), with the libx264 + aac encoders, zscale for HDR
+    tonemapping, hardware acceleration, and the cached transcode ceiling
   - Current unarr version
 
 Pass --fix to auto-repair the common misconfigurations: malformed api_url,
@@ -79,9 +82,14 @@ func runDoctor(opts doctorOpts) error {
 	// The renderer prints each check as it lands: the connectivity checks take
 	// up to 10 s each, so buffering the run would look like a 30 s hang.
 	r := doctor.NewTextRenderer(color.Output)
-	r.ShowFixTip = !opts.fix
 	r.Start()
 	report := doctor.Run(specs, r.OnCheck)
+	// Offer `--fix` only when it can actually do something. Gating on
+	// "any failure at all" sent a host with no ffmpeg to a command that would
+	// report nothing to repair — `--fix` installs no binaries. The decision
+	// lives here rather than in the renderer because the remedy string is this
+	// package's knowledge, not the renderer's.
+	r.ShowFixTip = !opts.fix && hasRepairableFailure(report)
 	r.Finish(report)
 
 	if opts.fix {
