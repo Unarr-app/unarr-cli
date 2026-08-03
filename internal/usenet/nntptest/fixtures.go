@@ -24,6 +24,25 @@ func BuildDirectFile(name string, content []byte, partSize int) (*nzb.NZB, map[s
 	return n, articles
 }
 
+// BuildDirectFileParts is BuildDirectFile for a NON-UNIFORM posting: sizes gives
+// the decoded byte count of each article in order, and content is chopped to
+// match (a trailing remainder becomes one extra article).
+//
+// Real postings are not uniform — a poster can top off a set with a short final
+// article, resume an interrupted upload with a different part size, or post a
+// repaired set whose parts came from two runs. Uniform fixtures hide every bug in
+// the offset-index estimate, because a single Observe pins a uniform layout
+// exactly. Anything asserting how many articles a seek costs, or that a seek
+// lands at all, needs at least one non-uniform case.
+func BuildDirectFileParts(name string, content []byte, sizes []int) (*nzb.NZB, map[string][]byte) {
+	segs, articles := postFileParts(name, content, sizes)
+	n := &nzb.NZB{
+		Files: []nzb.File{newFile(name, len(segs), segs)},
+		Meta:  map[string]string{},
+	}
+	return n, articles
+}
+
 // BuildRarStore builds a synthetic NZB and yEnc articles for a video posted
 // inside a multi-volume RAR archive using the STORE method (0% compression).
 // videoName is the file inside the archive (e.g. "movie.mkv"); volSize caps the
@@ -80,6 +99,47 @@ func postFile(name string, content []byte, partSize int) ([]nzb.Segment, map[str
 		}
 		partNum := i + 1
 		body := yenc.Encode(name, partNum, total, int64(start)+1, int64(end), fileSize, content[start:end])
+		msgID := fmt.Sprintf("%s-p%d@fake.local", base, partNum)
+		articles[msgID] = body
+		segs = append(segs, nzb.Segment{
+			Bytes:     int64(len(body)),
+			Number:    partNum,
+			MessageID: msgID,
+		})
+	}
+	return segs, articles
+}
+
+// postFileParts is postFile for explicit per-article sizes. Sizes <= 0 and sizes
+// past the end of content are skipped; whatever content is left over after the
+// listed sizes becomes a final article, so the parts always reassemble to
+// content byte-for-byte.
+func postFileParts(name string, content []byte, sizes []int) ([]nzb.Segment, map[string][]byte) {
+	bounds := make([][2]int, 0, len(sizes)+1)
+	at := 0
+	for _, size := range sizes {
+		if size <= 0 || at >= len(content) {
+			continue
+		}
+		end := min(at+size, len(content))
+		bounds = append(bounds, [2]int{at, end})
+		at = end
+	}
+	if at < len(content) {
+		bounds = append(bounds, [2]int{at, len(content)})
+	}
+	if len(bounds) == 0 {
+		bounds = append(bounds, [2]int{0, len(content)})
+	}
+
+	articles := make(map[string][]byte, len(bounds))
+	segs := make([]nzb.Segment, 0, len(bounds))
+	base := sanitizeID(name)
+	fileSize := int64(len(content))
+
+	for i, b := range bounds {
+		partNum := i + 1
+		body := yenc.Encode(name, partNum, len(bounds), int64(b[0])+1, int64(b[1]), fileSize, content[b[0]:b[1]])
 		msgID := fmt.Sprintf("%s-p%d@fake.local", base, partNum)
 		articles[msgID] = body
 		segs = append(segs, nzb.Segment{

@@ -65,6 +65,12 @@ func TestSeekToTailCostsBoundedArticles(t *testing.T) {
 			est, len(content))
 	}
 
+	// Count the locate's OWN fetches: with the cushion on, read-ahead goroutines
+	// race into the same window and land in BodyCalls, which made this assertion
+	// intermittent (2 spurious failures in 200 runs) for a reason that has nothing
+	// to do with what it guards.
+	r.readaheadK = 0
+
 	// Exactly what warmRange(tail) does: seek deep into the file on a FRESH reader
 	// whose index is still an estimate, then read.
 	if _, err := r.Seek(int64(len(content))-8*partSize, io.SeekStart); err != nil {
@@ -108,7 +114,7 @@ func TestSeekedReadReturnsCorrectBytes(t *testing.T) {
 		if err != nil && !errors.Is(err, io.EOF) {
 			t.Fatalf("read at %d: %v", off, err)
 		}
-		want := content[off:min64(off+int64(n), int64(len(content)))]
+		want := content[off:min(off+int64(n), int64(len(content)))]
 		if string(buf[:n]) != string(want) {
 			t.Fatalf("read at offset %d returned wrong bytes (%d read)", off, n)
 		}
@@ -257,10 +263,14 @@ func TestProbeDoesNotPrefetchPastHeaders(t *testing.T) {
 		t.Fatalf("Probe: %v", err)
 	}
 
-	// Budget: the parser needs the volume's first article, plus at most a couple
-	// more for a header that straddles an article boundary. Anything approaching
-	// (1 + defaultReadaheadK) per volume means the cushion is back.
-	const perVolumeBudget = 3
+	// Budget: the parser needs the volume's first article, plus occasionally one
+	// more for a header that straddles an article boundary — measured at 1.1/volume.
+	//
+	// This has to be TIGHT. At 3/volume the threshold sat above the ~2.3-2.9/volume
+	// the probe costs with the cushion back on, so the test passed with the fix
+	// reverted and guarded nothing. 2 leaves room for the straddle case and still
+	// fails immediately if the read-ahead returns.
+	const perVolumeBudget = 2
 	if got, want := s.BodyCalls(), len(volumes)*perVolumeBudget; got > want {
 		t.Fatalf("header probe of %d volume(s) cost %d article fetches, want <= %d (~%d/volume) — "+
 			"read-ahead is back on the probe readers",
@@ -337,6 +347,112 @@ func TestRarPlaybackBudgetSurvivesVolumeSwitch(t *testing.T) {
 	t.Logf("budgeted rar drain stopped after %d bytes (spent %d on the wire)", drained, budget.Spent())
 }
 
+// TestLocateConvergesOnNonUniformPostings is the correctness counterweight to
+// TestSeekToTailCostsBoundedArticles: making locate CHEAP must not make it FAIL.
+//
+// Every other fixture here is uniform, where one Observe pins the whole layout
+// byte-exactly and any locate strategy lands. Real postings are not: a poster
+// tops off with a short final part, resumes an interrupted upload at a different
+// part size, or reposts a repaired set. Two ways a converging locate can lose a
+// seek that the old one-segment walk would have found:
+//
+//   - it accepts a Locate candidate pointing AWAY from the target, so the walk
+//     ping-pongs instead of advancing and burns the fetch cap without progress;
+//   - the index infers one global part size from the first article it sees, which
+//     for an atypical first article poisons the map for every unobserved segment.
+//
+// A failed locate is not a degraded stream, it is a dead one: in playback the
+// error surfaces from Reader.Read with http.ServeContent already streaming, so
+// the response truncates mid-video (there is no fallback to batch there — that
+// only exists at plan time). This sweeps offsets across the file and demands both
+// the right bytes and a bounded cost.
+func TestLocateConvergesOnNonUniformPostings(t *testing.T) {
+	cases := []struct {
+		name  string
+		sizes []int
+	}{
+		{
+			// Jitter around a nominal part size: no single step length describes
+			// the file, so an inferred uniform step drifts further with every
+			// segment it is applied to.
+			name:  "jittered part sizes",
+			sizes: cyclePartSizes([]int{4096, 2560, 5888, 3712}, 120),
+		},
+		{
+			// The first article is the one the tail seek observes first. If the
+			// index latches ITS length as the file's step, every unobserved
+			// segment is placed with a 8x error.
+			name:  "atypical first article",
+			sizes: append([]int{512}, cyclePartSizes([]int{4096}, 119)...),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			total := 0
+			for _, s := range tc.sizes {
+				total += s
+			}
+			content := patternBytes(total)
+			n, articles := nntptest.BuildDirectFileParts("movie.mkv", content, tc.sizes)
+			s := nntptest.NewFakeServer(t)
+			s.AddArticles(articles)
+			c := dialFake(t, s)
+
+			f := n.Files[0]
+			worst, failures := 0, 0
+			// A FRESH reader per offset is the honest case: that is what every new
+			// stream session gets. Reusing one reader would let each seek land next
+			// to a segment the previous seek already anchored, which is precisely
+			// the easy case that hides this class of bug.
+			for i := len(tc.sizes) - 1; i >= 0; i -= 7 {
+				off := int64(0)
+				for j := 0; j < i; j++ {
+					off += int64(tc.sizes[j])
+				}
+				off += int64(tc.sizes[i] / 2) // mid-article, so a ±1 error is visible
+
+				r := NewReader(context.Background(), c, f, NewOffsetIndex(f))
+				r.retryBackoff = time.Millisecond
+				r.readaheadK = 0 // count the locate's own fetches, not the cushion's
+
+				// Seek from the END, like http.ServeContent and openReaderVolume do.
+				// That routes through ensureSizeExact, which observes segment 0 —
+				// so segment 0's length is the first (and for a while only) evidence
+				// the index has about how this posting is laid out.
+				if _, err := r.Seek(off-int64(len(content)), io.SeekEnd); err != nil {
+					t.Fatalf("seek to %d: %v", off, err)
+				}
+				before := s.BodyCalls()
+				buf := make([]byte, 64)
+				err := readFullFrom(r, buf)
+				cost := s.BodyCalls() - before
+				if cost > worst {
+					worst = cost
+				}
+				if err != nil {
+					failures++
+					t.Errorf("segment %d/%d: read at offset %d failed after %d fetches: %v",
+						i, len(tc.sizes), off, cost, err)
+					_ = r.Close()
+					continue
+				}
+				if got, want := buf, content[off:off+64]; string(got) != string(want) {
+					t.Errorf("segment %d: wrong bytes at offset %d", i, off)
+				}
+				_ = r.Close()
+			}
+			if failures > 0 {
+				t.Fatalf("%d offsets could not be located on a non-uniform posting — "+
+					"a converging locate must never lose a seek the one-segment walk would have found",
+					failures)
+			}
+			t.Logf("worst locate cost: %d article fetches over %d non-uniform parts",
+				worst, len(tc.sizes))
+		})
+	}
+}
+
 // --- helpers ---
 
 func mustFile(t *testing.T, name string, content []byte, partSize int) nzb.File {
@@ -345,9 +461,18 @@ func mustFile(t *testing.T, name string, content []byte, partSize int) nzb.File 
 	return n.Files[0]
 }
 
-func min64(a, b int64) int64 {
-	if a < b {
-		return a
+// readFullFrom fills buf, reporting the first error instead of panicking, so a
+// locate failure is a test failure with context rather than a fatal.
+func readFullFrom(r io.Reader, buf []byte) error {
+	_, err := io.ReadFull(r, buf)
+	return err
+}
+
+// cyclePartSizes repeats pattern until it has n sizes.
+func cyclePartSizes(pattern []int, n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = pattern[i%len(pattern)]
 	}
-	return b
+	return out
 }
