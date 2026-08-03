@@ -26,6 +26,14 @@ type Config struct {
 	Library       LibraryConfig       `toml:"library"`
 	Telemetry     TelemetryConfig     `toml:"telemetry,omitempty"`
 	Desktop       DesktopConfig       `toml:"desktop,omitempty"`
+
+	// unknownKeys holds the dotted TOML keys Load could not map onto the schema
+	// (a typo, or a valid key under the wrong section). UNEXPORTED on purpose:
+	// both the TOML decoder and encoder skip unexported fields, so carrying the
+	// diagnostic on Config costs no call-site churn and Save never writes it
+	// back into the user's file. Read it through UnknownKeys() / the Issue
+	// helpers in validate.go.
+	unknownKeys []string
 }
 
 // DesktopConfig holds settings for the unarr-desktop tray / unarr:// protocol
@@ -680,6 +688,13 @@ func Load(path string) (Config, error) {
 	}
 
 	applyDefaults(&cfg, meta)
+
+	// Keys the decoder ignored. Recorded, never fatal: failing here would break
+	// every existing config the day a key gets renamed. Callers warn instead —
+	// the daemon log, `unarr doctor`, `unarr config check`.
+	for _, k := range meta.Undecoded() {
+		cfg.unknownKeys = append(cfg.unknownKeys, k.String())
+	}
 	return cfg, nil
 }
 

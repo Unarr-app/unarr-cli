@@ -111,6 +111,12 @@ func runDoctor(opts doctorOpts) error {
 		return path, nil
 	})
 
+	// Unknown keys are inert — TOML decoding drops them silently, so the setting
+	// the user believes they wrote never takes effect. WARN, never FAIL.
+	check("Config keys", func() (string, error) {
+		return configKeysCheckResult(cfg)
+	})
+
 	check("API key configured", func() (string, error) {
 		key := effectiveAPIKey(&cfg)
 		if key == "" {

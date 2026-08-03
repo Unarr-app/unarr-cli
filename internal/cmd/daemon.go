@@ -126,6 +126,11 @@ func runDaemonStart() error {
 	// including a crash seconds from now — as deliberate and leave the agent down.
 	agent.ClearStopIntent()
 
+	// Surface keys the config decoder ignored (typo, or right key under the
+	// wrong section). One line each, warning only: refusing to start would turn
+	// any future key rename into a fleet-wide outage.
+	logUnknownConfigKeys(cfg)
+
 	// Validate config. A missing API key / agent ID means we have no credential
 	// to authenticate a telemetry post with, so these two can't be reported —
 	// they're the one blind spot, and inherently so.
