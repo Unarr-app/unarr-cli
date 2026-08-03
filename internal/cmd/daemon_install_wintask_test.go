@@ -68,7 +68,7 @@ func TestBuildWindowsTaskXML(t *testing.T) {
 func TestBuildLauncherVBS(t *testing.T) {
 	bin := `C:\Program Files\unarr\unarr.exe`
 	logDir := `C:\Users\alice\AppData\Local\unarr`
-	vbs := buildLauncherVBS(bin, logDir)
+	vbs := buildLauncherVBS(bin, logDir, bootLogMaxBytes)
 
 	// The daemon binary and its `start` verb now live in the shim, not the XML.
 	if !strings.Contains(vbs, bin) {
@@ -114,7 +114,7 @@ func TestBuildLauncherVBS(t *testing.T) {
 // space (Windows usernames routinely do) — the redirect target must stay quoted
 // so cmd.exe treats it as one argument.
 func TestBuildLauncherVBSQuotesUsernamePath(t *testing.T) {
-	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\Users\Ana Ruiz\AppData\Local\unarr`)
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\Users\Ana Ruiz\AppData\Local\unarr`, bootLogMaxBytes)
 	if !strings.Contains(vbs, `"C:\Users\Ana Ruiz\AppData\Local\unarr\unarr.log"`) {
 		t.Errorf("log path with a space is not quoted for cmd.exe: %s", vbs)
 	}
@@ -126,7 +126,7 @@ func TestBuildLauncherVBSQuotesUsernamePath(t *testing.T) {
 // embedded paths → the daemon silently never starts at logon.
 func TestBuildLauncherVBSBytesUTF16(t *testing.T) {
 	// Non-ASCII username exercises the encoding path (corrupts under ANSI/UTF-8).
-	b := buildLauncherVBSBytes(`C:\Users\Zoë\unarr\unarr.exe`, `C:\Users\Zoë\AppData\Local\unarr`)
+	b := buildLauncherVBSBytes(`C:\Users\Zoë\unarr\unarr.exe`, `C:\Users\Zoë\AppData\Local\unarr`, bootLogMaxBytes)
 	if len(b) < 2 || b[0] != 0xFF || b[1] != 0xFE {
 		t.Fatalf("missing UTF-16LE BOM (FF FE); first bytes: % x", b[:min(4, len(b))])
 	}
@@ -153,7 +153,7 @@ func TestBuildLauncherVBSBytesUTF16(t *testing.T) {
 // escaping broke the "Tom & Jerry" launch; plain quoting fixed it.)
 func TestBuildLauncherVBSMetacharUsername(t *testing.T) {
 	vbs := buildLauncherVBS(`C:\Users\Tom & Jerry (R&D)\unarr.exe`,
-		`C:\Users\Tom & Jerry (R&D)\AppData\Local\unarr`)
+		`C:\Users\Tom & Jerry (R&D)\AppData\Local\unarr`, bootLogMaxBytes)
 	// The path must be present verbatim, quoted, un-caret-escaped.
 	if !strings.Contains(vbs, `"C:\Users\Tom & Jerry (R&D)\unarr.exe"`) {
 		t.Errorf("metachar path must be quoted verbatim (no caret escaping): %s", vbs)
@@ -230,7 +230,7 @@ func TestReregisterWindowsTaskNoopOffWindows(t *testing.T) {
 // the right exit code is necessary but not sufficient — the shim itself has to
 // bring the daemon back, or nothing will.
 func TestBuildLauncherVBSSupervises(t *testing.T) {
-	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\Users\alice\AppData\Local\unarr`)
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\Users\alice\AppData\Local\unarr`, bootLogMaxBytes)
 
 	if !strings.Contains(vbs, "Do\n") || !strings.Contains(vbs, "Loop\n") {
 		t.Fatalf("shim does not loop — a dead daemon is never relaunched:\n%s", vbs)
@@ -266,7 +266,7 @@ func TestBuildLauncherVBSSupervises(t *testing.T) {
 // after the backoff sleep too — a user who stops the agent during the wait must
 // not have it relaunched on top of them.
 func TestBuildLauncherVBSStopEndsTheLoop(t *testing.T) {
-	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\unarr`)
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\unarr`, bootLogMaxBytes)
 
 	if n := strings.Count(vbs, "FileExists"); n < 2 {
 		t.Errorf("marker checked %d time(s); want it both after the daemon exits "+
@@ -282,7 +282,7 @@ func TestBuildLauncherVBSStopEndsTheLoop(t *testing.T) {
 // TestBuildLauncherVBSQuitsAfterTheDaemonExits guards the ordering: reading the
 // marker and quitting must happen AFTER the (blocking) launch, never before.
 func TestBuildLauncherVBSQuitsAfterTheDaemonExits(t *testing.T) {
-	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\unarr`)
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\unarr`, bootLogMaxBytes)
 
 	lastRun := strings.LastIndex(vbs, "sh.Run")
 	firstQuit := strings.Index(vbs, "WScript.Quit")
@@ -305,7 +305,7 @@ func TestBuildLauncherVBSQuitsAfterTheDaemonExits(t *testing.T) {
 // requested stop and would resurrect a paused agent every minute.
 func TestBuildLauncherVBSEmbedsStopMarker(t *testing.T) {
 	logDir := `C:\Users\alice\AppData\Local\unarr`
-	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, logDir)
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, logDir, bootLogMaxBytes)
 
 	want := logDir + `\` + agent.StopIntentFileName
 	if !strings.Contains(vbs, `"`+want+`"`) {
@@ -315,7 +315,7 @@ func TestBuildLauncherVBSEmbedsStopMarker(t *testing.T) {
 		t.Errorf("shim does not test for the marker:\n%s", vbs)
 	}
 	// A trailing separator on the data dir must not produce a doubled one.
-	vbs2 := buildLauncherVBS(`C:\unarr\unarr.exe`, logDir+`\`)
+	vbs2 := buildLauncherVBS(`C:\unarr\unarr.exe`, logDir+`\`, bootLogMaxBytes)
 	if strings.Contains(vbs2, `\\`+agent.StopIntentFileName) {
 		t.Errorf("doubled path separator before the marker:\n%s", vbs2)
 	}
@@ -326,7 +326,7 @@ func TestBuildLauncherVBSEmbedsStopMarker(t *testing.T) {
 // metacharacters — and lives inside a VBScript string literal.
 func TestBuildLauncherVBSMarkerPathQuotedForOddDataDir(t *testing.T) {
 	logDir := `C:\Users\Tom & Jerry (R&D)\AppData\Local\unarr`
-	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, logDir)
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, logDir, bootLogMaxBytes)
 
 	want := `"` + logDir + `\` + agent.StopIntentFileName + `"`
 	if !strings.Contains(vbs, want) {
@@ -341,7 +341,7 @@ func TestBuildLauncherVBSMarkerPathQuotedForOddDataDir(t *testing.T) {
 // On Error Resume Next, so a failed CreateObject must leave the script running
 // all the way to its Quit rather than aborting into an implicit success.
 func TestBuildLauncherVBSSurvivesCreateObjectFailure(t *testing.T) {
-	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\unarr`)
+	vbs := buildLauncherVBS(`C:\unarr\unarr.exe`, `C:\unarr`, bootLogMaxBytes)
 
 	errIdx := strings.Index(vbs, "On Error Resume Next")
 	createIdx := strings.Index(vbs, "CreateObject")

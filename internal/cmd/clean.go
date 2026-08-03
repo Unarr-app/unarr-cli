@@ -30,7 +30,7 @@ func newCleanCmd() *cobra.Command {
 Shows what will be removed and asks for confirmation before deleting.
 
 By default, cleans:
-  - Log files (unarr.log, unarr.err.log)
+  - Log files (unarr.log, unarr.err.log) and their rotated copies (.1, .2, …)
   - Daemon state file (daemon.state.json)
   - Stale usenet resume files older than 7 days (.progress, .nzb cache)
   - Stale replaced-file backups older than 7 days (from library upgrades)
@@ -43,7 +43,8 @@ progress for paused or interrupted downloads.
 
 With --all, also removes:
   - ALL usenet resume files (including recent ones)
-  - The entire data directory (~/.local/share/unarr/)
+  - The entire data directory (~/.local/share/unarr/ on Linux,
+    ~/Library/Application Support/unarr/ on macOS, %LOCALAPPDATA%\unarr\ on Windows)
 
 Never removes:
   - Configuration file (config.toml)
@@ -70,6 +71,28 @@ type cleanTarget struct {
 	description string
 	isDir       bool
 	isGlob      bool
+}
+
+// logCleanTargets lists every log file `clean` removes, live files and rings.
+//
+// It must cover exactly what the janitor supervises (daemonLogPaths), or a file
+// one of them knows about and the other does not is a file that survives a
+// clean and grows without a ceiling. The boot log needs its OWN entries: it is
+// not caught by the `unarr.log.*` glob, which matches unarr.log.1 but never
+// unarr.boot.log.
+//
+// The rings are globbed rather than listed from log_max_files, so a ring left
+// behind by an older/larger setting is still swept — the point of `clean` is
+// that nothing survives it.
+func logCleanTargets(dataDir string) []cleanTarget {
+	return []cleanTarget{
+		{filepath.Join(dataDir, logFileName), "daemon log", false, false},
+		{filepath.Join(dataDir, logFileName+".*"), "rotated daemon log", false, true},
+		{filepath.Join(dataDir, bootLogFileName), "daemon startup log", false, false},
+		{filepath.Join(dataDir, bootLogFileName+".*"), "rotated daemon startup log", false, true},
+		{filepath.Join(dataDir, errLogFileName), "daemon error log", false, false},
+		{filepath.Join(dataDir, errLogFileName+".*"), "rotated daemon error log", false, true},
+	}
 }
 
 // foundEntry represents a file or directory found during scanning.
@@ -104,13 +127,11 @@ func runClean(dryRun, all, yes bool) error {
 			{dataDir, "data directory", true, false},
 		}
 	} else {
-		targets = []cleanTarget{
-			{filepath.Join(dataDir, "unarr.log"), "daemon log", false, false},
-			{filepath.Join(dataDir, "unarr.err.log"), "daemon error log", false, false},
-			{filepath.Join(dataDir, "daemon.state.json"), "daemon state", false, false},
-			{filepath.Join(dataDir, "daemon.state.json.tmp"), "daemon state temp", false, false},
+		targets = append(logCleanTargets(dataDir),
+			cleanTarget{filepath.Join(dataDir, "daemon.state.json"), "daemon state", false, false},
+			cleanTarget{filepath.Join(dataDir, "daemon.state.json.tmp"), "daemon state temp", false, false},
 			// Resume files handled separately below (stale only)
-		}
+		)
 	}
 
 	// Temp targets apply regardless of --all
@@ -355,6 +376,18 @@ func fileSize(path string) int64 {
 	return info.Size()
 }
 
+// globSize totals the files matching a shell pattern. Used for the artifact
+// families whose exact names aren't known up front — rotated logs, upgrade
+// temp files.
+func globSize(pattern string) int64 {
+	matches, _ := filepath.Glob(pattern)
+	var total int64
+	for _, m := range matches {
+		total += fileSize(m)
+	}
+	return total
+}
+
 // CleanableBytes calculates the total size of files that would be safe to clean
 // right now. Called from the daemon heartbeat to report cleanable space.
 // Excludes daemon.state.json (actively written while daemon runs) and
@@ -364,9 +397,16 @@ func CleanableBytes() int64 {
 	tmpDir := os.TempDir()
 	var total int64
 
-	// Logs
-	total += fileSize(filepath.Join(dataDir, "unarr.log"))
-	total += fileSize(filepath.Join(dataDir, "unarr.err.log"))
+	// Logs — the live files plus every rotated copy of the ring, from the same
+	// list `clean` deletes, so the figure the daemon reports matches what
+	// `unarr clean` would actually free.
+	for _, t := range logCleanTargets(dataDir) {
+		if t.isGlob {
+			total += globSize(t.path)
+			continue
+		}
+		total += fileSize(t.path)
+	}
 
 	// Stale resume files only (>7 days)
 	resumeFound, _ := scanResumeFiles(filepath.Join(dataDir, "resume"), false)
@@ -384,10 +424,7 @@ func CleanableBytes() int64 {
 	total += streamBytes
 
 	// Upgrade temp files
-	matches, _ := filepath.Glob(filepath.Join(tmpDir, "unarr-download-*.tmp"))
-	for _, m := range matches {
-		total += fileSize(m)
-	}
+	total += globSize(filepath.Join(tmpDir, "unarr-download-*.tmp"))
 
 	// Config temp
 	total += fileSize(config.FilePath() + ".tmp")

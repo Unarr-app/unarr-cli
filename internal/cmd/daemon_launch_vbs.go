@@ -52,6 +52,25 @@ const launcherVBSName = "unarr-launch.vbs"
 // shim retries once, still redirected, so a failed start is never silent. The
 // daemon is not gated on logging succeeding.
 //
+// TWO LOG FILES, TWO OWNERS — and they MUST be different filenames:
+//
+//   - unarr.log belongs to the daemon (`start --log-file …`). It opens the file
+//     O_APPEND, which Go maps to a real FILE_APPEND_DATA handle, and rotates it
+//     by renaming it aside. That is the only rotation that shrinks a live file
+//     on Windows.
+//   - unarr.boot.log belongs to cmd.exe, via the `>>` redirect. It collects what
+//     bypasses log.SetOutput and would otherwise be lost: the start banner,
+//     cobra's fatal error print for a start that never got going, a Go panic
+//     dump.
+//
+// Pointing both at unarr.log would be strictly worse than the bug this fixes:
+// cmd.exe's redirect grants only FILE_SHARE_READ, so the daemon's own
+// FILE_APPEND_DATA open would be refused and it would end up with NO log at all.
+// The same sharing rule is why the boot log cannot be copy-truncated while cmd
+// holds it (os.Truncate is OpenFile(O_WRONLY)+Ftruncate — a sharing violation,
+// measured on the VM harness), and therefore why the shim bounds it ITSELF, by
+// rename, at the top of the loop where nothing holds the file.
+//
 // SUPERVISION: the shim restarts the daemon itself. It has to — the scheduled
 // task will not.
 //
@@ -90,8 +109,16 @@ const launcherVBSName = "unarr-launch.vbs"
 // already encodes (schtasks likewise needs UTF-16). We build the string here
 // and let buildLauncherVBSBytes do the UTF-16LE+BOM encoding, mirroring
 // buildWindowsTaskXML / buildWindowsTaskXMLBytes.
-func buildLauncherVBS(binPath, logDir string) string {
-	logPath := strings.TrimRight(logDir, `\`) + `\unarr.log`
+//
+// bootMaxBytes is the boot log's rotation budget, or 0 for "emit no trim at
+// all" — rotation is opt-in (see bootLogTrimBytes), and with it off the
+// generated script must leave the boot log's ring alone like every other
+// rotation path. Passed in rather than read from config here so this stays a
+// pure renderer.
+func buildLauncherVBS(binPath, logDir string, bootMaxBytes int64) string {
+	dir := strings.TrimRight(logDir, `\`)
+	logPath := dir + `\` + logFileName
+	bootPath := dir + `\` + bootLogFileName
 
 	// The command cmd.exe runs. Each path is wrapped in real double-quotes, which
 	// is BOTH necessary and sufficient: quotes make spaces safe AND neutralise
@@ -101,11 +128,15 @@ func buildLauncherVBS(binPath, logDir string) string {
 	// would make it look for a file whose name literally contains a caret. The
 	// nested-quote idiom `cmd /c ""prog" args"` is standard: cmd /c strips the
 	// single outer pair, leaving each path individually quoted and protected.
+	//
+	// --log-file rides on BOTH forms: a launch that could not be redirected must
+	// still give the daemon its own log, or that run would be entirely silent.
 	cmdFor := func(withRedirect bool) string {
+		start := `""` + binPath + `" start --log-file "` + logPath + `"`
 		if withRedirect {
-			return `cmd /c ""` + binPath + `" start >> "` + logPath + `" 2>&1"`
+			return `cmd /c ` + start + ` >> "` + bootPath + `" 2>&1"`
 		}
-		return `cmd /c ""` + binPath + `" start"`
+		return `cmd /c ` + start + `"`
 	}
 
 	// Marker the shim consults to tell a requested stop from a death. Built from
@@ -130,6 +161,7 @@ func buildLauncherVBS(binPath, logDir string) string {
 	b.WriteString(fmt.Sprintf("healthySecs = %d\n", healthyRunSecs))
 	b.WriteString("tries = 0\n")
 	b.WriteString("Do\n")
+	writeBootLogTrim(&b, bootPath, bootMaxBytes)
 	b.WriteString("  started = Timer\n")
 	b.WriteString("  rc = sh.Run(" + vbsQuote(cmdFor(true)) + ", 0, True)\n")
 	// A launch that could not run at all (Err set) still counts as an attempt —
@@ -175,11 +207,65 @@ func buildLauncherVBS(binPath, logDir string) string {
 	return b.String()
 }
 
+// writeBootLogTrim emits the boot log's rotation, which lives HERE because it
+// can live nowhere else: cmd.exe holds that file for the whole life of a run and
+// grants only FILE_SHARE_READ, so no process — not even the daemon — can
+// truncate or rename it while a daemon is up. The top of the relaunch loop is
+// the one moment nothing holds it.
+//
+// SIZE-CHECKED, never unconditional: rotating on every launch would push the
+// first (and most interesting) crash out of the ring after two relaunches, which
+// is precisely the evidence a crash loop is being kept for. One rotated slot,
+// renamed rather than copied, at maxBytes.
+//
+// maxBytes <= 0 emits NOTHING. Rotation is opt-in and off by default, and this
+// is the one rotator that cannot re-read the config at run time, so "off" has to
+// mean "the script was generated without a trim in it". A shim that kept its own
+// baked 2 MB threshold would be the single ring still mutating on a default
+// install — the exact thing the descope removed everywhere else.
+//
+// Every step is best-effort under the script's `On Error Resume Next`, and Err
+// is cleared afterwards so a failed trim cannot be mistaken for a failed launch
+// by the check that follows sh.Run.
+//
+// THE ORDER IS THE SAME INVARIANT logging.rotateThroughStaging enforces in Go,
+// spelled out by hand because VBScript cannot import it: move the LIVE file to
+// a staging name FIRST, and only once that worked delete the old slot and put
+// the staging file in it. Deleting .1 first — which is what this did — threw
+// away the crash evidence the one-slot ring exists for whenever the move then
+// failed, and the move fails for the ordinary reasons: an antivirus, Windows
+// Search, or a support session with `Get-Content -Wait` on the boot log.
+//
+// "Did the move work?" is tested as "is the live file gone?", which is exact
+// under On Error Resume Next and, unlike testing for the staging file, cannot
+// be fooled by a stale staging file left by a run that died mid-trim.
+func writeBootLogTrim(b *strings.Builder, bootPath string, maxBytes int64) {
+	if maxBytes <= 0 {
+		return
+	}
+	staging := bootPath + ".rotating"
+	b.WriteString("  Err.Clear\n")
+	b.WriteString("  If Not fso Is Nothing Then\n")
+	b.WriteString("    If fso.FileExists(" + vbsQuote(bootPath) + ") Then\n")
+	b.WriteString(fmt.Sprintf("      If fso.GetFile(%s).Size > %d Then\n",
+		vbsQuote(bootPath), maxBytes))
+	b.WriteString("        If fso.FileExists(" + vbsQuote(staging) + ") Then fso.DeleteFile " + vbsQuote(staging) + ", True\n")
+	b.WriteString("        fso.MoveFile " + vbsQuote(bootPath) + ", " + vbsQuote(staging) + "\n")
+	b.WriteString("        If Not fso.FileExists(" + vbsQuote(bootPath) + ") Then\n")
+	b.WriteString("          If fso.FileExists(" + vbsQuote(bootPath+".1") + ") Then fso.DeleteFile " + vbsQuote(bootPath+".1") + ", True\n")
+	b.WriteString("          fso.MoveFile " + vbsQuote(staging) + ", " + vbsQuote(bootPath+".1") + "\n")
+	b.WriteString("        End If\n")
+	b.WriteString("      End If\n")
+	b.WriteString("    End If\n")
+	b.WriteString("  End If\n")
+	b.WriteString("  Err.Clear\n")
+}
+
 // buildLauncherVBSBytes encodes the shim as UTF-16LE with a BOM — the encoding
 // Windows Script Host needs to read non-ASCII paths correctly (a BOM-less file
 // is decoded via the ANSI code page). Mirrors buildWindowsTaskXMLBytes.
-func buildLauncherVBSBytes(binPath, logDir string) []byte {
-	s := buildLauncherVBS(binPath, logDir)
+func buildLauncherVBSBytes(binPath, logDir string, bootMaxBytes int64) []byte {
+	s := buildLauncherVBS(binPath, logDir, bootMaxBytes)
 	u16 := utf16.Encode([]rune(s))
 	buf := &bytes.Buffer{}
 	buf.Write([]byte{0xFF, 0xFE}) // UTF-16LE BOM

@@ -34,6 +34,13 @@ type DaemonState struct {
 	TotalDownloaded int64          `json:"totalDownloaded"`
 	MethodStats     map[string]int `json:"methodStats,omitempty"`
 
+	// LogFile is the log file this daemon OWNS and rotates from the inside
+	// (`unarr start --log-file …`). Empty when the supervisor still owns the
+	// redirect, or when the daemon runs in the foreground. It is how an external
+	// rotator answers "is a live process writing this file?" — see ClaimLogFile.
+	// Never set it by hand: WriteState stamps it from this process's own claim.
+	LogFile string `json:"logFile,omitempty"`
+
 	// Managed-VPN split-tunnel state, so `unarr vpn status` can report whether
 	// torrent traffic is actually being routed through the tunnel (vs. the daemon
 	// running but the tunnel having failed to come up → downloading in the clear).
@@ -114,6 +121,12 @@ func WriteState(state *DaemonState) {
 	if stateSealed.Load() {
 		return // shutting down: see stateSealed
 	}
+	// Ownership of the log file is a property of THIS process, not of whatever
+	// snapshot a caller happens to hold, so it is stamped on every write rather
+	// than being carried around in DaemonState. A full-struct overwrite (Register
+	// rebuilds d.State from scratch) can therefore never drop it, and a release
+	// can never be undone by a straggler write.
+	state.LogFile = OwnedLogFile()
 	path := StateFilePath()
 	dir := filepath.Dir(path)
 	os.MkdirAll(dir, 0o755)

@@ -35,6 +35,26 @@ Environment=HOME={{.Home}}
 WantedBy=default.target
 `
 
+// launchdTemplate hands the daemon its own log (--log-file unarr.log) and
+// leaves launchd holding unarr.boot.log.
+//
+// The two files have different owners on purpose. The daemon opens unarr.log
+// O_APPEND and rotates it by renaming it aside — the only rotation that
+// actually shrinks a live file. launchd opens Standard*Path itself and holds it
+// for the agent's whole life, so that file can only be trimmed from the outside
+// by copy-truncate (which works here: launchd's handle is a genuine POSIX
+// append fd); it is deliberately small and collects only what bypasses
+// log.SetOutput — the start banner, a fatal cobra error, a panic dump.
+//
+// stdout and stderr still point at ONE file. Splitting them was a trap: the
+// daemon logs through log.Printf, which writes to stderr, so a separate
+// StandardErrorPath collected essentially the whole log while `unarr logs` read
+// a unarr.log holding only the start banner.
+//
+// An installed plist is NOT rewritten by a self-update, so a macOS box that
+// upgrades its binary keeps the old plist, passes no --log-file and stays on
+// copy-truncate — which works on macOS. That is an acceptable steady state, not
+// a reason to force a plist rewrite.
 const launchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -45,15 +65,17 @@ const launchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
   <array>
     <string>{{.BinPath}}</string>
     <string>start</string>
+    <string>--log-file</string>
+    <string>{{.LogDir}}/unarr.log</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>{{.LogDir}}/unarr.log</string>
+  <string>{{.LogDir}}/unarr.boot.log</string>
   <key>StandardErrorPath</key>
-  <string>{{.LogDir}}/unarr.err.log</string>
+  <string>{{.LogDir}}/unarr.boot.log</string>
 </dict>
 </plist>
 `
@@ -291,6 +313,13 @@ func installSystemd(data serviceData, green *color.Color) error {
 
 func installLaunchd(data serviceData, green *color.Color) error {
 	os.MkdirAll(data.LogDir, 0o755)
+	// launchd opens StandardOutPath itself and holds it for the life of the
+	// agent, so an oversized boot log has to be trimmed here, before `launchctl
+	// load` below. From then on the daemon's own janitor keeps it bounded. The
+	// main log is trimmed too: an install that predates --log-file may have left
+	// one over budget, and this is the same free gap for it.
+	rotateDaemonLogIn(data.LogDir)
+	rotateBootLogIn(data.LogDir)
 
 	path := service.PlistPath(data.Home)
 	if err := writeServiceFile(path, launchdTemplate, data); err != nil {
@@ -324,7 +353,7 @@ func installLaunchd(data serviceData, green *color.Color) error {
 	}
 	if out, err := svcOutput("launchctl", "list", service.LaunchdLabel); err != nil {
 		return fmt.Errorf("the unarr agent did not load (launchctl list: %s).\n  Check: %s\n%s",
-			firstLine(out, err), filepath.Join(data.LogDir, "unarr.err.log"), noServiceManagerHelp)
+			firstLine(out, err), filepath.Join(data.LogDir, logFileName), noServiceManagerHelp)
 	}
 
 	installed = true
@@ -335,7 +364,8 @@ func installLaunchd(data serviceData, green *color.Color) error {
 	fmt.Println("  Manage with:")
 	fmt.Println("    launchctl list | grep unarr")
 	fmt.Println("    launchctl unload " + path)
-	fmt.Println("    tail -f " + filepath.Join(data.LogDir, "unarr.log"))
+	fmt.Println("    unarr logs -f              (" + filepath.Join(data.LogDir, logFileName) + ")")
+	fmt.Println("    unarr logs --boot          (" + filepath.Join(data.LogDir, bootLogFileName) + ", startup + crashes)")
 	fmt.Println()
 
 	return nil
@@ -419,6 +449,24 @@ func runDaemonUninstall() error {
 // any existing task, so calling this on an already-installed box is safe.
 func writeAndCreateWindowsTask(data serviceData, logDir string) error {
 	os.MkdirAll(logDir, 0o755)
+	// The shim redirects with `>> unarr.boot.log`, so cmd.exe — not us — owns
+	// THAT handle once the task runs; unarr.log is the daemon's own. Trim both
+	// now, while nothing holds either: from here the daemon's Writer rotates
+	// unarr.log by rename and the shim size-checks the boot log before each
+	// relaunch (cmd.exe grants only FILE_SHARE_READ, so copy-truncate can never
+	// bound the boot log while it is held — measured on the VM harness).
+	//
+	// All of that is OPT-IN: with the default log_max_size_mb = 0 both trims are
+	// no-ops and the shim is generated without a trim at all (bootLogTrimBytes).
+	//
+	// "While nothing holds either" is now CHECKED rather than assumed: on the
+	// self-update path this runs BEFORE the daemon is restarted, so the old
+	// daemon is still writing unarr.log, and rotateDaemonLogIn correctly does
+	// nothing. The trim is not lost — the restarted daemon seeds its Writer from
+	// the file on disk, so its very first line (the run marker) rotates an
+	// over-budget log by rename, from the inside, where it is safe.
+	rotateDaemonLogIn(logDir)
+	rotateBootLogIn(logDir)
 
 	// Remove any existing task before (re)installing.
 	delCmd := exec.Command("schtasks", "/delete", "/tn", "unarr", "/f")
@@ -450,7 +498,7 @@ func writeAndCreateWindowsTask(data serviceData, logDir string) error {
 	// silently stop the daemon starting at logon (same encoding lesson as the
 	// task XML).
 	vbsPath := filepath.Join(logDir, launcherVBSName)
-	if err := os.WriteFile(vbsPath, buildLauncherVBSBytes(data.BinPath, logDir), 0o600); err != nil {
+	if err := os.WriteFile(vbsPath, buildLauncherVBSBytes(data.BinPath, logDir, bootLogTrimBytes()), 0o600); err != nil {
 		return fmt.Errorf("write launcher script: %w", err)
 	}
 
@@ -501,7 +549,8 @@ func installWindowsTask(data serviceData, green *color.Color) error {
 	fmt.Println("  Manage with:")
 	fmt.Println("    unarr daemon status")
 	fmt.Println("    unarr daemon stop")
-	fmt.Printf("    unarr daemon logs          (log: %s\\unarr.log)\n", logDir)
+	fmt.Printf("    unarr daemon logs          (log: %s)\n", filepath.Join(logDir, logFileName))
+	fmt.Printf("    unarr logs --boot          (startup + crashes: %s)\n", filepath.Join(logDir, bootLogFileName))
 	fmt.Println()
 
 	return nil
@@ -527,7 +576,12 @@ func resolveServiceData() (serviceData, error) {
 		BinPath: binPath,
 		User:    user,
 		Home:    home,
-		LogDir:  filepath.Join(home, ".local", "share", "unarr"),
+		// The SAME directory every reader and writer resolves — hardcoding the
+		// Linux XDG path here pointed the launchd plist at ~/.local/share/unarr
+		// on macOS while `unarr logs`, the janitor and `clean` all looked in
+		// ~/Library/Application Support/unarr: the log grew unsupervised in one
+		// place and "no daemon log yet" was printed about the other.
+		LogDir: config.DataDir(),
 	}, nil
 }
 

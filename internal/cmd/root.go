@@ -16,14 +16,15 @@ import (
 )
 
 var (
-	cfgFile    string
-	apiKeyFlag string
-	jsonOut    bool
-	noColor    bool
-	rootCmd    *cobra.Command
-	apiClient  *tc.Client
-	appCfg     config.Config
-	cfgLoaded  bool
+	cfgFile      string
+	apiKeyFlag   string
+	jsonOut      bool
+	noColor      bool
+	logLevelFlag string
+	rootCmd      *cobra.Command
+	apiClient    *tc.Client
+	appCfg       config.Config
+	cfgLoaded    bool
 )
 
 func init() {
@@ -76,6 +77,8 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 	rootCmd.PersistentFlags().StringVar(&apiKeyFlag, "api-key", "", "API key (overrides config file and env)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "output as JSON (for piping)")
 	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colored output")
+	rootCmd.PersistentFlags().StringVar(&logLevelFlag, "log-level", "",
+		"minimum log severity: debug, info, warn, error (overrides [daemon] log_level)")
 
 	// Getting Started
 	initCmd := newInitCmd()
@@ -130,6 +133,8 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 	probeHWAccelCmd.GroupID = "system"
 	cleanCmd := newCleanCmd()
 	cleanCmd.GroupID = "system"
+	logsCmd := newLogsCmd()
+	logsCmd.GroupID = "system"
 	libraryCmd := newLibraryCmd()
 	mirrorsCmd := newMirrorsCmd()
 	mirrorsCmd.GroupID = "system"
@@ -172,6 +177,7 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 		doctorCmd,
 		probeHWAccelCmd,
 		cleanCmd,
+		logsCmd,
 		libraryCmd,
 		mirrorsCmd,
 		selfUpdateCmd,

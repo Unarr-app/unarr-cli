@@ -163,6 +163,7 @@ unarr start
 | `unarr init` | First-time configuration wizard (API key, download dir, daemon) |
 | `unarr login` | Authenticate with your account (opens browser) |
 | `unarr config` | Edit all settings interactively (speed, organization, etc.) |
+| `unarr config check` | Validate `config.toml` — unknown keys (with suggestions) and out-of-range values; exits non-zero when anything is reported |
 | `unarr migrate` | Import settings and wanted list from Sonarr/Radarr/Prowlarr [pre-beta] |
 
 ### Search & Discovery
@@ -210,6 +211,7 @@ unarr start
 | `unarr stats` | Show catalog statistics |
 | `unarr doctor` | Diagnose configuration and connectivity |
 | `unarr mirrors` | Manage mirror failover list (list / update / test) |
+| `unarr logs` | Read the daemon log — `-f`, `--since`, `--level`, `--grep`, `-n` (alias: `unarr daemon logs`) |
 | `unarr clean` | Remove temporary files, logs, and cached data |
 | `unarr upgrade` | Update unarr to the latest version (alias: `unarr self-update`) |
 | `unarr version` | Show version info |
@@ -428,6 +430,68 @@ docker compose up -d
 Tags published: `latest`, `1.2`, `1.2.2`, ... — pin to a minor (`1.2`)
 for opt-in patch updates without surprises.
 
+## Logs
+
+```bash
+unarr logs                                  # last 50 lines
+unarr logs -f                               # follow
+unarr logs -n 200 --level warn              # only warnings and errors
+unarr logs --since 2h --grep 'usenet|nzb'   # last 2 hours, matching a regex
+unarr logs --since "2025-01-20 09:00" --level error
+unarr logs --boot                           # startup output — when it won't start
+unarr logs rotate                           # trim now, if rotation is on and over budget
+```
+
+`unarr daemon logs` is the same command (kept as an alias, `-f` / `-n`
+included). On Linux, where the systemd unit sends output to the journal, this
+streams from `journalctl --user -u unarr` instead of a file; everywhere else it
+reads `unarr.log` from the data directory and transparently continues into the
+rotated copies when the live file holds fewer lines than you asked for.
+
+Severity is inferred from the line itself (the daemon logs free-form text), so
+`--level` is a reading aid, not a guarantee. `--grep` is a case-insensitive
+regular expression. `--since` takes an age (`30m`, `2h`, `7d`, `1w`) or a stamp
+(`2025-01-20`, `2025-01-20 09:00`, `09:00` for today).
+
+**Two files.** A daemon started by a service launcher owns `unarr.log` and
+writes everything it logs there. The launcher itself captures a second, much
+smaller `unarr.boot.log`: the start banner, a fatal error from a start that
+never got going, a crash dump — output that never reaches the daemon's own log.
+`unarr logs --boot` reads it, and that is where to look when the daemon does not
+come up at all. On a systemd install there is no such file: the startup output
+is in the journal, so `unarr logs` already shows it and `--boot` says so.
+
+**Rotation is OPT-IN, and off by default** (`log_max_size_mb = 0`). Out of the
+box unarr never rotates anything: `unarr.log` and `unarr.boot.log` just grow.
+Bound them with `unarr clean`, or with an external `logrotate` — and if you use
+one, it must use `copytruncate`, since the daemon holds its descriptor for the
+whole run and has no reopen signal.
+
+Set `log_max_size_mb` to a number of MB to turn rotation on. `unarr.log` is then
+rotated once it reaches that size, keeping `log_max_files` copies (default 3),
+and `unarr.boot.log` gets its own fixed 2 MB cap with one rotated copy —
+independent of the size you set, but switched on by the same key. A running
+daemon rotates its own log by renaming it aside, so rotation does not wait for a
+restart; `unarr logs rotate` is for the case where the daemon is stopped, and it
+says so rather than doing nothing if a running daemon owns the file.
+
+**What you accept by turning it on.** Rotation is not a solved problem here, and
+this is why it does not ship on. Any second process holding the log can block
+the rename or the truncate — an open `unarr logs -f`, an antivirus scanner,
+OneDrive or Dropbox syncing the data directory, Windows Search. Windows is the
+strict case: a holder there can deny write access outright, so a rotation that
+cannot proceed is reported and the log keeps growing. Residual failure modes
+that remain even when it does proceed (a reader holding a rotated slot, two
+rotators racing over one staging file, a live-but-offline daemon losing its
+ownership claim) are listed under "Deuda abierta" in
+[`docs/plans/daemon-log-ownership.md`](docs/plans/daemon-log-ownership.md) —
+read it before enabling this on an install you care about. On Windows only, the
+boot log's trim is baked into the launcher script at install time, so re-run
+`unarr daemon install` after enabling rotation for that one to take effect.
+
+The global `--log-level` flag overrides `[daemon] log_level` for a single
+command.
+
 ## Clean
 
 Remove temporary files, logs, resume data, and other artifacts generated by unarr. Shows what will be removed and asks for confirmation before deleting.
@@ -439,7 +503,7 @@ unarr clean --yes      # Skip confirmation
 unarr clean --all      # Also remove the data directory
 ```
 
-**Cleans:** log files, daemon state, stale usenet resume files (> 7 days), stale replaced-file backups (> 7 days, kept by library upgrades), stream temp data, upgrade temp files, and stale atomic-write temps. Recent resume files are kept to preserve download progress for paused or interrupted downloads. Never removes your config file, downloaded media, or partial torrent/debrid downloads.
+**Cleans:** log files (including the rotated `unarr.log.1`, `.2`, … copies), daemon state, stale usenet resume files (> 7 days), stale replaced-file backups (> 7 days, kept by library upgrades), stream temp data, upgrade temp files, and stale atomic-write temps. Recent resume files are kept to preserve download progress for paused or interrupted downloads. Never removes your config file, downloaded media, or partial torrent/debrid downloads.
 
 ## Library clean (hygiene sweep)
 
@@ -608,9 +672,16 @@ remove_orphan_subtitles = true   # delete sidecars with no owning video (.unarr 
 prune_empty_dirs = true          # remove video-less dirs and media-named dirs
 
 [daemon]
-poll_interval = "30s"
-heartbeat_interval = "30s"
-auto_upgrade = true   # apply server-flagged upgrades in-place (since 0.9.6)
+auto_upgrade = true      # apply server-flagged upgrades in-place (since 0.9.6)
+status_interval = "3s"   # how often a running download reports progress
+
+# Log file (unarr.log in the data dir). Rotation is OPT-IN and off by default:
+# read the limitations in the "Logs" section above before turning it on. With 0
+# the log grows until `unarr clean` or an external logrotate trims it.
+log_max_size_mb = 0      # >0 = rotate unarr.log once it reaches this many MB; 0 = never rotate
+log_max_files = 3        # rotated copies to keep (unarr.log.1 … .3)
+log_level = "info"       # default minimum severity for `unarr logs`: debug|info|warn|error
+log_format = "text"      # `unarr logs` output: "text" (verbatim) or "json" (json-lines)
 
 [notifications]
 enabled = true
