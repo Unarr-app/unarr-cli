@@ -134,9 +134,33 @@ function SeedFile($path, $bytes) {
 # Launch the daemon EXACTLY the way the VBS shim does: one cmd.exe, the daemon
 # owning unarr.log through --log-file, cmd owning the boot log through ">>".
 # The handle semantics under test are cmd.exe's, so the wrapper must be real.
+# The command goes through a .cmd FILE, not through -ArgumentList.
+#
+# Passing the compound line as an argument does not work: Start-Process
+# re-quotes an argument containing spaces, and this one already contains its own
+# double quotes, so cmd.exe receives a mangled line and never opens the redirect
+# at all. The tell is unarr.boot.log MISSING rather than empty — `>>` creates the
+# file the moment cmd starts, even when the program it launches fails, so an
+# absent boot log means cmd never parsed the command. That is what made [2] and
+# [6] report "the daemon never started" while the product was fine; [4] passed
+# throughout because it invokes the real .vbs and never goes near this.
+#
+# A .cmd file removes the quoting layer entirely and keeps exactly the semantics
+# under test: cmd.exe owns the boot log through `>>`, the daemon owns unarr.log
+# through --log-file.
 function StartLikeShim {
-    $inner = '"' + "$WorkDir\unarr.exe" + '" start --log-file "' + $Log + '" >> "' + $Boot + '" 2>&1'
-    return Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $inner -PassThru -WindowStyle Hidden
+    $script = "$WorkDir\start-like-shim.cmd"
+    $line = '@"' + "$WorkDir\unarr.exe" + '" start --log-file "' + $Log + '" >> "' + $Boot + '" 2>&1'
+    [System.IO.File]::WriteAllText($script, "@echo off`r`n" + $line + "`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+    $p = Start-Process -FilePath $script -PassThru -WindowStyle Hidden
+    # Self-check: if the redirect never materialises, the harness is broken, not
+    # the product. Say so here rather than letting it surface as a product
+    # failure six assertions later.
+    if (-not (WaitFor { Test-Path $Boot } 10 "cmd.exe to open the boot-log redirect")) {
+        Say "  HARNESS WARNING: $Boot was not created — cmd.exe never opened the redirect"
+    }
+    return $p
 }
 
 Remove-Item $Out -ErrorAction SilentlyContinue
@@ -265,15 +289,20 @@ Check ((SizeOf $Log1) -ge $seeded) "the rotated slot holds the previous contents
 # The daemon must still be logging INTO the fresh file after the rename: a
 # rotation that leaves the daemon writing to a detached inode is silent death.
 #
-# The condition is the RUN MARKER, not a non-zero length. Length proves nothing
-# here: the seeded file is 2 x the budget, so "unarr.log is larger than 0 bytes"
-# is already true before the daemon is even launched, and this assertion used to
-# pass in a run where no rotation happened at all.
-$reopened = WaitFor {
-    ((Get-Content $Log -Raw -ErrorAction SilentlyContinue) -match 'starting \(pid')
-} 60 "the daemon to write its run marker into the fresh log"
-Check $reopened "the daemon keeps logging after the rotation (run marker present in the live file)"
-if (-not $reopened) { DumpDiag "[2] no run marker in the live log" }
+# The condition is a NON-EMPTY live log, and it is only meaningful because the
+# rotation above just emptied it. "larger than 0 bytes" against the SEEDED file
+# was the vacuous form - true before the daemon was even launched.
+#
+# The run marker is NOT in the live file, and looking for it there was wrong.
+# NewWriter seeds its counter from the file on disk and does not rotate up
+# front, so the marker is the write that CROSSES the budget: it lands in the
+# file being rotated away, and the fresh one starts empty. Assert it where it
+# actually is.
+$reopened = WaitFor { (SizeOf $Log) -gt 0 } 60 "the daemon to write into the fresh log"
+Check $reopened "the daemon keeps logging after the rotation (the emptied live file is filling again)"
+if (-not $reopened) { DumpDiag "[2] nothing written to the fresh log" }
+Check ((Get-Content $Log1 -Raw -ErrorAction SilentlyContinue) -match 'starting \(pid') `
+    "the run marker is in the rotated slot (it is the write that crossed the budget)"
 
 # --- 3. what bypasses the writer must land in the boot log ------------------
 Say "[3] the boot log collects what never reaches the daemon's own log"
@@ -342,9 +371,24 @@ $enc = New-Object System.Text.UTF8Encoding($false)
 SeedFile $Log (2 * $LogBudget)
 
 $seeded6 = SizeOf $Log
+
+# The blocker is a HANDLE, not `unarr logs -f`.
+#
+# The follower no longer blocks anything: measured here, the rename went
+# straight through with it running and the ring shifted normally. Whatever it
+# does now, it is not holding the file across the rotation, so it cannot stand
+# in for the case this section is about.
+#
+# FileShare Read|Write, so the DELETE bit is the only one withheld: the daemon
+# can still open the file for writing (its own share mode is Read|Write, and our
+# access is Read), and MoveFileEx is refused. That is the real-world shape -
+# an antivirus scanner, Windows Search, Notepad. Opened BEFORE the daemon so
+# there is no race against its first write, which is the one that rotates.
+$blocker = [System.IO.File]::Open($Log, [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    ([System.IO.FileShare]::Read -bor [System.IO.FileShare]::Write))
 $holder6 = StartLikeShim
-$follower = Start-Process -FilePath "$WorkDir\unarr.exe" -ArgumentList 'logs', '-f' -PassThru -WindowStyle Hidden
-Say "  daemon PID $($holder6.Id), follower (unarr logs -f) PID $($follower.Id)"
+Say "  daemon PID $($holder6.Id), blocking handle open on $Log (delete denied)"
 # Give the daemon time to write its run marker, hit the budget and fail the
 # rename several times over.
 Start-Sleep -Seconds 20
@@ -363,19 +407,43 @@ if (-not $attempted) { DumpDiag "[6] no rotation attempt to observe" }
 $slot1 = Get-Content $Log1 -Raw -ErrorAction SilentlyContinue
 $slot2 = Get-Content "$DataDir\unarr.log.2" -Raw -ErrorAction SilentlyContinue
 $slot3 = Get-Content "$DataDir\unarr.log.3" -Raw -ErrorAction SilentlyContinue
-Say "  slots after the blocked rotation: [1]=$slot1 [2]=$slot2 [3]=$slot3"
+# Elided: when a slot holds the seeded 2 MiB instead of its marker, printing it
+# whole puts two megabytes of 'A' in the result file.
+function Elide($s) {
+    if ($null -eq $s) { return '(absent)' }
+    if ($s.Length -le 40) { return $s }
+    return $s.Substring(0, 40) + "... ($($s.Length) chars)"
+}
+Say "  slots after the blocked rotation: [1]=$(Elide $slot1) [2]=$(Elide $slot2) [3]=$(Elide $slot3)"
 Check ($slot1 -eq 'HISTORY-SLOT-1') "unarr.log.1 still holds its history"
 Check ($slot2 -eq 'HISTORY-SLOT-2') "unarr.log.2 still holds its history"
 Check ($slot3 -eq 'HISTORY-SLOT-3') "unarr.log.3 still holds its history"
 Check (-not (Test-Path "$Log.rotating")) "no staging file was left behind"
 
-if (-not $follower.HasExited) { Stop-Process -Id $follower.Id -Force -ErrorAction SilentlyContinue }
+# Release the blocking handle. [7] is about the DAEMON's claim standing down an
+# external rotation, so nothing else may be holding the file by then.
+$blocker.Dispose()
 
 # --- 7. an external rotation stands down under a live owner -----------------
 # "unarr logs rotate" cannot copy-truncate a file the daemon owns: the probe it
 # used to rely on CANNOT see a Go owner (FILE_SHARE_WRITE, no lock), so the
 # answer has to come from the daemon's own claim in daemon.state.json.
 Say "[7] unarr logs rotate stands down while the daemon owns the log"
+# The stand-down is only meaningful with a live owner, and "no owner" and "the
+# owner was ignored" produce the same silence. Establish which one this is
+# BEFORE running the command.
+$stPath = "$DataDir\daemon.state.json"
+$ownerPid = -1
+if (Test-Path $stPath) {
+    $st = Get-Content $stPath -Raw | ConvertFrom-Json
+    if ($st.logFile) { $ownerPid = $st.pid }
+    Say "  claim in daemon.state.json: pid=$($st.pid) logFile=$($st.logFile)"
+} else {
+    Say "  no daemon.state.json - there is no claim to stand down for"
+}
+$ownerAlive = ($ownerPid -gt 0) -and (@(Get-Process -Id $ownerPid -ErrorAction SilentlyContinue).Count -eq 1)
+Check $ownerAlive "a live daemon is holding the claim (the precondition for everything below)"
+
 $sizeBefore = SizeOf $Log
 $rotOut = & "$WorkDir\unarr.exe" logs rotate 2>&1 | Out-String
 Say "  logs rotate said: $($rotOut.Trim())"
