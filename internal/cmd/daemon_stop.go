@@ -32,47 +32,75 @@ func runStop() error {
 	return stopDaemonByPID()
 }
 
-// stopDaemonByPID reads the state file and sends a graceful stop to the daemon PID.
-// Used as fallback on platforms without a service manager (and as Windows implementation).
+// stopDaemonByPID stops the daemon: intent first, then the supervisor, then the
+// PID. Used on platforms without a service manager — which is Windows, plus a
+// foreground daemon anywhere.
+//
+// The first two steps are UNCONDITIONAL, and that ordering is the fix for a
+// window measured on real Windows. `unarr stop` finds its target in the state
+// file, which is written during registration (seconds into startup) and survives
+// a crash — so between the shim relaunching a crashed daemon and that new daemon
+// registering, the file still names the previous, dead PID. Deciding what to do
+// from that file alone meant taking the "already dead" branch and killing
+// nothing while a live daemon carried on. Recording the intent and ending the
+// supervisor do not depend on the file being right, so they happen first and
+// always; the PID kill is then a best-effort extra, not the load-bearing step.
 func stopDaemonByPID() error {
+	// Record the intent BEFORE anything dies. On Windows this is the only thing
+	// that tells the launcher shim the exit was requested: taskkill /f gives a
+	// stopped daemon exactly the same exit status as one an AV killed, so without
+	// the marker the shim would relaunch it seconds after the user paused it —
+	// the "I pause it and it turns itself back on" bug. The next daemon start
+	// clears the marker, so it can never suppress a respawn after a LATER crash.
+	agent.WriteStopIntent()
+	// Then cut the supervisor. No-op off Windows (a real service manager already
+	// owns this); on Windows it ends the scheduled task, taking the whole
+	// wscript → cmd → unarr.exe tree with it regardless of what the state file
+	// claims. See stopSupervisor.
+	stopSupervisor()
+
 	state, err := agent.LoadState()
 	if err != nil {
 		if errors.Is(err, agent.ErrDaemonNotRunning) {
-			// Nothing to signal, but "stop" was still asked for, and on Windows the
-			// supervisor may be about to bring the daemon back. Record the intent so
-			// it does not.
-			agent.WriteStopIntent()
 			return err
 		}
 		return fmt.Errorf("read daemon state: %w", err)
 	}
-	if !agent.IsProcessAlive(state.PID) {
-		// Daemon already dead (crashed or fatal-exited) but left its state file
-		// behind. "Stopping" it should clean that up and succeed — this is the
-		// tray's Pause-after-crash path, not an error.
-		//
-		// The intent still has to be recorded: the process is gone, but the
-		// scheduled task that owns it is not, and a pending restart would undo the
-		// user's pause moments after they asked for it. Verified on real Windows —
-		// this branch is exactly the one a tray Pause hits after a crash.
-		agent.WriteStopIntent()
-		agent.RemoveState()
-		fmt.Println("  Daemon was not running — cleaned up stale state file.")
-		return nil
+	if agent.IsProcessAlive(state.PID) {
+		if err := killPID(state.PID); err != nil {
+			return err
+		}
+	} else {
+		// The state file outlived its daemon (a crash, or a respawn it had not
+		// caught up with). Not an error: the supervisor is already stopped and the
+		// stale file is about to be reaped, which is what the user asked for.
+		fmt.Println("  Daemon was not running under that PID — cleaning up.")
 	}
-	// Record the intent BEFORE the kill. On Windows this is the only thing that
-	// tells the launcher shim (and through it the scheduled task) that the exit
-	// about to happen was requested: taskkill /f gives a stopped daemon exactly
-	// the same exit status as one an AV killed, so without the marker the task
-	// would respawn the daemon a minute after the user paused it — the
-	// "I pause it and it turns itself back on" bug. The next daemon start clears
-	// the marker, so it can never suppress the respawn after a LATER crash.
-	agent.WriteStopIntent()
-	if err := killPID(state.PID); err != nil {
-		return err
-	}
-	reapStateAfterExit(state.PID)
+	// Reap whatever is left: the daemon the state file named, or the one the
+	// supervisor just took down under a different PID.
+	reapStoppedState()
 	return nil
+}
+
+// reapStoppedState removes the state file once the process it names is gone.
+//
+// Unlike reapStateAfterExit it is not told which PID to expect, because after a
+// supervisor stop we may not know it — the daemon that died can be a respawn the
+// state file had not caught up with. It re-reads the file every tick and only
+// removes it once THAT process is dead, so a daemon the user started again in
+// the meantime keeps its state instead of having it deleted out from under it.
+func reapStoppedState() {
+	for i := 0; i < 20; i++ { // up to ~10s for the tree to go down
+		st := agent.ReadState()
+		if st == nil {
+			return // already gone (clean shutdown reaped it)
+		}
+		if !agent.IsProcessAlive(st.PID) {
+			agent.RemoveState()
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // reapStateAfterExit waits briefly for the signaled daemon to exit, then

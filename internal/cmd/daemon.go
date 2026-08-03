@@ -1294,6 +1294,10 @@ func runDaemonStart() error {
 	// Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// Windows has no signals, so a stop there arrives as a file on disk instead.
+	// Watching it is what lets ANY running daemon be stopped — including one the
+	// state file has not caught up with after a respawn. See watchStopIntent.
+	go watchStopIntent(ctx, sigCh)
 
 	// Wait for signal or error
 	select {

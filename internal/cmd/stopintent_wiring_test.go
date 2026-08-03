@@ -28,34 +28,75 @@ func readSource(t *testing.T, name string) string {
 	return string(b)
 }
 
-// TestStopByPIDRecordsIntentBeforeKilling: on Windows the kill is taskkill /f,
-// which gives the daemon no chance to record anything itself. If the marker were
-// written after the kill (or not at all) the scheduled task would respawn the
-// agent a minute after the user paused it.
-func TestStopByPIDRecordsIntentBeforeKilling(t *testing.T) {
+// TestStopIsNotDecidedByTheStateFile pins the ordering that makes `unarr stop`
+// reliable, and the reason it has to be that way.
+//
+// Stop used to read the state file first and branch on it. That file is written
+// during registration — seconds into startup — and SURVIVES a crash, so between
+// the shim relaunching a crashed daemon and the new one registering it still
+// names the previous, dead PID. Stop then took the "already dead" path, killed
+// nothing, recorded nothing, and a live daemon carried on running (measured on
+// real Windows). The two steps that do not depend on that file being correct —
+// recording the intent, and ending the supervisor — must therefore come FIRST
+// and unconditionally; the PID kill is the best-effort extra afterwards.
+func TestStopIsNotDecidedByTheStateFile(t *testing.T) {
 	src := readSource(t, "daemon_stop.go")
+	body := src[strings.Index(src, "func stopDaemonByPID()"):]
+	body = body[:strings.Index(body, "\nfunc ")]
 
-	intent := strings.Index(src, "agent.WriteStopIntent()")
-	kill := strings.Index(src, "killPID(state.PID)")
-	if intent < 0 {
-		t.Fatal("stopDaemonByPID no longer records the stop intent — a tray pause would be respawned")
+	intent := strings.Index(body, "agent.WriteStopIntent()")
+	supervisor := strings.Index(body, "stopSupervisor()")
+	loadState := strings.Index(body, "agent.LoadState()")
+	kill := strings.Index(body, "killPID(state.PID)")
+
+	for name, idx := range map[string]int{
+		"agent.WriteStopIntent()": intent,
+		"stopSupervisor()":        supervisor,
+		"agent.LoadState()":       loadState,
+		"killPID(state.PID)":      kill,
+	} {
+		if idx < 0 {
+			t.Fatalf("stopDaemonByPID no longer calls %s; this guard needs updating", name)
+		}
 	}
-	if kill < 0 {
-		t.Fatal("stopDaemonByPID no longer kills by PID; this guard needs updating")
+	if intent > loadState {
+		t.Error("the stop intent must be recorded before the state file is even read — " +
+			"a stale file must not be able to skip it")
+	}
+	if supervisor > loadState {
+		t.Error("the supervisor must be stopped before the state file is read — " +
+			"ending the task is what stops a daemon the file does not know about")
 	}
 	if intent > kill {
 		t.Error("the stop intent must be recorded BEFORE the kill: taskkill /f leaves no window to record it after")
 	}
-	// Every exit from stopDaemonByPID must record it, not just the one that finds a
-	// live process. Real Windows caught this: after a crash the tray's Pause takes
-	// the "already dead" branch, which recorded nothing — so a pending restart
-	// would have undone the pause. `unarr stop` is a request about the FUTURE, not
-	// just about the process that happens to be alive right now.
-	body := src[strings.Index(src, "func stopDaemonByPID()"):]
-	body = body[:strings.Index(body, "\nfunc ")]
-	if n := strings.Count(body, "agent.WriteStopIntent()"); n < 3 {
-		t.Errorf("stopDaemonByPID records the stop intent on only %d of its 3 exit paths "+
-			"(no state file / stale state file / live process)", n)
+	// Recorded once, unconditionally. Branch-local copies are how the old version
+	// managed to miss a path.
+	if n := strings.Count(body, "agent.WriteStopIntent()"); n != 1 {
+		t.Errorf("stop intent recorded %d times; want exactly one unconditional call", n)
+	}
+}
+
+// TestStopSupervisorIsPlatformSplit: the escape hatch is Windows-only. On Linux
+// and macOS `unarr stop` already routes through the service manager, and running
+// schtasks there would be nonsense.
+func TestStopSupervisorIsPlatformSplit(t *testing.T) {
+	win := readSource(t, "supervisor_stop_windows.go")
+	other := readSource(t, "supervisor_stop_other.go")
+
+	if !strings.Contains(win, "//go:build windows") {
+		t.Error("supervisor_stop_windows.go is missing its build tag")
+	}
+	if !strings.Contains(other, "//go:build !windows") {
+		t.Error("supervisor_stop_other.go is missing its build tag")
+	}
+	if !strings.Contains(win, `"/end"`) || !strings.Contains(win, `"unarr"`) {
+		t.Errorf("the Windows stop no longer ends the scheduled task:\n%s", win)
+	}
+	// It must stay best-effort: a foreground daemon has no task, and schtasks
+	// erroring there is not a failure of "stop".
+	if !strings.Contains(win, "_ = cmd.Run()") {
+		t.Errorf("ending the task must be best-effort (no task / not installed is fine):\n%s", win)
 	}
 }
 
