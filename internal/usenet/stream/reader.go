@@ -32,21 +32,32 @@ const (
 // are yEnc-ENCODED sizes, ~3-7% larger than the decoded bytes, so on a 10 GB
 // release that is ~900 articles ≈ 670 MB of pure waste for a single tail seek —
 // with no player attached (the head/tail warm-up does exactly this seek).
-// relocateArticle now re-Locates after each Observe, which converges in 2 fetches,
-// so this cap only ever fires on a pathologically irregular posting: better to
-// fail the stream (the caller falls back to the batch download) than to silently
-// drain the Usenet account.
-const maxLocateFetches = 8
+// articleForOffset now re-Locates after each Observe and only accepts candidates
+// that move toward the target, which converges in ~2 fetches (5 measured on the
+// nastiest non-uniform fixture), so this cap only fires on a pathologically
+// irregular posting.
+//
+// Sized with room to spare, deliberately. Hitting it is NOT a graceful
+// degradation: during playback the error surfaces out of Reader.Read with
+// http.ServeContent already writing the response, so the video truncates
+// mid-stream — the fallback to a batch download only exists at plan time. The old
+// unbounded walk always landed eventually; a cap that is merely "usually enough"
+// would trade hundreds of wasted MB for dead playback. 16 articles is ~12 MB
+// worst case, still ~50x cheaper than the walk this replaced.
+const maxLocateFetches = 16
 
 // Readahead budget. Expressed in BYTES rather than a raw article count so the
 // buffer carried ahead of the read cursor stays bounded no matter how large the
 // poster's articles are, and so the cost is legible in the unit we are billed in.
 // Package vars (not consts) so a caller/test can retune without a rebuild.
 var (
-	// ReadaheadBytes is the cushion prefetched ahead of the read cursor. Small on
-	// purpose: bytes fetched ahead of a player that stops watching are billed and
-	// thrown away. ~8 MiB is several seconds of a 4K stream and comfortably covers
-	// the gap between two sequential http.ServeContent reads.
+	// ReadaheadBytes caps the cushion prefetched ahead of the read cursor. It is a
+	// CEILING, not the operating point: at the ~750 KB articles a typical posting
+	// uses, defaultReadaheadK (4 articles ≈ 3 MB) is what actually sizes the
+	// cushion and this never binds. It binds only on postings with unusually large
+	// articles, where a fixed article count would silently mean tens of MB
+	// prefetched ahead of a player that may stop watching — bytes we would be
+	// billed for and throw away.
 	ReadaheadBytes int64 = 8 << 20
 	// ReadaheadMaxArticles caps the prefetch fan-out regardless of ReadaheadBytes,
 	// so a posting with tiny articles cannot spawn hundreds of goroutines.
@@ -110,6 +121,10 @@ type Reader struct {
 
 // SetFetchBudget caps the NNTP bytes this reader may pull. Implements
 // BudgetedReader. Pass nil for unbounded (the default for live playback).
+//
+// Must be called before the first Read: from then on the prefetch goroutines read
+// r.budget, and this write is not synchronised with them. Every caller applies it
+// to a freshly opened reader, which is inside that window.
 func (r *Reader) SetFetchBudget(b *FetchBudget) { r.budget = b }
 
 // NewReader builds a Reader over f's articles. ix must be the index for f (built
@@ -258,9 +273,21 @@ func (r *Reader) articleForOffset(pos int64) (*yenc.Part, int, error) {
 // dir is classifyOffset's verdict for the part just fetched (-1: pos sits before
 // it, +1: at/after its end). It prefers a fresh Locate on the just-sharpened index
 // — the convergent path that collapses a far seek to ~2 fetches — and falls back
-// to a ±1 step only when Locate re-proposes a segment already tried.
+// to a ±1 step when Locate has nothing better to offer.
+//
+// The candidate must MOVE TOWARD pos. classifyOffset just proved, against the
+// article's real yEnc range, that pos lies on the `dir` side of `from`; a Locate
+// proposing the other side contradicts that hard evidence, so following it can
+// only spend a fetch without closing the distance.
+//
+// This is insurance, not a measured win: on every fixture here the walk costs the
+// same with it and without it, because a healthy index does not propose backwards
+// candidates. It is cheap, and it upgrades "the walk usually advances" to "the
+// walk cannot spend a fetch going the wrong way" — worth having on a loop whose
+// budget running out truncates someone's video.
 func (r *Reader) nextCandidate(pos int64, from, n, dir int, tried map[int]bool) (int, error) {
-	if seg, _, _, ok := r.ix.Locate(pos); ok && !tried[seg] {
+	if seg, _, _, ok := r.ix.Locate(pos); ok && !tried[seg] &&
+		((dir > 0 && seg > from) || (dir < 0 && seg < from)) {
 		return seg, nil
 	}
 	if dir < 0 {

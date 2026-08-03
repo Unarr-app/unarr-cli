@@ -73,10 +73,18 @@ type BudgetedReader interface {
 	SetFetchBudget(b *FetchBudget)
 }
 
-// ApplyFetchBudget caps rd's NNTP spend at b, reporting whether rd supported it.
-// A false return means the reader is not one of ours — the caller should treat
-// that as "cannot bound this, do not speculatively read".
+// ApplyFetchBudget caps rd's NNTP spend at b, reporting whether the spend is now
+// actually bounded. A false return means the caller must not speculatively read:
+// either rd is not one of ours, or b is nil.
+//
+// A nil budget means UNLIMITED (NewFetchBudget returns nil for a non-positive
+// size), so reporting success for it would turn every "refuse to read what I
+// cannot bound" guard into its exact opposite — one mistyped ceiling and the
+// warm-up drains the account instead of declining to run.
 func ApplyFetchBudget(rd any, b *FetchBudget) bool {
+	if b == nil {
+		return false
+	}
 	br, ok := rd.(BudgetedReader)
 	if !ok {
 		return false

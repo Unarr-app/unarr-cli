@@ -31,13 +31,14 @@ type rarVideoReader struct {
 }
 
 // SetFetchBudget caps the NNTP bytes this stream may pull across ALL its volumes.
-// Implements BudgetedReader. Applied to the already-open volume reader too, so it
-// takes effect immediately rather than at the next volume switch.
+// Implements BudgetedReader.
+//
+// Must be called before the first Read, like Reader.SetFetchBudget: after that,
+// prefetch goroutines are reading the budget field and this would be an unguarded
+// concurrent write. OpenVideo returns a reader with no volume open yet, so every
+// caller is already in that window.
 func (v *rarVideoReader) SetFetchBudget(b *FetchBudget) {
 	v.budget = b
-	if v.curReader != nil {
-		v.curReader.r.SetFetchBudget(b)
-	}
 }
 
 // Read serves bytes at the current position by locating the extent covering it,
