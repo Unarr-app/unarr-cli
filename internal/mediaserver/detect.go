@@ -264,7 +264,7 @@ func ParentDir(paths []string) string {
 	parent := filepath.Dir(paths[0])
 	for _, p := range paths[1:] {
 		d := filepath.Dir(p)
-		for parent != "/" && parent != "." {
+		for !isRootDir(parent) && parent != "." {
 			if d == parent || strings.HasPrefix(d, parent+string(filepath.Separator)) {
 				break
 			}
@@ -274,8 +274,13 @@ func ParentDir(paths []string) string {
 
 	// Don't return root or home as a suggestion
 	home, _ := os.UserHomeDir()
-	if parent == "/" || parent == "." || parent == home {
+	if isRootDir(parent) || parent == "." || parent == home {
 		return ""
 	}
 	return parent
 }
+
+// isRootDir reports whether p is its own parent, i.e. a filesystem root. The
+// walk-up loop above must stop there; comparing against a literal "/" hangs
+// forever on Windows, where roots are `C:\` or `\`.
+func isRootDir(p string) bool { return filepath.Dir(p) == p }

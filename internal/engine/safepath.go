@@ -25,9 +25,17 @@ func safePath(baseDir, untrusted string) (string, error) {
 		return "", fmt.Errorf("path traversal blocked: %q escapes %q", untrusted, baseDir)
 	}
 
-	// Resolve symlinks if the path already exists on disk
+	// Resolve symlinks if the path already exists on disk. The base is resolved
+	// too, so the comparison is like-for-like: a download dir that merely SITS
+	// behind a symlink (macOS /var → /private/var, Windows 8.3 short names) is
+	// mount indirection, not traversal. Only a target that escapes the RESOLVED
+	// base is a real escape.
 	if real, err := filepath.EvalSymlinks(resolved); err == nil {
-		if !isWithinDir(baseDir, real) {
+		base := baseDir
+		if realBase, err := filepath.EvalSymlinks(baseDir); err == nil {
+			base = realBase
+		}
+		if !isWithinDir(base, real) {
 			return "", fmt.Errorf("path traversal blocked: %q resolves outside %q via symlink", untrusted, baseDir)
 		}
 		return real, nil

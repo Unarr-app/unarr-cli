@@ -133,7 +133,10 @@ var ErrVPNTunnelDown = errors.New("VPN required: tunnel went down mid-download �
 // TorrentDownloader downloads torrents via BitTorrent P2P.
 type TorrentDownloader struct {
 	client *torrent.Client
-	cfg    TorrentConfig
+	// store is the DefaultStorage impl. torrent.Client.Close() does not close it,
+	// so Shutdown must — see NewTorrentDownloader.
+	store storage.ClientImplCloser
+	cfg   TorrentConfig
 
 	activeMu sync.Mutex
 	active   map[string]*torrent.Torrent // taskID -> torrent handle
@@ -195,19 +198,26 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	// When PieceCompletionDir is set (daemon always passes the agent state dir),
 	// keep the piece-completion SQLite DB off the download dir so it never lands
 	// on NFS/SMB where SQLite's file locking times out and emits a warning.
+	//
+	// The storage impl is kept so Shutdown can close it: torrent.Client.Close()
+	// closes torrents and peers but NOT DefaultStorage, so the piece-completion DB
+	// handle would leak for the process's life — on Windows that keeps `.torrent.db`
+	// locked and the directory undeletable.
+	var store storage.ClientImplCloser
 	if cfg.PieceCompletionDir != "" {
 		if mkErr := os.MkdirAll(cfg.PieceCompletionDir, 0o755); mkErr != nil {
 			log.Printf("[torrent] piece-completion dir create failed (%v), DB stays in download dir", mkErr)
-			tcfg.DefaultStorage = storage.NewMMap(cfg.DataDir)
+			store = storage.NewMMap(cfg.DataDir)
 		} else if pc, pcErr := storage.NewDefaultPieceCompletionForDir(cfg.PieceCompletionDir); pcErr != nil {
 			log.Printf("[torrent] piece-completion db in %q failed (%v), falling back to download dir", cfg.PieceCompletionDir, pcErr)
-			tcfg.DefaultStorage = storage.NewMMap(cfg.DataDir)
+			store = storage.NewMMap(cfg.DataDir)
 		} else {
-			tcfg.DefaultStorage = storage.NewMMapWithCompletion(cfg.DataDir, pc)
+			store = storage.NewMMapWithCompletion(cfg.DataDir, pc)
 		}
 	} else {
-		tcfg.DefaultStorage = storage.NewMMap(cfg.DataDir)
+		store = storage.NewMMap(cfg.DataDir)
 	}
+	tcfg.DefaultStorage = store
 
 	// Fixed port for incoming peer connections (enables UPnP port mapping).
 	// With ListenPort=0, only ~30% of peers can connect to us.
@@ -346,6 +356,7 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	seedCtx, seedCancel := context.WithCancel(context.Background())
 	return &TorrentDownloader{
 		client:            client,
+		store:             store,
 		cfg:               cfg,
 		active:            make(map[string]*torrent.Torrent),
 		seedCtx:           seedCtx,
@@ -868,6 +879,15 @@ func (d *TorrentDownloader) Shutdown(ctx context.Context) error {
 	d.activeMu.Unlock()
 
 	errs := d.client.Close()
+
+	// Close the storage AFTER the client: the piece-completion DB is written on
+	// torrent drop, and the client never closes DefaultStorage itself.
+	if d.store != nil {
+		if err := d.store.Close(); err != nil {
+			log.Printf("[torrent] close storage: %v", err)
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("close client: %v", errs[0])
 	}

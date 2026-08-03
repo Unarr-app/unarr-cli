@@ -95,7 +95,12 @@ func deleteOne(filePath string, scanPaths []string) error {
 	}
 
 	// Security: resolved file must be within one of the configured scan paths.
-	if !isWithinScanPaths(real, scanPaths) {
+	// The roots are resolved too so the comparison is like-for-like: a scan path
+	// that merely SITS behind a symlink (macOS /var → /private/var, Windows 8.3
+	// short names) is mount indirection, not an escape. Same rule as
+	// confinedForRemoval in reconcile_errors.go.
+	roots := resolvedRoots(scanPaths)
+	if !isWithinScanPaths(real, roots) {
 		return fmt.Errorf("path %q (resolved: %q) is outside all configured scan paths — refusing to delete", clean, real)
 	}
 
@@ -110,8 +115,9 @@ func deleteOne(filePath string, scanPaths []string) error {
 	// dead metadata for a video that's gone.
 	deleteSidecars(real)
 
-	// Clean up empty parent directories, stopping at the scan path root.
-	pruneEmptyDirs(filepath.Dir(real), scanPaths)
+	// Clean up empty parent directories, stopping at the scan path root. `real` is
+	// resolved, so the roots must be too or the walk stops on the first comparison.
+	pruneEmptyDirs(filepath.Dir(real), roots)
 
 	return nil
 }
