@@ -52,8 +52,10 @@ func newReaderVolume(ctx context.Context, fetcher ArticleFetcher, f nzb.File, bu
 // is ~300 MB of billed Usenet traffic burned just to CLASSIFY the release — before
 // anyone has pressed play, and even if the release then turns out not to be
 // streamable at all. Playback keeps its cushion via newReaderVolume.
-func newProbeVolume(ctx context.Context, fetcher ArticleFetcher, f nzb.File) (*readerVolume, error) {
-	return openReaderVolume(ctx, fetcher, f, false, nil)
+// budget bounds the whole probe (shared across every volume reader it opens), so
+// classifying a release cannot walk the set without a ceiling.
+func newProbeVolume(ctx context.Context, fetcher ArticleFetcher, f nzb.File, budget *FetchBudget) (*readerVolume, error) {
+	return openReaderVolume(ctx, fetcher, f, false, budget)
 }
 
 // openReaderVolume is the shared constructor behind newReaderVolume /

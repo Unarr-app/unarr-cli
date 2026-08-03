@@ -17,6 +17,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -216,7 +218,7 @@ func TestIdleReaderDropsQueuedPrefetch(t *testing.T) {
 	r.mu.Unlock()
 
 	before := s.BodyCalls()
-	r.prefetch(10, r.ix.Segment(10).MessageID)
+	r.prefetch(10, r.ix.Segment(10).MessageID, r.ix.Segment(10).Bytes)
 	r.wg.Wait()
 
 	if got := s.BodyCalls() - before; got != 0 {
@@ -227,7 +229,7 @@ func TestIdleReaderDropsQueuedPrefetch(t *testing.T) {
 	r.mu.Lock()
 	r.lastRead = time.Now()
 	r.mu.Unlock()
-	r.prefetch(11, r.ix.Segment(11).MessageID)
+	r.prefetch(11, r.ix.Segment(11).MessageID, r.ix.Segment(11).Bytes)
 	r.wg.Wait()
 	if got := s.BodyCalls() - before; got != 1 {
 		t.Fatalf("an ACTIVE reader issued %d prefetch fetch(es), want 1 — playback must keep its cushion", got)
@@ -453,7 +455,146 @@ func TestLocateConvergesOnNonUniformPostings(t *testing.T) {
 	}
 }
 
+// TestProbeStopsAtItsBudgetAndFallsBack pins that classifying a release cannot
+// walk it without a ceiling.
+//
+// The probe is the most speculative traffic this path issues: it runs before
+// anything is known to be playable, with no player attached, fanned out across
+// the pool. Its normal cost (one article per volume) is inherent and stays; what
+// must not be open-ended is the tail — a container whose headers straddle
+// articles, or an NZB whose declared sizes bear no relation to what arrives.
+//
+// Running out must land on the ordinary not-streamable path (the batch download),
+// never a hang or a hard fault, so a bounded probe degrades exactly like an
+// unreadable header does.
+func TestProbeStopsAtItsBudgetAndFallsBack(t *testing.T) {
+	const volSize, partSize = 6000, 400
+	content := patternBytes(60_000)
+	n, articles := nntptest.BuildRarStore("show.s01e01.mkv", content, volSize, partSize)
+
+	s := nntptest.NewFakeServer(t)
+	s.AddArticles(articles)
+	c := dialFake(t, s)
+
+	volumes := n.RarFiles()
+	// An NZB that under-declares its articles: the budget is derived from the
+	// declared sizes, the bytes that actually arrive are the real ones. One
+	// article's worth of real data therefore blows a budget built from lies.
+	for i := range volumes {
+		for j := range volumes[i].Segments {
+			volumes[i].Segments[j].Bytes = 1
+		}
+	}
+
+	before := s.BodyCalls()
+	_, err := Probe(context.Background(), c, volumes)
+	cost := s.BodyCalls() - before
+
+	if err == nil {
+		t.Fatalf("Probe succeeded against a budget of %d bytes for %d volumes — it is not bounded",
+			probeBudget(volumes).Spent(), len(volumes))
+	}
+	if !errors.Is(err, ErrNotStreamable) {
+		t.Fatalf("Probe failed with %v, want a not-streamable outcome so the caller falls back to batch", err)
+	}
+	if cost >= len(volumes) {
+		t.Errorf("probe spent %d fetches over %d volumes despite an exhausted budget — it kept walking",
+			cost, len(volumes))
+	}
+	t.Logf("exhausted probe stopped after %d fetches over %d volumes: %v", cost, len(volumes), err)
+}
+
+// TestBudgetReservesBeforeTheWire pins that the ceiling holds when several
+// fetches race, which is the only way it is ever used: head and tail warm-up
+// goroutines plus a read-ahead fan-out all draw on ONE pot.
+//
+// Checking "is there room?" and debiting after the article lands is not a
+// ceiling. Every racer passes the check before the first debit arrives, so N
+// concurrent fetches all proceed against a budget with room for a few — the
+// overspend scales with the fan-out, not with the cap. Claiming the bytes up
+// front is what makes the (N+1)th fetch see the first N.
+func TestBudgetReservesBeforeTheWire(t *testing.T) {
+	const (
+		parts      = 32
+		partSize   = 4096
+		concurrent = 12
+		roomFor    = 3 // articles the budget can afford
+	)
+	content := patternBytes(parts * partSize)
+	n, articles := nntptest.BuildDirectFile("movie.mkv", content, partSize)
+	f := n.Files[0]
+
+	// Every fetch parks inside Body until released, so all `concurrent` callers
+	// are in flight at once — the exact window a check-then-debit budget misses.
+	g := &gatedFetcher{bodies: articles, release: make(chan struct{})}
+
+	ix := NewOffsetIndex(f)
+	budget := NewFetchBudget(int64(roomFor) * ix.Segment(0).Bytes)
+	r := NewReader(context.Background(), g, f, ix)
+	r.retryBackoff = time.Millisecond
+	r.SetFetchBudget(budget)
+	defer func() { _ = r.Close() }()
+
+	var wg sync.WaitGroup
+	var refused atomic.Int64
+	for i := 0; i < concurrent; i++ {
+		wg.Add(1)
+		go func(seg int) {
+			defer wg.Done()
+			s := ix.Segment(seg)
+			if _, err := r.fetchDecodeRetry(s.MessageID, s.Bytes); err != nil {
+				refused.Add(1)
+			}
+		}(i)
+	}
+
+	// Let everyone either enter Body or be refused, then release the parked ones.
+	deadline := time.After(5 * time.Second)
+	for int64(g.entered())+refused.Load() < concurrent {
+		select {
+		case <-deadline:
+			t.Fatalf("only %d entered + %d refused of %d after 5s",
+				g.entered(), refused.Load(), concurrent)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	close(g.release)
+	wg.Wait()
+
+	cap := int64(roomFor) * ix.Segment(0).Bytes
+	if got := budget.Spent(); got > cap {
+		t.Fatalf("budget of %d bytes (%d articles) spent %d with %d concurrent fetches — "+
+			"the ceiling is being checked, not reserved", cap, roomFor, got, concurrent)
+	}
+	if g.entered() > roomFor {
+		t.Errorf("%d fetches reached the wire against a %d-article budget", g.entered(), roomFor)
+	}
+	t.Logf("%d concurrent fetches against a %d-article budget: %d reached the wire, %d spent of %d",
+		concurrent, roomFor, g.entered(), budget.Spent(), cap)
+}
+
 // --- helpers ---
+
+// gatedFetcher parks every Body call until release is closed, so a test can hold
+// N fetches in flight simultaneously.
+type gatedFetcher struct {
+	bodies  map[string][]byte
+	release chan struct{}
+	n       atomic.Int64
+}
+
+func (g *gatedFetcher) Body(ctx context.Context, messageID string) ([]byte, error) {
+	g.n.Add(1)
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return g.bodies[messageID], nil
+}
+
+func (g *gatedFetcher) entered() int { return int(g.n.Load()) }
 
 func mustFile(t *testing.T, name string, content []byte, partSize int) nzb.File {
 	t.Helper()

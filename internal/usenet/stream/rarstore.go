@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"sort"
@@ -120,6 +121,52 @@ func Probe(ctx context.Context, fetcher ArticleFetcher, rarFiles []nzb.File) (*R
 	}, nil
 }
 
+// probeArticlesPerVolume is how many articles the header probe may spend on a
+// volume before the release is treated as unclassifiable. Measured cost is 1.1
+// (one article, occasionally a second when a header straddles the boundary), so
+// this is a wide guard against a pathological container, not a working limit.
+const probeArticlesPerVolume = 3
+
+// probeBudget caps what classifying a release may cost in NNTP bytes.
+//
+// The probe is the most speculative traffic the stream path issues: it runs
+// before anything is known to be playable, with no player attached, fanned out
+// across up to ten connections — and on a 99-volume release its NORMAL cost is
+// already ~84 MB. That floor is inherent (each volume's headers must be read to
+// map the video across the set) and is not what this bounds. What it bounds is
+// the tail: a container whose headers straddle articles, or a hostile NZB, could
+// otherwise walk volumes without any ceiling at all.
+//
+// Sized from the posting's own article size so it scales with the release rather
+// than a guessed absolute. Running out yields a not-streamable outcome, i.e. the
+// batch download — the same fallback as an unreadable header.
+func probeBudget(volumes []nzb.File) *FetchBudget {
+	var total int64
+	for _, v := range volumes {
+		for _, s := range v.Segments {
+			if s.Bytes > 0 {
+				total += s.Bytes
+				break // one representative article per volume
+			}
+		}
+	}
+	return NewFetchBudget(total * probeArticlesPerVolume)
+}
+
+// probeError turns whatever went wrong probing one volume into a not-streamable
+// outcome, so the caller falls back to the batch download instead of surfacing a
+// hard fault. An error that already carries a reason keeps it.
+func probeError(f nzb.File, err error) error {
+	var nse *NotStreamableError
+	if errors.As(err, &nse) {
+		return err
+	}
+	if errors.Is(err, ErrFetchBudgetExhausted) {
+		return notStreamable("header probe exceeded its article budget at volume " + f.Filename())
+	}
+	return notStreamable("volume " + f.Filename() + ": " + err.Error())
+}
+
 // probeVolumes parses every volume's headers CONCURRENTLY (bounded by the NNTP
 // connection pool) and returns all file chunks in DETERMINISTIC volume order.
 //
@@ -133,6 +180,7 @@ func Probe(ctx context.Context, fetcher ArticleFetcher, rarFiles []nzb.File) (*R
 // rest — a not-streamable / faulty volume still fails fast.
 func probeVolumes(ctx context.Context, fetcher ArticleFetcher, volumes []nzb.File) ([]rarChunk, error) {
 	limit := probeConcurrency(fetcher, len(volumes))
+	budget := probeBudget(volumes)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -168,15 +216,15 @@ func probeVolumes(ctx context.Context, fetcher ArticleFetcher, volumes []nzb.Fil
 		go func(i int, f nzb.File) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			vs, err := newProbeVolume(ctx, fetcher, f)
+			vs, err := newProbeVolume(ctx, fetcher, f, budget)
 			if err != nil {
-				setErr(notStreamable("open volume " + f.Filename() + ": " + err.Error()))
+				setErr(probeError(f, err))
 				return
 			}
 			chunks, perr := parseVolume(vs, i)
 			_ = vs.close()
 			if perr != nil {
-				setErr(perr)
+				setErr(probeError(f, perr))
 				return
 			}
 			perVol[i] = chunks

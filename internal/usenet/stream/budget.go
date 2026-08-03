@@ -40,21 +40,53 @@ func NewFetchBudget(maxBytes int64) *FetchBudget {
 	return b
 }
 
-// charge debits n bytes and reports whether the budget still had room BEFORE the
-// debit. It always records the spend, so Spent stays truthful about what was
-// actually pulled even on the article that crossed the line. A nil budget is
-// unbounded and always allows.
-func (b *FetchBudget) charge(n int64) bool {
+// reserve claims est bytes BEFORE they are pulled, reporting whether the budget
+// had room. Pair every true with exactly one settle.
+//
+// Reserving, not just charging afterwards, is what makes the ceiling hold under
+// concurrency. Several readers draw on one pot (head + tail warm-up, read-ahead
+// goroutines, successive volume readers), so a "check, fetch, then debit" order
+// lets every one of them pass the check before the first debit lands and blow
+// through the cap together — limiting is not reserving. Claiming up front means
+// the Nth concurrent fetch sees the other N-1 already accounted for.
+//
+// est is the NZB's encoded Segment.Bytes, which runs 3-7% ABOVE the decoded
+// bytes: over-reserving is the safe direction, and settle gives back the excess.
+// A non-positive est carries no information, so it degrades to the old check —
+// still bounded, just without the concurrency guarantee.
+func (b *FetchBudget) reserve(est int64) bool {
 	if b == nil {
 		return true
 	}
-	b.spent.Add(n)
-	return b.remaining.Add(-n) > -n // true iff remaining was > 0 before the debit
+	if est <= 0 {
+		return b.remaining.Load() > 0
+	}
+	if b.remaining.Add(-est) < 0 {
+		b.remaining.Add(est) // put it back: this fetch is not happening
+		return false
+	}
+	return true
 }
 
-// exhausted reports whether the budget is used up. A nil budget never is.
-func (b *FetchBudget) exhausted() bool {
-	return b != nil && b.remaining.Load() <= 0
+// settle reconciles a reservation with what actually came off the wire: the
+// difference goes back to the pot (or is taken from it, if the article was
+// bigger than advertised) and Spent records the real bytes.
+//
+// actual is 0 when the fetch failed, which refunds the whole reservation — a
+// failed Body call transferred nothing we can account for, matching how spend was
+// recorded before reservations existed.
+func (b *FetchBudget) settle(reserved, actual int64) {
+	if b == nil {
+		return
+	}
+	if actual > 0 {
+		b.spent.Add(actual)
+	}
+	if reserved > 0 {
+		b.remaining.Add(reserved - actual)
+	} else {
+		b.remaining.Add(-actual) // nothing was reserved: debit what we pulled
+	}
 }
 
 // Spent returns the bytes charged against this budget so far — the number to log

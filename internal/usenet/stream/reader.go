@@ -345,7 +345,10 @@ func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
 	}
 	r.mu.Unlock()
 
-	part, err := r.fetchDecodeRetry(r.ix.Segment(segIdx).MessageID)
+	seg := r.ix.Segment(segIdx)
+	// Segment.Bytes is the ENCODED size — what will actually cross the wire, and
+	// what the budget must be asked for before the fetch starts.
+	part, err := r.fetchDecodeRetry(seg.MessageID, seg.Bytes)
 	if err != nil {
 		return nil, err
 	}
@@ -359,14 +362,7 @@ func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
 // failures (a not-yet-propagated article, a dropped connection, a corrupt body)
 // up to maxAttempts with a bounded backoff. Every failure is logged; the final
 // error is wrapped so the caller can degrade cleanly rather than hang.
-func (r *Reader) fetchDecodeRetry(messageID string) (*yenc.Part, error) {
-	// Cost ceiling BEFORE the wire: a speculative reader (cold-buffer warm-up, no
-	// player attached) stops pulling once it has spent its byte budget, however
-	// much wall clock is left. Usenet is billed by volume, so this is the bound
-	// that actually protects the account.
-	if r.budget.exhausted() {
-		return nil, ErrFetchBudgetExhausted
-	}
+func (r *Reader) fetchDecodeRetry(messageID string, estBytes int64) (*yenc.Part, error) {
 	var lastErr error
 	for attempt := 0; attempt < r.maxAttempts; attempt++ {
 		if attempt > 0 {
@@ -376,11 +372,20 @@ func (r *Reader) fetchDecodeRetry(messageID string) (*yenc.Part, error) {
 				return nil, r.ctx.Err()
 			}
 		}
+		// Cost ceiling BEFORE the wire, claimed rather than merely checked: a
+		// speculative reader (cold-buffer warm-up, no player attached) stops pulling
+		// once its byte budget is spoken for, however much wall clock is left.
+		// Usenet is billed by volume, so this is the bound that protects the
+		// account — and it is per ATTEMPT, because a retry re-transfers the article.
+		if !r.budget.reserve(estBytes) {
+			return nil, ErrFetchBudgetExhausted
+		}
 		raw, err := r.fetcher.Body(r.ctx, messageID)
+		// Reconcile against what came off the wire, whether or not it decodes — a
+		// corrupt body was still transferred and still billed. A failed Body
+		// transferred nothing we can account for and refunds the reservation.
+		r.budget.settle(estBytes, int64(len(raw)))
 		if err == nil {
-			// Charge what came off the wire, whether or not it decodes — a corrupt
-			// body was still transferred and still billed.
-			r.budget.charge(int64(len(raw)))
 			var part *yenc.Part
 			if part, err = yenc.DecodeBytes(raw); err == nil {
 				return part, nil
@@ -400,8 +405,8 @@ func (r *Reader) fetchDecodeRetry(messageID string) (*yenc.Part, error) {
 // converted to an article count using the size of the article just served, then
 // clamped by readaheadK/ReadaheadMaxArticles — so the cushion carried ahead of the
 // cursor stays bounded in the unit we are billed in, whatever the poster's article
-// size. Message-ids are resolved here on the read goroutine; the spawned
-// goroutines never touch the index.
+// size. Message-ids AND size estimates are resolved here on the read goroutine;
+// the spawned goroutines never touch the index.
 func (r *Reader) triggerReadahead(fromSeg, articleBytes int) {
 	k := r.readaheadWindow(articleBytes)
 	if k <= 0 {
@@ -409,7 +414,8 @@ func (r *Reader) triggerReadahead(fromSeg, articleBytes int) {
 	}
 	n := r.ix.SegmentCount()
 	for j := fromSeg + 1; j <= fromSeg+k && j < n; j++ {
-		r.prefetch(j, r.ix.Segment(j).MessageID)
+		seg := r.ix.Segment(j)
+		r.prefetch(j, seg.MessageID, seg.Bytes)
 	}
 }
 
@@ -435,7 +441,7 @@ func (r *Reader) readaheadWindow(articleBytes int) int {
 
 // prefetch fetches segment segIdx in the background unless it is already cached
 // or already being fetched. Dedup + cache writes happen under r.mu.
-func (r *Reader) prefetch(segIdx int, messageID string) {
+func (r *Reader) prefetch(segIdx int, messageID string, estBytes int64) {
 	r.mu.Lock()
 	if r.cache.has(segIdx) || r.inflight[segIdx] {
 		r.mu.Unlock()
@@ -458,7 +464,7 @@ func (r *Reader) prefetch(segIdx int, messageID string) {
 			r.mu.Unlock()
 			return
 		}
-		part, err := r.fetchDecodeRetry(messageID)
+		part, err := r.fetchDecodeRetry(messageID, estBytes)
 		r.mu.Lock()
 		delete(r.inflight, segIdx)
 		if err == nil {
