@@ -22,6 +22,53 @@ const (
 	defaultRetryBackoff = 500 * time.Millisecond
 )
 
+// maxLocateFetches bounds how many articles ONE Read may fetch while homing in
+// on the article that covers the read position. Every Usenet article we pull is
+// BILLED BY VOLUME, so the locate probe must never be allowed to walk the file.
+//
+// Before this cap the probe stepped one segment at a time from the OffsetIndex's
+// *estimated* position and never re-Locate()d after Observe(), so a Seek far into
+// the file cost (estimate error) / (article size) fetches: the NZB's Segment.Bytes
+// are yEnc-ENCODED sizes, ~3-7% larger than the decoded bytes, so on a 10 GB
+// release that is ~900 articles ≈ 670 MB of pure waste for a single tail seek —
+// with no player attached (the head/tail warm-up does exactly this seek).
+// articleForOffset now re-Locates after each Observe and only accepts candidates
+// that move toward the target, which converges in ~2 fetches (5 measured on the
+// nastiest non-uniform fixture), so this cap only fires on a pathologically
+// irregular posting.
+//
+// Sized with room to spare, deliberately. Hitting it is NOT a graceful
+// degradation: during playback the error surfaces out of Reader.Read with
+// http.ServeContent already writing the response, so the video truncates
+// mid-stream — the fallback to a batch download only exists at plan time. The old
+// unbounded walk always landed eventually; a cap that is merely "usually enough"
+// would trade hundreds of wasted MB for dead playback. 16 articles is ~12 MB
+// worst case, still ~50x cheaper than the walk this replaced.
+const maxLocateFetches = 16
+
+// Readahead budget. Expressed in BYTES rather than a raw article count so the
+// buffer carried ahead of the read cursor stays bounded no matter how large the
+// poster's articles are, and so the cost is legible in the unit we are billed in.
+// Package vars (not consts) so a caller/test can retune without a rebuild.
+var (
+	// ReadaheadBytes caps the cushion prefetched ahead of the read cursor. It is a
+	// CEILING, not the operating point: at the ~750 KB articles a typical posting
+	// uses, defaultReadaheadK (4 articles ≈ 3 MB) is what actually sizes the
+	// cushion and this never binds. It binds only on postings with unusually large
+	// articles, where a fixed article count would silently mean tens of MB
+	// prefetched ahead of a player that may stop watching — bytes we would be
+	// billed for and throw away.
+	ReadaheadBytes int64 = 8 << 20
+	// ReadaheadMaxArticles caps the prefetch fan-out regardless of ReadaheadBytes,
+	// so a posting with tiny articles cannot spawn hundreds of goroutines.
+	ReadaheadMaxArticles = 8
+	// ReadaheadIdleWindow is how long after the last Read a queued prefetch stays
+	// worth issuing. A prefetch goroutine parked on the NNTP connection pool while
+	// the consumer disconnects would otherwise still pull (and bill) its article;
+	// past this window it is dropped instead. "Cease in seconds", not in minutes.
+	ReadaheadIdleWindow = 2 * time.Second
+)
+
 // ArticleFetcher fetches a raw (yEnc) article body by message-id. *nntp.Client
 // satisfies it; injecting the interface keeps the Reader testable against the
 // in-memory fake server with no real network.
@@ -54,15 +101,31 @@ type Reader struct {
 
 	pos int64 // logical read position (moved by Seek, advanced by Read)
 
-	mu       sync.Mutex     // guards cache + inflight
+	mu       sync.Mutex     // guards cache + inflight + lastRead
 	cache    *articleCache  // decoded articles by segment index
 	inflight map[int]bool   // segments a read-ahead goroutine is currently fetching
 	wg       sync.WaitGroup // tracks read-ahead goroutines (drained by Close)
+	lastRead time.Time      // when the consumer last called Read (gates prefetch)
 
-	readaheadK   int
-	maxAttempts  int
-	retryBackoff time.Duration
+	readaheadK     int
+	readaheadBytes int64
+	idleWindow     time.Duration
+	maxAttempts    int
+	retryBackoff   time.Duration
+
+	// budget, when set, is a hard ceiling on the NNTP bytes this reader may pull.
+	// Used by speculative reads that run with NO player attached (the cold-buffer
+	// warm-up); nil for live playback. Shared by pointer across readers.
+	budget *FetchBudget
 }
+
+// SetFetchBudget caps the NNTP bytes this reader may pull. Implements
+// BudgetedReader. Pass nil for unbounded (the default for live playback).
+//
+// Must be called before the first Read: from then on the prefetch goroutines read
+// r.budget, and this write is not synchronised with them. Every caller applies it
+// to a freshly opened reader, which is inside that window.
+func (r *Reader) SetFetchBudget(b *FetchBudget) { r.budget = b }
 
 // NewReader builds a Reader over f's articles. ix must be the index for f (built
 // with NewOffsetIndex(f)); if nil, one is constructed so callers that only have
@@ -74,17 +137,27 @@ func NewReader(ctx context.Context, fetcher ArticleFetcher, f nzb.File, ix *Offs
 	}
 	cctx, cancel := context.WithCancel(ctx)
 	return &Reader{
-		ctx:          cctx,
-		cancel:       cancel,
-		fetcher:      fetcher,
-		ix:           ix,
-		cache:        newArticleCache(defaultCacheCap),
-		inflight:     make(map[int]bool),
-		readaheadK:   defaultReadaheadK,
-		maxAttempts:  defaultMaxAttempts,
-		retryBackoff: defaultRetryBackoff,
+		ctx:            cctx,
+		cancel:         cancel,
+		fetcher:        fetcher,
+		ix:             ix,
+		cache:          newArticleCache(defaultCacheCap),
+		inflight:       make(map[int]bool),
+		lastRead:       time.Now(),
+		readaheadK:     defaultReadaheadK,
+		readaheadBytes: ReadaheadBytes,
+		idleWindow:     ReadaheadIdleWindow,
+		maxAttempts:    defaultMaxAttempts,
+		retryBackoff:   defaultRetryBackoff,
 	}
 }
+
+// DisableReadahead turns off the prefetch cushion for a Reader that does small
+// RANDOM reads rather than sequential playback — the RAR header probe, which
+// reads a few hundred bytes at the front of each volume. Prefetching 4 articles
+// (~3 MB) per volume there is pure billed waste: on a 99-volume release the probe
+// alone pulled ~300 MB of articles the parser never looks at.
+func (r *Reader) DisableReadahead() { r.readaheadK = 0 }
 
 // Read serves bytes from the current position, fetching (and decoding) exactly
 // the article that covers it. It returns io.EOF once the position reaches the
@@ -109,7 +182,10 @@ func (r *Reader) Read(p []byte) (int, error) {
 	}
 	n := copy(p, part.Data[off:])
 	r.pos += int64(n)
-	r.triggerReadahead(segIdx)
+	r.mu.Lock()
+	r.lastRead = time.Now()
+	r.mu.Unlock()
+	r.triggerReadahead(segIdx, len(part.Data))
 	return n, nil
 }
 
@@ -150,10 +226,14 @@ func (r *Reader) Close() error {
 
 // articleForOffset returns the decoded part whose EXACT byte range covers pos,
 // plus its segment index. It starts from the index's (possibly estimated) guess
-// and probes forward/back one segment at a time, Observing each fetched part to
-// sharpen the map, until pos lands inside a fetched article. The probe is bounded
-// by the segment count, so it always terminates; io.EOF is returned when pos is
-// past the last article's real data.
+// and CONVERGES: every fetched part is Observed, which re-anchors the whole
+// OffsetIndex (a single observation pins a uniform posting byte-exactly), and the
+// next candidate comes from a fresh Locate on the sharpened map — not from a
+// one-segment step. That is what keeps a far seek at ~2 article fetches instead of
+// walking hundreds of billed articles across the estimate's error (see
+// maxLocateFetches). Stepping ±1 remains only as the last-resort nudge for an
+// irregular posting where Locate keeps returning a segment that does not cover
+// pos. io.EOF is returned when pos is past the last article's real data.
 func (r *Reader) articleForOffset(pos int64) (*yenc.Part, int, error) {
 	n := r.ix.SegmentCount()
 	if n == 0 {
@@ -163,28 +243,63 @@ func (r *Reader) articleForOffset(pos int64) (*yenc.Part, int, error) {
 	if !ok {
 		return nil, 0, io.EOF
 	}
-	for probe := 0; probe <= n; probe++ {
+	tried := make(map[int]bool, maxLocateFetches)
+	for fetches := 0; fetches < maxLocateFetches; fetches++ {
 		part, err := r.fetchArticle(segIdx)
 		if err != nil {
 			return nil, segIdx, err
 		}
 		r.ix.Observe(segIdx, part)
-		switch classifyOffset(pos, part) {
-		case -1:
-			if segIdx == 0 {
-				return nil, segIdx, fmt.Errorf("usenet reader: offset %d precedes first article", pos)
-			}
-			segIdx--
-		case 1:
-			if segIdx == n-1 {
-				return nil, segIdx, io.EOF
-			}
-			segIdx++
-		default:
+		dir := classifyOffset(pos, part)
+		if dir == 0 {
 			return part, segIdx, nil
 		}
+		tried[segIdx] = true
+		next, err := r.nextCandidate(pos, segIdx, n, dir, tried)
+		if err != nil {
+			return nil, segIdx, err
+		}
+		segIdx = next
 	}
-	return nil, segIdx, fmt.Errorf("usenet reader: could not locate article for offset %d in %d segments", pos, n)
+	// Converging normally takes 2 fetches; hitting the cap means the posting's
+	// offset map is not self-consistent. Fail cleanly — the caller falls back to
+	// the batch download — rather than keep pulling billed articles.
+	return nil, segIdx, fmt.Errorf(
+		"usenet reader: could not locate article for offset %d within %d fetches (%d segments)",
+		pos, maxLocateFetches, n)
+}
+
+// nextCandidate picks the segment to fetch next after `from` failed to cover pos.
+// dir is classifyOffset's verdict for the part just fetched (-1: pos sits before
+// it, +1: at/after its end). It prefers a fresh Locate on the just-sharpened index
+// — the convergent path that collapses a far seek to ~2 fetches — and falls back
+// to a ±1 step when Locate has nothing better to offer.
+//
+// The candidate must MOVE TOWARD pos. classifyOffset just proved, against the
+// article's real yEnc range, that pos lies on the `dir` side of `from`; a Locate
+// proposing the other side contradicts that hard evidence, so following it can
+// only spend a fetch without closing the distance.
+//
+// This is insurance, not a measured win: on every fixture here the walk costs the
+// same with it and without it, because a healthy index does not propose backwards
+// candidates. It is cheap, and it upgrades "the walk usually advances" to "the
+// walk cannot spend a fetch going the wrong way" — worth having on a loop whose
+// budget running out truncates someone's video.
+func (r *Reader) nextCandidate(pos int64, from, n, dir int, tried map[int]bool) (int, error) {
+	if seg, _, _, ok := r.ix.Locate(pos); ok && !tried[seg] &&
+		((dir > 0 && seg > from) || (dir < 0 && seg < from)) {
+		return seg, nil
+	}
+	if dir < 0 {
+		if from == 0 {
+			return 0, fmt.Errorf("usenet reader: offset %d precedes first article", pos)
+		}
+		return from - 1, nil
+	}
+	if from >= n-1 {
+		return 0, io.EOF
+	}
+	return from + 1, nil
 }
 
 // classifyOffset reports where pos sits relative to a decoded part's exact range:
@@ -230,7 +345,10 @@ func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
 	}
 	r.mu.Unlock()
 
-	part, err := r.fetchDecodeRetry(r.ix.Segment(segIdx).MessageID)
+	seg := r.ix.Segment(segIdx)
+	// Segment.Bytes is the ENCODED size — what will actually cross the wire, and
+	// what the budget must be asked for before the fetch starts.
+	part, err := r.fetchDecodeRetry(seg.MessageID, seg.Bytes)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +362,7 @@ func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
 // failures (a not-yet-propagated article, a dropped connection, a corrupt body)
 // up to maxAttempts with a bounded backoff. Every failure is logged; the final
 // error is wrapped so the caller can degrade cleanly rather than hang.
-func (r *Reader) fetchDecodeRetry(messageID string) (*yenc.Part, error) {
+func (r *Reader) fetchDecodeRetry(messageID string, estBytes int64) (*yenc.Part, error) {
 	var lastErr error
 	for attempt := 0; attempt < r.maxAttempts; attempt++ {
 		if attempt > 0 {
@@ -254,7 +372,19 @@ func (r *Reader) fetchDecodeRetry(messageID string) (*yenc.Part, error) {
 				return nil, r.ctx.Err()
 			}
 		}
+		// Cost ceiling BEFORE the wire, claimed rather than merely checked: a
+		// speculative reader (cold-buffer warm-up, no player attached) stops pulling
+		// once its byte budget is spoken for, however much wall clock is left.
+		// Usenet is billed by volume, so this is the bound that protects the
+		// account — and it is per ATTEMPT, because a retry re-transfers the article.
+		if !r.budget.reserve(estBytes) {
+			return nil, ErrFetchBudgetExhausted
+		}
 		raw, err := r.fetcher.Body(r.ctx, messageID)
+		// Reconcile against what came off the wire, whether or not it decodes — a
+		// corrupt body was still transferred and still billed. A failed Body
+		// transferred nothing we can account for and refunds the reservation.
+		r.budget.settle(estBytes, int64(len(raw)))
 		if err == nil {
 			var part *yenc.Part
 			if part, err = yenc.DecodeBytes(raw); err == nil {
@@ -270,22 +400,48 @@ func (r *Reader) fetchDecodeRetry(messageID string) (*yenc.Part, error) {
 		messageID, r.maxAttempts, lastErr)
 }
 
-// triggerReadahead prefetches up to readaheadK articles following fromSeg so the
-// next sequential reads hit the cache. Message-ids are resolved here on the read
-// goroutine; the spawned goroutines never touch the index.
-func (r *Reader) triggerReadahead(fromSeg int) {
-	if r.readaheadK <= 0 {
+// triggerReadahead prefetches the articles following fromSeg so the next
+// sequential reads hit the cache. The window is a BYTE budget (readaheadBytes)
+// converted to an article count using the size of the article just served, then
+// clamped by readaheadK/ReadaheadMaxArticles — so the cushion carried ahead of the
+// cursor stays bounded in the unit we are billed in, whatever the poster's article
+// size. Message-ids AND size estimates are resolved here on the read goroutine;
+// the spawned goroutines never touch the index.
+func (r *Reader) triggerReadahead(fromSeg, articleBytes int) {
+	k := r.readaheadWindow(articleBytes)
+	if k <= 0 {
 		return
 	}
 	n := r.ix.SegmentCount()
-	for j := fromSeg + 1; j <= fromSeg+r.readaheadK && j < n; j++ {
-		r.prefetch(j, r.ix.Segment(j).MessageID)
+	for j := fromSeg + 1; j <= fromSeg+k && j < n; j++ {
+		seg := r.ix.Segment(j)
+		r.prefetch(j, seg.MessageID, seg.Bytes)
 	}
+}
+
+// readaheadWindow returns how many articles may be prefetched: the byte budget
+// divided by the observed article size, capped by the reader's article-count
+// limit. A zero/unknown article size falls back to the count limit alone.
+func (r *Reader) readaheadWindow(articleBytes int) int {
+	k := r.readaheadK
+	if k <= 0 {
+		return 0
+	}
+	if k > ReadaheadMaxArticles {
+		k = ReadaheadMaxArticles
+	}
+	if r.readaheadBytes > 0 && articleBytes > 0 {
+		byBytes := int(r.readaheadBytes / int64(articleBytes))
+		if byBytes < k {
+			k = byBytes
+		}
+	}
+	return k
 }
 
 // prefetch fetches segment segIdx in the background unless it is already cached
 // or already being fetched. Dedup + cache writes happen under r.mu.
-func (r *Reader) prefetch(segIdx int, messageID string) {
+func (r *Reader) prefetch(segIdx int, messageID string, estBytes int64) {
 	r.mu.Lock()
 	if r.cache.has(segIdx) || r.inflight[segIdx] {
 		r.mu.Unlock()
@@ -297,7 +453,18 @@ func (r *Reader) prefetch(segIdx int, messageID string) {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		part, err := r.fetchDecodeRetry(messageID)
+		// A prefetch parked behind a busy NNTP pool can start long after the
+		// consumer went away (player paused, closed, or the HTTP connection was
+		// cut). Issuing it anyway pulls an article nobody will read and we get
+		// BILLED for it, so drop it once the reader has been quiet: fetching must
+		// cease within seconds of the last Read, not at connection teardown.
+		if r.readerIdle() {
+			r.mu.Lock()
+			delete(r.inflight, segIdx)
+			r.mu.Unlock()
+			return
+		}
+		part, err := r.fetchDecodeRetry(messageID, estBytes)
 		r.mu.Lock()
 		delete(r.inflight, segIdx)
 		if err == nil {
@@ -308,4 +475,17 @@ func (r *Reader) prefetch(segIdx int, messageID string) {
 			log.Printf("[usenet-stream] read-ahead segment %d abandoned: %v", segIdx, err)
 		}
 	}()
+}
+
+// readerIdle reports whether the consumer has stopped reading for longer than the
+// idle window, in which case a queued prefetch is no longer worth its billed
+// bytes. A non-positive window disables the check.
+func (r *Reader) readerIdle() bool {
+	if r.idleWindow <= 0 {
+		return false
+	}
+	r.mu.Lock()
+	last := r.lastRead
+	r.mu.Unlock()
+	return time.Since(last) > r.idleWindow
 }

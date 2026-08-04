@@ -54,6 +54,40 @@ func (s *ActiveTaskStore) Remove(taskID string) {
 	s.flushLocked()
 }
 
+// Get returns the persisted dispatch payload for a task, if the store holds one.
+// Used to resume a paused download without asking the server for a re-dispatch
+// (the daemon may be offline, or the row may be gone entirely).
+func (s *ActiveTaskStore) Get(taskID string) (Task, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.tasks[taskID]
+	return t, ok
+}
+
+// Snapshot returns every task currently held. Read by the local control server
+// so `unarr downloads` can list entries that are persisted but NOT running
+// (paused, or a zombie awaiting reconciliation).
+func (s *ActiveTaskStore) Snapshot() []Task {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Task, 0, len(s.tasks))
+	for _, t := range s.tasks {
+		out = append(out, t)
+	}
+	return out
+}
+
+// Clear drops every persisted task. This is the "put every zombie down" button
+// behind `unarr downloads purge`; it does not touch files on disk.
+func (s *ActiveTaskStore) Clear() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.tasks)
+	s.tasks = make(map[string]Task)
+	s.flushLocked()
+	return n
+}
+
 // Load reads the persisted tasks from disk into the store and returns them.
 // Returns nil on a missing or unreadable file (a fresh daemon has nothing to
 // resume). Safe to call once at startup before any Add/Remove.

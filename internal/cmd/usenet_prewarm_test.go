@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/usenet/stream"
 )
 
 // readerSummary records where one fake reader started (its seek target) and how
@@ -40,7 +42,14 @@ type fakeStreamReader struct {
 	started bool
 	first   int64
 	total   int64
+	budget  *stream.FetchBudget
 }
+
+// SetFetchBudget makes the fake a stream.BudgetedReader. warmRange REFUSES to
+// drain a reader it cannot byte-cap (an uncappable speculative read is exactly
+// what made a stream bind cost ~1 GB), so the fake must support it like the real
+// Usenet readers do.
+func (r *fakeStreamReader) SetFetchBudget(b *stream.FetchBudget) { r.budget = b }
 
 func (r *fakeStreamReader) Seek(off int64, whence int) (int64, error) {
 	switch whence {
@@ -182,5 +191,57 @@ func TestPrewarmUsenetHeadTailTinyFile(t *testing.T) {
 	}
 	if tn != 0 {
 		t.Errorf("tail warmed = %d, want 0 for a file smaller than the tail window", tn)
+	}
+}
+
+// uncappableReader is a stream reader that does NOT implement
+// stream.BudgetedReader — the shape warmRange must refuse.
+type uncappableReader struct{ pos, size int64 }
+
+func (r *uncappableReader) Seek(off int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+		r.pos = off
+	case io.SeekCurrent:
+		r.pos += off
+	case io.SeekEnd:
+		r.pos = r.size + off
+	}
+	return r.pos, nil
+}
+
+func (r *uncappableReader) Read(b []byte) (int, error) {
+	if r.pos >= r.size {
+		return 0, io.EOF
+	}
+	n := int64(len(b))
+	if rem := r.size - r.pos; n > rem {
+		n = rem
+	}
+	r.pos += n
+	return int(n), nil
+}
+func (r *uncappableReader) Close() error { return nil }
+
+type uncappableProvider struct{ size int64 }
+
+func (p *uncappableProvider) FileName() string { return "movie.mkv" }
+func (p *uncappableProvider) FileSize() int64  { return p.size }
+func (p *uncappableProvider) NewFileReader(context.Context) io.ReadSeekCloser {
+	return &uncappableReader{size: p.size}
+}
+
+// TestPrewarmRefusesUncappableReader is the cost fail-safe: the warm-up drains
+// bytes with NO player attached, so a reader whose NNTP spend cannot be bounded
+// must NOT be warmed at all. Warming an uncappable reader is exactly how a stream
+// bind came to cost ~1 GB — better a cold first open (a latency regression the
+// player recovers from) than an unbounded, billed drain.
+func TestPrewarmRefusesUncappableReader(t *testing.T) {
+	p := &uncappableProvider{size: 100 << 20}
+
+	hn, tn, _ := prewarmUsenetHeadTail(context.Background(), p, 4<<20, 2<<20, 5*time.Second)
+
+	if hn != 0 || tn != 0 {
+		t.Fatalf("warmed head=%d tail=%d from a reader that cannot be byte-capped; want 0/0", hn, tn)
 	}
 }

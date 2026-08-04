@@ -181,7 +181,15 @@ unarr start
 | Command | Description |
 |---------|-------------|
 | `unarr download <hash\|magnet>` | One-shot download (no daemon needed) |
+| `unarr downloads` | List the download queue (alias: `unarr dl`) |
+| `unarr downloads pause\|resume <id>` | Pause a download / continue it |
+| `unarr downloads stop <id>` | Cancel it and stop it coming back after a restart |
+| `unarr downloads retry <id>` | Start it over |
+| `unarr downloads purge` | Forget queued downloads that are not running |
 | `unarr stream <hash\|magnet>` | Stream a torrent directly to mpv/vlc/browser |
+
+See [Controlling downloads](#controlling-downloads) for the flags, the offline
+recovery path, and how these interact with the website.
 
 ### Library
 
@@ -295,6 +303,81 @@ One-shot download by info hash or magnet link (no daemon required).
 unarr download abc123def456abc123def456abc123def456abc1
 unarr download "magnet:?xt=urn:btih:..." --method torrent
 ```
+
+## Controlling downloads
+
+`unarr downloads` lists and controls whatever the daemon on this machine is
+working on. It talks to the daemon directly over loopback — no website, no
+account lookup — so it keeps working when the server is unreachable or the
+download has fallen out of the dashboard.
+
+```bash
+unarr downloads                      # what is running right now (alias: unarr dl)
+unarr downloads pause                # menu: tick what to pause
+unarr downloads stop                 # menu: tick what to stop
+unarr downloads pause --all          # pause everything
+unarr downloads stop --all           # stop everything (asks to confirm)
+unarr downloads pause 31ec4169       # or name it directly
+unarr downloads resume 31ec4169      # continue where it left off
+unarr downloads stop 31ec4169 --delete   # cancel and delete the partial file
+unarr downloads retry 31ec4169       # start it over
+unarr downloads purge                # forget queued leftovers
+unarr downloads --json               # machine-readable, for scripts
+```
+
+**Run an action with no id and you get a menu** of the downloads it can apply
+to — space to tick, enter to confirm, esc to cancel. Only the relevant ones are
+listed: `pause` shows what is running, `resume` shows what is not.
+
+Ids may be abbreviated to any unique prefix — the 8-character ids printed here
+and in the logs are enough. An ambiguous prefix is refused rather than guessed.
+
+Two actions ask before they run: `--delete` (files leave the disk) and
+`stop --all` (nothing resumes by itself afterwards). `--yes` skips the question,
+and in a script or a pipe — where there is no terminal to answer on — the
+command refuses instead of hanging.
+
+`unarr download stop|pause|resume|retry|list|purge` works too, as an alias.
+
+**Actions reach the website.** Whatever you do here (or from the desktop tray)
+is reported to unarr.app, so the dashboard reflects it within a few seconds
+instead of showing a download that stopped minutes ago. It works the other way
+round as well: cancelling on the website stops the download on this machine.
+
+### When a download will not stop
+
+If a download survives cancelling on the website, its task row is gone — you
+cancelled it and then removed it from the list — so the server has no way left
+to reach the agent, while the agent keeps restarting it from its **resume
+queue** on every launch.
+
+The agent now detects this by itself: a task the server no longer knows about is
+dropped after a few status reports. To end it immediately:
+
+```bash
+unarr downloads stop <id>   # daemon running
+```
+
+With the daemon stopped, `--force` edits the on-disk resume queue instead — the
+file that would otherwise bring the download back:
+
+```bash
+unarr downloads                 # lists the queue even with no daemon
+unarr downloads stop <id> --force
+unarr downloads purge --force   # clear the whole queue
+```
+
+The queue lives at `active-tasks.json` in the data dir
+(`~/.local/share/unarr/` on Linux, `~/Library/Application Support/unarr/` on
+macOS, `%LOCALAPPDATA%\unarr\` on Windows). Deleting it only forgets pending
+downloads — media files and config are untouched.
+
+### From the desktop tray
+
+unarr-desktop lists the active downloads in its menu with **Pause / Resume /
+Stop / Stop and delete files** under each one. Same control plane, same
+reporting back to the website. Beyond five downloads the menu points at
+`unarr downloads`, which has no limit.
 
 ## Daemon
 

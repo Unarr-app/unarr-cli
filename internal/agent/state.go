@@ -58,6 +58,18 @@ type DaemonState struct {
 	// HTTPS hostname the daemon is reachable at from anywhere on the internet.
 	// Empty when the funnel is off or hasn't registered yet.
 	FunnelURL string `json:"funnelUrl,omitempty"`
+
+	// Local control plane (see internal/control): the loopback port `unarr
+	// downloads` and the desktop tray drive downloads through, plus the token
+	// they must present. Published here because the state file is already the
+	// daemon's handshake with local tooling and is 0o600 — the token is only
+	// readable by the user who owns the daemon.
+	//
+	// Zero/empty means "no control plane": either an older daemon, or one whose
+	// control listener failed to bind. Clients must treat that as ErrNoDaemon
+	// and fall back to the offline path rather than assuming a port.
+	ControlPort  int    `json:"controlPort,omitempty"`
+	ControlToken string `json:"controlToken,omitempty"`
 }
 
 // stateFilePathFn is overridable for testing.

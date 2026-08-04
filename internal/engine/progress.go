@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -37,13 +39,34 @@ type ProgressReporter struct {
 	onPause           ActionFunc
 	onDeleteFiles     ActionFunc
 	onStreamRequested ActionFunc
+	onUnknown         ActionFunc
 	onWatchingChanged func(watching bool)
 
 	mu           sync.Mutex
 	latest       map[string]*Task      // taskID -> task with latest progress
 	lastReported map[string]TaskStatus // taskID -> last status sent to API
 	lastCheckAt  time.Time             // last time we reported for control-signal polling
+	// unknownStreak counts consecutive reports the server answered with
+	// success=false ("no such task") per task. See unknownTaskThreshold.
+	unknownStreak map[string]int
 }
+
+// unknownTaskThreshold is how many consecutive "no such task" answers a task
+// must collect before the agent puts it down.
+//
+// The server answers success=false when the row is gone — the user cancelled the
+// download and then removed it from the list, so `removeTask` deleted the row.
+// From that moment the web has no way left to tell this agent to stop (the
+// cancel flag rides on the row, and so does the sync control signal), while the
+// agent keeps the task in its resume store and re-submits it on every restart:
+// a download that cannot be stopped from anywhere (user report 2026-08-03,
+// 56.8 GB torrent still running after the row was deleted and the .exe
+// restarted). So an unknown task is treated as cancelled.
+//
+// Three in a row, not one: a single false can also come from a transient server
+// hiccup or a mid-flight row migration, and killing a healthy download for that
+// would be far worse than stopping a zombie one cycle later.
+const unknownTaskThreshold = 3
 
 // NewProgressReporter creates a reporter that flushes every interval. A nil
 // client yields a local-only reporter that tracks progress for terminal output
@@ -57,10 +80,11 @@ func NewProgressReporter(ac *agent.Client, interval time.Duration) *ProgressRepo
 		rep = ac
 	}
 	return &ProgressReporter{
-		reporter:     rep,
-		interval:     interval,
-		latest:       make(map[string]*Task),
-		lastReported: make(map[string]TaskStatus),
+		reporter:      rep,
+		interval:      interval,
+		latest:        make(map[string]*Task),
+		lastReported:  make(map[string]TaskStatus),
+		unknownStreak: make(map[string]int),
 	}
 }
 
@@ -75,6 +99,12 @@ func (r *ProgressReporter) SetDeleteFilesHandler(fn ActionFunc) { r.onDeleteFile
 
 // SetStreamRequestedHandler sets the callback for stream activation.
 func (r *ProgressReporter) SetStreamRequestedHandler(fn ActionFunc) { r.onStreamRequested = fn }
+
+// SetUnknownTaskHandler sets the callback invoked when the server has answered
+// "no such task" unknownTaskThreshold times in a row for the same task — the
+// zombie case. The handler is expected to stop the download AND drop its
+// resume-store entry, or the daemon resurrects it on the next start.
+func (r *ProgressReporter) SetUnknownTaskHandler(fn ActionFunc) { r.onUnknown = fn }
 
 // SetWatchingFunc sets the function that checks if someone is viewing downloads.
 func (r *ProgressReporter) SetWatchingFunc(fn WatchingFunc) { r.isWatching = fn }
@@ -98,6 +128,25 @@ func (r *ProgressReporter) Untrack(taskID string) {
 	defer r.mu.Unlock()
 	delete(r.latest, taskID)
 	delete(r.lastReported, taskID)
+	delete(r.unknownStreak, taskID)
+}
+
+// noteUnknown records one "no such task" answer and reports whether the task has
+// now crossed unknownTaskThreshold. A successful report resets the streak.
+func (r *ProgressReporter) noteUnknown(taskID string, unknown bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !unknown {
+		delete(r.unknownStreak, taskID)
+		return false
+	}
+	if r.unknownStreak == nil {
+		// A ProgressReporter built as a struct literal (tests, and any future
+		// caller that skips the constructor) must not panic on a nil map.
+		r.unknownStreak = make(map[string]int)
+	}
+	r.unknownStreak[taskID]++
+	return r.unknownStreak[taskID] >= unknownTaskThreshold
 }
 
 // Run starts the periodic flush loop. Blocks until ctx is cancelled.
@@ -173,6 +222,15 @@ func (r *ProgressReporter) flush(ctx context.Context) {
 		update := task.ToStatusUpdate()
 		resp, err := r.reporter.ReportStatus(ctx, update)
 		if err != nil {
+			// Single-report mode answers an unknown task with 404, not with a
+			// success=false body — same zombie, different shape. Everything else
+			// (network, 5xx) must NOT count, or a server blip would kill healthy
+			// downloads.
+			var httpErr *agent.HTTPError
+			if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+				r.handleResponse(task, &agent.StatusResponse{Success: false})
+				continue
+			}
 			log.Printf("[%s] progress report failed: %v", task.ShortID(), err)
 			continue
 		}
@@ -223,6 +281,17 @@ func (r *ProgressReporter) handleResponse(task *Task, resp *agent.StatusResponse
 	// Propagate watching flag from status response to daemon
 	if resp.Watching && r.onWatchingChanged != nil {
 		r.onWatchingChanged(true)
+	}
+
+	// The server does not know this task (deleted row). Repeated → zombie.
+	if r.noteUnknown(task.ID, !resp.Success) {
+		log.Printf("[%s] server no longer knows this task after %d reports — stopping it",
+			agent.ShortID(task.ID), unknownTaskThreshold)
+		r.Untrack(task.ID)
+		if r.onUnknown != nil {
+			r.onUnknown(task.ID)
+		}
+		return
 	}
 
 	if resp.Cancelled {

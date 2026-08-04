@@ -229,6 +229,25 @@ type StatusUpdate struct {
 	InfoHash string `json:"infoHash,omitempty"`
 }
 
+// TaskControlRequest reports a LOCALLY initiated control action so the web
+// reflects it. Sent by the daemon after `unarr downloads …`, a tray action, or
+// a zombie reap. Actions mirror internal/control: pause | resume | cancel |
+// retry.
+type TaskControlRequest struct {
+	TaskID      string `json:"taskId"`
+	AgentID     string `json:"agentId"`
+	Action      string `json:"action"`
+	DeleteFiles bool   `json:"deleteFiles,omitempty"`
+	// Reason is surfaced in the web UI for actions the user did not click there
+	// (e.g. "stopped from the terminal", "server no longer knew this task").
+	Reason string `json:"reason,omitempty"`
+}
+
+// TaskControlResponse is the (currently minimal) reply to a control report.
+type TaskControlResponse struct {
+	Success bool `json:"success"`
+}
+
 // StatusResponse is returned by the status endpoint.
 // Includes flags the CLI must act on.
 type StatusResponse struct {
