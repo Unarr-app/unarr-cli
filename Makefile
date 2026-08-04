@@ -1,4 +1,4 @@
-.PHONY: all build test lint arch coverage clean fmt vet check install-hooks changelog release release-patch release-minor release-major release-dry
+.PHONY: all build test test-e2e lint arch coverage clean fmt vet check install-hooks changelog release release-patch release-minor release-major release-dry
 
 BINARY = unarr
 SENTRY_DSN ?=
@@ -14,6 +14,18 @@ build:
 ## Run all tests
 test:
 	go test -v -race -count=1 ./...
+
+## Run the end-to-end suites in test/e2e (log ring under a foreign descriptor, config
+## round-trip, the `unarr logs` CLI over a real process).
+##
+## They sit behind `//go:build e2e`, so plain `go test ./...` does NOT match them — the
+## tag is the only way in, and without this target they never run at all. Kept out of
+## `test` and out of the lefthook pre-commit hook on purpose: the suite compiles the CLI
+## binary, which is ~4s with a warm build cache but ~50s cold, and a pre-commit hook that
+## can stall for a minute is a hook people disable. CI runs it as its own job instead
+## (.github/workflows/ci.yml), so it gates merges without taxing every commit.
+test-e2e:
+	go test -tags e2e -race -count=1 ./test/e2e/...
 
 ## Run linter (requires golangci-lint)
 lint:

@@ -8,8 +8,6 @@ import (
 	"math"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 
@@ -324,38 +322,13 @@ func parseFFprobeOutput(data ffprobeOutput) (*MediaInfo, error) {
 // 5. Previously downloaded in cache dir
 // 6. Auto-download static binary
 func ResolveFFprobe(explicit string) (string, error) {
-	if explicit != "" {
-		if _, err := os.Stat(explicit); err == nil {
-			return explicit, nil
-		}
-		return "", fmt.Errorf("ffprobe not found at explicit path: %s", explicit)
-	}
-
-	if envPath := os.Getenv("FFPROBE_PATH"); envPath != "" {
-		if _, err := os.Stat(envPath); err == nil {
-			return envPath, nil
-		}
-	}
-
-	if p, err := exec.LookPath("ffprobe"); err == nil {
+	// Steps 1-5 are LocateFFprobe — shared verbatim with `unarr doctor`, which
+	// needs the same search WITHOUT step 6.
+	if p, ok := LocateFFprobe(explicit); ok {
 		return p, nil
 	}
-
-	if exePath, err := os.Executable(); err == nil {
-		name := "ffprobe"
-		if runtime.GOOS == "windows" {
-			name = "ffprobe.exe"
-		}
-		adjacent := filepath.Join(filepath.Dir(exePath), name)
-		if _, err := os.Stat(adjacent); err == nil {
-			return adjacent, nil
-		}
-	}
-
-	if cached, err := FFprobeCachePath(); err == nil {
-		if _, err := os.Stat(cached); err == nil {
-			return cached, nil
-		}
+	if explicit != "" {
+		return "", fmt.Errorf("ffprobe not found at explicit path: %s", explicit)
 	}
 
 	if p, err := DownloadFFprobe(); err == nil {

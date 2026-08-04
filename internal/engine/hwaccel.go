@@ -111,7 +111,7 @@ func DetectHWAccelDiagnostic(ctx context.Context, ffmpegPath string) HWAccelDiag
 	if ffmpegPath == "" {
 		return d
 	}
-	d.FFmpegVersion = ffmpegVersionLine(ctx, ffmpegPath)
+	d.FFmpegVersion = toolVersionLine(ctx, ffmpegPath)
 	encoders := listFFmpegEncoders(ctx, ffmpegPath)
 	for _, name := range hwEncoderNames {
 		if strings.Contains(encoders, name) {
@@ -182,11 +182,12 @@ var hwEncoderNames = []string{
 	"h264_videotoolbox", "hevc_videotoolbox",
 }
 
-// ffmpegVersionLine extracts the "ffmpeg version X.Y.Z" prefix from
-// `ffmpeg -version`. Bounded to avoid hanging the daemon on a misbehaving
-// binary.
-func ffmpegVersionLine(ctx context.Context, ffmpegPath string) string {
-	cmd := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-version")
+// toolVersionLine extracts the "<tool> version X.Y.Z" prefix from
+// `<tool> -version`. Bounded to avoid hanging the daemon on a misbehaving
+// binary. Named for the family rather than for ffmpeg because ffprobe answers
+// `-version` identically and doctor reports both.
+func toolVersionLine(ctx context.Context, toolPath string) string {
+	cmd := exec.CommandContext(ctx, toolPath, "-hide_banner", "-version")
 	winproc.HideWindow(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil || len(out) == 0 {

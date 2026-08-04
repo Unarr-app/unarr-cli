@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/Unarr-app/unarr-cli/internal/logging"
 )
 
 // Config holds all persistent CLI configuration.
@@ -24,6 +26,14 @@ type Config struct {
 	Library       LibraryConfig       `toml:"library"`
 	Telemetry     TelemetryConfig     `toml:"telemetry,omitempty"`
 	Desktop       DesktopConfig       `toml:"desktop,omitempty"`
+
+	// unknownKeys holds the dotted TOML keys Load could not map onto the schema
+	// (a typo, or a valid key under the wrong section). UNEXPORTED on purpose:
+	// both the TOML decoder and encoder skip unexported fields, so carrying the
+	// diagnostic on Config costs no call-site churn and Save never writes it
+	// back into the user's file. Read it through UnknownKeys() / the Issue
+	// helpers in validate.go.
+	unknownKeys []string
 }
 
 // DesktopConfig holds settings for the unarr-desktop tray / unarr:// protocol
@@ -264,7 +274,61 @@ type DaemonConfig struct {
 	// fallback; "sse" forces SSE only (no fallback); "poll" forces the pre-0.14
 	// long-poll wake only. Empty = "auto". Available since unarr 0.14.0.
 	Downlink string `toml:"downlink"`
+
+	// LogMaxSizeMB is the size budget for unarr.log before it rotates to
+	// unarr.log.1. DEFAULT 0 — rotation is OFF, and turning it on is OPT-IN.
+	//
+	// Off by default because rotating a file another process may be holding is
+	// not a solved problem here, and shipping it on would hand every install the
+	// unsolved part. Known limitations once it is on, all of them real and all
+	// of them Windows-flavoured first: a second holder of the file (an open
+	// `unarr logs -f`, an antivirus scanner, OneDrive/Dropbox syncing the data
+	// dir, Windows Search) can block the rename or the truncate, and the
+	// residual failure modes — a reader holding a rotated slot, two rotators
+	// racing over one staging name, a live-but-offline daemon losing its
+	// ownership claim — are listed under "Deuda abierta" in
+	// docs/plans/daemon-log-ownership.md. Read that before setting this.
+	//
+	// With 0, unarr.log grows without bound: bound it with `unarr clean`, or
+	// with an external logrotate using copytruncate (the daemon holds its
+	// descriptor for the whole run and has no reopen signal).
+	LogMaxSizeMB int `toml:"log_max_size_mb"`
+	// LogMaxFiles is how many rotated copies to keep (unarr.log.1 … .N).
+	// Default 3, so the whole ring costs at most (N+1) × log_max_size_mb.
+	LogMaxFiles int `toml:"log_max_files"`
+	// LogLevel is the minimum severity `unarr logs` shows by default:
+	// "debug" | "info" | "warn" | "error". Default "info". The global
+	// --log-level flag overrides it for a single invocation.
+	LogLevel string `toml:"log_level"`
+	// LogFormat is how `unarr logs` renders lines: "text" (exactly as written)
+	// or "json" (one JSON object per line, for jq / a log shipper).
+	// Default "text".
+	LogFormat string `toml:"log_format"`
 }
+
+// Log-ring defaults.
+//
+// The slot count is NOT redefined here: internal/logging needs it as its own
+// fallback (Options.keep, RotatedPaths resolve an unset MaxFiles with it), so
+// that package owns the number and this one derives from it — two literals
+// silently drifting apart is exactly the bug this avoids. internal/logging is
+// stdlib-only, so the import adds no dependency weight and no cycle.
+//
+// The size budget has no counterpart over there on purpose: an unset MaxSizeMB
+// already means "rotation disabled" in logging.Options, so this constant is a
+// pure config policy number and this is its ONLY definition — every other place
+// that needs it (Default(), applyDefaults, the boot log's own ring, the
+// VBScript shim's trim) resolves it from the loaded config rather than
+// re-literalising it.
+//
+// It is 0: rotation is opt-in. See DaemonConfig.LogMaxSizeMB for why, and
+// docs/plans/daemon-log-ownership.md for what opting in costs.
+const (
+	defaultLogMaxSizeMB = 0
+	defaultLogMaxFiles  = logging.DefaultMaxFiles
+	defaultLogLevel     = "info"
+	defaultLogFormat    = "text"
+)
 
 // AutoUpgradeEnabled returns the resolved AutoUpgrade flag — defaults to true
 // when the user has not set it explicitly. Pointer-vs-bool because Go's
@@ -555,6 +619,13 @@ func Default() Config {
 			// as `auto_upgrade = true` instead of an omitted key — keeps the
 			// freshly-written config aligned with what README documents.
 			AutoUpgrade: boolPtr(true),
+			// Log ring: OFF (log_max_size_mb = 0), keeping 3 slots for whoever
+			// turns it on. Written out explicitly, zero and all, so a fresh
+			// config shows the knob exists instead of hiding it.
+			LogMaxSizeMB: defaultLogMaxSizeMB,
+			LogMaxFiles:  defaultLogMaxFiles,
+			LogLevel:     defaultLogLevel,
+			LogFormat:    defaultLogFormat,
 		},
 		Organize: OrganizeConfig{
 			Enabled: true,
@@ -617,6 +688,13 @@ func Load(path string) (Config, error) {
 	}
 
 	applyDefaults(&cfg, meta)
+
+	// Keys the decoder ignored. Recorded, never fatal: failing here would break
+	// every existing config the day a key gets renamed. Callers warn instead —
+	// the daemon log, `unarr doctor`, `unarr config check`.
+	for _, k := range meta.Undecoded() {
+		cfg.unknownKeys = append(cfg.unknownKeys, k.String())
+	}
 	return cfg, nil
 }
 
@@ -691,6 +769,25 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	// saturate the box with scan-time sprite generation.
 	if !meta.IsDefined("library", "prewarm_max_load_ratio") {
 		cfg.Library.PrewarmMaxLoadRatio = 0.7
+	}
+
+	// Log rotation defaults OFF for configs that predate the keys, and the
+	// assignment stays rather than being dropped as a no-op: defaultLogMaxSizeMB
+	// is the single definition of the policy, so flipping rotation back on for
+	// new installs is a one-constant change and cannot forget this path. The
+	// IsDefined guard (not a zero-check) is still what lets an explicit
+	// `log_max_size_mb = 0` and an omitted key stay distinguishable here.
+	if !meta.IsDefined("daemon", "log_max_size_mb") {
+		cfg.Daemon.LogMaxSizeMB = defaultLogMaxSizeMB
+	}
+	if !meta.IsDefined("daemon", "log_max_files") {
+		cfg.Daemon.LogMaxFiles = defaultLogMaxFiles
+	}
+	if !meta.IsDefined("daemon", "log_level") {
+		cfg.Daemon.LogLevel = defaultLogLevel
+	}
+	if !meta.IsDefined("daemon", "log_format") {
+		cfg.Daemon.LogFormat = defaultLogFormat
 	}
 
 	if !meta.IsDefined("downloads", "transcode", "enabled") {

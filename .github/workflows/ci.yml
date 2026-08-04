@@ -37,6 +37,29 @@ jobs:
       - if: runner.os == 'Windows'
         run: go test -count=1 ./...
 
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      # test/e2e is behind `//go:build e2e`, so the `test` job above does not
+      # match a single one of these files — the tag is the only way in, and this
+      # job is the only thing that passes it. They drive the log ring over real
+      # files (a foreign appending descriptor with RotateNow copy-truncating
+      # underneath it) and run `unarr logs` as a real process, so they catch the
+      # on-disk failures unit tests cannot: a rotation that strands the writer
+      # on a dead inode, a slot that never gets dropped.
+      #
+      # Linux-only: what these assert is filesystem behaviour shared by every
+      # target, and the one place it genuinely diverges — whether cmd.exe's `>>`
+      # redirect is a real append handle — cannot be settled by a CI runner
+      # anyway. That is measured on the VM harness in test/windows/.
+      - run: make test-e2e
+
   vet:
     name: Vet
     runs-on: ubuntu-latest

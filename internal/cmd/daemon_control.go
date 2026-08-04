@@ -4,14 +4,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
-	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/logging"
 	"github.com/Unarr-app/unarr-cli/internal/service"
 	"github.com/Unarr-app/unarr-cli/internal/winproc"
 	"github.com/fatih/color"
@@ -80,28 +78,44 @@ by the system service manager, plus local state information.`,
 	}
 }
 
+// newDaemonLogsCmd is the historical spelling of `unarr logs`, kept as an alias
+// so every script and doc that says `unarr daemon logs -n 100 -f` keeps
+// working. It shares runLogs and the flag set with the top-level command, so
+// the two cannot drift apart.
 func newDaemonLogsCmd() *cobra.Command {
-	var follow bool
-	var lines int
+	var o logsOptions
 
 	cmd := &cobra.Command{
 		Use:   "logs",
-		Short: "Show daemon logs",
-		Long: `Show daemon log output.
+		Short: "Show daemon logs (alias of 'unarr logs')",
+		Long: `Show daemon log output. Same command as 'unarr logs'.
 
-  Linux:   streams from journald (journalctl --user -u unarr)
-  macOS:   tails ~/.local/share/unarr/unarr.log
-  Windows: tails %LOCALAPPDATA%\unarr\unarr.log`,
+  Linux:   reads $XDG_DATA_HOME/unarr/unarr.log (~/.local/share/unarr/unarr.log),
+           or streams from journald (journalctl --user -u unarr) when installed
+           as a systemd service
+  macOS:   reads ~/Library/Application Support/unarr/unarr.log
+  Windows: reads %LOCALAPPDATA%\unarr\unarr.log
+
+Rotated copies (unarr.log.1, .2, …) are read too, so a long -n still reaches
+back past the last rotation.
+
+When the daemon does not come up at all, --boot reads unarr.boot.log instead:
+the startup output the service launcher captures, including a crash on the way
+up, which never reaches the daemon's own log.
+
+On macOS, a service installed by an older build still splits stderr into
+unarr.err.log next to it — where most of the log ends up. Re-run
+'unarr daemon install' to send both streams back to unarr.log.`,
 		Example: `  unarr daemon logs
   unarr daemon logs -f
   unarr daemon logs -n 100 -f`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemonLogs(follow, lines)
+			return runLogs(o)
 		},
 	}
 
-	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output")
-	cmd.Flags().IntVarP(&lines, "lines", "n", 50, "Number of lines to show")
+	bindLogsFlags(cmd, &o)
 	return cmd
 }
 
@@ -125,6 +139,11 @@ re-read its configuration file without interrupting active downloads.
 
 func runDaemonSvcStart() error {
 	fmt.Println()
+	// launchd (StandardOutPath) and the Windows shim's `>> unarr.log` redirect
+	// open the log themselves, so this gap — before the service manager is told
+	// to run — is the one moment we can trim an oversized log without racing
+	// the process that owns the descriptor.
+	rotateDaemonLog()
 	switch runtime.GOOS {
 	case "linux":
 		if err := svcExec("systemctl", "--user", "start", "unarr"); err != nil {
@@ -212,49 +231,6 @@ func runDaemonSvcStatus() error {
 	return nil
 }
 
-func runDaemonLogs(follow bool, lines int) error {
-	switch runtime.GOOS {
-	case "linux":
-		args := []string{"--user", "-u", "unarr", "--no-pager", "-n", strconv.Itoa(lines)}
-		if follow {
-			// -f implies live output; drop --no-pager so journalctl can control the terminal.
-			args = []string{"--user", "-u", "unarr", "-f"}
-		}
-		return svcExecInteractive("journalctl", args...)
-
-	case "darwin":
-		home, _ := os.UserHomeDir()
-		logFile := filepath.Join(home, ".local", "share", "unarr", "unarr.log")
-		if _, err := os.Stat(logFile); err != nil {
-			fmt.Fprintln(os.Stderr, "The daemon writes this file when running as a launchd service. Run 'unarr daemon install' first.")
-			return fmt.Errorf("log file not found: %s", logFile)
-		}
-		args := []string{"-n", strconv.Itoa(lines)}
-		if follow {
-			args = append(args, "-f")
-		}
-		args = append(args, logFile)
-		return svcExecInteractive("tail", args...)
-
-	case "windows":
-		logFile := filepath.Join(config.DataDir(), "unarr.log")
-		if _, err := os.Stat(logFile); err != nil {
-			fmt.Fprintln(os.Stderr, "The daemon writes logs here when running. Start it first.")
-			return fmt.Errorf("log file not found: %s", logFile)
-		}
-		var psCmd string
-		if follow {
-			psCmd = fmt.Sprintf("Get-Content -Path '%s' -Tail %d -Wait", logFile, lines)
-		} else {
-			psCmd = fmt.Sprintf("Get-Content -Path '%s' -Tail %d", logFile, lines)
-		}
-		return svcExecInteractive("powershell", "-NonInteractive", "-Command", psCmd)
-
-	default:
-		return fmt.Errorf("log viewing not supported on %s", runtime.GOOS)
-	}
-}
-
 func runDaemonReload() error {
 	return sendReloadSignal()
 }
@@ -305,31 +281,47 @@ func printStateInfo() {
 	fmt.Println()
 }
 
+// detachedStartArgs is the argv a detached `unarr start` gets. --log-file hands
+// the daemon ownership of unarr.log, so it rotates that file by rename from the
+// inside; this parent keeps only the boot log. Split out so the choice is
+// testable without launching a daemon.
+func detachedStartArgs(logPath string) []string {
+	return []string{"start", "--log-file", logPath}
+}
+
 // startDaemonDetached launches `unarr start` as a background process in its own
 // session, so it outlives the terminal that spawned it. Used when no service
 // manager is in play (the wizard's "start it now" path) — plain `unarr start`
 // is foreground and dies with the shell, which is not what "start it" means to
-// a user. Output goes to the same log file the service install uses.
+// a user.
+//
+// Two files, two owners: the child owns unarr.log (--log-file), while the
+// descriptor inherited here carries only what bypasses log.SetOutput — the
+// banner, a fatal cobra error, a panic dump — into unarr.boot.log. That split
+// is what makes a death BEFORE the Writer is installed diagnosable at all.
 func startDaemonDetached() error {
 	bin, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("find executable: %w", err)
 	}
 
-	logDir := config.DataDir()
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return fmt.Errorf("create log dir: %w", err)
-	}
-	logPath := filepath.Join(logDir, "unarr.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// Rotate-then-open: the child inherits this descriptor for its whole life,
+	// so the size check has to happen here, in the gap before the handover. It
+	// must stay an *os.File — os/exec passes a real file straight through, but
+	// any other io.Writer makes it copy through a goroutine in THIS process,
+	// which exits seconds from now and would leave the daemon writing into a
+	// broken pipe. Rotation DURING the run is the daemon's own janitor for this
+	// file (a genuine POSIX append fd, so copy-truncate is correct on it).
+	bootPath := daemonBootLogPath()
+	bootFile, err := logging.OpenFile(bootLogRingOptions(bootPath))
 	if err != nil {
-		return fmt.Errorf("open log file: %w", err)
+		return err
 	}
-	defer logFile.Close()
+	defer bootFile.Close()
 
-	cmd := exec.Command(bin, "start")
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd := exec.Command(bin, detachedStartArgs(daemonLogPath())...)
+	cmd.Stdout = bootFile
+	cmd.Stderr = bootFile
 	cmd.SysProcAttr = detachedSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
@@ -352,8 +344,11 @@ func startDaemonDetached() error {
 
 	select {
 	case werr := <-exited:
+		// The BOOT log, not unarr.log: an exit this fast happens before the
+		// Writer is installed, so the reason (bad config, lock contention, a
+		// panic dump) is in the file this parent holds and nowhere else.
 		return fmt.Errorf("the daemon exited immediately after starting (%s)\n%s",
-			exitReason(werr), tailLogFile(logPath, 15))
+			exitReason(werr), tailLogFile(bootPath, 15))
 	case <-time.After(detachedStartupProbe):
 		return nil
 	}
@@ -408,16 +403,6 @@ func tailLogFile(path string, n int) string {
 func svcExec(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	winproc.HideWindow(cmd)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-// svcExecInteractive is like svcExec but also connects stdin (needed for follow/pager modes).
-func svcExecInteractive(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	winproc.HideWindow(cmd)
-	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

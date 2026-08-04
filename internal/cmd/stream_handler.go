@@ -37,11 +37,7 @@ func startIdleGuard(ctx context.Context, srv *engine.StreamServer) {
 		case <-ticker.C:
 			if srv.HasFile() && srv.IdleSince() > streamIdleTimeout {
 				taskID := srv.CurrentTaskID()
-				short := taskID
-				if len(short) > 8 {
-					short = short[:8]
-				}
-				log.Printf("[%s] stream idle timeout (%v no HTTP requests), clearing file", short, streamIdleTimeout)
+				log.Printf("[%s] stream idle timeout (%v no HTTP requests), clearing file", agent.ShortID(taskID), streamIdleTimeout)
 				// Per-task cancel: only reap the IDLE stream (the one served on the
 				// persistent server), never other tasks' live streams or in-flight
 				// streamability probes.
@@ -195,7 +191,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		return
 	}
 
-	task.ResolvedMethod = engine.MethodTorrent
+	task.SetResolvedMethod(engine.MethodTorrent)
 	reporter.Track(task)
 	defer reporter.ReportFinal(context.Background(), task)
 
@@ -206,7 +202,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	// faster). No HLS transcode here: external players handle any container.
 	// Falls through to the P2P StreamEngine below when there is no direct URL.
 	if at.DirectURL != "" {
-		task.ResolvedMethod = engine.MethodDebrid
+		task.SetResolvedMethod(engine.MethodDebrid)
 		task.Transition(engine.StatusResolving)
 		bctx, bcancel := context.WithTimeout(ctx, 15*time.Second)
 		// fallbackSize 0 → provider derives size from a HEAD; refresh nil → no
@@ -216,15 +212,15 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		provider, perr := engine.NewDebridFileProvider(bctx, at.DirectURL, at.DirectFileName, 0, nil)
 		bcancel()
 		if perr != nil {
-			task.ErrorMessage = "debrid stream provider: " + perr.Error()
+			task.SetError("debrid stream provider: " + perr.Error())
 			task.Transition(engine.StatusFailed)
 			return
 		}
 		srv.SetFile(provider, at.ID)
-		task.FileName = provider.FileName()
-		task.TotalBytes = provider.FileSize()
-		task.SetStreamURL(srv.URLsJSON()) // mutex-safe: the reporter reads it via GetStreamURL
-		log.Printf("[%s] stream (debrid): %s (%s) url: %s", at.ID[:8], provider.FileName(), ui.FormatBytes(provider.FileSize()), srv.URL())
+		task.SetFileName(provider.FileName())
+		task.SetTotalBytes(provider.FileSize())
+		task.SetStreamURL(srv.URLsJSON())
+		log.Printf("[%s] stream (debrid): %s (%s) url: %s", agent.ShortID(at.ID), provider.FileName(), ui.FormatBytes(provider.FileSize()), srv.URL())
 
 		if agentClient != nil {
 			watchReporter := engine.NewWatchReporter(agentClient, srv, at.ID)
@@ -236,7 +232,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		// server keeps serving until the idle guard reaps it (30m), same as P2P.
 		task.Transition(engine.StatusCompleted)
 		<-ctx.Done()
-		log.Printf("[%s] stream (debrid) stopped", at.ID[:8])
+		log.Printf("[%s] stream (debrid) stopped", agent.ShortID(at.ID))
 		return
 	}
 
@@ -253,10 +249,10 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	})
 	if err != nil {
 		if errors.Is(err, engine.ErrVPNRequired) {
-			task.ErrorMessage = "VPN required: tunnel down — P2P streaming disabled (debrid still works)"
-			log.Printf("[%s] stream refused: VPN required but tunnel down — not joining the swarm in the clear", at.ID[:8])
+			task.SetError("VPN required: tunnel down — P2P streaming disabled (debrid still works)")
+			log.Printf("[%s] stream refused: VPN required but tunnel down — not joining the swarm in the clear", agent.ShortID(at.ID))
 		} else {
-			task.ErrorMessage = "create stream engine: " + err.Error()
+			task.SetError("create stream engine: " + err.Error())
 		}
 		task.Transition(engine.StatusFailed)
 		return
@@ -266,28 +262,28 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	// 2. Wait for metadata + select file
 	task.Transition(engine.StatusResolving)
 	if err := eng.Start(ctx, at.InfoHash); err != nil {
-		task.ErrorMessage = err.Error()
+		task.SetError(err.Error())
 		task.Transition(engine.StatusFailed)
 		return
 	}
 
-	task.FileName = eng.FileName()
-	task.TotalBytes = eng.FileLength()
+	task.SetFileName(eng.FileName())
+	task.SetTotalBytes(eng.FileLength())
 	task.Transition(engine.StatusDownloading)
 
-	log.Printf("[%s] stream: %s (%s)", at.ID[:8], eng.FileName(), ui.FormatBytes(eng.FileLength()))
+	log.Printf("[%s] stream: %s (%s)", agent.ShortID(at.ID), eng.FileName(), ui.FormatBytes(eng.FileLength()))
 
 	// 3. Buffer initial data
 	if err := eng.WaitBuffer(ctx, nil); err != nil {
-		task.ErrorMessage = "buffering failed: " + err.Error()
+		task.SetError("buffering failed: " + err.Error())
 		task.Transition(engine.StatusFailed)
 		return
 	}
 
 	// 4. Set file on the persistent stream server (instant, no port binding)
 	srv.SetFile(eng, at.ID)
-	task.StreamURL = srv.URLsJSON()
-	log.Printf("[%s] stream ready: %s (url: %s)", at.ID[:8], eng.FileName(), srv.URL())
+	task.SetStreamURL(srv.URLsJSON())
+	log.Printf("[%s] stream ready: %s (url: %s)", agent.ShortID(at.ID), eng.FileName(), srv.URL())
 
 	// Pre-descargar los últimos 5 MB del archivo para que el moov atom (MP4)
 	// o el seekhead (MKV) estén disponibles cuando VLC los pida al abrir el
@@ -311,7 +307,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[%s] stream stopped", at.ID[:8])
+			log.Printf("[%s] stream stopped", agent.ShortID(at.ID))
 			return
 
 		case <-progressTicker.C:
@@ -321,9 +317,9 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 			// explicitly rather than serve a stalled stream. Once completed there is
 			// nothing left to fetch, so a later drop can't leak.
 			if !completed && !eng.VPNStillHealthy() {
-				task.ErrorMessage = "VPN tunnel down — P2P streaming stopped (no clear-net leak)"
+				task.SetError("VPN tunnel down — P2P streaming stopped (no clear-net leak)")
 				task.Transition(engine.StatusFailed)
-				log.Printf("[%s] VPN tunnel went down mid-stream — stopping P2P (partial kept, P2P disabled)", at.ID[:8])
+				log.Printf("[%s] VPN tunnel went down mid-stream — stopping P2P (partial kept, P2P disabled)", agent.ShortID(at.ID))
 				return
 			}
 
@@ -345,7 +341,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 			// Terminal progress
 			if !completed && p.TotalBytes > 0 {
 				fmt.Fprintf(os.Stderr, "\r[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
-					at.ID[:8], pct,
+					agent.ShortID(at.ID), pct,
 					ui.FormatBytes(p.DownloadedBytes), ui.FormatBytes(p.TotalBytes), ui.FormatBytes(p.SpeedBps),
 					p.Peers, p.Seeds)
 			}
@@ -376,17 +372,17 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 					}
 					eng.PauseDownload()
 					log.Printf("[%s] %s — pausing background download at %d%% (partial kept, resumes on replay)",
-						at.ID[:8], reason, pct)
+						agent.ShortID(at.ID), reason, pct)
 				case !idle && eng.IsDownloadPaused():
 					eng.ResumeDownload()
-					log.Printf("[%s] viewer active — resuming background download", at.ID[:8])
+					log.Printf("[%s] viewer active — resuming background download", agent.ShortID(at.ID))
 				}
 			}
 
 			if !completed && p.DownloadedBytes >= p.TotalBytes && p.TotalBytes > 0 {
 				fmt.Fprint(os.Stderr, "\r\033[2K")
 				task.Transition(engine.StatusCompleted)
-				log.Printf("[%s] stream download complete, server stays up until idle (30m)", at.ID[:8])
+				log.Printf("[%s] stream download complete, server stays up until idle (30m)", agent.ShortID(at.ID))
 				completed = true
 			}
 		}

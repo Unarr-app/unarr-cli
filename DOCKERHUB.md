@@ -196,7 +196,35 @@ Use `docker exec` for one-off commands while the daemon is running:
 
 ```bash
 docker exec unarr unarr status
-docker exec unarr unarr doctor      # diagnose config / connectivity
+docker exec unarr unarr doctor         # diagnose config / connectivity
+docker exec unarr unarr support-bundle # one redacted file to attach to an issue
+```
+
+---
+
+## Health check
+
+The image ships a `HEALTHCHECK`, so a container whose daemon has died shows as
+`unhealthy` instead of `running`:
+
+```bash
+docker ps                                    # STATUS column shows (healthy)
+docker inspect --format '{{.State.Health.Status}}' unarr
+docker compose up -d --wait                  # blocks until the daemon is really up
+```
+
+It runs `unarr doctor --quick`, which checks only local things — config
+readable, download dir writable, disk space, and whether the daemon process is
+actually alive — and **makes no network call**. That is deliberate: a probe
+that reached the API would flip the container unhealthy on any internet blip,
+and Docker's response to unhealthy is to restart. Warnings never mark the
+container unhealthy for the same reason.
+
+Run it yourself to see what it sees:
+
+```bash
+docker exec unarr unarr doctor --quick
+docker exec unarr unarr doctor --quick --json   # exit 1 when unhealthy
 ```
 
 ---

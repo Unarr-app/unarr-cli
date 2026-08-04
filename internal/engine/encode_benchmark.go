@@ -42,7 +42,41 @@ const realtimeMarginSoftware = 2.0
 // average out process spin-up.
 const benchmarkClipSeconds = 3
 
-// BenchmarkMaxTranscodeHeight returns the largest output height this host can
+// Reasons an EncodeBenchmark reached its ceiling. They are the difference
+// between "we measured this host" and "we could not measure it and fell back",
+// which a renderer (unarr bench) and a cache reader (unarr doctor) both need to
+// state honestly instead of presenting a default as a measurement.
+const (
+	EncodeReasonHardware     = "hwaccel"      // HW encoder present — no probe run
+	EncodeReasonNoFFmpeg     = "no-ffmpeg"    // nothing to benchmark with
+	EncodeReasonSustained    = "sustained"    // a rung cleared the realtime threshold
+	EncodeReasonFloor        = "floor"        // measured, but not even 480p sustains
+	EncodeReasonUnmeasurable = "unmeasurable" // every probe failed to run
+)
+
+// EncodeRungResult is one measured rung. Factor is meaningful only when
+// Measured is true: a probe that could not run reports 0, which must never be
+// read as "0× realtime, this host is hopeless".
+type EncodeRungResult struct {
+	Height   int     `json:"height"`
+	Width    int     `json:"width"`
+	Factor   float64 `json:"realtimeFactor"`
+	Measured bool    `json:"measured"`
+}
+
+// EncodeBenchmark is the full outcome of the transcode-ceiling probe: the
+// ceiling the daemon will advertise plus the evidence behind it. The daemon
+// only needs Ceiling; `unarr bench` and the cache keep the rest so a user can
+// see how close the host came to the next rung up.
+type EncodeBenchmark struct {
+	HWAccel   string             `json:"hwaccel"`
+	Ceiling   int                `json:"maxTranscodeHeight"`
+	Threshold float64            `json:"realtimeThreshold"`
+	Reason    string             `json:"reason"`
+	Rungs     []EncodeRungResult `json:"rungs,omitempty"`
+}
+
+// MeasureEncodeCeiling finds the largest output height this host can
 // software-transcode in real time, one of {1080,720,480}. Hardware encoders
 // return 2160 WITHOUT benchmarking — NVENC/QSV/VAAPI/VideoToolbox all sustain
 // 4K and a probe would only add startup latency.
@@ -54,39 +88,72 @@ const benchmarkClipSeconds = 3
 // sources to an external player instead. Floors at 480: a box that can't
 // sustain even that is barely functional, and 480-or-smaller sources transcode
 // cheaply regardless — anything larger is already gated out by the 480 ceiling.
-func BenchmarkMaxTranscodeHeight(ctx context.Context, ffmpegPath string, hw HWAccel) int {
+//
+// Deliberately silent: it is the shared measurement core behind the daemon's
+// startup probe (which logs) and `unarr bench` (which renders a table), and a
+// measurement function that writes to the log can only be used by one of them.
+func MeasureEncodeCeiling(ctx context.Context, ffmpegPath string, hw HWAccel) EncodeBenchmark {
+	res := EncodeBenchmark{HWAccel: string(hw), Threshold: realtimeMarginSoftware}
 	if hw != HWAccelNone {
-		return 2160
+		res.Ceiling, res.Reason = 2160, EncodeReasonHardware
+		return res
 	}
 	if ffmpegPath == "" {
-		return 1080 // no benchmark possible; keep the historical default
+		res.Ceiling, res.Reason = 1080, EncodeReasonNoFFmpeg // keep the historical default
+		return res
 	}
 	measuredAny := false
 	for _, rung := range softwareBenchmarkRungs {
 		factor, ok := measureEncodeRealtimeFactor(ctx, ffmpegPath, rung)
+		res.Rungs = append(res.Rungs, EncodeRungResult{
+			Height: rung.height, Width: rung.width, Factor: factor, Measured: ok,
+		})
 		if !ok {
 			// Probe couldn't run (timeout / exec error) — try a lighter rung
 			// rather than treat the failure as a measured "fast enough".
-			log.Printf("[transcode] encode benchmark: %dp probe failed — trying lower", rung.height)
 			continue
 		}
 		measuredAny = true
 		if factor >= realtimeMarginSoftware {
-			log.Printf("[transcode] encode benchmark: software ceiling %dp (%.1f× realtime)", rung.height, factor)
-			return rung.height
+			res.Ceiling, res.Reason = rung.height, EncodeReasonSustained
+			return res
 		}
-		log.Printf("[transcode] encode benchmark: %dp only %.1f× realtime (<%.1f×) — trying lower", rung.height, factor, realtimeMarginSoftware)
 	}
 	if !measuredAny {
 		// No rung produced a measurement at all — the benchmark infrastructure
 		// failed (missing lavfi/testsrc2, ffmpeg wedged), NOT a slow host. Don't
 		// punish a possibly-capable box by flooring at 480; keep the historical
 		// default so behaviour is no worse than before the benchmark existed.
-		log.Printf("[transcode] encode benchmark: no rung could be measured (lavfi/ffmpeg issue) — keeping default 1080 ceiling")
-		return 1080
+		res.Ceiling, res.Reason = 1080, EncodeReasonUnmeasurable
+		return res
 	}
-	log.Printf("[transcode] encode benchmark: host can't sustain 480p software encode — flooring ceiling at 480 (oversized sources route to external)")
-	return 480
+	res.Ceiling, res.Reason = 480, EncodeReasonFloor
+	return res
+}
+
+// BenchmarkMaxTranscodeHeight is the daemon-startup entry point: it runs
+// MeasureEncodeCeiling and narrates it to the daemon log, which is the only
+// place a user can see WHY their agent advertised 720p. Returns just the
+// ceiling because that is all the register payload carries.
+func BenchmarkMaxTranscodeHeight(ctx context.Context, ffmpegPath string, hw HWAccel) int {
+	res := MeasureEncodeCeiling(ctx, ffmpegPath, hw)
+	for _, r := range res.Rungs {
+		switch {
+		case !r.Measured:
+			log.Printf("[transcode] encode benchmark: %dp probe failed — trying lower", r.Height)
+		case r.Factor >= res.Threshold:
+			log.Printf("[transcode] encode benchmark: software ceiling %dp (%.1f× realtime)", r.Height, r.Factor)
+		default:
+			log.Printf("[transcode] encode benchmark: %dp only %.1f× realtime (<%.1f×) — trying lower", r.Height, r.Factor, res.Threshold)
+		}
+	}
+	switch res.Reason {
+	case EncodeReasonUnmeasurable:
+		log.Printf("[transcode] encode benchmark: no rung could be measured (lavfi/ffmpeg issue) — keeping default 1080 ceiling")
+	case EncodeReasonFloor:
+		log.Printf("[transcode] encode benchmark: host can't sustain 480p software encode — flooring ceiling at 480 (oversized sources route to external)")
+	}
+	return res.Ceiling
 }
 
 // measureEncodeRealtimeFactor encodes benchmarkClipSeconds of synthetic video

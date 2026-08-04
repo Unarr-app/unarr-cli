@@ -40,7 +40,10 @@ dist-ffbinaries/
 
 # Docker
 tmp/
-config/
+# Anchored: the docker bind-mount is the REPO-ROOT config/ only. Unanchored,
+# this pattern also swallowed internal/config/ — new source files there were
+# silently untrackable.
+/config/
 dist-ffbinaries/
 
 # Claude Code: keep entirely local, do not track
@@ -51,3 +54,7 @@ CLAUDE.md
 .claude/settings.json
 /unarr-desktop
 /unarr-desktop.exe
+
+# `unarr support-bundle` writes here by default. Redacted, but still a dump of
+# someone's machine — it has no business in a commit.
+unarr-support-*.tar.gz
