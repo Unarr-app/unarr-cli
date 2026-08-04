@@ -113,6 +113,16 @@ type Daemon struct {
 	// so the web can prefer it over Tailscale/LAN for in-browser playback.
 	funnelURL string
 
+	// Local control plane endpoint (internal/control), kept HERE and not only in
+	// State because Register REBUILDS State from scratch — a registration that
+	// lands after the control server bound (the common case: registration
+	// retries behind a network hiccup, or a recovery from sign_in_required)
+	// would otherwise erase the port and token from the state file, and every
+	// `unarr downloads` and tray action would report "no control plane" against
+	// a daemon that has a perfectly good one.
+	controlPort  int
+	controlToken string
+
 	// httpsWanMapped: the stream server auto-published its HTTPS port to the WAN
 	// via UPnP (external port matches). Written by the stream server's mapping
 	// maintainer goroutine (SetWanMappedCallback → SetHTTPSWanMapped) and read by
@@ -381,6 +391,11 @@ func (d *Daemon) register(ctx context.Context, park bool) error {
 		VPNRequired: vpnRequired,
 		VPNBlocking: vpnRequired && !vpnActive,
 		FunnelURL:   d.funnelURL,
+		// Carried over: the control server binds before (or in parallel with) a
+		// successful registration, and rebuilding State without these would hide
+		// the control plane from the CLI and the tray. See the field comments.
+		ControlPort:  d.controlPort,
+		ControlToken: d.controlToken,
 	}
 	WriteState(&d.State)
 
@@ -488,6 +503,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 // TriggerSync requests an immediate sync cycle.
 func (d *Daemon) TriggerSync() {
 	d.sync.TriggerSync()
+}
+
+// SetControlPlane publishes the loopback control endpoint into the daemon state
+// so `unarr downloads` and the desktop tray can find it. Call once, right after
+// the control server binds and BEFORE the first state write — a client that
+// reads a state file without these fields correctly concludes there is no
+// control plane and takes the offline path.
+func (d *Daemon) SetControlPlane(port int, token string) {
+	d.controlPort = port
+	d.controlToken = token
+	d.State.ControlPort = port
+	d.State.ControlToken = token
+	WriteState(&d.State)
 }
 
 // Deregister notifies the server of graceful shutdown.
