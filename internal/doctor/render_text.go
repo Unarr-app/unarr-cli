@@ -58,8 +58,13 @@ func (r *TextRenderer) OnCheck(c Check) {
 		r.lastGroup = c.Group
 	}
 
+	// The pass styling is also the fallback: a Status this renderer has never
+	// heard of prints as a plain check rather than panicking on a nil colour.
+	// StatusPass is still spelled out so `exhaustive` keeps guarding the switch —
+	// a new status added to check.go must be decided here, not defaulted.
 	col, symbol := r.green, "+"
 	switch c.Status {
+	case StatusPass:
 	case StatusFail:
 		col, symbol = r.red, "x"
 	case StatusWarn:
