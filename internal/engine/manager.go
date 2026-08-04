@@ -385,9 +385,7 @@ func (m *Manager) CancelTask(taskID string) bool {
 		dl.Pause(taskID) // stop download, keep files
 	}
 
-	task.mu.Lock()
-	task.ErrorMessage = "cancelled by user"
-	task.mu.Unlock()
+	task.SetError("cancelled by user")
 	task.Transition(StatusCancelled)
 
 	log.Printf("[%s] cancelled: %s", agent.ShortID(taskID), task.Title)
@@ -449,9 +447,7 @@ func (m *Manager) CancelAndDeleteFiles(taskID string) bool {
 		dl.Cancel(taskID) // stop download + delete files
 	}
 
-	task.mu.Lock()
-	task.ErrorMessage = "cancelled by user"
-	task.mu.Unlock()
+	task.SetError("cancelled by user")
 	task.Transition(StatusCancelled)
 
 	log.Printf("[%s] cancelled + files deleted: %s", agent.ShortID(taskID), task.Title)
@@ -724,9 +720,7 @@ func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Resu
 	if finalPath == "" {
 		finalPath = result.FilePath
 	}
-	task.mu.Lock()
-	task.FilePath = finalPath
-	task.mu.Unlock()
+	task.SetFilePath(finalPath)
 
 	// Handle upgrade replacement (mode = "upgrade")
 	if task.ReplacePath != "" {
@@ -734,9 +728,7 @@ func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Resu
 		if err := replaceFile(task.ReplacePath, finalPath, backupDir); err != nil {
 			log.Printf("[%s] replace warning: %v (keeping new file at %s)", agent.ShortID(task.ID), err, finalPath)
 		} else {
-			task.mu.Lock()
-			task.FilePath = task.ReplacePath
-			task.mu.Unlock()
+			task.SetFilePath(task.ReplacePath)
 			log.Printf("[%s] upgraded: replaced %s", agent.ShortID(task.ID), task.ReplacePath)
 		}
 	}
@@ -755,9 +747,7 @@ func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Resu
 }
 
 func (m *Manager) fail(ctx context.Context, task *Task, msg string) {
-	task.mu.Lock()
-	task.ErrorMessage = msg
-	task.mu.Unlock()
+	task.SetError(msg)
 	task.Transition(StatusFailed)
 	log.Printf("[%s] FAILED: %s - %s", agent.ShortID(task.ID), task.Title, msg)
 	if m.cfg.Notifications {
@@ -783,9 +773,7 @@ func (m *Manager) fail(ctx context.Context, task *Task, msg string) {
 // re-dispatch; a daemon restart resumes unconditionally. Safety is intact: no
 // clear-net P2P and no data loss (partial kept).
 func (m *Manager) pauseForVPN(ctx context.Context, task *Task) {
-	task.mu.Lock()
-	task.ErrorMessage = "VPN tunnel down — torrent paused (partial kept); resumes when the tunnel recovers"
-	task.mu.Unlock()
+	task.SetError("VPN tunnel down — torrent paused (partial kept); resumes when the tunnel recovers")
 	if err := task.Transition(StatusCancelled); err != nil {
 		// The state machine rejected the pause (unexpected from downloading/resolving)
 		// — fall back to a plain fail so the task never sticks in a non-terminal state.

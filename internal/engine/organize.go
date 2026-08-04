@@ -2,7 +2,6 @@ package engine
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -232,11 +231,8 @@ func moveToDir(result *Result, task *Task, destDir, destFileName string, cfg Org
 		return organizeDir(result, destDir, destFileName, cfg)
 	}
 
-	if err := os.Rename(result.FilePath, destPath); err != nil {
-		if err := copyFile(result.FilePath, destPath); err != nil {
-			return "", fmt.Errorf("move file: %w", err)
-		}
-		os.Remove(result.FilePath)
+	if err := moveFile(result.FilePath, destPath); err != nil {
+		return "", fmt.Errorf("move file: %w", err)
 	}
 
 	// Move subtitle files alongside the video
@@ -300,11 +296,8 @@ func organizeDir(result *Result, destDir, destFileName string, cfg OrganizeConfi
 	}
 	finalFileName := filepath.Base(destPath)
 
-	if err := os.Rename(videoPath, destPath); err != nil {
-		if err := copyFile(videoPath, destPath); err != nil {
-			return "", fmt.Errorf("move principal video: %w", err)
-		}
-		os.Remove(videoPath)
+	if err := moveFile(videoPath, destPath); err != nil {
+		return "", fmt.Errorf("move principal video: %w", err)
 	}
 
 	// Drag the principal video's subtitles (same-basename siblings) alongside it.
@@ -520,12 +513,9 @@ func moveSubtitles(srcVideoPath, destDir, destFileName string) {
 		}
 		destPath := filepath.Join(destDir, subDest)
 
-		if err := os.Rename(subSrc, destPath); err != nil {
-			if err := copyFile(subSrc, destPath); err != nil {
-				log.Printf("[organize] warning: failed to move subtitle %s: %v", e.Name(), err)
-				continue
-			}
-			os.Remove(subSrc)
+		if err := moveFile(subSrc, destPath); err != nil {
+			log.Printf("[organize] warning: failed to move subtitle %s: %v", e.Name(), err)
+			continue
 		}
 	}
 }
@@ -598,26 +588,19 @@ func replaceFile(oldPath, newPath, backupDir string) error {
 	backupName := fmt.Sprintf("%s.%d%s", nameNoExt, time.Now().Unix(), ext)
 	backupPath := filepath.Join(backupDir, backupName)
 
-	if err := os.Rename(oldPath, backupPath); err != nil {
-		// Cross-device: copy + delete
-		if err := copyFile(oldPath, backupPath); err != nil {
-			return fmt.Errorf("backup failed: %w", err)
-		}
-		os.Remove(oldPath)
+	if err := moveFile(oldPath, backupPath); err != nil {
+		return fmt.Errorf("backup failed: %w", err)
 	}
 
 	// Move new file to old path
 	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
 		return fmt.Errorf("create target dir: %w", err)
 	}
-	if err := os.Rename(newPath, oldPath); err != nil {
-		// Cross-device: copy + delete
-		if err := copyFile(newPath, oldPath); err != nil {
-			// Rollback: restore backup
-			os.Rename(backupPath, oldPath)
-			return fmt.Errorf("replace failed: %w", err)
-		}
-		os.Remove(newPath)
+	if err := moveFile(newPath, oldPath); err != nil {
+		// Rollback: restore the backup taken above. moveFile has already removed
+		// any partial destination, so this rename lands on a clean path.
+		os.Rename(backupPath, oldPath)
+		return fmt.Errorf("replace failed: %w", err)
 	}
 
 	return nil
@@ -796,19 +779,4 @@ func normalizeLangTag(m string) string {
 	}
 }
 
-func copyFile(src, dst string) error {
-	s, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-
-	d, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-
-	_, err = io.Copy(d, s)
-	return err
-}
+// copyFile and moveFile live in movefile.go.

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,14 +17,15 @@ import (
 )
 
 var (
-	cfgFile    string
-	apiKeyFlag string
-	jsonOut    bool
-	noColor    bool
-	rootCmd    *cobra.Command
-	apiClient  *tc.Client
-	appCfg     config.Config
-	cfgLoaded  bool
+	cfgFile      string
+	apiKeyFlag   string
+	jsonOut      bool
+	noColor      bool
+	logLevelFlag string
+	rootCmd      *cobra.Command
+	apiClient    *tc.Client
+	appCfg       config.Config
+	cfgLoaded    bool
 )
 
 func init() {
@@ -76,6 +78,8 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 	rootCmd.PersistentFlags().StringVar(&apiKeyFlag, "api-key", "", "API key (overrides config file and env)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "output as JSON (for piping)")
 	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colored output")
+	rootCmd.PersistentFlags().StringVar(&logLevelFlag, "log-level", "",
+		"minimum log severity: debug, info, warn, error (overrides [daemon] log_level)")
 
 	// Getting Started
 	initCmd := newInitCmd()
@@ -137,6 +141,8 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 	probeHWAccelCmd.GroupID = "system"
 	cleanCmd := newCleanCmd()
 	cleanCmd.GroupID = "system"
+	logsCmd := newLogsCmd()
+	logsCmd.GroupID = "system"
 	libraryCmd := newLibraryCmd()
 	mirrorsCmd := newMirrorsCmd()
 	mirrorsCmd.GroupID = "system"
@@ -180,6 +186,9 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 		doctorCmd,
 		probeHWAccelCmd,
 		cleanCmd,
+		newBenchCmd(),
+		newSupportBundleCmd(),
+		logsCmd,
 		libraryCmd,
 		mirrorsCmd,
 		selfUpdateCmd,
@@ -192,9 +201,23 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 	)
 }
 
+// errQuietExit makes a command exit 1 without printing an error line and
+// without reporting to Sentry.
+//
+// It exists for `unarr doctor --quick`, which a Docker HEALTHCHECK runs every
+// 60 seconds: the exit code IS the result, so an unhealthy container is not an
+// application error. Without this, every probe on a container whose daemon is
+// down would print over the JSON the caller is parsing and file a Sentry event
+// a minute — turning a working health probe into an incident stream.
+var errQuietExit = errors.New("quiet exit")
+
 // Execute runs the root command.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		if errors.Is(err, errQuietExit) {
+			sentry.Close()
+			os.Exit(1)
+		}
 		// Report to Sentry with command context
 		command := ""
 		if cmd, _, cerr := rootCmd.Find(os.Args[1:]); cerr == nil && cmd != nil && cmd != rootCmd {

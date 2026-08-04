@@ -105,6 +105,48 @@ and nothing restarts it — measured with a real logon trigger, not just
 (`daemon_launch_vbs.go`) as a relaunch loop, and why the exit code alone was not
 enough. Do not "simplify" that loop back into a bare `WScript.Quit`.
 
+### Log rotation + ownership — `smoke-rotation.ps1`
+
+Verifies the one thing a Linux lab structurally cannot: that the daemon's log
+**actually shrinks** while a real `cmd.exe` redirect holder is attached. Needs
+`fakeapi.exe` next to the binaries (as `smoke-supervision.ps1` does), otherwise
+the daemon does not stay up long enough for check [2] to be conclusive.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File \\host.lan\Data\smoke-rotation.ps1
+```
+
+**What it established (2026-08-03, Win11 26200) — the bug it now guards.** The
+shim used to run `cmd /c ""unarr.exe" start >> "…\unarr.log" 2>&1`, so cmd.exe
+held unarr.log with only `FILE_SHARE_READ`. `os.Truncate` on Windows is
+`OpenFile(name, O_WRONLY, 0666)` + `Ftruncate`, and that `GENERIC_WRITE` is a
+sharing violation, so copy-truncate rotation failed **after** copying the whole
+file aside:
+
+```
+unarr logs rotate -> exit 1
+Error: truncate log file: open C:\unarrlab\unarr\unarr.log:
+The process cannot access the file because it is being used by another process.
+snapshot unarr.log.1 present = True (2108130 bytes)   <- the copy was made
+live unarr.log after the truncate = 2108228 bytes     <- it did not shrink
+```
+
+Per 60s janitor tick: the ring shifted (real history gone in three minutes), a
+whole budget was copied (~28 GB/day at the 20 MB default), and the live log
+never shrank. `janitor.go` swallowed the error, so none of it was visible.
+
+The fix is ownership: the daemon opens unarr.log itself (`start --log-file …`,
+O_APPEND ⇒ a real `FILE_APPEND_DATA` handle) and rotates it by **rename**, which
+works precisely because the renamer holds the descriptor. cmd.exe keeps only
+`unarr.boot.log` — the banner, a fatal start error, a panic dump — which the
+shim bounds itself, by rename, at the top of its relaunch loop where nothing
+holds the file. The two paths **must stay different files**: point the `>>` at
+the log the daemon owns and cmd's `FILE_SHARE_READ` refuses the daemon's own
+open, leaving it with no log at all. That is check [1].
+
+Re-run this after ANY change to `daemon_launch_vbs.go`, `daemon_install*`,
+`internal/logging`, or the `--log-file` wiring.
+
 ### Gotchas that cost real time here (read before writing a .ps1)
 
 - **Deploy .ps1 as UTF-8 WITH a BOM and CRLF.** Windows PowerShell 5.1 decodes a

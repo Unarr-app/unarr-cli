@@ -22,6 +22,7 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/engine"
 	"github.com/Unarr-app/unarr-cli/internal/library"
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
+	"github.com/Unarr-app/unarr-cli/internal/logging"
 	"github.com/Unarr-app/unarr-cli/internal/notify"
 	"github.com/Unarr-app/unarr-cli/internal/ui"
 	"github.com/Unarr-app/unarr-cli/internal/usenet/download"
@@ -33,7 +34,7 @@ import (
 
 // newStartCmd creates the top-level `unarr start` command.
 func newStartCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start the download daemon (foreground)",
 		Long: `Start the unarr daemon in the foreground.
@@ -56,6 +57,8 @@ To run as a background service, use 'unarr daemon install' instead.`,
 			return runDaemon()
 		},
 	}
+	bindDaemonLogFlag(cmd)
+	return cmd
 }
 
 // newStopCmd creates the top-level `unarr stop` command.
@@ -122,6 +125,11 @@ func runDaemonStart() error {
 	// including a crash seconds from now — as deliberate and leave the agent down.
 	agent.ClearStopIntent()
 
+	// Surface keys the config decoder ignored (typo, or right key under the
+	// wrong section). One line each, warning only: refusing to start would turn
+	// any future key rename into a fleet-wide outage.
+	logUnknownConfigKeys(cfg)
+
 	// Validate config. A missing API key / agent ID means we have no credential
 	// to authenticate a telemetry post with, so these two can't be reported —
 	// they're the one blind spot, and inherently so.
@@ -174,6 +182,12 @@ func runDaemonStart() error {
 			log.Printf("[lock] release %s: %v", config.LockPath(), err)
 		}
 	}()
+
+	// Take ownership of the log file the launcher named — AFTER the flock, so a
+	// daemon that lost the race cannot rename the live log of the one already
+	// running, and BEFORE the banner. No-op without --log-file (foreground
+	// `unarr start`, Docker, systemd/journald). See daemon_logsetup.go.
+	defer installDaemonLogWriter()()
 
 	// Validate configured paths are safe
 	if err := cfg.ValidatePaths(); err != nil {
@@ -345,6 +359,15 @@ func runDaemonStart() error {
 	// Daemon-scoped context — cancelled on shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Keep every FOREIGN-HELD daemon log inside its size budget for the whole
+	// run: whoever started us (launchd, the Windows shim, the detached launcher)
+	// owns those descriptors, so no writer in this process controls them — but a
+	// copy-truncate from the outside does. The log we own ourselves is excluded;
+	// its Writer rotates it by rename. A no-op under systemd, where output goes
+	// to the journal and no such file exists — and a no-op on every platform by
+	// DEFAULT, since log_max_size_mb is 0 unless the user opted into rotation.
+	startLogJanitors(ctx, logging.DefaultSweepInterval, ownedLogPath())
 
 	// Parse speed limits
 	maxDl, _ := config.ParseSpeed(cfg.Download.MaxDownloadSpeed)

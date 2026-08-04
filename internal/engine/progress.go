@@ -231,7 +231,7 @@ func (r *ProgressReporter) flush(ctx context.Context) {
 				r.handleResponse(task, &agent.StatusResponse{Success: false})
 				continue
 			}
-			log.Printf("[%s] progress report failed: %v", agent.ShortID(task.ID), err)
+			log.Printf("[%s] progress report failed: %v", task.ShortID(), err)
 			continue
 		}
 		r.mu.Lock()
@@ -295,7 +295,7 @@ func (r *ProgressReporter) handleResponse(task *Task, resp *agent.StatusResponse
 	}
 
 	if resp.Cancelled {
-		log.Printf("[%s] cancelled by user (via web)", task.ID[:8])
+		log.Printf("[%s] cancelled by user (via web)", task.ShortID())
 		r.Untrack(task.ID)
 		if resp.DeleteFiles && r.onDeleteFiles != nil {
 			r.onDeleteFiles(task.ID)
@@ -303,7 +303,7 @@ func (r *ProgressReporter) handleResponse(task *Task, resp *agent.StatusResponse
 			r.onCancel(task.ID)
 		}
 	} else if resp.Paused {
-		log.Printf("[%s] paused by user (via web)", task.ID[:8])
+		log.Printf("[%s] paused by user (via web)", task.ShortID())
 		r.Untrack(task.ID)
 		if r.onPause != nil {
 			r.onPause(task.ID)
@@ -311,7 +311,7 @@ func (r *ProgressReporter) handleResponse(task *Task, resp *agent.StatusResponse
 	}
 
 	if resp.StreamRequested && task.GetStreamURL() == "" {
-		log.Printf("[%s] stream requested by user (via web)", task.ID[:8])
+		log.Printf("[%s] stream requested by user (via web)", task.ShortID())
 		if r.onStreamRequested != nil {
 			r.onStreamRequested(task.ID)
 		}
@@ -326,7 +326,7 @@ func (r *ProgressReporter) ReportFinal(ctx context.Context, task *Task) {
 	}
 	update := task.ToStatusUpdate()
 	if _, err := r.reporter.ReportStatus(ctx, update); err != nil {
-		log.Printf("[%s] final report failed: %v", task.ID[:8], err)
+		log.Printf("[%s] final report failed: %v", task.ShortID(), err)
 	}
 	r.Untrack(task.ID)
 }

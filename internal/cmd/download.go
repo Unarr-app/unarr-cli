@@ -186,7 +186,7 @@ func runDownloadWithDeps(input, method string, deps downloadDeps) error {
 	} else {
 		for _, t := range active {
 			if t.GetStatus() == engine.StatusFailed {
-				return fmt.Errorf("download failed: %s", t.ErrorMessage)
+				return fmt.Errorf("download failed: %s", t.GetError())
 			}
 		}
 	}

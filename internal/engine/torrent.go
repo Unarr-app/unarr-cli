@@ -431,9 +431,9 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 
 	// 1. Wait for metadata (0 = unlimited, like qBittorrent)
 	if d.cfg.MetadataTimeout > 0 {
-		log.Printf("[%s] waiting for metadata (timeout: %s, trackers: %d)...", task.ID[:8], d.cfg.MetadataTimeout, len(defaultTrackers))
+		log.Printf("[%s] waiting for metadata (timeout: %s, trackers: %d)...", task.ShortID(), d.cfg.MetadataTimeout, len(defaultTrackers))
 	} else {
-		log.Printf("[%s] waiting for metadata (no timeout, trackers: %d)...", task.ID[:8], len(defaultTrackers))
+		log.Printf("[%s] waiting for metadata (no timeout, trackers: %d)...", task.ShortID(), len(defaultTrackers))
 	}
 
 	if d.cfg.MetadataTimeout > 0 {
@@ -441,7 +441,7 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 		defer metaCancel()
 		select {
 		case <-t.GotInfo():
-			log.Printf("[%s] metadata received: %s (%d files)", task.ID[:8], t.Name(), len(t.Files()))
+			log.Printf("[%s] metadata received: %s (%d files)", task.ShortID(), t.Name(), len(t.Files()))
 		case <-metaCtx.Done():
 			stats := t.Stats()
 			cleanup()
@@ -451,7 +451,7 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 		// Unlimited — wait until metadata arrives or context is cancelled
 		select {
 		case <-t.GotInfo():
-			log.Printf("[%s] metadata received: %s (%d files)", task.ID[:8], t.Name(), len(t.Files()))
+			log.Printf("[%s] metadata received: %s (%d files)", task.ShortID(), t.Name(), len(t.Files()))
 		case <-ctx.Done():
 			cleanup()
 			return nil, fmt.Errorf("cancelled while waiting for metadata")
@@ -461,7 +461,7 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 	// 2. Select files to download (prefer largest video + matching subs)
 	totalBytes, fileName := d.selectFiles(t, task.ID)
 
-	log.Printf("[%s] downloading %s (%s)", task.ID[:8], fileName, formatBytes(totalBytes))
+	log.Printf("[%s] downloading %s (%s)", task.ShortID(), fileName, formatBytes(totalBytes))
 
 	// 2.5 Pre-flight disk-space guard — refuse before writing rather than fill
 	// the disk to 0 mid-download (corrupts the partial file). Torrents land in
@@ -565,7 +565,7 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 				if isTTY {
 					fmt.Fprintln(os.Stderr)
 				}
-				log.Printf("[%s] VPN tunnel went down - pausing torrent (files kept, P2P disabled)", task.ID[:8])
+				log.Printf("[%s] VPN tunnel went down - pausing torrent (files kept, P2P disabled)", task.ShortID())
 				return nil, ErrVPNTunnelDown
 			}
 
@@ -598,7 +598,7 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 			// Terminal progress
 			pct := int(float64(downloaded) / float64(totalBytes) * 100)
 			line := fmt.Sprintf("[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
-				task.ID[:8], pct,
+				task.ShortID(), pct,
 				formatBytes(downloaded), formatBytes(totalBytes), formatBytes(speed),
 				stats.ActivePeers, stats.ConnectedSeeders)
 			if isTTY {
@@ -636,7 +636,7 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 				if missing := t.BytesMissing(); missing > 0 {
 					return nil, integrityErr("truncated", "torrent reported complete but %s of verified pieces are still missing", formatBytes(missing))
 				}
-				log.Printf("[%s] download complete: %s", task.ID[:8], fileName)
+				log.Printf("[%s] download complete: %s", task.ShortID(), fileName)
 				return &Result{}, nil
 			}
 		}
@@ -824,7 +824,7 @@ func (d *TorrentDownloader) Pause(taskID string) error {
 	}
 
 	t.Drop()
-	log.Printf("[%s] paused (files kept for resume)", taskID[:8])
+	log.Printf("[%s] paused (files kept for resume)", agent.ShortID(taskID))
 	return nil
 }
 
@@ -845,7 +845,7 @@ func (d *TorrentDownloader) Cancel(taskID string) error {
 	if name != "" {
 		path, err := safePath(d.cfg.DataDir, name)
 		if err != nil {
-			log.Printf("[%s] cancel blocked: %v", taskID[:8], err)
+			log.Printf("[%s] cancel blocked: %v", agent.ShortID(taskID), err)
 			return nil
 		}
 		if fi, statErr := os.Stat(path); statErr == nil {
@@ -854,7 +854,7 @@ func (d *TorrentDownloader) Cancel(taskID string) error {
 			} else {
 				os.Remove(path)
 			}
-			log.Printf("[%s] cleaned up partial download: %s", taskID[:8], name)
+			log.Printf("[%s] cleaned up partial download: %s", agent.ShortID(taskID), name)
 		}
 	}
 
@@ -907,7 +907,7 @@ func (d *TorrentDownloader) GetStreamProvider(taskID string) (FileProvider, erro
 	d.activeMu.Unlock()
 
 	if !ok {
-		return nil, fmt.Errorf("no active torrent for task %s", taskID[:8])
+		return nil, fmt.Errorf("no active torrent for task %s", agent.ShortID(taskID))
 	}
 
 	// Select largest video file
@@ -998,7 +998,7 @@ func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) (tota
 	skipped := len(files) - 1 - subCount
 	if skipped > 0 {
 		log.Printf("[%s] selected: %s (%s) + %d subs, skipped %d files",
-			taskID[:8], filepath.Base(fileName), formatBytes(video.Length()), subCount, skipped)
+			agent.ShortID(taskID), filepath.Base(fileName), formatBytes(video.Length()), subCount, skipped)
 	}
 
 	return totalBytes, fileName

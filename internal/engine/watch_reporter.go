@@ -68,6 +68,6 @@ func (wr *WatchReporter) sendReport(ctx context.Context) {
 	defer cancel()
 
 	if err := wr.client.ReportWatchProgress(reportCtx, update); err != nil {
-		log.Printf("[%s] watch-progress: report failed: %v", wr.taskID[:8], err)
+		log.Printf("[%s] watch-progress: report failed: %v", agent.ShortID(wr.taskID), err)
 	}
 }

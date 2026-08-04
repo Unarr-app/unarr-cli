@@ -54,10 +54,11 @@ func resolveMethod(ctx context.Context, task *Task, downloaders map[DownloadMeth
 	// return the actionable reason instead of the generic "no method" message.
 	var gateReason error
 
+	triedMethods := task.TriedMethodsSnapshot()
 	for _, method := range order {
 		// Skip already-tried methods
 		tried := false
-		for _, tm := range task.TriedMethods {
+		for _, tm := range triedMethods {
 			if tm == method {
 				tried = true
 				break
@@ -74,11 +75,7 @@ func resolveMethod(ctx context.Context, task *Task, downloaders map[DownloadMeth
 
 		available, err := dl.Available(ctx, task)
 		if err != nil {
-			taskID := task.ID
-			if len(taskID) > 8 {
-				taskID = taskID[:8]
-			}
-			log.Printf("[%s] %s availability check failed: %v", taskID, method, err)
+			log.Printf("[%s] %s availability check failed: %v", task.ShortID(), method, err)
 			if errors.Is(err, ErrVPNRequired) {
 				gateReason = err
 			}
@@ -92,7 +89,7 @@ func resolveMethod(ctx context.Context, task *Task, downloaders map[DownloadMeth
 	if gateReason != nil {
 		return "", fmt.Errorf("no download method available: %w", gateReason)
 	}
-	return "", fmt.Errorf("no download method available (order: %v, tried: %v)", order, task.TriedMethods)
+	return "", fmt.Errorf("no download method available (order: %v, tried: %v)", order, triedMethods)
 }
 
 // tryFallback attempts to fall back to the next untried download method WITHIN
@@ -104,11 +101,12 @@ func tryFallback(task *Task, downloaders map[DownloadMethod]Downloader, configMe
 		return false // single method requested, no fallback
 	}
 
-	task.TriedMethods = append(task.TriedMethods, task.ResolvedMethod)
+	task.MarkTried(task.GetResolvedMethod())
+	triedMethods := task.TriedMethodsSnapshot()
 
 	for _, m := range order {
 		tried := false
-		for _, tm := range task.TriedMethods {
+		for _, tm := range triedMethods {
 			if tm == m {
 				tried = true
 				break

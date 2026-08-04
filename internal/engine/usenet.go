@@ -127,10 +127,7 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		cancel()
 	}()
 
-	shortID := task.ID
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
-	}
+	shortID := task.ShortID()
 
 	// Step 1: Get NZB ID (from cache, task, or search)
 	nzbID, nzbTitle, err := u.resolveNzbID(dlCtx, task)

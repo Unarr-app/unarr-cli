@@ -45,7 +45,8 @@ Environment variables override config file values:
   UNARR_TELEMETRY      Lifecycle telemetry: off to disable (default on)`,
 		Example: `  unarr config               # Interactive menu
   unarr config downloads     # Jump to downloads settings
-  unarr config region        # Jump to region settings`,
+  unarr config region        # Jump to region settings
+  unarr config check         # Validate the file, report unknown keys`,
 		Args:      cobra.MaximumNArgs(1),
 		ValidArgs: configCategories,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -56,6 +57,8 @@ Environment variables override config file values:
 			return runConfigMenu(category)
 		},
 	}
+
+	cmd.AddCommand(newConfigCheckCmd())
 
 	return cmd
 }

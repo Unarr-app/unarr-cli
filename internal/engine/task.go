@@ -214,6 +214,69 @@ func (t *Task) GetResolvedMethod() DownloadMethod {
 	return t.ResolvedMethod
 }
 
+// SetError records the failure/cancellation cause thread-safely. Written by the
+// manager and by the stream handlers (cmd package, which cannot reach t.mu)
+// while the progress reporter reads it via ToStatusUpdate from its own
+// goroutine — a plain assignment is a torn-string data race, not a benign one.
+func (t *Task) SetError(msg string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ErrorMessage = msg
+}
+
+// GetError returns the failure/cancellation cause thread-safely.
+func (t *Task) GetError() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.ErrorMessage
+}
+
+// SetFilePath records the final on-disk path thread-safely.
+func (t *Task) SetFilePath(p string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.FilePath = p
+}
+
+// SetFileName records the resolved media file name thread-safely.
+func (t *Task) SetFileName(n string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.FileName = n
+}
+
+// SetTotalBytes records the total size thread-safely. Used by the stream paths,
+// which learn the size from the provider/engine rather than from a Progress tick.
+func (t *Task) SetTotalBytes(n int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.TotalBytes = n
+}
+
+// MarkTried appends a download method to the tried list thread-safely, so a
+// fallback never re-picks a method that already failed.
+func (t *Task) MarkTried(m DownloadMethod) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.TriedMethods = append(t.TriedMethods, m)
+}
+
+// TriedMethodsSnapshot returns a copy of the tried methods thread-safely. Copy,
+// not the slice header: the caller must never range over the live backing array
+// while MarkTried may append to it.
+func (t *Task) TriedMethodsSnapshot() []DownloadMethod {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return append([]DownloadMethod(nil), t.TriedMethods...)
+}
+
+// ShortID returns the 8-char log prefix for this task. Delegates to
+// agent.ShortID, which — unlike a raw t.ID[:8] — does not panic on the short
+// synthetic ids the one-shot download path mints.
+func (t *Task) ShortID() string {
+	return agent.ShortID(t.ID)
+}
+
 // UpdateProgress updates download metrics thread-safely.
 func (t *Task) UpdateProgress(p Progress) {
 	t.mu.Lock()
@@ -314,9 +377,10 @@ func (t *Task) MagnetURI() string {
 
 // HasUntried returns true if there are download methods not yet attempted.
 func (t *Task) HasUntried(available []DownloadMethod) bool {
+	triedMethods := t.TriedMethodsSnapshot()
 	for _, m := range available {
 		tried := false
-		for _, tm := range t.TriedMethods {
+		for _, tm := range triedMethods {
 			if tm == m {
 				tried = true
 				break

@@ -63,6 +63,7 @@ Once installed, every commit will automatically:
 ```bash
 make build      # Build the binary
 make test       # Run tests
+make test-e2e   # Run the build-tagged end-to-end suites (test/e2e)
 make coverage   # Run tests with coverage
 make lint       # Run golangci-lint
 make fmt        # Format code (gofmt -s -w)
@@ -137,6 +138,31 @@ go test -run TestParse -v ./internal/parser/...
 # With coverage report
 make coverage
 ```
+
+### End-to-end tests
+
+The suites under `test/e2e/` drive the log ring, the config round-trip and the
+`unarr logs` CLI over real files and a real process. They are behind
+`//go:build e2e`, so **`make test` and plain `go test ./...` do not run them** —
+`go test ./test/...` reports "matched no packages". The tag is the only way in:
+
+```bash
+make test-e2e                                   # what CI runs
+go test -tags e2e -race -count=1 ./test/e2e/... # the same thing, spelled out
+go test -tags e2e -run TestRotation ./test/e2e/...
+
+# Keep the workspaces (and their rotated logs) around to inspect afterwards:
+UNARR_E2E_DIR=/tmp/unarr-e2e go test -tags e2e ./test/e2e/...
+```
+
+They run as a dedicated **E2E** job in CI, not as part of `make test` and not in
+the pre-commit hook: the suite compiles the CLI binary, so it takes ~4s with a
+warm build cache but ~50s cold, and a hook that can stall for a minute is a hook
+people turn off. Run `make test-e2e` yourself when you touch `internal/logging`,
+the daemon log wiring, or the `unarr logs` command.
+
+Windows-specific daemon behaviour is **not** covered here — that needs the real
+VM harness in [`test/windows/`](test/windows/README.md).
 
 ## Commit Messages
 

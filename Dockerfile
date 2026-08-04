@@ -175,6 +175,24 @@ ENV LIBVA_DRIVER_NAME=iHD
 
 VOLUME ["/config", "/downloads", "/data"]
 
+# Without this, a container whose daemon has died reports "running" forever:
+# the entrypoint process is still alive, and nothing else looks at whether the
+# thing it supervises is. Docker, Portainer, Swarm, k8s and `compose --wait`
+# all read this and nothing else.
+#
+# --quick is the load-bearing flag. It runs ONLY the local checks — config,
+# download dir, disk, daemon liveness — and makes NO network call. A
+# healthcheck that reaches the API marks the container unhealthy on every
+# transient blip, Docker restarts it, and one ISP hiccup becomes a restart loop
+# across the fleet. Warnings never produce a non-zero exit for the same reason:
+# Docker's only response to "unhealthy" is to restart, and a missing par2 is
+# not a reason to restart anything.
+#
+# start-period is generous because the first boot registers the agent and scans
+# the library, and neither is instant on a NAS.
+HEALTHCHECK --interval=60s --timeout=15s --start-period=90s --retries=3 \
+  CMD unarr doctor --quick --json > /dev/null || exit 1
+
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 # `up` is `start` plus one extra ability: if UNARR_AUTHKEY is set it redeems the
 # key first. With CMD=start, `docker run -e UNARR_AUTHKEY=… unarr/cli` ignored the

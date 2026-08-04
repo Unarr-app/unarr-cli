@@ -37,6 +37,67 @@ func TestBenchmarkMaxTranscodeHeight_SoftwareReturnsValidRung(t *testing.T) {
 	}
 }
 
+// The wrapper must stay a thin view over the core: whatever the core decides,
+// the daemon's ceiling is exactly that number and nothing is re-derived.
+func TestMeasureEncodeCeiling_AgreesWithWrapper(t *testing.T) {
+	cases := []struct {
+		name       string
+		ffmpeg     string
+		hw         HWAccel
+		wantReason string
+	}{
+		{"hardware", "/nonexistent/ffmpeg", HWAccelNVENC, EncodeReasonHardware},
+		{"no ffmpeg", "", HWAccelNone, EncodeReasonNoFFmpeg},
+		{"probe cannot run", "/nonexistent/ffmpeg", HWAccelNone, EncodeReasonUnmeasurable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := MeasureEncodeCeiling(context.Background(), tc.ffmpeg, tc.hw)
+			if res.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", res.Reason, tc.wantReason)
+			}
+			if got := BenchmarkMaxTranscodeHeight(context.Background(), tc.ffmpeg, tc.hw); got != res.Ceiling {
+				t.Errorf("wrapper ceiling %d != core ceiling %d", got, res.Ceiling)
+			}
+		})
+	}
+}
+
+// A rung whose probe never ran reports Measured=false, so a renderer can't
+// print "0.0x realtime" as if it were a measurement.
+func TestMeasureEncodeCeiling_FailedProbesAreNotMeasurements(t *testing.T) {
+	res := MeasureEncodeCeiling(context.Background(), "/nonexistent/ffmpeg", HWAccelNone)
+	if len(res.Rungs) != len(softwareBenchmarkRungs) {
+		t.Fatalf("rungs = %d, want %d", len(res.Rungs), len(softwareBenchmarkRungs))
+	}
+	for _, r := range res.Rungs {
+		if r.Measured {
+			t.Errorf("%dp reported as measured with no ffmpeg", r.Height)
+		}
+	}
+	if res.Ceiling != 1080 {
+		t.Errorf("ceiling = %d, want the 1080 default when nothing could be measured", res.Ceiling)
+	}
+}
+
+func TestMeasureEncodeCeiling_SoftwareRecordsEvidence(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not on PATH — software benchmark needs a real encoder")
+	}
+	res := MeasureEncodeCeiling(context.Background(), ffmpeg, HWAccelNone)
+	if len(res.Rungs) == 0 {
+		t.Fatal("no rungs recorded")
+	}
+	if res.Threshold != realtimeMarginSoftware {
+		t.Errorf("threshold = %v, want %v", res.Threshold, realtimeMarginSoftware)
+	}
+	first := res.Rungs[0]
+	if first.Measured && first.Factor <= 0 {
+		t.Errorf("measured rung has factor %v, want > 0", first.Factor)
+	}
+}
+
 func TestMeasureEncodeRealtimeFactor_RealEncoder(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
