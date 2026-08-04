@@ -114,7 +114,7 @@ func (s *credentialStore) reload() (key, agentID string, changed bool) {
 func (s *credentialStore) persist(apply func(*config.Config)) {
 	onDisk, err := config.Load(s.path)
 	if err != nil {
-		log.Printf("[agent] could not re-read %s before saving (%v) — credential kept in memory only", s.path, err)
+		log.Printf("[agent] could not re-read %s before saving (%v) - credential kept in memory only", s.path, err)
 		return
 	}
 	apply(&onDisk)

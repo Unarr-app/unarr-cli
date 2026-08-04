@@ -139,7 +139,7 @@ func FFmpegSupportsQSV10BitDecode(ffmpegPath string) bool {
 		// Couldn't even produce a 10-bit HEVC sample (no hevc_qsv encoder, no
 		// device). Nothing proven about DECODE, but the conservative answer is
 		// the same: keep 10-bit sources on the software decoder.
-		log.Printf("[qsv] 10-bit decode probe skipped (sample encode failed) — 10-bit sources will decode in software: %v", err)
+		log.Printf("[qsv] 10-bit decode probe skipped (sample encode failed) - 10-bit sources will decode in software: %v", err)
 		// Same rule as the main path: don't cache a transient deadline, or one
 		// busy moment at startup would pin every 10-bit source to the software
 		// decoder for the whole daemon run.
@@ -181,13 +181,13 @@ func FFmpegSupportsQSV10BitDecode(ffmpegPath string) bool {
 		qsv10BitCacheMu.Unlock()
 	}
 	if supported {
-		log.Printf("[qsv] 10-bit HW decode works — 10-bit sources keep hardware decode")
+		log.Printf("[qsv] 10-bit HW decode works - 10-bit sources keep hardware decode")
 	} else {
 		detail := strings.TrimSpace(lastLine(out))
 		if detail == "" && err != nil {
 			detail = err.Error()
 		}
-		log.Printf("[qsv] 10-bit HW decode unavailable — 10-bit sources will decode in software (QSV encode kept): %v", detail)
+		log.Printf("[qsv] 10-bit HW decode unavailable - 10-bit sources will decode in software (QSV encode kept): %v", detail)
 	}
 	return supported
 }

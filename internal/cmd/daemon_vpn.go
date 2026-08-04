@@ -45,14 +45,14 @@ func bringUpVPN(cfg config.Config, required bool) (*vpn.Tunnel, string) {
 	tunnel, err := vpn.Up(conf)
 	if err != nil {
 		if required {
-			log.Printf("[vpn] tunnel failed to start (%v) — VPN REQUIRED, so torrent/P2P is DISABLED (debrid/usenet still available); the supervisor will keep retrying", err)
+			log.Printf("[vpn] tunnel failed to start (%v) - VPN REQUIRED, so torrent/P2P is DISABLED (debrid/usenet still available); the supervisor will keep retrying", err)
 		} else {
-			log.Printf("[vpn] tunnel failed to start (%v) — downloading in the clear", err)
+			log.Printf("[vpn] tunnel failed to start (%v) - downloading in the clear", err)
 		}
 		return failedTunnel(required), mode
 	}
 
-	log.Printf("[vpn] tunnel active (%s) — torrent traffic split-tunnelled through WireGuard", mode)
+	log.Printf("[vpn] tunnel active (%s) - torrent traffic split-tunnelled through WireGuard", mode)
 	return tunnel, mode
 }
 
@@ -107,13 +107,13 @@ func logVPNBringUpError(err error, required bool) {
 	slotHeld := errors.As(err, &fe) && fe.Code == vpn.ErrSlotOnDevice
 	switch {
 	case slotHeld && required:
-		log.Printf("[vpn] the single WireGuard slot is held by another unarr agent — VPN REQUIRED, so THIS agent's torrent/P2P is DISABLED (debrid/usenet still work). Free the slot or run OpenVPN on this machine. See https://unarr.app/vpn")
+		log.Printf("[vpn] the single WireGuard slot is held by another unarr agent - VPN REQUIRED, so THIS agent's torrent/P2P is DISABLED (debrid/usenet still work). Free the slot or run OpenVPN on this machine. See https://unarr.app/vpn")
 	case slotHeld:
-		log.Printf("[vpn] the single WireGuard slot is already held by another unarr agent — this one downloads in the clear. To protect this machine too, set up OpenVPN on it (1 agent uses WireGuard, the rest use OpenVPN — up to 10). See https://unarr.app/vpn")
+		log.Printf("[vpn] the single WireGuard slot is already held by another unarr agent - this one downloads in the clear. To protect this machine too, set up OpenVPN on it (1 agent uses WireGuard, the rest use OpenVPN - up to 10). See https://unarr.app/vpn")
 	case required:
-		log.Printf("[vpn] could not fetch VPN config (%v) — VPN REQUIRED, torrent/P2P DISABLED (debrid/usenet still available); the supervisor will keep retrying", err)
+		log.Printf("[vpn] could not fetch VPN config (%v) - VPN REQUIRED, torrent/P2P DISABLED (debrid/usenet still available); the supervisor will keep retrying", err)
 	default:
-		log.Printf("[vpn] could not enable VPN (%v) — downloading in the clear", err)
+		log.Printf("[vpn] could not enable VPN (%v) - downloading in the clear", err)
 	}
 }
 
@@ -164,9 +164,9 @@ func superviseVPNTunnel(ctx context.Context, d *agent.Daemon, tunnel *vpn.Tunnel
 			}
 			// Tunnel down: block P2P (torrent), then try to bring it back.
 			d.SetVPNState(false, true, mode, tunnel.Endpoint)
-			log.Printf("[vpn] tunnel DOWN — P2P blocked (torrent disabled; debrid/usenet unaffected); reconnecting...")
+			log.Printf("[vpn] tunnel DOWN - P2P blocked (torrent disabled; debrid/usenet unaffected); reconnecting...")
 			if err := reconnectVPN(ctx, tunnel, cfg); err != nil {
-				log.Printf("[vpn] reconnect failed (%v) — staying blocked, retrying in %s", err, backoff)
+				log.Printf("[vpn] reconnect failed (%v) - staying blocked, retrying in %s", err, backoff)
 				if !sleepCtx(ctx, backoff) {
 					return
 				}
@@ -174,7 +174,7 @@ func superviseVPNTunnel(ctx context.Context, d *agent.Daemon, tunnel *vpn.Tunnel
 				continue
 			}
 			d.SetVPNState(true, true, mode, tunnel.Endpoint)
-			log.Printf("[vpn] tunnel reconnected — P2P re-enabled")
+			log.Printf("[vpn] tunnel reconnected - P2P re-enabled")
 			backoff = minVPNBackoff
 		}
 	}

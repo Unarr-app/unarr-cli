@@ -126,7 +126,7 @@ func DiskInfoBounded(path string) (free, total int64, err error) {
 			// Say it once. A stuck mount stays stuck, and the heartbeat would
 			// otherwise repeat this line for as long as the agent runs.
 			log.Printf("[disk] free-space probe for %s did not answer in %s "+
-				"(unreachable network share?) — continuing without disk figures", path, diskProbeTimeout)
+				"(unreachable network share?) - continuing without disk figures", path, diskProbeTimeout)
 		}
 		if last.valid {
 			return last.free, last.total, nil

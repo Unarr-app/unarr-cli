@@ -181,7 +181,7 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 	// intent). A normal manual Retry from the web clears the error and re-pends
 	// minutes later (after the user fixes storage), well past the cooldown.
 	if !at.ForceStart && m.inStorageCooldown(at.ID) {
-		log.Printf("[%s] skipping re-dispatch — failed writing to storage <%s ago (fix your download folder, then retry)",
+		log.Printf("[%s] skipping re-dispatch - failed writing to storage <%s ago (fix your download folder, then retry)",
 			agent.ShortID(at.ID), storageFailCooldown)
 		return
 	}
@@ -200,7 +200,7 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 	if _, exists := m.active[task.ID]; exists {
 		m.activeMu.Unlock()
 		taskCancel()
-		log.Printf("[%s] already active — ignoring duplicate submit", agent.ShortID(task.ID))
+		log.Printf("[%s] already active - ignoring duplicate submit", agent.ShortID(task.ID))
 		return
 	}
 	m.active[task.ID] = task
@@ -749,7 +749,7 @@ func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Resu
 func (m *Manager) fail(ctx context.Context, task *Task, msg string) {
 	task.SetError(msg)
 	task.Transition(StatusFailed)
-	log.Printf("[%s] FAILED: %s — %s", agent.ShortID(task.ID), task.Title, msg)
+	log.Printf("[%s] FAILED: %s - %s", agent.ShortID(task.ID), task.Title, msg)
 	if m.cfg.Notifications {
 		notify.Send("Download failed", task.Title+": "+msg)
 	}
@@ -780,7 +780,7 @@ func (m *Manager) pauseForVPN(ctx context.Context, task *Task) {
 		m.fail(ctx, task, "VPN tunnel down: "+err.Error())
 		return
 	}
-	log.Printf("[%s] VPN tunnel down — torrent PAUSED (partial kept, resumes when the tunnel heals): %s",
+	log.Printf("[%s] VPN tunnel down - torrent PAUSED (partial kept, resumes when the tunnel heals): %s",
 		agent.ShortID(task.ID), task.Title)
 	m.recordFinishedKeep(task.ToStatusUpdate(), true) // report paused state; KEEP the resume-store entry
 	m.reporter.ReportFinal(ctx, task)
@@ -822,7 +822,7 @@ const storageErrorPrefix = "storage unavailable: "
 // purpose — the bytes were fine, so the wording must not say "corrupt".
 // (Incident 2026-07-24: NFS soft-mount fsync timeout looping a debrid download.)
 func (m *Manager) failStorage(ctx context.Context, task *Task, cause error) {
-	log.Printf("[%s] storage unavailable — FAILED (retry after fixing your download folder): %s — %s",
+	log.Printf("[%s] storage unavailable - FAILED (retry after fixing your download folder): %s - %s",
 		agent.ShortID(task.ID), task.Title, cause.Error())
 	if m.cfg.Notifications {
 		notify.Send("Download failed — storage unavailable",

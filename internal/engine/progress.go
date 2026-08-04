@@ -285,7 +285,7 @@ func (r *ProgressReporter) handleResponse(task *Task, resp *agent.StatusResponse
 
 	// The server does not know this task (deleted row). Repeated → zombie.
 	if r.noteUnknown(task.ID, !resp.Success) {
-		log.Printf("[%s] server no longer knows this task after %d reports — stopping it",
+		log.Printf("[%s] server no longer knows this task after %d reports - stopping it",
 			agent.ShortID(task.ID), unknownTaskThreshold)
 		r.Untrack(task.ID)
 		if r.onUnknown != nil {

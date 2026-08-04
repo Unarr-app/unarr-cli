@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,7 +20,6 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/control"
 	"github.com/Unarr-app/unarr-cli/internal/davfs"
 	"github.com/Unarr-app/unarr-cli/internal/engine"
-	"github.com/Unarr-app/unarr-cli/internal/funnel"
 	"github.com/Unarr-app/unarr-cli/internal/library"
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 	"github.com/Unarr-app/unarr-cli/internal/logging"
@@ -208,11 +206,11 @@ func runDaemonStart() error {
 	// broker issues *.<hash>.agent.unarr.app for it.
 	if cfg.Download.HTTPSStreamPort > 0 && cfg.Agent.Hash == "" {
 		if h, err := acme.GenerateHash(); err != nil {
-			log.Printf("[acme] could not generate agent hash (%v) — direct-TLS disabled", err)
+			log.Printf("[acme] could not generate agent hash (%v) - direct-TLS disabled", err)
 		} else {
 			cfg.Agent.Hash = h
 			if err := config.Save(cfg, config.FilePath()); err != nil {
-				log.Printf("[acme] could not persist agent hash (%v) — direct-TLS disabled until persisted", err)
+				log.Printf("[acme] could not persist agent hash (%v) - direct-TLS disabled until persisted", err)
 				cfg.Agent.Hash = ""
 			} else {
 				log.Printf("[acme] generated agent hash %s", h)
@@ -309,7 +307,7 @@ func runDaemonStart() error {
 	// Create HTTP client with mirror failover so a `.com` block-out rolls
 	// over to `.to` / .onion without restarting the daemon.
 	agentClient := newAgentClientFromConfig(cfg, userAgent)
-	log.Printf("Transport: HTTP sync → %s (mirrors: %d)", cfg.Auth.APIURL, len(cfg.Auth.Mirrors))
+	log.Printf("Transport: HTTP sync -> %s (mirrors: %d)", cfg.Auth.APIURL, len(cfg.Auth.Mirrors))
 
 	// Create daemon
 	d := agent.NewDaemon(daemonCfg, agentClient)
@@ -459,7 +457,7 @@ func runDaemonStart() error {
 		case seedTime > 0:
 			log.Printf("[torrent] seeding enabled (stop after %s)", seedTime)
 		default:
-			log.Printf("[torrent] seeding enabled (no ratio/time target — seeds until shutdown)")
+			log.Printf("[torrent] seeding enabled (no ratio/time target - seeds until shutdown)")
 		}
 	}
 
@@ -481,9 +479,9 @@ func runDaemonStart() error {
 	// Log its state so the boot line makes clear whether a Usenet stream session
 	// will be served live from NNTP or always fall back to the batch download.
 	if cfg.Download.UsenetStreaming {
-		log.Printf("[usenet] on-the-fly streaming ENABLED (downloads.usenet_streaming=true) — streamable releases play live, others fall back to download")
+		log.Printf("[usenet] on-the-fly streaming ENABLED (downloads.usenet_streaming=true) - streamable releases play live, others fall back to download")
 	} else {
-		log.Printf("[usenet] on-the-fly streaming disabled (downloads.usenet_streaming=false) — usenet stream sessions use the batch download")
+		log.Printf("[usenet] on-the-fly streaming disabled (downloads.usenet_streaming=false) - usenet stream sessions use the batch download")
 	}
 
 	// Pre-flight disk reserve: refuse a download that would leave less than this
@@ -596,17 +594,17 @@ func runDaemonStart() error {
 			// [cors] line and the [stream] HTTPS line produced a crash report whose
 			// log tail simply stopped, with ~40 lines of candidate code and no way
 			// to tell which one. One line either side turns that into a fix.
-			log.Printf("[acme] pre-cert registration…")
+			log.Printf("[acme] pre-cert registration...")
 			if err := d.RegisterBestEffort(ctx); err != nil {
-				log.Printf("[acme] pre-cert registration failed (%v) — cert will arrive on a later renewal tick", err)
+				log.Printf("[acme] pre-cert registration failed (%v) - cert will arrive on a later renewal tick", err)
 			} else {
-				log.Printf("[acme] registered — checking certificate")
+				log.Printf("[acme] registered - checking certificate")
 				fetchAgentCert(ctx, agentClient, cfg.Agent.Hash)
 			}
 		}
 		keyPath, certPath := acme.Paths(config.DataDir())
 		if err := streamSrv.LoadTLSCertificateFromFiles(certPath, keyPath); err != nil {
-			log.Printf("[stream] HTTPS disabled — no usable certificate at %s (%v)", certPath, err)
+			log.Printf("[stream] HTTPS disabled - no usable certificate at %s (%v)", certPath, err)
 		} else {
 			streamSrv.EnableTLS(cfg.Download.HTTPSStreamPort)
 			log.Printf("[stream] HTTPS armed on port %d with certificate %s", cfg.Download.HTTPSStreamPort, certPath)
@@ -635,14 +633,14 @@ func runDaemonStart() error {
 		}
 		c, err := engine.NewHLSCache(cacheDir, cfg.Download.HLSCache.SizeGB)
 		if err != nil {
-			log.Printf("[hls_cache] init failed (%v) — falling back to per-session tmpdirs", err)
+			log.Printf("[hls_cache] init failed (%v) - falling back to per-session tmpdirs", err)
 		} else {
 			hlsCache = c
 			hlsCache.StartSweeper(ctx, time.Hour)
 			log.Printf("[hls_cache] enabled: dir=%s budget=%dGB", cacheDir, cfg.Download.HLSCache.SizeGB)
 		}
 	} else {
-		log.Printf("[hls_cache] disabled by config — every play re-encodes from scratch")
+		log.Printf("[hls_cache] disabled by config - every play re-encodes from scratch")
 	}
 	// Read-only WebDAV library export (opt-in). Armed before Listen() so it is
 	// mounted on the same mux (and thus served by the HTTPS listener too).
@@ -703,9 +701,9 @@ func runDaemonStart() error {
 	// a user hits a confusing "rejected" line in the logs.
 	if cfg.Download.Transcode.Enabled {
 		if _, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err != nil {
-			log.Printf("[hls] transcode enabled but ffmpeg/ffprobe not found — install ffmpeg to use HLS")
+			log.Printf("[hls] transcode enabled but ffmpeg/ffprobe not found - install ffmpeg to use HLS")
 		} else if _, err := mediainfo.ResolveFFprobe(cfg.Library.FFprobePath); err != nil {
-			log.Printf("[hls] transcode enabled but ffmpeg/ffprobe not found — install ffmpeg to use HLS")
+			log.Printf("[hls] transcode enabled but ffmpeg/ffprobe not found - install ffmpeg to use HLS")
 		}
 	}
 
@@ -766,10 +764,10 @@ func runDaemonStart() error {
 	// unknownTaskThreshold status reports (see ProgressReporter), and
 	// `unarr downloads purge` drops the whole queue by hand.
 	if resume := taskStore.Load(); len(resume) > 0 {
-		log.Printf("[resume] re-submitting %d interrupted download(s) — any the server no longer knows about will be dropped after a few status reports", len(resume))
+		log.Printf("[resume] re-submitting %d interrupted download(s) - any the server no longer knows about will be dropped after a few status reports", len(resume))
 		for _, t := range resume {
 			t.ForceStart = false // respect MaxConcurrent on bulk auto-resume
-			log.Printf("[resume] %s — %s", agent.ShortID(t.ID), t.Title)
+			log.Printf("[resume] %s - %s", agent.ShortID(t.ID), t.Title)
 			manager.Submit(ctx, t)
 		}
 	}
@@ -855,9 +853,9 @@ func runDaemonStart() error {
 	// cannot reach it — server down, account logged out, or the task row deleted
 	// out from under a still-running download.
 	if ctrlSrv, err := control.NewServer(controller); err != nil {
-		log.Printf("[control] could not create the local control plane: %v — `unarr downloads` will fall back to offline mode", err)
+		log.Printf("[control] could not create the local control plane: %v - `unarr downloads` will fall back to offline mode", err)
 	} else if err := ctrlSrv.Listen(ctx); err != nil {
-		log.Printf("[control] could not start the local control plane: %v — `unarr downloads` will fall back to offline mode", err)
+		log.Printf("[control] could not start the local control plane: %v - `unarr downloads` will fall back to offline mode", err)
 	} else {
 		d.SetControlPlane(ctrlSrv.Port(), ctrlSrv.Token())
 	}
@@ -885,7 +883,7 @@ func runDaemonStart() error {
 			return library.DeleteFiles(items, daemonCfg.ScanPaths)
 		}
 	} else if cfg.Library.AllowDelete {
-		log.Printf("[library] allow_delete=true but no scan paths resolved — deletion stays OFF")
+		log.Printf("[library] allow_delete=true but no scan paths resolved - deletion stays OFF")
 		sc.SetCanDelete(false) // never advertise what we cannot perform
 	}
 	log.Printf("[library] file deletion from web: %v", sc.CanDelete())
@@ -944,7 +942,7 @@ func runDaemonStart() error {
 		// Displace the prior stream (served OR still probing), not other tasks' work.
 		displacePriorStreams(sr.TaskID)
 		streamSrv.SetFile(engine.NewDiskFileProvider(filePath), sr.TaskID)
-		log.Printf("[%s] streaming from disk: %s → %s", agent.ShortID(sr.TaskID), filepath.Base(filePath), streamSrv.URL())
+		log.Printf("[%s] streaming from disk: %s -> %s", agent.ShortID(sr.TaskID), filepath.Base(filePath), streamSrv.URL())
 
 		watchCtx, watchCancel := context.WithCancel(ctx) //nolint:gosec // G118
 		streamRegistry.mu.Lock()
@@ -1254,7 +1252,7 @@ func runDaemonStart() error {
 			// spawn = ffmpeg launch + tmp setup. First-fMP4-byte is logged by the
 			// source itself; serveGrowing logs any client read that blocks waiting
 			// for ffmpeg to catch up.
-			log.Printf("[stream %s] remux (copy) → fMP4: %s [probe=%v spawn=%v]",
+			log.Printf("[stream %s] remux (copy) -> fMP4: %s [probe=%v spawn=%v]",
 				agent.ShortID(sess.SessionID), filepath.Base(filePath),
 				tProbe.Sub(tStart).Round(time.Millisecond), time.Since(tProbe).Round(time.Millisecond))
 			markReady(sess.SessionID)
@@ -1453,7 +1451,7 @@ func reportBlocked(b *agent.Blocked) {
 // `unarr login` (which mints a new per-machine key bound to a new agentId)
 // instead of looping against a server that keeps rejecting the old identity.
 func reportAgentRevoked(creds *credentialStore, err error) {
-	log.Printf("[agent] credential revoked by server (%v) — this machine was removed from your account", err)
+	log.Printf("[agent] credential revoked by server (%v) - this machine was removed from your account", err)
 	creds.wipe()
 	fmt.Println()
 	fmt.Println("  This agent was removed from your account.")
@@ -1505,7 +1503,7 @@ func setupWebDAV(streamSrv *engine.StreamServer, cfg config.Config) {
 	log.Printf("[webdav] read-only library export enabled (user %q) at :%d/dav/", user, cfg.Download.StreamPort)
 	if webDAVOverUPnPExposed(cfg) {
 		log.Printf("[webdav] WARNING: webdav_allow_wan is on AND the stream port is published to the WAN " +
-			"(enable_upnp / auto_https_upnp) — /dav/ is reachable from the public internet, and its Basic auth " +
+			"(enable_upnp / auto_https_upnp) - /dav/ is reachable from the public internet, and its Basic auth " +
 			"has no rate limiting. Turn webdav_allow_wan off to restrict the mount to LAN / Tailscale.")
 	}
 }
@@ -1673,7 +1671,7 @@ func resolvePlayableFile(rawPath string, allowedRoots []string, logLabel string)
 	filePath := filepath.Clean(rawPath)
 	if !isAllowedStreamPath(filePath, allowedRoots...) {
 		if remapped := relocateUnreachable(filePath, allowedRoots); remapped != "" {
-			log.Printf("[%s] stream self-heal: remapped %s → %s", logLabel, filePath, remapped)
+			log.Printf("[%s] stream self-heal: remapped %s -> %s", logLabel, filePath, remapped)
 			filePath = remapped
 		} else if _, err := os.Stat(filePath); err == nil {
 			return "", pathErrRejected, fmt.Errorf("path outside allowed dirs: %s", filePath)
@@ -1695,7 +1693,7 @@ func resolvePlayableFile(rawPath string, allowedRoots []string, logLabel string)
 		// Last resort before failing: the file may simply have moved within
 		// an allowed root — try to relocate it by path tail.
 		if remapped := relocateUnreachable(filePath, allowedRoots); remapped != "" {
-			log.Printf("[%s] stream self-heal: relocated missing %s → %s", logLabel, filePath, remapped)
+			log.Printf("[%s] stream self-heal: relocated missing %s -> %s", logLabel, filePath, remapped)
 			filePath = remapped
 			info, statErr = os.Stat(filePath)
 		}
@@ -1780,7 +1778,7 @@ func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore,
 		// reaps the old prefix. See docs/plans/unarr-path-resilience.md.
 		forceFull := basePathChanged(existing, scanPaths)
 		if forceFull {
-			log.Printf("[auto-scan] WARNING: library base path changed (was %q, now %v) — "+
+			log.Printf("[auto-scan] WARNING: library base path changed (was %q, now %v) - "+
 				"running a FULL re-scan. This can take a while on large libraries; "+
 				"playback and matches are preserved.", existing.Path, scanPaths)
 		}
@@ -1830,7 +1828,7 @@ func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore,
 			// "what exists" is incomplete. Declaring fullCycle anyway would let the
 			// server's stale-cleanup DELETE those rows as gone.
 			if n := library.CountAborted(cache); n > 0 {
-				log.Printf("[auto-scan] %d file(s) under %s could not be probed (mount/timeout) — not a full cycle", n, scanPath)
+				log.Printf("[auto-scan] %d file(s) under %s could not be probed (mount/timeout) - not a full cycle", n, scanPath)
 				fullCycle = false
 			}
 
@@ -1876,7 +1874,7 @@ func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore,
 			// An entirely-empty library can't open a sync session (the server
 			// requires ≥1 item per batch), so stale rows survive until a file
 			// reappears — same trade-off as before, now explicit.
-			log.Printf("[auto-scan] no items under any scan path — skipping sync")
+			log.Printf("[auto-scan] no items under any scan path - skipping sync")
 		}
 
 		// Save merged cache for incremental scanning next time. Items under a root
@@ -1957,7 +1955,7 @@ func orphanPartialRemovalAllowed(configured bool, pending pendingDownloadCounter
 		return configured
 	}
 	if n := len(pending.Load()); n > 0 {
-		log.Printf("[cleanup] %d pending download(s) — skipping orphan-partial removal to protect paused/interrupted resume data", n)
+		log.Printf("[cleanup] %d pending download(s) - skipping orphan-partial removal to protect paused/interrupted resume data", n)
 		return false
 	}
 	return true
@@ -1983,7 +1981,7 @@ func runPostScanCleanup(cfg config.Config, pending pendingDownloadCounter) {
 		if n, err := humanize.ParseBytes(c.MinVideoBytes); err == nil && n > 0 {
 			floor = int64(n)
 		} else {
-			log.Printf("[cleanup] invalid library.cleanup.min_video_bytes %q — using 1 MiB: %v", c.MinVideoBytes, err)
+			log.Printf("[cleanup] invalid library.cleanup.min_video_bytes %q - using 1 MiB: %v", c.MinVideoBytes, err)
 		}
 	}
 
@@ -2041,76 +2039,6 @@ func recentPartials(downloadDir string, maxAge time.Duration) map[string]bool {
 	return active
 }
 
-// superviseFunnel keeps a CloudFlare Quick Tunnel up across cloudflared
-// crashes and CF's ~6h tunnel rotation. On a clean exit (cancellation) it
-// returns; on a crash it clears the reported URL and respawns with an
-// exponential backoff so we don't hammer cloudflared into a tight loop when
-// it can't reach the CF edge.
-func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
-	const initialBackoff = 2 * time.Second
-	const maxBackoff = 5 * time.Minute
-	// A tunnel that stayed up this long AND actually published a URL was
-	// HEALTHY — its exit is CF's routine ~6h quick-tunnel rotation (or a
-	// one-off blip), not a crash loop. Without this reset the backoff only
-	// ever grew: a few flaky restarts early in the daemon's life ratcheted it
-	// toward 5 min, and then EVERY later rotation of a perfectly healthy
-	// tunnel cost remote viewers up to 5 minutes of funnel downtime, forever.
-	// Healthy exit → fast respawn; only consecutive unhealthy runs keep
-	// escalating. The URL requirement matters: a cloudflared that connects
-	// but never provisions (regional CF incident) idles past any lifetime
-	// threshold before dying — lifetime alone would classify that as healthy
-	// and churn max-frequency restarts through the whole incident.
-	const healthyRun = 5 * time.Minute
-	backoff := initialBackoff
-	for ctx.Err() == nil {
-		t, err := funnel.Start(ctx, funnel.Config{Port: port})
-		if err != nil {
-			log.Printf("[funnel] could not start CloudFlare tunnel (%v) — retrying in %s", err, backoff)
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return
-			}
-			backoff = min(backoff*2, maxBackoff)
-			continue
-		}
-		startedAt := time.Now()
-		var gotURL atomic.Bool
-		log.Printf("[funnel] cloudflared started, waiting for public URL...")
-		go func() {
-			url, werr := t.WaitURL(45 * time.Second)
-			if werr != nil {
-				log.Printf("[funnel] cloudflared did not emit a URL (%v)", werr)
-				return
-			}
-			log.Printf("[funnel] public URL: %s", url)
-			gotURL.Store(true)
-			d.SetFunnelURL(url)
-		}()
-		// Block until cloudflared exits (CF rotation, crash, or shutdown).
-		exitErr := <-t.Done()
-		_ = t.Close()
-		d.SetFunnelURL("")
-		if ctx.Err() != nil {
-			return
-		}
-		if gotURL.Load() && time.Since(startedAt) >= healthyRun {
-			backoff = initialBackoff
-		}
-		if exitErr != nil {
-			log.Printf("[funnel] cloudflared exited: %v — restarting in %s", exitErr, backoff)
-		} else {
-			log.Printf("[funnel] cloudflared exited cleanly — restarting in %s", backoff)
-		}
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
-			return
-		}
-		backoff = min(backoff*2, maxBackoff)
-	}
-}
-
 // mirrorCORSOrigins fetches /api/mirrors from the configured primary (+ extra
 // mirror candidates + static IPFS fallback) and returns the discovered URLs as
 // Origin strings. Best-effort: any failure logs a warning and returns an empty
@@ -2127,7 +2055,7 @@ func mirrorCORSOrigins(parent context.Context, cfg config.Config, userAgent stri
 	candidates := append([]string{cfg.Auth.APIURL}, cfg.Auth.Mirrors...)
 	resp, err := agent.FetchMirrorsWithFallback(ctx, candidates, userAgent)
 	if err != nil {
-		log.Printf("[cors] mirror discovery failed (%v) — using static allowlist only", err)
+		log.Printf("[cors] mirror discovery failed (%v) - using static allowlist only", err)
 		return nil
 	}
 
@@ -2310,7 +2238,7 @@ func fetchAgentCert(ctx context.Context, client *agent.Client, hash string) bool
 	// network call while logging nothing on the way. Naming each step is what
 	// lets a truncated crash-report log tail name the culprit instead of leaving
 	// the whole block suspect.
-	log.Printf("[acme] certificate needed for %s — building CSR", acme.WildcardName(hash, base))
+	log.Printf("[acme] certificate needed for %s - building CSR", acme.WildcardName(hash, base))
 	csr, err := acme.BuildCSR(dataDir, hash, base)
 	if err != nil {
 		log.Printf("[acme] build CSR failed: %v", err)
@@ -2377,7 +2305,7 @@ func monitorSessionHealth(ctx context.Context, hsess *engine.HLSSession, session
 		} else {
 			pendingBucket = ""
 		}
-		log.Printf("[hls %s] health %s→%s (speed %.2fx→%.2fx)", agent.ShortID(sessionID), last.Health, h.Health, last.RealtimeRatio, h.RealtimeRatio)
+		log.Printf("[hls %s] health %s->%s (speed %.2fx->%.2fx)", agent.ShortID(sessionID), last.Health, h.Health, last.RealtimeRatio, h.RealtimeRatio)
 		if post(h, "health update") != nil {
 			continue // baseline unchanged → next tick retries the transition
 		}

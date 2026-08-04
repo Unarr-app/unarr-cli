@@ -82,7 +82,7 @@ func downloadFpcalc(dest string) (string, error) {
 		return "", err
 	}
 
-	fmt.Fprintf(os.Stderr, "fpcalc not found — downloading chromaprint %s...\n", fpcalcVersion)
+	fmt.Fprintf(os.Stderr, "fpcalc not found - downloading chromaprint %s...\n", fpcalcVersion)
 
 	resp, err := fpcalcDLClient.Get(url)
 	if err != nil {

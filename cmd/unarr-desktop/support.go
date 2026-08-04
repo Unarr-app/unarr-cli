@@ -19,6 +19,10 @@ const (
 	supportEmail = "support@unarr.app"
 	// maxReportLogBytes bounds the log tail included in a report. The server
 	// caps the body anyway; 64 KiB of tail is plenty to diagnose a crash.
+	//
+	// collectReportLogs has already trimmed each source to its own budget, so
+	// this is a backstop for the headers and for a future third section — not
+	// the cut that decides what a developer gets to read.
 	maxReportLogBytes = 64 << 10
 	reportTimeout     = 30 * time.Second
 )
@@ -35,7 +39,7 @@ func sendReport(kind, message string) error {
 	report := agent.SupportReport{
 		Kind:           kind,
 		Message:        message,
-		Logs:           string(tailBytes(collectLogs(), maxReportLogBytes)),
+		Logs:           string(tailBytes(collectReportLogs(), maxReportLogBytes)),
 		AgentVersion:   resolveAgentVersion(),
 		DesktopVersion: version,
 		OS:             runtime.GOOS,

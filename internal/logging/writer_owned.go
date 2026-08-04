@@ -196,5 +196,5 @@ func (w *Writer) reportOnce(err error) {
 		return
 	}
 	w.warned = true
-	fmt.Fprintf(os.Stderr, "unarr: %v — logging continues, but %s may grow past its budget\n", err, w.path)
+	fmt.Fprintf(os.Stderr, "unarr: %v - logging continues, but %s may grow past its budget\n", err, w.path)
 }

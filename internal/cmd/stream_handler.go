@@ -250,7 +250,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	if err != nil {
 		if errors.Is(err, engine.ErrVPNRequired) {
 			task.SetError("VPN required: tunnel down — P2P streaming disabled (debrid still works)")
-			log.Printf("[%s] stream refused: VPN required but tunnel down — not joining the swarm in the clear", agent.ShortID(at.ID))
+			log.Printf("[%s] stream refused: VPN required but tunnel down - not joining the swarm in the clear", agent.ShortID(at.ID))
 		} else {
 			task.SetError("create stream engine: " + err.Error())
 		}
@@ -319,7 +319,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 			if !completed && !eng.VPNStillHealthy() {
 				task.SetError("VPN tunnel down — P2P streaming stopped (no clear-net leak)")
 				task.Transition(engine.StatusFailed)
-				log.Printf("[%s] VPN tunnel went down mid-stream — stopping P2P (partial kept, P2P disabled)", agent.ShortID(at.ID))
+				log.Printf("[%s] VPN tunnel went down mid-stream - stopping P2P (partial kept, P2P disabled)", agent.ShortID(at.ID))
 				return
 			}
 
@@ -340,7 +340,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 
 			// Terminal progress
 			if !completed && p.TotalBytes > 0 {
-				fmt.Fprintf(os.Stderr, "\r[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
+				fmt.Fprintf(os.Stderr, "\r[%s] %d%% - %s/%s @ %s/s  peers:%d seeds:%d",
 					agent.ShortID(at.ID), pct,
 					ui.FormatBytes(p.DownloadedBytes), ui.FormatBytes(p.TotalBytes), ui.FormatBytes(p.SpeedBps),
 					p.Peers, p.Seeds)
@@ -371,11 +371,11 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 						reason = "stream replaced by a newer title"
 					}
 					eng.PauseDownload()
-					log.Printf("[%s] %s — pausing background download at %d%% (partial kept, resumes on replay)",
+					log.Printf("[%s] %s - pausing background download at %d%% (partial kept, resumes on replay)",
 						agent.ShortID(at.ID), reason, pct)
 				case !idle && eng.IsDownloadPaused():
 					eng.ResumeDownload()
-					log.Printf("[%s] viewer active — resuming background download", agent.ShortID(at.ID))
+					log.Printf("[%s] viewer active - resuming background download", agent.ShortID(at.ID))
 				}
 			}
 

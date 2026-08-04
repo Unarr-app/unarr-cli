@@ -49,7 +49,10 @@ func hasCLI() bool { _, ok := resolveUnarrBin(); return ok }
 // for short, synchronous queries (version, log dump), never for control.
 // Bounded: a binary on a hung network mount (or blocked by AV) must not hang
 // the calling goroutine forever — the account loop would never run again.
-func runUnarrOutput(args ...string) ([]byte, error) {
+//
+// A var, not a plain func, so the log-collection tests can drive the several
+// CLI invocations a report makes without an `unarr` on PATH.
+var runUnarrOutput = func(args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, unarrBin(), args...)
@@ -79,6 +82,27 @@ type agentStatus struct {
 func readStatus() agentStatus {
 	st := agent.ReadState()
 	if st == nil || st.PID == 0 {
+		return agentStatus{}
+	}
+	// The host rebooted under this daemon — the state file is a relic of the
+	// previous boot, not evidence of a death. Reaped here so the tray renders a
+	// plain "stopped" (the service launcher is bringing the daemon back as this
+	// runs) instead of a red crash badge plus a mailed report for a restart the
+	// user asked for.
+	//
+	// BEFORE the liveness check, not after: after a reboot the recorded PID can
+	// belong to an unrelated process, and IsProcessAlive would say yes — the
+	// tray would then show a healthy green agent that is not running.
+	//
+	// The remove needs no PID guard. A LIVE daemon's state cannot predate the
+	// boot: its StartedAt is stamped after the boot by construction, and
+	// StateFromPreviousBoot reads the NEWER of StartedAt and the heartbeat — so
+	// even a daemon whose sync has been failing for hours (no heartbeat updates)
+	// is still judged current. The one way to reach this with a live daemon is a
+	// user winding the system clock forward, and that self-heals on its next
+	// heartbeat, which rewrites the file.
+	if agent.StateFromPreviousBoot(st) {
+		agent.RemoveState()
 		return agentStatus{}
 	}
 	if !agent.IsProcessAlive(st.PID) {
@@ -216,25 +240,6 @@ func dumpLogs() (string, error) {
 		return "", werr
 	}
 	return f.Name(), nil
-}
-
-// collectLogs delegates to `unarr daemon logs` — the daemon knows where its
-// logs live (journald for a systemd service, a file otherwise), so the tray
-// never has to guess a path. Returns an actionable placeholder when nothing is
-// available; any error the command printed is part of the text, so the user
-// always sees something useful. Shared by "View logs" (temp file) and the
-// support-report path (request body).
-func collectLogs() []byte {
-	out, err := runUnarrOutput("daemon", "logs")
-	if len(out) == 0 {
-		msg := "No logs available."
-		if err != nil {
-			msg += " (" + err.Error() + ")"
-		}
-		out = []byte(msg + "\nIf the agent runs in the foreground, logs go to its" +
-			" terminal. Install it as a service (unarr daemon install) to persist them.\n")
-	}
-	return out
 }
 
 // openPath opens a file or directory with the OS default handler (no terminal).

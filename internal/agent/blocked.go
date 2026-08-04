@@ -199,7 +199,7 @@ func (d *Daemon) waitOutBlock(ctx context.Context, b *Blocked, req RegisterReque
 	// because the flock is held — telling the user at once that no daemon is
 	// running and that one already is.
 	d.publishBlockedState()
-	log.Printf("[agent] blocked: %s (%s) — %s", b.Message, b.Reason, b.Remedy)
+	log.Printf("[agent] blocked: %s (%s) - %s", b.Message, b.Reason, b.Remedy)
 	// A revoked agent is tombstoned server-side: that exact credential will
 	// never be accepted again, so it is wiped here as it always was. Parking
 	// afterwards is still right — the retry is what picks up the key a fresh
@@ -235,7 +235,7 @@ func (d *Daemon) waitOutBlock(ctx context.Context, b *Blocked, req RegisterReque
 		req.AgentID = d.cfg.AgentID
 		resp, err := d.client.Register(ctx, req)
 		if err == nil {
-			log.Printf("[agent] recovered from %s — registered", b.Reason)
+			log.Printf("[agent] recovered from %s - registered", b.Reason)
 			ClearBlocked()
 			return resp, nil
 		}

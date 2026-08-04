@@ -38,7 +38,7 @@ func moveFile(src, dst string) error {
 	}
 	if err := os.Remove(src); err != nil {
 		log.Printf("[organize] warning: copied %s to %s but could not remove the source: %v "+
-			"— the file now exists in BOTH places", src, dst, err)
+			"- the file now exists in BOTH places", src, dst, err)
 	}
 	return nil
 }

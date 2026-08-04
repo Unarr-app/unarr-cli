@@ -46,7 +46,7 @@ func FetchSubtitles(reqs []agent.SubtitleFetchRequest, scanPaths []string) (done
 		}
 	}
 	if len(safe) == 0 {
-		log.Printf("library: no valid scan paths — refusing to write subtitle sidecars")
+		log.Printf("library: no valid scan paths - refusing to write subtitle sidecars")
 		for _, r := range reqs {
 			failed = append(failed, agent.SubtitleFetchError{ID: r.ID, Error: "no valid scan paths"})
 		}

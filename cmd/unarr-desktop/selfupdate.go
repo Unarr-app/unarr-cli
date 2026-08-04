@@ -112,7 +112,7 @@ func runDesktopSelfUpdate() int {
 	switch {
 	case errors.Is(err, upgrade.ErrNoDesktopAssets):
 		fmt.Fprintf(os.Stderr, "unarr-desktop: update: %v\n", err)
-		fmt.Fprintln(os.Stderr, "This release has no signed desktop assets (yet) — try again in a few minutes, or reinstall via install.sh / install.ps1.")
+		fmt.Fprintln(os.Stderr, "This release has no signed desktop assets (yet) - try again in a few minutes, or reinstall via install.sh / install.ps1.")
 		return 1
 	case err != nil:
 		fmt.Fprintln(os.Stderr, "unarr-desktop: update:", err)

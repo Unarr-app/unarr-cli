@@ -105,7 +105,7 @@ func (r *httpsMappingRenewer) handleFailure(err error) {
 	// The lease dropped or the gateway went away AFTER we had it. Clear the
 	// mapping so the web stops preferring a now-dead direct-TLS host and falls
 	// back to the funnel; the next tick retries (self-heal).
-	log.Printf("[stream] HTTPS UPnP renewal failed: %v — clearing WAN mapping (funnel fallback)", err)
+	log.Printf("[stream] HTTPS UPnP renewal failed: %v - clearing WAN mapping (funnel fallback)", err)
 	r.set(nil, false)
 }
 
@@ -115,7 +115,7 @@ func (r *httpsMappingRenewer) handleFailure(err error) {
 // host from the INTERNAL port, so a mismatch advertises a URL nothing answers.
 func (r *httpsMappingRenewer) handleMapping(m *UPnPMapping) {
 	if m.ExternalPort != r.ss.httpsPort {
-		log.Printf("[stream] HTTPS UPnP external port %d != internal %d — not advertising direct-TLS (funnel fallback)",
+		log.Printf("[stream] HTTPS UPnP external port %d != internal %d - not advertising direct-TLS (funnel fallback)",
 			m.ExternalPort, r.ss.httpsPort)
 		m.Remove() // drop it now, or every tick leaks another
 		r.set(nil, false)

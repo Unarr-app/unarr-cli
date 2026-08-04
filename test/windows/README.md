@@ -147,8 +147,70 @@ open, leaving it with no log at all. That is check [1].
 Re-run this after ANY change to `daemon_launch_vbs.go`, `daemon_install*`,
 `internal/logging`, or the `--log-file` wiring.
 
+### Boot time + crash reports — `smoke-boottime.ps1`
+
+The only check that runs **Go tests inside the guest** rather than driving the
+shipped binaries. Deploy the test binaries next to the exes first:
+
+```bash
+for p in ./internal/sysinfo ./internal/agent ./cmd/unarr-desktop; do
+  GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c \
+    -o "test/windows/shared/$(basename $p | sed s/unarr-desktop/desktop/)_test.exe" "$p"
+done
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass \\host.lan\Data\smoke-boottime.ps1
+```
+
+Five checks, each covering something a Linux lab structurally cannot:
+
+1. **`sysinfo.BootTime()` agrees with the OS.** It reads `GetTickCount64`
+   through a lazy `kernel32` binding — cross-compiling proves neither that the
+   binding resolves nor that the value means what we think. Diffed against
+   `Win32_OperatingSystem.LastBootUpTime` (measured 2026-08-04, Win11: 0.5s
+   apart). `GetTickCount64` and NOT `QueryUnbiasedInterruptTime`: the unbiased
+   clocks stop while the machine sleeps, which on a laptop would place the
+   apparent boot *after* a genuine overnight crash and reclassify it as a reboot.
+2. **The package tests pass against real Windows syscalls** — `agent` and
+   `unarr-desktop`, whose PID-reuse case runs through
+   `OpenProcess`/`GetExitCodeProcess` rather than the unix stand-in.
+3. Same tests again, **named individually and verbosely**, because the `agent`
+   roll-up carries one unrelated failure here (an AST guard that reads its own
+   package's `.go` sources, which a `go test -c` binary run from the share does
+   not have next to it).
+4. **The crash-report log collection against the real CLI** — the tray shells
+   out to `unarr daemon logs --boot` to collect the file a Go panic lands in,
+   and it SWALLOWS a failure of that call by design (a missing boot log is an
+   ordinary state of the world). A CLI answering "unknown flag" would therefore
+   restore the original bug in total silence. Needs `unarr.exe` deployed beside
+   `desktop_test.exe`; the e2e resolves a CLI from its own directory when there
+   is no Go toolchain.
+5. **`--boot` really returns the boot log**, checked directly: write a panic
+   marker into `unarr.boot.log`, ask the shipped `unarr.exe` for it.
+
+The bugs it guards: a Windows box that reboots for updates in its 02:00–05:00
+maintenance window kills the daemon before its 30s drain can remove the state
+file, leaving "running + PID gone" — indistinguishable on disk from a panic, so
+the tray mailed a crash report for a restart nobody would call a crash. And the
+report it mailed could not have contained a panic anyway, because panics go to
+stderr → `unarr.boot.log`, which nothing collected.
+
+Re-run after any change to `internal/sysinfo`, `agent.StateFromPreviousBoot`,
+`readStatus`, or `cmd/unarr-desktop/logsources.go`.
+
 ### Gotchas that cost real time here (read before writing a .ps1)
 
+- **Copy binaries to a LOCAL directory before running them.** A process started
+  from `\\host.lan\Data` inherits a **UNC working directory**, and every child
+  it spawns then fails — measured as `exit status 1`, **zero bytes** of output
+  and **~72s of SMB timeout per call**, even for `unarr version`, which touches
+  no files. The failure looks exactly like a broken product (the e2e reported
+  "No logs available" and took 296s) and is nothing of the kind: copy
+  `unarr.exe` + the test binary to e.g. `C:\unarrtest` and the same run takes
+  **1.1s**. Note the CLI must land in the SAME directory as the test binary,
+  which resolves it as a sibling when there is no Go toolchain. Running a .ps1
+  off the share is fine; only spawning processes from a UNC cwd is not.
 - **Deploy .ps1 as UTF-8 WITH a BOM and CRLF.** Windows PowerShell 5.1 decodes a
   BOM-less file as CP1252, which turns the UTF-8 bytes of an em dash into a CURLY
   QUOTE — and PowerShell accepts curly quotes as string delimiters. One em dash

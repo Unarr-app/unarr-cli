@@ -52,7 +52,7 @@ func watchStopIntent(ctx context.Context, sigCh chan<- os.Signal) {
 			if !agent.StopIntentExists() {
 				continue
 			}
-			log.Printf("[agent] stop requested (%s) — shutting down", agent.StopIntentPath())
+			log.Printf("[agent] stop requested (%s) - shutting down", agent.StopIntentPath())
 			select {
 			case sigCh <- syscall.SIGTERM:
 			default: // a shutdown is already under way

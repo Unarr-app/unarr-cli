@@ -218,7 +218,7 @@ func (s *HLSSession) generateCopySegment(ctx context.Context, idx int) error {
 	if err := os.Rename(tmp, final); err != nil {
 		return fmt.Errorf("hls: copy-vod seg-%d publish: %w", idx, err)
 	}
-	log.Printf("[hls %s] copy-vod seg-%d ready (%.1f–%.1fs, %dms)",
+	log.Printf("[hls %s] copy-vod seg-%d ready (%.1f-%.1fs, %dms)",
 		shortHLSID(s.cfg.SessionID), idx, start, end, time.Since(startedAt).Milliseconds())
 	return nil
 }

@@ -92,7 +92,7 @@ func BuildUsenetStream(ctx context.Context, fetcher stream.ArticleFetcher, n *nz
 		// Defensive: a streamable plan always yields an opener. Treat a nil
 		// provider as non-streamable rather than register a dead source that would
 		// 500 the endpoint on first read.
-		log.Printf("[usenet-stream] streamable plan for %q produced a nil provider — falling back to batch", plan.VideoName)
+		log.Printf("[usenet-stream] streamable plan for %q produced a nil provider - falling back to batch", plan.VideoName)
 		return nil, fmt.Errorf("usenet stream: %w (nil provider for %q)", stream.ErrNotStreamable, plan.VideoName)
 	}
 

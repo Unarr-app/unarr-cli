@@ -61,7 +61,7 @@ func installDaemonLogWriter() func() {
 	}
 	w, err := logging.NewWriter(logRingOptions(daemonLogFileFlag))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "unarr: %v — logging to stderr instead\n", err)
+		fmt.Fprintf(os.Stderr, "unarr: %v - logging to stderr instead\n", err)
 		return func() {}
 	}
 	// Announce the ownership the moment it is real, and only then: every

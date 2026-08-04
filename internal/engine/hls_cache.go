@@ -353,7 +353,7 @@ func (c *HLSCache) Sweep() (int64, error) {
 		// Every pinned byte already exceeds the budget — even evicting
 		// every unpinned dir won't bring us under. Warn loudly so the
 		// operator knows to bump size_gb (or kill the long-running session).
-		log.Printf("[hls_cache] warn: pinned bytes (%.1f MB) exceed budget (%.1f MB) — cannot enforce limit until sessions release",
+		log.Printf("[hls_cache] warn: pinned bytes (%.1f MB) exceed budget (%.1f MB) - cannot enforce limit until sessions release",
 			float64(pinned)/(1024*1024), float64(c.maxBytes)/(1024*1024))
 		return 0, nil
 	}

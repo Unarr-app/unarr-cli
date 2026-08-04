@@ -681,7 +681,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		// can't actually serve a HIT — drop the dir and re-encode.
 		segCountForVerify := segmentCountForDuration(probe.DurationSec)
 		if cfg.Cache.HasComplete(cacheKey) && !cfg.Cache.VerifyComplete(cacheKey, segCountForVerify) {
-			log.Printf("[hls %s] cache %s sealed but failed integrity check — re-encoding",
+			log.Printf("[hls %s] cache %s sealed but failed integrity check - re-encoding",
 				shortHLSID(cfg.SessionID), cacheKey)
 			_ = cfg.Cache.Invalidate(cacheKey)
 		}
@@ -812,7 +812,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		// a shorter cut, or progress was saved against another release). Start
 		// from the beginning instead of encoding only the final segment, which
 		// would "end" the video seconds after it starts.
-		log.Printf("[hls %s] startSec %.0f ≥ duration %.0f — starting from 0",
+		log.Printf("[hls %s] startSec %.0f >= duration %.0f - starting from 0",
 			shortHLSID(cfg.SessionID), cfg.StartSec, probe.DurationSec)
 	}
 	s.ffmpegSegStart = startIdx
@@ -1361,7 +1361,7 @@ func (s *HLSSession) watchCopyFirstSegment(ffCtx context.Context, cmd *exec.Cmd)
 			return
 		}
 		if time.Now().After(deadline) {
-			log.Printf("[hls %s] copy produced no segment within %s — killing stuck ffmpeg (0 kB hang)",
+			log.Printf("[hls %s] copy produced no segment within %s - killing stuck ffmpeg (0 kB hang)",
 				shortHLSID(s.cfg.SessionID), copyWatchdogTimeout)
 			// Kill the SPECIFIC process we were spawned to watch. waitFFmpeg's
 			// cmd.Wait() then returns non-nil → fallbackToTranscode (trigger a).
@@ -1427,7 +1427,7 @@ func (s *HLSSession) fallbackToTranscode(reason string) bool {
 	s.gaveUp = false
 	s.mu.Unlock()
 
-	log.Printf("[hls %s] copy failed (%s) — falling back to transcode", shortHLSID(s.cfg.SessionID), reason)
+	log.Printf("[hls %s] copy failed (%s) - falling back to transcode", shortHLSID(s.cfg.SessionID), reason)
 
 	// Relaunch as a re-encode from the start. restartFromSegment kills the old
 	// (failed/killed) copy ffmpeg, waits for it to reap, then spawns the encode
@@ -2074,7 +2074,7 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 			!probe.SubtitleTracks[reqBurn].IsTextSubtitle() {
 			burnIdx = reqBurn
 		} else {
-			log.Printf("[hls %s] burn subtitle %d ignored — not a bitmap track in range",
+			log.Printf("[hls %s] burn subtitle %d ignored - not a bitmap track in range",
 				shortHLSID(cfg.SessionID), reqBurn)
 		}
 	}
@@ -2106,7 +2106,7 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 	// Wistoria S02E08 had one audio track but the session carried audioIndex=2).
 	// Fall back to the first track so audio is never silently dropped.
 	if n := len(probe.AudioTracks); n > 0 && audioIdx >= n {
-		log.Printf("[hls %s] audioIndex %d out of range (%d audio track(s)) — using 0:a:0",
+		log.Printf("[hls %s] audioIndex %d out of range (%d audio track(s)) - using 0:a:0",
 			shortHLSID(cfg.SessionID), audioIdx, n)
 		audioIdx = 0
 	}
@@ -2466,7 +2466,7 @@ func buildHLSCopyArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string) [
 		}
 	}
 	if n := len(probe.AudioTracks); n > 0 && audioIdx >= n {
-		log.Printf("[hls %s] audioIndex %d out of range (%d audio track(s)) — using 0:a:0",
+		log.Printf("[hls %s] audioIndex %d out of range (%d audio track(s)) - using 0:a:0",
 			shortHLSID(cfg.SessionID), audioIdx, n)
 		audioIdx = 0
 	}

@@ -213,7 +213,7 @@ func moveToDir(result *Result, task *Task, destDir, destFileName string, cfg Org
 		// handles the multi-file case) and distinct content falls through to a
 		// version-tagged sibling.
 		if !srcInfo.IsDir() && sameContent(result.FilePath, destPath) {
-			log.Printf("[organize] %s is byte-identical to existing %s — dropping redundant re-download", result.FilePath, destPath)
+			log.Printf("[organize] %s is byte-identical to existing %s - dropping redundant re-download", result.FilePath, destPath)
 			if err := os.Remove(result.FilePath); err != nil {
 				log.Printf("[organize] warning: failed to remove redundant source %s: %v", result.FilePath, err)
 			}
@@ -273,7 +273,7 @@ func organizeDir(result *Result, destDir, destFileName string, cfg OrganizeConfi
 		if pathExists(fallbackDest) {
 			fallbackDest = versionDistinctPath(destDir, filepath.Base(srcDir), result, nil)
 		}
-		log.Printf("[organize] no video file in release dir %s — moving folder as-is to %s", srcDir, fallbackDest)
+		log.Printf("[organize] no video file in release dir %s - moving folder as-is to %s", srcDir, fallbackDest)
 		if err := os.Rename(srcDir, fallbackDest); err != nil {
 			return "", fmt.Errorf("move directory: %w", err)
 		}

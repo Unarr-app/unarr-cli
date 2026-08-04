@@ -276,7 +276,7 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 				pct = int(float64(downloaded) / float64(totalBytes) * 100)
 			}
 
-			log.Printf("[%s] %d%% — %s/%s @ %s/s  (debrid)",
+			log.Printf("[%s] %d%% - %s/%s @ %s/s  (debrid)",
 				agent.ShortID(task.ID), pct,
 				formatBytes(downloaded), formatBytes(totalBytes), formatBytes(speed))
 

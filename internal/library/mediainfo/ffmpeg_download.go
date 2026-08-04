@@ -50,7 +50,7 @@ func DownloadFFmpeg() (string, error) {
 		return "", err
 	}
 
-	fmt.Fprintf(os.Stderr, "ffmpeg not found — downloading for %s (~70MB)...\n", platform)
+	fmt.Fprintf(os.Stderr, "ffmpeg not found - downloading for %s (~70MB)...\n", platform)
 
 	resp, err := ffprobeDLClient.Get(url)
 	if err != nil {

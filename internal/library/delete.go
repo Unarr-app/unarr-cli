@@ -39,7 +39,7 @@ func DeleteFiles(items []agent.LibraryDeleteRequest, scanPaths []string) ([]int,
 		}
 	}
 	if len(safe) == 0 {
-		log.Printf("library: no valid scan paths configured — refusing to delete")
+		log.Printf("library: no valid scan paths configured - refusing to delete")
 		failed := make([]agent.LibraryDeleteError, 0, len(items))
 		for _, item := range items {
 			failed = append(failed, agent.LibraryDeleteError{

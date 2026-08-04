@@ -451,7 +451,7 @@ func (sc *SyncClient) runWakeListener(ctx context.Context) {
 			continue
 		}
 		if woke {
-			log.Printf("wake signal received — syncing immediately")
+			log.Printf("wake signal received - syncing immediately")
 			sc.TriggerSync()
 		}
 		// On timeout (woke=false) or after a wake, reconnect immediately.
@@ -493,7 +493,7 @@ func (sc *SyncClient) runDownlink(ctx context.Context) {
 		log.Printf("downlink: long-poll wake (downlink=poll)")
 		sc.runWakeListener(ctx)
 	case "sse":
-		log.Printf("downlink: SSE only (downlink=sse) — no long-poll fallback")
+		log.Printf("downlink: SSE only (downlink=sse) - no long-poll fallback")
 		sc.runSSELoop(ctx, false)
 	default:
 		sc.runSSELoop(ctx, true)
@@ -520,7 +520,7 @@ func (sc *SyncClient) runSSELoop(ctx context.Context, allowFallback bool) {
 
 		failures++
 		if allowFallback && failures >= maxSSEFailures {
-			log.Printf("downlink: SSE unavailable after %d attempts — falling back to long-poll for %s", failures, downlinkFallbackWindow)
+			log.Printf("downlink: SSE unavailable after %d attempts - falling back to long-poll for %s", failures, downlinkFallbackWindow)
 			sc.runWakeListenerFor(ctx, downlinkFallbackWindow)
 			failures = 0
 			continue
@@ -564,7 +564,7 @@ func (sc *SyncClient) runEventStreamOnce(ctx context.Context) bool {
 			// stream that flushes one ping and goes quiet must not be treated as
 			// healthy or the fallback never triggers for partial bufferers.
 			if ctx.Err() == nil {
-				log.Printf("downlink: no SSE frame within %s — dropping (dead or buffered path)", sc.livenessTimeout)
+				log.Printf("downlink: no SSE frame within %s - dropping (dead or buffered path)", sc.livenessTimeout)
 			}
 			return false
 		case ev, ok := <-stream.Events():

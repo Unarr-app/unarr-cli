@@ -482,7 +482,7 @@ func (ss *StreamServer) Listen(ctx context.Context) error {
 			ss.urls.Public = fmt.Sprintf("http://%s:%d/stream", mapping.ExternalIP, mapping.ExternalPort)
 		}
 	} else {
-		log.Printf("[stream] UPnP disabled — port %d not published to WAN (set downloads.enable_upnp = true to opt in)", ss.port)
+		log.Printf("[stream] UPnP disabled - port %d not published to WAN (set downloads.enable_upnp = true to opt in)", ss.port)
 	}
 
 	// Best single URL for backward compat: Tailscale > LAN > Public > localhost
@@ -629,7 +629,7 @@ func (ss *StreamServer) SetFile(provider FileProvider, taskID string) {
 		pm := probeMediaInfo(dp.path)
 		if pm.bitrateBps > 0 {
 			ss.bitrateBps.Store(pm.bitrateBps)
-			log.Printf("[stream] detected bitrate: %.1f Mbps → throttle at %.1f Mbps",
+			log.Printf("[stream] detected bitrate: %.1f Mbps -> throttle at %.1f Mbps",
 				float64(pm.bitrateBps)/1e6, float64(pm.bitrateBps)*2/1e6)
 		}
 		if pm.durationSec > 0 {
@@ -791,7 +791,7 @@ func (ss *StreamServer) Shutdown(ctx context.Context) error {
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
-			log.Printf("[stream] HTTPS UPnP maintainer didn't stop in 3s (SOAP stall?) — proceeding with shutdown")
+			log.Printf("[stream] HTTPS UPnP maintainer didn't stop in 3s (SOAP stall?) - proceeding with shutdown")
 		}
 	}
 
@@ -1176,7 +1176,7 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 	// Auth: every caller must carry a valid stream token. 404 (not 401/403) so
 	// an unauthorised caller gets no oracle that a stream is active here.
 	if !ss.checkStreamToken(streamScopeStream, r.URL.Query().Get("t")) {
-		log.Printf("[stream] rejected %s — bad/absent token", clientIP)
+		log.Printf("[stream] rejected %s - bad/absent token", clientIP)
 		http.Error(w, "no active stream", http.StatusNotFound)
 		return
 	}
@@ -1272,7 +1272,7 @@ func (ss *StreamServer) thumbnailHandler(w http.ResponseWriter, r *http.Request)
 	}
 	if !ss.checkStreamToken(streamScopeThumb(rawPath), q.Get("t")) {
 		clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-		log.Printf("[thumbnail] rejected from %s — bad/absent token", clientIP)
+		log.Printf("[thumbnail] rejected from %s - bad/absent token", clientIP)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -1318,7 +1318,7 @@ func (ss *StreamServer) thumbnailHandler(w http.ResponseWriter, r *http.Request)
 		// ("invalid as first byte of an EBML number") and no frame decodes.
 		// Retry once with the slow but robust output-seek path before giving up
 		// (2026-06-03: anime MKVs returned a broken image in the web scrubber).
-		log.Printf("[thumbnail] input-seek failed (pos=%.1f w=%d path=%q): err=%v %s — retrying output-seek",
+		log.Printf("[thumbnail] input-seek failed (pos=%.1f w=%d path=%q): err=%v %s - retrying output-seek",
 			pos, width, rawPath, err, strings.TrimSpace(stderr.String()))
 		var stderr2 strings.Builder
 		cmd2 := exec.CommandContext(ctx, ss.ffmpegPath, buildThumbnailArgsAccurate(rawPath, pos, width)...)
@@ -1376,7 +1376,7 @@ func (ss *StreamServer) trickplayHandler(w http.ResponseWriter, r *http.Request)
 	}
 	if !ss.checkStreamToken(streamScopeThumb(rawPath), q.Get("t")) {
 		clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-		log.Printf("[trickplay] rejected from %s — bad/absent token", clientIP)
+		log.Printf("[trickplay] rejected from %s - bad/absent token", clientIP)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -1451,7 +1451,7 @@ func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	if !ss.checkStreamToken(streamScopeSub(rawPath, index), q.Get("t")) {
 		clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-		log.Printf("[sub] rejected from %s — bad/absent token", clientIP)
+		log.Printf("[sub] rejected from %s - bad/absent token", clientIP)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}

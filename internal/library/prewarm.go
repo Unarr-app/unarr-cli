@@ -337,14 +337,14 @@ func waitForLowLoad(ctx context.Context, maxRatio float64) {
 			return
 		}
 		if !logged {
-			log.Printf("[prewarm] system load %.1f > %.1f — deferring trickplay (≤ %s)", load, threshold, prewarmLoadWaitCap)
+			log.Printf("[prewarm] system load %.1f > %.1f - deferring trickplay (<= %s)", load, threshold, prewarmLoadWaitCap)
 			logged = true
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-deadline:
-			log.Printf("[prewarm] load still high after %s — proceeding with throttled trickplay (nice + idle I/O + single-flight still apply)", prewarmLoadWaitCap)
+			log.Printf("[prewarm] load still high after %s - proceeding with throttled trickplay (nice + idle I/O + single-flight still apply)", prewarmLoadWaitCap)
 			return
 		case <-time.After(15 * time.Second):
 		}

@@ -208,7 +208,7 @@ func parseSubFiles(raw []string) []string {
 			continue
 		}
 		if strings.Contains(s, "#") {
-			fmt.Fprintf(os.Stderr, "unarr-desktop: ignoring subtitle: %q contains '#' (VLC MRL separator — chained inputs are not allowed)\n", s)
+			fmt.Fprintf(os.Stderr, "unarr-desktop: ignoring subtitle: %q contains '#' (VLC MRL separator - chained inputs are not allowed)\n", s)
 			continue
 		}
 		normalized, err := validateHTTPURL(s, "subtitle url")

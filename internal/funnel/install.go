@@ -40,6 +40,15 @@ var pinnedCloudflaredSHA256 = map[string]string{
 	"cloudflared-linux-386":   "ad82d1dbed8bbb9d702807cbd97df932cc774d29e9da5c109b7a3c7f7aee2065",
 }
 
+// ErrNoAutoDownload marks the one funnel failure that RETRYING CANNOT FIX:
+// there is no cloudflared on this machine and this platform has no auto-download
+// path, so the only thing that changes the outcome is a human installing the
+// binary. It is a sentinel (errors.Is) rather than a string match so the
+// supervisor can stop instead of logging the same line every five minutes
+// forever — which is what it did, 288 times a day, on every Windows box with the
+// funnel enabled, pushing real evidence out of the crash-report log tail.
+var ErrNoAutoDownload = errors.New("funnel: cloudflared is not installed and cannot be downloaded automatically on this platform")
+
 // ResolveBinary returns the path to a usable cloudflared executable, downloading
 // one into the unarr data dir if neither $PATH nor the cached location has it.
 // This makes the funnel feature usable on headless installs (NAS / Docker)
@@ -60,6 +69,25 @@ func ResolveBinary() (string, error) {
 		return cached, nil
 	}
 	return downloadCloudflared(cached)
+}
+
+// installHint is the per-OS one-liner that actually gets a user unstuck. The
+// old message said only "install cloudflared manually", which on Windows is a
+// dead end unless you already know the package name.
+//
+// ASCII ONLY. This text ends up in unarr.log, in a crash report, and on a
+// Windows console — three decoders, and the ones that are not UTF-8 turn a
+// single em dash into mojibake. The field reports show exactly that ("windows
+// ?" install cloudflared"), which is how a legible instruction became noise.
+func installHint() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "winget install --id Cloudflare.cloudflared"
+	case "darwin":
+		return "brew install cloudflared"
+	default:
+		return "see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+	}
 }
 
 func cachedBinaryPath() string {
@@ -85,7 +113,13 @@ func cachedBinaryPath() string {
 // always takes precedence.
 func downloadCloudflared(dest string) (string, error) {
 	if runtime.GOOS != "linux" {
-		return "", fmt.Errorf("funnel: auto-download not supported on %s — install cloudflared manually or drop a binary at %s", runtime.GOOS, dest)
+		// Wrapped in ErrNoAutoDownload so the supervisor can tell "a human has to
+		// act" from "the CF edge is having a bad minute" and stop retrying. Also
+		// ASCII-only: this string is logged, and a UTF-8 em dash in the log is
+		// what a Windows console (CP850) and a CP1252 reader each mangle
+		// differently — see the note on installHint.
+		return "", fmt.Errorf("%w on %s: install it manually (%s) or drop a binary at %s",
+			ErrNoAutoDownload, runtime.GOOS, installHint(), dest)
 	}
 
 	var asset string

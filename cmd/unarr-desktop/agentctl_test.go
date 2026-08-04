@@ -85,14 +85,20 @@ func writeConfig(t *testing.T, agentID string) {
 // its PID is alive, so it claims this test process.
 func writeState(t *testing.T, agentID string) {
 	t.Helper()
-	st := agent.DaemonState{
+	writeStateFile(t, agent.DaemonState{
 		AgentID:       agentID,
 		Status:        "running",
 		Version:       "test",
 		PID:           os.Getpid(),
 		StartedAt:     time.Now(),
 		LastHeartbeat: time.Now(),
-	}
+	})
+}
+
+// writeStateFile drops an arbitrary state file into the sandboxed data dir, for
+// the cases that need to control the PID or the timestamps.
+func writeStateFile(t *testing.T, st agent.DaemonState) {
+	t.Helper()
 	data, err := json.Marshal(st)
 	if err != nil {
 		t.Fatalf("marshal state: %v", err)

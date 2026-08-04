@@ -140,18 +140,18 @@ func BenchmarkMaxTranscodeHeight(ctx context.Context, ffmpegPath string, hw HWAc
 	for _, r := range res.Rungs {
 		switch {
 		case !r.Measured:
-			log.Printf("[transcode] encode benchmark: %dp probe failed — trying lower", r.Height)
+			log.Printf("[transcode] encode benchmark: %dp probe failed - trying lower", r.Height)
 		case r.Factor >= res.Threshold:
-			log.Printf("[transcode] encode benchmark: software ceiling %dp (%.1f× realtime)", r.Height, r.Factor)
+			log.Printf("[transcode] encode benchmark: software ceiling %dp (%.1fx realtime)", r.Height, r.Factor)
 		default:
-			log.Printf("[transcode] encode benchmark: %dp only %.1f× realtime (<%.1f×) — trying lower", r.Height, r.Factor, res.Threshold)
+			log.Printf("[transcode] encode benchmark: %dp only %.1fx realtime (<%.1fx) - trying lower", r.Height, r.Factor, res.Threshold)
 		}
 	}
 	switch res.Reason {
 	case EncodeReasonUnmeasurable:
-		log.Printf("[transcode] encode benchmark: no rung could be measured (lavfi/ffmpeg issue) — keeping default 1080 ceiling")
+		log.Printf("[transcode] encode benchmark: no rung could be measured (lavfi/ffmpeg issue) - keeping default 1080 ceiling")
 	case EncodeReasonFloor:
-		log.Printf("[transcode] encode benchmark: host can't sustain 480p software encode — flooring ceiling at 480 (oversized sources route to external)")
+		log.Printf("[transcode] encode benchmark: host can't sustain 480p software encode - flooring ceiling at 480 (oversized sources route to external)")
 	}
 	return res.Ceiling
 }
