@@ -95,3 +95,32 @@ func configKeysCheckResult(cfg config.Config) (string, error) {
 	}
 	return "!" + strings.Join(warnings, "; "), nil
 }
+
+// configValuesCheckResult is the doctor check for values that are syntactically
+// fine but outside their accepted range — log_level = "verbose", a port of
+// 99999, a negative seed_ratio.
+//
+// It exists because `unarr doctor` printed "All checks passed!" for a config
+// `unarr config check` rejected outright: the keys check only ever looked at
+// key SPELLING, so a file whose every key was correct and whose values were all
+// nonsense came back clean. The two commands now agree on what is wrong; they
+// still disagree, deliberately, on how loudly to say it.
+//
+// WARN, never FAIL, and that is the part worth defending: the loader already
+// substitutes its default for a value it cannot use, so the agent is running
+// correctly — just not the way the user wrote it down. Failing here would give
+// --quick a non-zero exit, and Docker's answer to unhealthy is to restart, so a
+// stray log_level would turn into a container restarting every 60 seconds
+// forever. `unarr config check` is the one that exits non-zero, because it is
+// the one a deployment gate calls on purpose.
+func configValuesCheckResult(cfg config.Config) (string, error) {
+	issues := cfg.ValueIssues()
+	if len(issues) == 0 {
+		return "no out-of-range values", nil
+	}
+	msgs := make([]string, 0, len(issues))
+	for _, iss := range issues {
+		msgs = append(msgs, iss.String())
+	}
+	return "!" + strings.Join(msgs, "; ") + " (run `unarr config check` for the full list)", nil
+}

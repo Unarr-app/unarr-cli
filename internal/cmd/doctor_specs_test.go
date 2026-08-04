@@ -19,6 +19,7 @@ func TestDoctorSpecsOrderAndGroups(t *testing.T) {
 	want := [][2]string{
 		{"Config", "Config file"},
 		{"Config", "Config keys"},
+		{"Config", "Config values"},
 		{"Config", "API key configured"},
 		{"Connectivity", "API reachable"},
 		{"Connectivity", "Discovery API (search/stats)"},
@@ -68,6 +69,7 @@ func TestQuickSpecsAreLocalOnly(t *testing.T) {
 	want := []string{
 		"Config file",
 		"Config keys",
+		"Config values",
 		"Download directory",
 		"Download dir writable",
 		"Disk space",

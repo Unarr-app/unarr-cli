@@ -81,6 +81,12 @@ func doctorConfigSpecs(cfg *config.Config) []doctor.Spec {
 			Fn:    func() (string, error) { return configKeysCheckResult(*cfg) },
 		},
 		{
+			Group: "Config",
+			Name:  "Config values",
+			Quick: true,
+			Fn:    func() (string, error) { return configValuesCheckResult(*cfg) },
+		},
+		{
 			Group:  "Config",
 			Name:   "API key configured",
 			Remedy: setupHint(cfg.Auth.APIURL) + " to configure it",

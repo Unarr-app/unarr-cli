@@ -54,6 +54,45 @@ func TestConfigKeysCheckResultWarns(t *testing.T) {
 	}
 }
 
+// The regression this pins: every key below is spelled correctly, so the keys
+// check is clean and `unarr doctor` reported "All checks passed!" for a file
+// `unarr config check` rejected with three problems. Doctor was blind to values.
+func TestConfigValuesCheckResultWarnsOnValidKeysWithBadValues(t *testing.T) {
+	cfg := loadTestConfig(t, "[downloads]\npreferred_quality = \"4k\"\nseed_ratio = -1.5\n\n[daemon]\nlog_level = \"verbose\"\n")
+
+	if msg, err := configKeysCheckResult(cfg); err != nil || strings.HasPrefix(msg, "!") {
+		t.Fatalf("keys are all spelled right; the keys check must stay clean, got %q (err %v)", msg, err)
+	}
+
+	msg, err := configValuesCheckResult(cfg)
+	// WARN, never FAIL: the loader falls back to its default, so the agent is
+	// running. A failure here would give `doctor --quick` a non-zero exit and
+	// Docker restarts an unhealthy container — a stray log_level must not become
+	// a restart loop.
+	if err != nil {
+		t.Fatalf("out-of-range values must warn, not fail: %v", err)
+	}
+	if !strings.HasPrefix(msg, "!") {
+		t.Fatalf("expected a WARN-prefixed message, got %q", msg)
+	}
+	for _, want := range []string{"downloads.preferred_quality", "downloads.seed_ratio", "daemon.log_level"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message does not name %s: %q", want, msg)
+		}
+	}
+}
+
+func TestConfigValuesCheckResultCleanOnGoodValues(t *testing.T) {
+	cfg := loadTestConfig(t, "[downloads]\npreferred_quality = \"1080p\"\nseed_ratio = 1.5\n\n[daemon]\nlog_level = \"debug\"\n")
+	msg, err := configValuesCheckResult(cfg)
+	if err != nil {
+		t.Fatalf("valid values must not fail the check: %v", err)
+	}
+	if strings.HasPrefix(msg, "!") {
+		t.Errorf("valid values must not warn, got %q", msg)
+	}
+}
+
 func TestUnknownKeyWarningsOnePerKey(t *testing.T) {
 	cfg := loadTestConfig(t, "[auth]\napi_ky = \"k\"\n\n[library]\nworkerz = 4\n")
 	got := unknownKeyWarnings(cfg)
