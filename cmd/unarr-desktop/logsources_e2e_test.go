@@ -1,12 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestReportLogsAgainstTheRealCLI drives the whole chain end to end: a real
@@ -67,11 +69,37 @@ func TestReportLogsAgainstTheRealCLI(t *testing.T) {
 
 	body := string(collectReportLogs())
 	if !strings.Contains(body, "panic: runtime error") {
-		t.Fatalf("the real CLI did not yield the startup log — the crash would be lost:\n%s", tail(body, 2000))
+		t.Fatalf("the real CLI did not yield the startup log — the crash would be lost:\n%s\n%s",
+			tail(body, 2000), diagnoseCLI(t, dataDir))
 	}
 	if !strings.Contains(body, "[cleanup] nothing to clean") {
-		t.Fatalf("the real CLI did not yield the daemon log:\n%s", tail(body, 2000))
+		t.Fatalf("the real CLI did not yield the daemon log:\n%s\n%s",
+			tail(body, 2000), diagnoseCLI(t, dataDir))
 	}
+}
+
+// diagnoseCLI reports what each half of the collection actually did. The
+// assembled body deliberately throws away the reason a source was skipped, so
+// without this a failure here says only "no logs available" and leaves whoever
+// reads it — on a machine they may not have — with nothing to go on.
+func diagnoseCLI(t *testing.T, dataDir string) string {
+	t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- diagnosis ---\nunarrBin()=%q  dataDir=%s\n", unarrBin(), dataDir)
+	for _, name := range []string{"unarr.log", "unarr.boot.log"} {
+		if st, err := os.Stat(filepath.Join(dataDir, name)); err == nil {
+			fmt.Fprintf(&b, "%s: %d bytes\n", name, st.Size())
+		} else {
+			fmt.Fprintf(&b, "%s: %v\n", name, err)
+		}
+	}
+	for _, argv := range [][]string{{"daemon", "logs"}, {"daemon", "logs", "--boot"}, {"version"}} {
+		start := time.Now()
+		out, err := runUnarrOutput(argv...)
+		fmt.Fprintf(&b, "%v -> err=%v, %d bytes, %s\n  %s\n",
+			argv, err, len(out), time.Since(start).Round(time.Millisecond), tail(strings.TrimSpace(string(out)), 300))
+	}
+	return b.String()
 }
 
 // resolveUnarrForE2E finds the daemon binary this tray shells out to: built

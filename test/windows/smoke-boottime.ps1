@@ -113,6 +113,66 @@ foreach ($n in $named) {
     }
 }
 
+# --- 4. the crash-report log collection, against the REAL CLI ---------------
+# The bug this whole change exists for lives on Windows, and the piece that can
+# only be proven here is the argv: unarr-desktop shells out to
+# `unarr daemon logs --boot` to collect the file a Go panic lands in. A CLI that
+# answers "unknown flag" makes the tray silently collect one log instead of two,
+# and the tray SWALLOWS that failure by design (a missing boot log is an
+# ordinary state of the world) - so nothing but this would notice.
+#
+# Needs unarr.exe deployed next to desktop_test.exe, which run.sh already does:
+# the test resolves a CLI from its own directory when there is no Go toolchain.
+# RUN FROM A LOCAL DIRECTORY, NOT THE SHARE. A process started from
+# \\host.lan\Data inherits a UNC working directory, and every child it then
+# spawns fails: measured here as exit status 1, zero bytes of output and ~72s of
+# SMB timeout PER CALL - even for `unarr version`, which touches no files. That
+# is an artefact of the harness, not of the product (installers put both
+# binaries under %LOCALAPPDATA%), and it is why the other smokes copy to
+# C:\unarr first. The CLI has to land in the SAME directory: the e2e resolves
+# it as a sibling of the test binary when there is no Go toolchain.
+$localBin = 'C:\unarrtest'
+New-Item -ItemType Directory -Force -Path $localBin | Out-Null
+Copy-Item (Join-Path $share 'desktop_test.exe') $localBin -Force -ErrorAction SilentlyContinue
+Copy-Item (Join-Path $share 'unarr.exe') $localBin -Force -ErrorAction SilentlyContinue
+$dt = Join-Path $localBin 'desktop_test.exe'
+if (Test-Path $dt) {
+    Push-Location $localBin
+    $o = & $dt '-test.v' '-test.run=TestReportLogsAgainstTheRealCLI' 2>&1 | Out-String
+    Pop-Location
+    foreach ($line in ($o -split "`r?`n")) {
+        if ($line -match '^\s*(---|===) (PASS|FAIL|SKIP)|using the CLI') { Say "    $line" }
+    }
+    if ($o -match '(?m)^--- PASS') {
+        Say "PASS: `unarr daemon logs --boot` feeds the crash report on real Windows"
+    } elseif ($o -match '(?m)^--- SKIP') {
+        Say "SKIP: the e2e could not find a CLI to test against (deploy unarr.exe next to desktop_test.exe)"
+    } else {
+        Say "FAIL: the crash-report log collection did not work against the real CLI"
+        Say $o
+        $fail++
+    }
+} else {
+    Say "SKIP: desktop_test.exe not deployed"
+}
+
+# --- 5. the boot log really does hold a panic -------------------------------
+# Direct, no Go involved: write a panic into unarr.boot.log and ask the shipped
+# CLI for it exactly the way the tray does.
+$dataDir = Join-Path $env:LOCALAPPDATA 'unarr'
+New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+$bootLog = Join-Path $dataDir 'unarr.boot.log'
+$marker = "panic: smoke-boottime marker $(Get-Random)"
+Add-Content -Path $bootLog -Value $marker -Encoding UTF8
+$bootOut = & (Join-Path $localBin 'unarr.exe') daemon logs --boot 2>&1 | Out-String
+if ($bootOut -match [regex]::Escape($marker)) {
+    Say "PASS: unarr.exe daemon logs --boot returns what is in unarr.boot.log"
+} else {
+    Say "FAIL: --boot did not return the marker written to $bootLog"
+    Say $bootOut
+    $fail++
+}
+
 Say ""
 if ($fail -eq 0) { Say "ALL CHECKS PASSED" } else { Say "$fail CHECK(S) FAILED" }
 
