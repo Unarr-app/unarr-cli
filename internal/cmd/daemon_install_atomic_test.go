@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -69,6 +70,14 @@ func TestWriteServiceFileIsReadableByTheSupervisor(t *testing.T) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Windows has no POSIX mode bits: Go reports 0666 for any file it created
+	// writable, whatever mode was asked for, so this assertion can only be made
+	// where the OS actually stores it. The unit file itself is a systemd/launchd
+	// artefact and is never written on Windows (the scheduled task is), so
+	// nothing is left unguarded by skipping here.
+	if runtime.GOOS == "windows" {
+		t.Skip("no POSIX mode bits on Windows; the unit file is a unix-only artefact")
 	}
 	if perm := fi.Mode().Perm(); perm != 0o644 {
 		t.Errorf("mode = %o, want 644 — 600 would leave the unit unreadable", perm)

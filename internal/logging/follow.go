@@ -22,6 +22,19 @@ const pollInterval = 250 * time.Millisecond
 // replaces it underneath. Returns nil when ctx is cancelled — a user pressing
 // Ctrl-C has not hit an error.
 func Follow(ctx context.Context, q Query, w io.Writer) error {
+	// How much of the file Print is about to consume, sampled BEFORE it runs.
+	// The follower then resumes from exactly there, which is what stops the two
+	// halves of this function from disagreeing about the same file.
+	//
+	// The bug this replaces: Print ran first, then the follower opened the file
+	// and seeked to its END. A log CREATED in the window between those two
+	// steps was therefore never printed (Print saw no file) and never streamed
+	// (the seek skipped past it) — the first lines a daemon ever wrote were lost
+	// outright. Sampling first also makes the ordering honest in the other
+	// direction: if the file grows between the sample and Print, the worst case
+	// is a line shown twice, and a log viewer that repeats itself is a far
+	// smaller failure than one that silently drops the beginning.
+	resumeAt := fileSize(q.Path)
 	if err := Print(q, w); err != nil {
 		return err
 	}
@@ -31,7 +44,7 @@ func Follow(ctx context.Context, q Query, w io.Writer) error {
 	}
 	f := &follower{path: q.Path, format: q.Format, out: w, filter: lineFilter{m: m}}
 	defer f.close()
-	f.openAtEnd()
+	f.openAt(resumeAt)
 
 	for {
 		select {
@@ -65,10 +78,24 @@ type follower struct {
 	offset int64
 }
 
-// openAtEnd attaches to the live file and skips what Print already showed. A
-// file that does not exist yet is not an error — the daemon may not have
-// started; step() picks it up when it appears.
-func (fo *follower) openAtEnd() {
+// fileSize is the file's current length, or 0 when it does not exist yet. A
+// missing log is the ordinary case here — the daemon may not have started.
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+// openAt attaches to the live file and resumes reading at `at` — the point
+// Print stopped, so nothing is shown twice and nothing is skipped. A file that
+// does not exist yet is not an error; step() picks it up when it appears.
+//
+// `at` past the current end (the file was truncated between the sample and
+// here) is self-correcting: reads return EOF until it grows again, and
+// reopenIfReplaced sees info.Size() < offset and re-attaches from the start.
+func (fo *follower) openAt(at int64) {
 	f, err := os.Open(fo.path)
 	if err != nil {
 		return
@@ -78,12 +105,11 @@ func (fo *follower) openAtEnd() {
 		f.Close()
 		return
 	}
-	end, err := f.Seek(0, io.SeekEnd)
-	if err != nil {
+	if _, err := f.Seek(at, io.SeekStart); err != nil {
 		f.Close()
 		return
 	}
-	fo.attach(f, info, end)
+	fo.attach(f, info, at)
 }
 
 // openAtStart attaches to a file we have not read at all — a fresh log after

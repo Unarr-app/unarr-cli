@@ -14,12 +14,18 @@ import (
 
 // withEmptyDataDir points the data dir at a temp dir, so there is no daemon
 // state file and no resume queue: the "nothing installed / nothing running"
-// baseline.
+// baseline. Returns the RESOLVED data dir, which is not the same shape on every
+// platform (linux/windows nest a "unarr" component, macOS does not).
+//
+// It delegates to withDataDir rather than setting XDG_DATA_HOME by hand, and
+// that mattered: XDG_DATA_HOME is read on LINUX ONLY. On macOS the data dir is
+// the config dir, on Windows it is LOCALAPPDATA — so this sandbox held on the
+// CI's ubuntu runner and nowhere else, and these tests were reading and WRITING
+// the real agent's daemon.state.json on the macOS and Windows runners. That is
+// both why they failed there and why they contaminated whatever ran next.
 func withEmptyDataDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dir)
-	return dir
+	return withDataDir(t)
 }
 
 // seedResumeQueue writes tasks into the on-disk resume queue — the file that
@@ -46,7 +52,10 @@ func TestControlClient_NoStateFileIsNoDaemon(t *testing.T) {
 func TestControlClient_OldDaemonWithoutControlPlane(t *testing.T) {
 	dir := withEmptyDataDir(t)
 	agent.WriteState(&agent.DaemonState{AgentID: "a", Status: "running", PID: os.Getpid()})
-	if _, err := os.Stat(filepath.Join(dir, "unarr", "daemon.state.json")); err != nil {
+	// dir is the RESOLVED data dir, so no "unarr" component is spliced in here:
+	// that nesting is a linux/windows detail, and on macOS the data dir IS the
+	// config dir. Hard-coding it made this assertion a linux-only one.
+	if _, err := os.Stat(filepath.Join(dir, "daemon.state.json")); err != nil {
 		t.Fatalf("fixture: state file not written: %v", err)
 	}
 

@@ -3,6 +3,7 @@ package logging
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -200,6 +201,16 @@ func TestWriterSerializesConcurrentWritesAcrossRotations(t *testing.T) {
 // anything with the same complaint. Here the block is an unwritable directory,
 // which is the reproducible Linux stand-in for a Windows sharing violation.
 func TestWriterBacksOffAndReportsOnceWhenTheRenameFails(t *testing.T) {
+	// The block below is a directory permission, and two kinds of runner ignore
+	// those: root, and Windows (which decides deletes and renames from the ACL,
+	// not from the mode Go maps onto it). On either one the rename SUCCEEDS, the
+	// fixture never blocks anything, and the assertions below describe a
+	// scenario that did not happen. The behaviour under test — back off a whole
+	// budget instead of retrying per line — is platform-independent; only this
+	// way of provoking it is not.
+	if runtime.GOOS == "windows" {
+		t.Skip("a directory mode cannot block a rename on Windows; the fixture, not the behaviour, is unix-only")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions, so the rename cannot be blocked")
 	}

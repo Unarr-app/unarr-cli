@@ -35,7 +35,7 @@ func (d *stallingDownloader) Shutdown(context.Context) error {
 // store, because the interesting behaviour is exactly how those two interact.
 func newTestController(t *testing.T) (*taskController, context.CancelFunc) {
 	t.Helper()
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	withDataDir(t) // every platform's data dir, not just linux's
 
 	reporter := engine.NewProgressReporter(nil, time.Hour)
 	mgr := engine.NewManager(
@@ -447,8 +447,11 @@ func TestControlPlane_EndToEnd(t *testing.T) {
 // The store is on disk, so a restart must see the same queue — that persistence
 // is the whole reason a zombie survives one.
 func TestActiveTaskStore_SurvivesReload(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dir)
+	// withDataDir, not a bare XDG_DATA_HOME: that variable is read on LINUX
+	// ONLY, so this test used to write the real agent's active-tasks.json on
+	// macOS and Windows — failing there, and leaving a queue behind for whatever
+	// ran next.
+	dir := withDataDir(t)
 
 	store := agent.NewActiveTaskStore()
 	store.Add(ctlTask("persisted"))
@@ -469,7 +472,7 @@ func TestActiveTaskStore_SurvivesReload(t *testing.T) {
 
 	// Sanity-check the file really is where the docs say it is, since the
 	// offline recovery path tells users to delete it by hand.
-	if _, err := os.Stat(filepath.Join(dir, "unarr", "active-tasks.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "active-tasks.json")); err != nil {
 		t.Fatalf("active-tasks.json not at the documented path: %v", err)
 	}
 }

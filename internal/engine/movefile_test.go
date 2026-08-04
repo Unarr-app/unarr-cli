@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -64,6 +65,16 @@ func TestMoveFileReportsAnUndeletableSource(t *testing.T) {
 	// Force the copy path (rename would succeed here) by making rename fail:
 	// a read-only parent directory refuses both rename-away and unlink, which
 	// is the same shape as Windows' ERROR_SHARING_VIOLATION on delete.
+	//
+	// THE SCENARIO IS REAL ON WINDOWS; THE WAY THIS PROVOKES IT IS NOT. A
+	// read-only directory bit does not stop a delete there — Windows takes that
+	// decision from the ACL, not from the mode Go maps onto it — so the source
+	// is removed, the fixture collapses, and the test fails while reporting
+	// nothing about moveFile. Provoking it natively would mean holding an open
+	// handle without FILE_SHARE_DELETE, which Go's os package does not offer.
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod cannot make a directory undeletable on Windows; the fixture, not the behaviour, is unix-only")
+	}
 	if err := os.Chmod(srcDir, 0o555); err != nil {
 		t.Fatal(err)
 	}

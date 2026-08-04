@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -41,6 +43,22 @@ func waitFor(t *testing.T, cond func() bool) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+// renameWithRetry renames a log the way the Writer does: patiently. A single
+// refusal is normal on Windows (a scanner or another reader holding the file
+// for a moment) and means nothing about the code under test.
+func renameWithRetry(t *testing.T, from, to string) error {
+	t.Helper()
+	var err error
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err = os.Rename(from, to); err == nil {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return err
 }
 
 // appendLine adds one line to a log file the way a daemon would.
@@ -107,6 +125,27 @@ func TestFollowAppliesTheFilters(t *testing.T) {
 }
 
 func TestFollowSurvivesRotation(t *testing.T) {
+	// Not reachable on Windows, and the reason is worth writing down because it
+	// is a real property of the product there, not a test artefact.
+	//
+	// Go's os.Open asks for FILE_SHARE_READ|FILE_SHARE_WRITE and NOT
+	// FILE_SHARE_DELETE, so while a follower holds the log open, ANY rename of
+	// it — the Writer's own included — is refused with "the process cannot
+	// access the file because it is being used by another process". Retrying
+	// does not help: it is a property of the open handle, not a passing lock
+	// (measured on the VM harness, 5s of retries, every attempt refused).
+	//
+	// So on Windows an `unarr logs -f` session blocks rotation for as long as it
+	// is open. That is EXPECTED and already handled: the Writer treats a refused
+	// rename as a back-off-a-whole-budget event rather than an error, which is
+	// what TestWriterBacksOffAndReportsOnceWhenTheRenameFails pins. And the
+	// capability this test is about — noticing the file underneath was replaced
+	// and re-attaching — is covered on Windows by TestFollowSurvivesCopyTruncate,
+	// which needs no rename and does pass there.
+	if runtime.GOOS == "windows" {
+		t.Skip("a followed file cannot be renamed on Windows (no FILE_SHARE_DELETE); " +
+			"TestFollowSurvivesCopyTruncate covers re-attachment there")
+	}
 	path := newTestLog(t)
 	writeLines(t, path, "before")
 
@@ -118,7 +157,16 @@ func TestFollowSurvivesRotation(t *testing.T) {
 	}
 
 	// Rotate the way the Writer does — rename, then a brand new live file.
-	if err := os.Rename(path, RotatedPath(path, 1)); err != nil {
+	//
+	// Retried, because on Windows a rename of a file someone else has open is
+	// not reliably instantaneous: Defender's post-write scan and the follower's
+	// own handle both hold it for short moments, and the call comes back with
+	// "The process cannot access the file because it is being used by another
+	// process". That is exactly why the real Writer backs off and retries rather
+	// than treating one refusal as fatal (see writer_owned.go), so a test that
+	// gave up on the first attempt was holding the product to a stricter
+	// standard than the product holds itself.
+	if err := renameWithRetry(t, path, RotatedPath(path, 1)); err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
 	appendLine(t, path, "after rotation")
@@ -161,5 +209,52 @@ func TestFollowWaitsForALogThatDoesNotExistYet(t *testing.T) {
 	appendLine(t, path, "first ever line")
 	if !waitFor(t, func() bool { return strings.Contains(out.String(), "first ever line") }) {
 		t.Fatalf("Follow did not pick up a log created after it started, got %q", out.String())
+	}
+}
+
+// TestFollowNeverLosesTheFirstLineToAStartupRace hammers the one interleaving
+// that used to drop data, instead of waiting for the scheduler to produce it by
+// luck (it did, on macOS, roughly one run in three).
+//
+// The race: Follow printed the existing tail, and THEN opened the file and
+// seeked to its end. A log created in between was invisible to both halves —
+// Print saw no file, the seek skipped what had just been written — so the first
+// lines a daemon ever wrote were lost, and `unarr logs -f` started at the same
+// moment as the daemon showed nothing until the SECOND line arrived.
+//
+// Each iteration recreates the window: start following a path with no file,
+// then create it immediately. Twenty rounds turns a one-in-three flake into a
+// near-certain failure if the ordering ever regresses.
+func TestFollowNeverLosesTheFirstLineToAStartupRace(t *testing.T) {
+	for i := range 20 {
+		path := filepath.Join(t.TempDir(), "unarr.log")
+		out, stop := startFollow(t, Query{Path: path, Lines: 5})
+		appendLine(t, path, "first ever line")
+
+		ok := waitFor(t, func() bool { return strings.Contains(out.String(), "first ever line") })
+		stop()
+		if !ok {
+			t.Fatalf("round %d: the first line written to a brand-new log never appeared: %q", i, out.String())
+		}
+	}
+}
+
+// TestFollowDoesNotRepeatTheTailItAlreadyPrinted is the other side of that
+// contract: resuming from the size Print consumed must not re-emit those lines.
+// A viewer that repeats itself on every start is a milder bug than one that
+// drops lines, but it is still a bug.
+func TestFollowDoesNotRepeatTheTailItAlreadyPrinted(t *testing.T) {
+	path := newTestLog(t)
+	writeLines(t, path, "old one", "old two")
+
+	out, stop := startFollow(t, Query{Path: path, Lines: 5})
+	defer stop()
+
+	appendLine(t, path, "brand new")
+	if !waitFor(t, func() bool { return strings.Contains(out.String(), "brand new") }) {
+		t.Fatalf("Follow did not stream the new line, got %q", out.String())
+	}
+	if n := strings.Count(out.String(), "old two"); n != 1 {
+		t.Fatalf("the printed tail appeared %d times, want exactly 1:\n%s", n, out.String())
 	}
 }
