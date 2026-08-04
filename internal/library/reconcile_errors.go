@@ -212,13 +212,13 @@ func isConfiguredRoot(clean string, roots []string) bool {
 //     resolve (removeOne treats a missing path as an idempotent success).
 func confinedForRemoval(clean string, roots []string) bool {
 	if !isWithinScanPaths(clean, roots) {
-		log.Printf("reconcile: refusing to remove %s — outside configured roots", clean)
+		log.Printf("reconcile: refusing to remove %s - outside configured roots", clean)
 		return false
 	}
 	// Never delete a configured dir itself: removing an empty Movies/ or TV Shows/
 	// on a fresh or momentarily-empty library would break the next organize.
 	if isConfiguredRoot(clean, roots) {
-		log.Printf("reconcile: refusing to remove %s — it is a configured library dir", clean)
+		log.Printf("reconcile: refusing to remove %s - it is a configured library dir", clean)
 		return false
 	}
 	// Resolve symlinks and re-validate confinement against the RESOLVED roots. A
@@ -231,7 +231,7 @@ func confinedForRemoval(clean string, roots []string) bool {
 		return true // gone or unresolvable — removeOne handles a missing path idempotently
 	}
 	if !isWithinScanPaths(real, resolvedRoots(roots)) {
-		log.Printf("reconcile: refusing to remove %s — resolves to %s outside configured roots", clean, real)
+		log.Printf("reconcile: refusing to remove %s - resolves to %s outside configured roots", clean, real)
 		return false
 	}
 	return true

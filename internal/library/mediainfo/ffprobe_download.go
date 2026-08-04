@@ -94,7 +94,7 @@ func DownloadFFprobe() (string, error) {
 		return "", err
 	}
 
-	fmt.Fprintf(os.Stderr, "ffprobe not found — downloading for %s...\n", platform)
+	fmt.Fprintf(os.Stderr, "ffprobe not found - downloading for %s...\n", platform)
 
 	resp, err := ffprobeDLClient.Get(url)
 	if err != nil {

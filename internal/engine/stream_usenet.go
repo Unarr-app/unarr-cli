@@ -138,7 +138,7 @@ func (ss *StreamServer) usenetHandler(w http.ResponseWriter, r *http.Request) {
 	// wrong token is a 401 — /usenet is a local ffmpeg endpoint, so a clear
 	// Unauthorized beats the no-oracle 404 /stream needs for its public reach.
 	if !ss.checkStreamToken(streamScopeUsenet(id), r.URL.Query().Get("t")) {
-		log.Printf("[usenet-stream] rejected %s for id %q — bad/absent token", clientIP, id)
+		log.Printf("[usenet-stream] rejected %s for id %q - bad/absent token", clientIP, id)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

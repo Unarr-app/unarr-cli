@@ -232,7 +232,7 @@ func probeTail(parent context.Context, ffprobePath, filePath string, startSec fl
 		case ctx.Err() != nil:
 			// Our own deadline: the storage was too slow under load. Worth retrying
 			// serially — measured 107s→0.8s for the same file on NFS.
-			log.Printf("[integrity] tail probe timed out for %s after %s — file left UNCHECKED, queued for a serial retry",
+			log.Printf("[integrity] tail probe timed out for %s after %s - file left UNCHECKED, queued for a serial retry",
 				filePath, truncProbeTimeout)
 			return 0, 0, true, false
 		default:

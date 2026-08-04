@@ -195,7 +195,7 @@ func retryPendingTails(ctx context.Context, ffprobePath, ffmpegPath string, item
 	if pending == 0 {
 		return
 	}
-	log.Printf("[scan] %d file(s) had their integrity check time out — retrying serially", pending)
+	log.Printf("[scan] %d file(s) had their integrity check time out - retrying serially", pending)
 
 	recovered, unverified := 0, 0
 	for i := range items {

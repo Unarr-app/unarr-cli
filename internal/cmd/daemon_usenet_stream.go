@@ -274,7 +274,7 @@ func (d usenetStreamDeps) fallbackUsenetToDownload(sess agent.StreamSession, rea
 	// Nothing to resolve a download from → report only (the message already told
 	// the user). Avoids submitting a task the downloader can't act on.
 	if sess.NzbID == "" && sess.InfoHash == "" {
-		log.Printf("[usenet-stream %s] no nzbId/infoHash to download — reported only", sid)
+		log.Printf("[usenet-stream %s] no nzbId/infoHash to download - reported only", sid)
 		return
 	}
 
@@ -406,7 +406,7 @@ func handleUsenetStreamTask(streamCtx, daemonCtx context.Context, at agent.Task,
 				PreferredMethod: "usenet",
 				Mode:            "download",
 			})
-			log.Printf("[%s] usenet stream not streamable (%s) — reported stream error, queued batch download", agent.ShortID(at.ID), reason)
+			log.Printf("[%s] usenet stream not streamable (%s) - reported stream error, queued batch download", agent.ShortID(at.ID), reason)
 		},
 	}
 

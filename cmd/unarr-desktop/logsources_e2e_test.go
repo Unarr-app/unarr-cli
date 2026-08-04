@@ -23,10 +23,11 @@ func TestReportLogsAgainstTheRealCLI(t *testing.T) {
 	}
 	isolatePaths(t)
 
-	// Build BEFORE HOME is redirected: the toolchain resolves GOPATH and the
-	// module cache from it, and a fake home would make `go build` re-download
-	// every dependency into a temp dir it then cannot fully remove.
-	bin := buildUnarrCLI(t)
+	// Resolve BEFORE HOME is redirected: when this has to build, the toolchain
+	// resolves GOPATH and the module cache from it, and a fake home would make
+	// `go build` re-download every dependency into a temp dir it then cannot
+	// fully remove.
+	bin := resolveUnarrForE2E(t)
 
 	// A fake HOME for the CLI run itself, because `unarr logs` reads the systemd
 	// journal instead of a file when it finds a unit at
@@ -73,8 +74,17 @@ func TestReportLogsAgainstTheRealCLI(t *testing.T) {
 	}
 }
 
-// buildUnarrCLI compiles the daemon binary this tray shells out to.
-func buildUnarrCLI(t *testing.T) string {
+// resolveUnarrForE2E finds the daemon binary this tray shells out to: built
+// from THIS tree when a toolchain is around, and only otherwise a deployed one.
+//
+// The order matters in both directions. Building first means the test measures
+// the branch under test rather than whatever `unarr` the developer happens to
+// have installed — an older one on $PATH would answer "unknown flag: --boot"
+// and turn a real failure into a skip. Falling back to a deployed binary is
+// what lets this run on the real-Windows harness, the platform the bug lives
+// on: `go test -c` ships a test binary to a guest with no Go toolchain, and a
+// build-only helper could never do more than skip exactly where it matters.
+func resolveUnarrForE2E(t *testing.T) string {
 	t.Helper()
 	name := "unarr"
 	if runtime.GOOS == "windows" {
@@ -82,10 +92,26 @@ func buildUnarrCLI(t *testing.T) string {
 	}
 	out := filepath.Join(t.TempDir(), name)
 	cmd := exec.Command("go", "build", "-o", out, "github.com/Unarr-app/unarr-cli/cmd/unarr")
-	if combined, err := cmd.CombinedOutput(); err != nil {
-		t.Skipf("cannot build the CLI here (%v): %s", err, combined)
+	if combined, err := cmd.CombinedOutput(); err == nil {
+		return out
+	} else {
+		t.Logf("no toolchain here (%v: %s) — looking for a deployed CLI", err, firstLine(string(combined)))
 	}
-	return out
+	// Sibling of the test binary: how the Windows harness deploys unarr.exe and
+	// desktop_test.exe into the same share.
+	if self, err := os.Executable(); err == nil {
+		cand := filepath.Join(filepath.Dir(self), name)
+		if _, statErr := os.Stat(cand); statErr == nil {
+			t.Logf("using the CLI next to this test binary: %s", cand)
+			return cand
+		}
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		t.Logf("using the CLI on PATH: %s", p)
+		return p
+	}
+	t.Skip("no CLI to test against: cannot build one and none is deployed")
+	return ""
 }
 
 // unarrDataDir mirrors config.DataDir() for the sandbox isolatePaths set up.

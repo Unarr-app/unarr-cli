@@ -274,7 +274,7 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 		// Name a few: "which articles died" is the first thing needed to tell a
 		// provider-retention problem from a bad post, and it never reaches the
 		// server (only the count does).
-		log.Printf("[%s] %d/%d segments unavailable on the server — relying on par2 recovery (first: %s)",
+		log.Printf("[%s] %d/%d segments unavailable on the server - relying on par2 recovery (first: %s)",
 			shortID, len(missingSegs), totalSegs, describeMissing(missingSegs, 3))
 	}
 
@@ -668,10 +668,10 @@ func invalidateDamaged(tracker *download.ProgressTracker, nzbFile *nzb.NZB, dama
 		log.Printf("[%s] par2 reported %d damaged file(s); invalidated %d for re-download: %s",
 			shortID, len(damaged), hit, strings.Join(damaged, ", "))
 	case len(damaged) == 0:
-		log.Printf("[%s] par2 named no damaged file — invalidating all content files for a clean retry", shortID)
+		log.Printf("[%s] par2 named no damaged file - invalidating all content files for a clean retry", shortID)
 		resetAllContent(tracker, nzbFile)
 	default:
-		log.Printf("[%s] par2 named %d damaged file(s) that match no NZB entry (obfuscated post?) — invalidating all content files: %s",
+		log.Printf("[%s] par2 named %d damaged file(s) that match no NZB entry (obfuscated post?) - invalidating all content files: %s",
 			shortID, len(damaged), strings.Join(damaged, ", "))
 		resetAllContent(tracker, nzbFile)
 	}
@@ -679,7 +679,7 @@ func invalidateDamaged(tracker *download.ProgressTracker, nzbFile *nzb.NZB, dama
 	// The invalidation is only real once it reaches disk: if this write is lost,
 	// the retry reloads the old all-done bitset and is a no-op again.
 	if err := tracker.Flush(); err != nil {
-		log.Printf("[%s] WARNING: could not persist the par2 invalidation — the retry may resume as if intact: %v", shortID, err)
+		log.Printf("[%s] WARNING: could not persist the par2 invalidation - the retry may resume as if intact: %v", shortID, err)
 	}
 }
 
@@ -694,7 +694,7 @@ func downloadPar2Index(ctx context.Context, segDl *download.Downloader, nzbFile 
 	}
 	par2Files, err := segDl.DownloadPar2Files(ctx, []nzb.File{*idx}, taskDir, nil)
 	if err != nil {
-		log.Printf("[usenet] WARNING: par2 index download failed — delivery will be UNVERIFIED: %v", err)
+		log.Printf("[usenet] WARNING: par2 index download failed - delivery will be UNVERIFIED: %v", err)
 		return
 	}
 	for name, path := range par2Files {

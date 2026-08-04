@@ -254,7 +254,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	if err != nil {
 		if errors.Is(err, engine.ErrVPNRequired) {
 			task.ErrorMessage = "VPN required: tunnel down — P2P streaming disabled (debrid still works)"
-			log.Printf("[%s] stream refused: VPN required but tunnel down — not joining the swarm in the clear", at.ID[:8])
+			log.Printf("[%s] stream refused: VPN required but tunnel down - not joining the swarm in the clear", at.ID[:8])
 		} else {
 			task.ErrorMessage = "create stream engine: " + err.Error()
 		}
@@ -323,7 +323,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 			if !completed && !eng.VPNStillHealthy() {
 				task.ErrorMessage = "VPN tunnel down — P2P streaming stopped (no clear-net leak)"
 				task.Transition(engine.StatusFailed)
-				log.Printf("[%s] VPN tunnel went down mid-stream — stopping P2P (partial kept, P2P disabled)", at.ID[:8])
+				log.Printf("[%s] VPN tunnel went down mid-stream - stopping P2P (partial kept, P2P disabled)", at.ID[:8])
 				return
 			}
 
@@ -344,7 +344,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 
 			// Terminal progress
 			if !completed && p.TotalBytes > 0 {
-				fmt.Fprintf(os.Stderr, "\r[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
+				fmt.Fprintf(os.Stderr, "\r[%s] %d%% - %s/%s @ %s/s  peers:%d seeds:%d",
 					at.ID[:8], pct,
 					ui.FormatBytes(p.DownloadedBytes), ui.FormatBytes(p.TotalBytes), ui.FormatBytes(p.SpeedBps),
 					p.Peers, p.Seeds)
@@ -375,11 +375,11 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 						reason = "stream replaced by a newer title"
 					}
 					eng.PauseDownload()
-					log.Printf("[%s] %s — pausing background download at %d%% (partial kept, resumes on replay)",
+					log.Printf("[%s] %s - pausing background download at %d%% (partial kept, resumes on replay)",
 						at.ID[:8], reason, pct)
 				case !idle && eng.IsDownloadPaused():
 					eng.ResumeDownload()
-					log.Printf("[%s] viewer active — resuming background download", at.ID[:8])
+					log.Printf("[%s] viewer active - resuming background download", at.ID[:8])
 				}
 			}
 

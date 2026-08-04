@@ -67,25 +67,25 @@ func BenchmarkMaxTranscodeHeight(ctx context.Context, ffmpegPath string, hw HWAc
 		if !ok {
 			// Probe couldn't run (timeout / exec error) — try a lighter rung
 			// rather than treat the failure as a measured "fast enough".
-			log.Printf("[transcode] encode benchmark: %dp probe failed — trying lower", rung.height)
+			log.Printf("[transcode] encode benchmark: %dp probe failed - trying lower", rung.height)
 			continue
 		}
 		measuredAny = true
 		if factor >= realtimeMarginSoftware {
-			log.Printf("[transcode] encode benchmark: software ceiling %dp (%.1f× realtime)", rung.height, factor)
+			log.Printf("[transcode] encode benchmark: software ceiling %dp (%.1fx realtime)", rung.height, factor)
 			return rung.height
 		}
-		log.Printf("[transcode] encode benchmark: %dp only %.1f× realtime (<%.1f×) — trying lower", rung.height, factor, realtimeMarginSoftware)
+		log.Printf("[transcode] encode benchmark: %dp only %.1fx realtime (<%.1fx) - trying lower", rung.height, factor, realtimeMarginSoftware)
 	}
 	if !measuredAny {
 		// No rung produced a measurement at all — the benchmark infrastructure
 		// failed (missing lavfi/testsrc2, ffmpeg wedged), NOT a slow host. Don't
 		// punish a possibly-capable box by flooring at 480; keep the historical
 		// default so behaviour is no worse than before the benchmark existed.
-		log.Printf("[transcode] encode benchmark: no rung could be measured (lavfi/ffmpeg issue) — keeping default 1080 ceiling")
+		log.Printf("[transcode] encode benchmark: no rung could be measured (lavfi/ffmpeg issue) - keeping default 1080 ceiling")
 		return 1080
 	}
-	log.Printf("[transcode] encode benchmark: host can't sustain 480p software encode — flooring ceiling at 480 (oversized sources route to external)")
+	log.Printf("[transcode] encode benchmark: host can't sustain 480p software encode - flooring ceiling at 480 (oversized sources route to external)")
 	return 480
 }
 

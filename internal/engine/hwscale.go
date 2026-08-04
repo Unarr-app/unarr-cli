@@ -67,13 +67,13 @@ func FFmpegSupportsScaleCuda(ffmpegPath string) bool {
 		scaleCudaCacheMu.Unlock()
 	}
 	if supported {
-		log.Printf("[hwscale] ffmpeg scale_cuda works — NVENC SDR downscales stay on the GPU (no CPU round-trip)")
+		log.Printf("[hwscale] ffmpeg scale_cuda works - NVENC SDR downscales stay on the GPU (no CPU round-trip)")
 	} else {
 		detail := strings.TrimSpace(lastLine(out))
 		if detail == "" {
 			detail = err.Error()
 		}
-		log.Printf("[hwscale] ffmpeg scale_cuda unavailable — NVENC keeps the CPU scale path: %v", detail)
+		log.Printf("[hwscale] ffmpeg scale_cuda unavailable - NVENC keeps the CPU scale path: %v", detail)
 	}
 	return supported
 }

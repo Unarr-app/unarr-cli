@@ -144,14 +144,14 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	// fMP4 HLS, not mpegts). Skip the MPEG-TS copy-vod path → fall back to the
 	// fMP4 EVENT-copy (buildHLSCopyArgs).
 	if s.cfg.Fmp4Only {
-		log.Printf("[hls %s] copy-vod skipped: Fmp4Only (cast) — using fMP4 EVENT copy",
+		log.Printf("[hls %s] copy-vod skipped: Fmp4Only (cast) - using fMP4 EVENT copy",
 			shortHLSID(s.cfg.SessionID))
 		return false
 	}
 	// MPEG-TS transport carries H.264 universally but not HEVC/AV1 (see package
 	// comment). Non-H.264 copy → legacy EVENT path (no regression).
 	if !mediainfo.CopyVODEligibleCodec(s.probe.VideoCodec) {
-		log.Printf("[hls %s] copy-vod skipped: codec %q not TS-eligible — using EVENT copy",
+		log.Printf("[hls %s] copy-vod skipped: codec %q not TS-eligible - using EVENT copy",
 			shortHLSID(s.cfg.SessionID), s.probe.VideoCodec)
 		return false
 	}
@@ -166,12 +166,12 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 		// upfront. Needs a known duration + HTTP range support (else every
 		// segment's -ss would re-read from byte 0); without either, EVENT copy.
 		if s.durationSec <= 0 {
-			log.Printf("[hls %s] copy-vod skipped: remote source has no known duration — using EVENT copy",
+			log.Printf("[hls %s] copy-vod skipped: remote source has no known duration - using EVENT copy",
 				shortHLSID(s.cfg.SessionID))
 			return false
 		}
 		if !sourceSupportsRange(ctx, s.cfg.sourceRef()) {
-			log.Printf("[hls %s] copy-vod skipped: remote source lacks HTTP range support — using EVENT copy",
+			log.Printf("[hls %s] copy-vod skipped: remote source lacks HTTP range support - using EVENT copy",
 				shortHLSID(s.cfg.SessionID))
 			return false
 		}
@@ -193,7 +193,7 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 			var err error
 			kfs, err = mediainfo.IndexKeyframes(ctx, s.cfg.Transcode.FFprobePath, src)
 			if err != nil {
-				log.Printf("[hls %s] copy-vod keyframe index failed (%v) — using EVENT copy",
+				log.Printf("[hls %s] copy-vod keyframe index failed (%v) - using EVENT copy",
 					shortHLSID(s.cfg.SessionID), err)
 				return false
 			}
@@ -208,7 +208,7 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	}
 
 	if len(starts) < 2 {
-		log.Printf("[hls %s] copy-vod planning yielded no segments — using EVENT copy",
+		log.Printf("[hls %s] copy-vod planning yielded no segments - using EVENT copy",
 			shortHLSID(s.cfg.SessionID))
 		return false
 	}
@@ -371,13 +371,13 @@ func launchCopyVODPass(s *HLSSession) bool {
 		// needBytes<=0 no-ops, defeating it) and segmentWaitTimeout would fall to
 		// the 60s encode default instead of the size-derived ceiling. Fall back to
 		// lazy per-segment generation, which stat-verifies each segment itself.
-		log.Printf("[hls %s] copy-vod pass skipped (stat source: %v) — lazy per-segment",
+		log.Printf("[hls %s] copy-vod pass skipped (stat source: %v) - lazy per-segment",
 			shortHLSID(s.cfg.SessionID), err)
 		return false
 	}
 	srcSize := fi.Size()
 	if err := CheckDiskSpace(s.tmpDir, srcSize, copyVODPassDiskReserve); err != nil {
-		log.Printf("[hls %s] copy-vod pass skipped (%v) — lazy per-segment",
+		log.Printf("[hls %s] copy-vod pass skipped (%v) - lazy per-segment",
 			shortHLSID(s.cfg.SessionID), err)
 		return false
 	}
@@ -390,7 +390,7 @@ func launchCopyVODPass(s *HLSSession) bool {
 	cmd.Stderr = errBuf
 	if err := cmd.Start(); err != nil {
 		cancel()
-		log.Printf("[hls %s] copy-vod pass start failed (%v) — lazy per-segment",
+		log.Printf("[hls %s] copy-vod pass start failed (%v) - lazy per-segment",
 			shortHLSID(s.cfg.SessionID), err)
 		return false
 	}
@@ -416,7 +416,7 @@ func launchCopyVODPass(s *HLSSession) bool {
 func (s *HLSSession) waitCopyPass(cmd *exec.Cmd, ffCtx context.Context, errBuf *bytes.Buffer) {
 	err := cmd.Wait()
 	for attempt := 1; err != nil && ffCtx.Err() == nil && attempt <= copyVODPassMaxRestarts; attempt++ {
-		log.Printf("[hls %s] copy-vod pass failed (%v: %s) — restart %d/%d from 0",
+		log.Printf("[hls %s] copy-vod pass failed (%v: %s) - restart %d/%d from 0",
 			shortHLSID(s.cfg.SessionID), err, strings.TrimSpace(errBuf.String()), attempt, copyVODPassMaxRestarts)
 		// Restart-from-0 truncates+rewrites every seg-N.ts IN PLACE (segment
 		// muxer, no .tmp+rename). Roll the watermark back to 0 so no handler

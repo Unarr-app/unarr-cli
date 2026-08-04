@@ -143,7 +143,7 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, fileIndex 
 		// makes every segment "already done" below, so the run creates an empty
 		// pre-allocated file, downloads nothing, and returns a file of pure
 		// zeros as a successful download.
-		log.Printf("[usenet] %s was marked complete but is missing from disk — re-downloading", fileName)
+		log.Printf("[usenet] %s was marked complete but is missing from disk - re-downloading", fileName)
 		tracker.ResetFile(fileIndex)
 	}
 
@@ -455,7 +455,7 @@ func (d *Downloader) DownloadFile(ctx context.Context, file nzb.File, fileIndex 
 	}
 
 	if len(missing) > 0 {
-		log.Printf("[usenet] downloaded %s (%d/%d segments, %s) — %d segments unavailable, leaving holes for par2",
+		log.Printf("[usenet] downloaded %s (%d/%d segments, %s) - %d segments unavailable, leaving holes for par2",
 			fileName, totalSegs-len(missing), totalSegs, formatBytes(actualSize), len(missing))
 	} else {
 		log.Printf("[usenet] downloaded %s (%d segments, %s)", fileName, totalSegs, formatBytes(actualSize))

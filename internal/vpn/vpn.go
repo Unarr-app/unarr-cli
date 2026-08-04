@@ -258,7 +258,7 @@ func (t *Tunnel) Healthy() bool {
 	if err != nil {
 		// A live device that cannot report its own state is treated as down so
 		// the gate fails closed; log it rather than swallowing the error.
-		log.Printf("[vpn] health check: IpcGet failed (%v) — treating tunnel as down", err)
+		log.Printf("[vpn] health check: IpcGet failed (%v) - treating tunnel as down", err)
 		return false
 	}
 	return handshakeFresh(ipc, time.Now(), in.startedAt)

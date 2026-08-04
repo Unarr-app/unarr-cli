@@ -565,7 +565,7 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 				if isTTY {
 					fmt.Fprintln(os.Stderr)
 				}
-				log.Printf("[%s] VPN tunnel went down — pausing torrent (files kept, P2P disabled)", task.ID[:8])
+				log.Printf("[%s] VPN tunnel went down - pausing torrent (files kept, P2P disabled)", task.ID[:8])
 				return nil, ErrVPNTunnelDown
 			}
 
@@ -694,7 +694,7 @@ func (d *TorrentDownloader) seedAndDrop(taskID string, t *torrent.Torrent, total
 	ratioTarget := d.cfg.SeedRatio
 	timeTarget := d.cfg.SeedTime
 	if ratioTarget <= 0 && timeTarget <= 0 && !d.cfg.VPNRequired {
-		log.Printf("[%s] seeding indefinitely (no ratio/time target) — drops at shutdown", sid)
+		log.Printf("[%s] seeding indefinitely (no ratio/time target) - drops at shutdown", sid)
 		return
 	}
 	// With the kill-switch on we always run the loop, even with no ratio/time
@@ -726,7 +726,7 @@ func (d *TorrentDownloader) seedAndDrop(taskID string, t *torrent.Torrent, total
 			// Kill-switch: stop uploading the instant the tunnel goes down — a
 			// completed torrent must not keep seeding in the clear after the VPN dies.
 			if d.cfg.VPNRequired && !d.tunnelHealthy() {
-				log.Printf("[%s] VPN tunnel down — stopping seeding (P2P disabled)", sid)
+				log.Printf("[%s] VPN tunnel down - stopping seeding (P2P disabled)", sid)
 				d.dropTracked(taskID, t)
 				return
 			}
@@ -738,7 +738,7 @@ func (d *TorrentDownloader) seedAndDrop(taskID string, t *torrent.Torrent, total
 				continue
 			}
 
-			log.Printf("[%s] seeding complete: %s, uploaded %s — dropping", sid, reason, formatBytes(uploaded))
+			log.Printf("[%s] seeding complete: %s, uploaded %s - dropping", sid, reason, formatBytes(uploaded))
 			d.dropTracked(taskID, t)
 			return
 		}
@@ -790,7 +790,7 @@ func makeReadable(path string) {
 		log.Printf("[organize] makeReadable walk %q: %v", path, err)
 	}
 	if chmodFails > 0 {
-		log.Printf("[organize] WARNING: %d file(s) under %q could not be made readable (chmod failed) — likely NFS root_squash or an SMB uid mapping. Streaming, ffprobe and organize will fail to open them. Run the agent as the user that owns the share, or mount it so that user can chmod.", chmodFails, path)
+		log.Printf("[organize] WARNING: %d file(s) under %q could not be made readable (chmod failed) - likely NFS root_squash or an SMB uid mapping. Streaming, ffprobe and organize will fail to open them. Run the agent as the user that owns the share, or mount it so that user can chmod.", chmodFails, path)
 	}
 	// Same silent-unreadable check the single-file path does: on NFS/SMB a chmod
 	// can "succeed" yet leave the file unopenable. Probe one representative file
@@ -806,7 +806,7 @@ func makeReadable(path string) {
 func warnIfUnreadable(path string) {
 	f, err := os.Open(path)
 	if err != nil {
-		log.Printf("[organize] WARNING: %q is not readable after chmod (%v) — likely NFS root_squash or an SMB uid mapping (anacrolix mmap creates files mode 0000). Streaming/ffprobe/organize will fail. Run the agent as the user that owns the share, or mount it so that user can chmod.", path, err)
+		log.Printf("[organize] WARNING: %q is not readable after chmod (%v) - likely NFS root_squash or an SMB uid mapping (anacrolix mmap creates files mode 0000). Streaming/ffprobe/organize will fail. Run the agent as the user that owns the share, or mount it so that user can chmod.", path, err)
 		return
 	}
 	_ = f.Close()

@@ -104,7 +104,7 @@ func FFmpegSupportsLibplacebo(ffmpegPath string) bool {
 		libplaceboCacheMu.Unlock()
 	}
 	if supported {
-		log.Printf("[tonemap] ffmpeg libplacebo works (Vulkan OK) — HDR sources tonemapped on the GPU (preferred)")
+		log.Printf("[tonemap] ffmpeg libplacebo works (Vulkan OK) - HDR sources tonemapped on the GPU (preferred)")
 	} else {
 		// On an exec/timeout failure the stderr tail is empty — surface err
 		// itself so the log distinguishes "no Vulkan" from "ffmpeg never ran".
@@ -112,7 +112,7 @@ func FFmpegSupportsLibplacebo(ffmpegPath string) bool {
 		if detail == "" {
 			detail = err.Error()
 		}
-		log.Printf("[tonemap] ffmpeg libplacebo unavailable (no Vulkan runtime or filter absent) — HDR falls back to zscale/none: %v", detail)
+		log.Printf("[tonemap] ffmpeg libplacebo unavailable (no Vulkan runtime or filter absent) - HDR falls back to zscale/none: %v", detail)
 	}
 	return supported
 }
@@ -158,9 +158,9 @@ func FFmpegSupportsZscale(ffmpegPath string) bool {
 	zscaleCache[ffmpegPath] = supported
 	zscaleCacheMu.Unlock()
 	if supported {
-		log.Printf("[tonemap] ffmpeg has zscale — HDR sources will be tonemapped to SDR")
+		log.Printf("[tonemap] ffmpeg has zscale - HDR sources will be tonemapped to SDR")
 	} else {
-		log.Printf("[tonemap] ffmpeg %q lacks zscale — HDR sources play without tonemapping (desaturated)", ffmpegPath)
+		log.Printf("[tonemap] ffmpeg %q lacks zscale - HDR sources play without tonemapping (desaturated)", ffmpegPath)
 	}
 	return supported
 }

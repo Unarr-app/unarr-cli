@@ -64,7 +64,7 @@ to see available quality upgrades.`,
 						return err
 					}
 					if n := library.CountAborted(cache); n > 0 {
-						fmt.Fprintf(os.Stderr, "warning: %d file(s) under %s could not be probed — skipping full-cycle cleanup\n", n, p)
+						fmt.Fprintf(os.Stderr, "warning: %d file(s) under %s could not be probed - skipping full-cycle cleanup\n", n, p)
 						fullCycle = false
 					}
 					caches = append(caches, cache)
@@ -152,7 +152,7 @@ func runScan(ctx context.Context, cfg config.Config, dirPath string, workers int
 			if len(current) > 50 {
 				current = "..." + current[len(current)-47:]
 			}
-			fmt.Fprintf(os.Stderr, "\r  Scanning %d/%d — %s\033[K", scanned, total, current)
+			fmt.Fprintf(os.Stderr, "\r  Scanning %d/%d - %s\033[K", scanned, total, current)
 		},
 	})
 	if err != nil {
@@ -196,7 +196,7 @@ func runScan(ctx context.Context, cfg config.Config, dirPath string, workers int
 	// itself is already saved).
 	if cfg.Library.CacheSubtitles || cfg.Library.CacheThumbnails || cfg.Library.Trickplay.Enabled {
 		if ff, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err == nil {
-			fmt.Fprintf(os.Stderr, "  Pre-extracting subtitles + thumbnails to cache… (Ctrl-C to skip)\n")
+			fmt.Fprintf(os.Stderr, "  Pre-extracting subtitles + thumbnails to cache... (Ctrl-C to skip)\n")
 			// ffprobe powers the COPY-VOD keyframe-index sidecar; if it can't be
 			// resolved, keyframe prewarm is skipped (playback self-warms it).
 			ffprobe, _ := mediainfo.ResolveFFprobe(ffprobePath)

@@ -116,7 +116,7 @@ func confirmAndFlagDuplicates(paths []string, flagged map[string]bool) []Finding
 		if !same {
 			// Fingerprints matched but the bytes differ (collision on the extremes).
 			// Do NOT delete — this is a genuinely different file.
-			log.Printf("reconcile: %s shares a fingerprint with %s but differs on full compare — keeping both", p, keep)
+			log.Printf("reconcile: %s shares a fingerprint with %s but differs on full compare - keeping both", p, keep)
 			continue
 		}
 		flagged[p] = true

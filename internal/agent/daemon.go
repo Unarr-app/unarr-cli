@@ -246,7 +246,7 @@ func (d *Daemon) ApplyReloadedConfig(allowDelete bool, methodOrder []string) {
 		prev = []string{}
 	}
 	if !slices.Equal(prev, methodOrder) {
-		log.Printf("[reload] preferred method order changed (%v → %v) — RESTART REQUIRED: run 'unarr daemon restart' to apply it", prev, methodOrder)
+		log.Printf("[reload] preferred method order changed (%v -> %v) - RESTART REQUIRED: run 'unarr daemon restart' to apply it", prev, methodOrder)
 	}
 }
 
@@ -419,12 +419,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// startup so the operator installs them before the first download fails.
 	if d.Features.Usenet {
 		if _, err := exec.LookPath("par2"); err != nil {
-			log.Printf("[usenet] WARNING: par2 not found in PATH — corrupted segments cannot be repaired and extraction may fail. Install par2 (apt install par2 / brew install par2).")
+			log.Printf("[usenet] WARNING: par2 not found in PATH - corrupted segments cannot be repaired and extraction may fail. Install par2 (apt install par2 / brew install par2).")
 		}
 		_, unrarErr := exec.LookPath("unrar")
 		_, sevenZErr := exec.LookPath("7z")
 		if unrarErr != nil && sevenZErr != nil {
-			log.Printf("[usenet] WARNING: no archive extractor (unrar or 7z) found — RAR-packed downloads cannot be unpacked. Install unrar or 7z.")
+			log.Printf("[usenet] WARNING: no archive extractor (unrar or 7z) found - RAR-packed downloads cannot be unpacked. Install unrar or 7z.")
 		}
 	}
 
@@ -459,10 +459,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		d.lastNotifiedVersion = version
 		if !d.cfg.AutoUpgrade {
-			log.Printf("[upgrade] new version available: %s — auto_upgrade=false, run `unarr update` to apply", version)
+			log.Printf("[upgrade] new version available: %s - auto_upgrade=false, run `unarr update` to apply", version)
 			return
 		}
-		log.Printf("[upgrade] new version available: %s — applying auto-upgrade", version)
+		log.Printf("[upgrade] new version available: %s - applying auto-upgrade", version)
 		go d.deferAutoUpgradeUntilIdle(version)
 	}
 	d.sync.OnScan = func() {
@@ -551,7 +551,7 @@ func (d *Daemon) deferAutoUpgradeUntilIdle(version string) {
 	}
 
 	if n := activeStreams(); n > 0 {
-		log.Printf("[upgrade] v%s deferred — %d active stream(s); will apply when idle", version, n)
+		log.Printf("[upgrade] v%s deferred - %d active stream(s); will apply when idle", version, n)
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
@@ -559,7 +559,7 @@ func (d *Daemon) deferAutoUpgradeUntilIdle(version string) {
 				break
 			}
 		}
-		log.Printf("[upgrade] no active streams — applying deferred upgrade to v%s", version)
+		log.Printf("[upgrade] no active streams - applying deferred upgrade to v%s", version)
 	}
 	d.applyAutoUpgrade(version) // exits the process on success
 }
@@ -583,7 +583,7 @@ func (d *Daemon) applyAutoUpgrade(targetVersion string) {
 	// installed the same version off-band. Skip Execute (which would also
 	// no-op) AND skip os.Exit, but DO clear the flag — otherwise we loop.
 	if currentClean == targetClean {
-		log.Printf("[upgrade] already on v%s — clearing server flag", currentClean)
+		log.Printf("[upgrade] already on v%s - clearing server flag", currentClean)
 		ctxR, cancelR := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelR()
 		if err := d.client.ReportUpgradeResult(ctxR, d.cfg.AgentID, true, currentClean, ""); err != nil {
@@ -621,7 +621,7 @@ func (d *Daemon) applyAutoUpgrade(targetVersion string) {
 		}
 		return
 	}
-	log.Printf("[upgrade] upgraded v%s → v%s; reporting result + exiting so service supervisor restarts on new binary",
+	log.Printf("[upgrade] upgraded v%s -> v%s; reporting result + exiting so service supervisor restarts on new binary",
 		result.OldVersion, result.NewVersion)
 	// Fleet desktops ride the SAME web-triggered signal: `unarr update` in a
 	// terminal refreshes the tray companion next to the CLI, so the daemon's
@@ -636,7 +636,7 @@ func (d *Daemon) applyAutoUpgrade(targetVersion string) {
 		log.Printf("[upgrade] desktop: %s", msg)
 	}); derr != nil {
 		if errors.Is(derr, upgrade.ErrNoDesktopAssets) {
-			log.Printf("[upgrade] desktop sibling skipped: release v%s ships no signed desktop assets (yet) — it will refresh on a later update", result.NewVersion)
+			log.Printf("[upgrade] desktop sibling skipped: release v%s ships no signed desktop assets (yet) - it will refresh on a later update", result.NewVersion)
 		} else {
 			log.Printf("[upgrade] desktop sibling update failed (CLI upgrade unaffected): %v", derr)
 		}
