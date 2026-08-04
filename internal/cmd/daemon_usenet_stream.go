@@ -12,15 +12,25 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/Unarr-app/unarr-cli/internal/engine"
 	"github.com/Unarr-app/unarr-cli/internal/ui"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/stream"
 )
 
 // Usenet direct-play cold-buffer warm-up budget. Head covers the MKV/MP4 header
 // (EBML head, Tracks, first frames); tail covers the index that sits at the end of
 // a non-faststart container (mkv Cues/SeekHead, last ~128 KB) that VLC reads before
 // it paints. Warming both into the upstream server cache makes the FIRST open play.
+//
+// EVERY byte here is billed by volume and is fetched with NO player attached — the
+// warm-up runs before the /stream URL is even reported ready. So it is bounded by
+// BOTH a wall clock AND a hard byte budget: a time-only bound is not a bound at all
+// when the upstream sustains ~55 MB/s (8 s ≈ 440 MB). usenetPrewarmMaxBytes is the
+// ceiling on total warm-up traffic; head+tail are sized well inside it, and the cap
+// is what actually holds if a pathological posting makes the reader work harder
+// than expected.
 const (
-	usenetPrewarmHeadBytes = 4 << 20 // 4 MiB
-	usenetPrewarmTailBytes = 2 << 20 // 2 MiB
+	usenetPrewarmHeadBytes = 4 << 20  // 4 MiB
+	usenetPrewarmTailBytes = 2 << 20  // 2 MiB
+	usenetPrewarmMaxBytes  = 24 << 20 // 24 MiB hard ceiling for the whole warm-up
 	usenetPrewarmTimeout   = 8 * time.Second
 )
 
@@ -42,30 +52,52 @@ func prewarmUsenetHeadTail(ctx context.Context, provider engine.FileProvider, he
 	defer cancel()
 
 	size := provider.FileSize()
+	// ONE pot shared by both warm-up goroutines: the ceiling is on total warm-up
+	// traffic, not per-range, so a costly tail cannot be paid for twice over. The
+	// timeout above bounds LATENCY; this bounds MONEY.
+	budget := stream.NewFetchBudget(usenetPrewarmMaxBytes)
 	var wg sync.WaitGroup
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		headRead = warmRange(wctx, provider, 0, headBytes, size)
+		headRead = warmRange(wctx, provider, warmSpec{offset: 0, n: headBytes, size: size, budget: budget})
 	}()
 
 	if tailBytes > 0 && size > tailBytes {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			tailRead = warmRange(wctx, provider, size-tailBytes, tailBytes, size)
+			tailRead = warmRange(wctx, provider, warmSpec{offset: size - tailBytes, n: tailBytes, size: size, budget: budget})
 		}()
 	}
 
 	wg.Wait()
+	if spent := budget.Spent(); spent > 0 {
+		log.Printf("[usenet-stream] warm-up pulled %s from NNTP (cap %s)",
+			ui.FormatBytes(spent), ui.FormatBytes(usenetPrewarmMaxBytes))
+	}
 	return headRead, tailRead, time.Since(start)
+}
+
+// warmSpec is one range to warm: where to start (offset), how much to drain (n),
+// the file's total size (size, to clamp the range) and the SHARED byte budget the
+// drain is charged against.
+type warmSpec struct {
+	offset, n, size int64
+	budget          *stream.FetchBudget
 }
 
 // warmRange opens a fresh provider reader, seeks to offset, and drains up to n
 // bytes into io.Discard so those articles are fetched + cached upstream. Bounded by
-// ctx; a deadline/cancel just ends the drain early (best-effort). Returns bytes read.
-func warmRange(ctx context.Context, provider engine.FileProvider, offset, n, size int64) int64 {
+// ctx AND by the shared byte budget; a deadline/cancel/exhausted budget just ends
+// the drain early (best-effort). Returns bytes read.
+//
+// The budget is REQUIRED, not advisory: if the reader cannot be capped we do not
+// warm at all. This range is read with no player attached, so an uncappable
+// speculative drain is exactly the thing that made a stream bind cost ~1 GB.
+func warmRange(ctx context.Context, provider engine.FileProvider, w warmSpec) int64 {
+	offset, n, size := w.offset, w.n, w.size
 	if offset < 0 {
 		offset = 0
 	}
@@ -79,13 +111,20 @@ func warmRange(ctx context.Context, provider engine.FileProvider, offset, n, siz
 		return 0
 	}
 	rd := provider.NewFileReader(ctx)
+	if rd == nil {
+		return 0
+	}
 	defer rd.Close()
+	if !stream.ApplyFetchBudget(rd, w.budget) {
+		log.Printf("[usenet-stream] warm-up skipped: reader %T cannot be byte-capped", rd)
+		return 0
+	}
 	if offset > 0 {
 		if _, err := rd.Seek(offset, io.SeekStart); err != nil {
 			return 0
 		}
 	}
-	read, _ := io.CopyN(io.Discard, rd, n) // best-effort: ctx cancels the underlying fetch
+	read, _ := io.CopyN(io.Discard, rd, n) // best-effort: ctx/budget end the drain
 	return read
 }
 
@@ -298,7 +337,7 @@ func isUsenetStreamTask(at agent.Task) bool {
 // survives a stop-stream) bounds the fallback batch download so a dropped player
 // never aborts the download that replaced the stream.
 func handleUsenetStreamTask(streamCtx, daemonCtx context.Context, at agent.Task, task *engine.Task, reporter *engine.ProgressReporter, cfg config.Config, agentClient *agent.Client, usenetDl *engine.UsenetDownloader, manager *engine.Manager, srv *engine.StreamServer) {
-	task.ResolvedMethod = engine.MethodUsenet
+	task.SetResolvedMethod(engine.MethodUsenet)
 	task.Transition(engine.StatusResolving)
 	reporter.Track(task) // resolving + the served /stream URL reach the web by taskId
 

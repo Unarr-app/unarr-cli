@@ -29,11 +29,29 @@ type OffsetIndex struct {
 	exactLen   []int64 // exact decoded length once observed, else -1
 	exactStart []int64 // exact 0-based file start once observed, else -1
 
-	// uniformStep is the exact decoded length of the first observed NON-final
-	// segment. In the common uniform posting this is the shared part size, so
-	// one observation lets every not-yet-observed non-final segment inherit an
-	// exact length. Zero until such a segment is observed.
-	uniformStep int64
+	// anchorEst/anchorLen are the encoded estimate and the exact decoded length of
+	// the first observed NON-final segment — the evidence that lets a uniform
+	// posting be pinned byte-exactly from a single article. anchorLen goes to -1
+	// as soon as another observation disagrees: the parts are not all one size, so
+	// there is no shared length to inherit.
+	//
+	// The anchor is only handed to segments whose ENCODED size says they are the
+	// same shape (sameEncodedShape). Without that check, one atypical article —
+	// a short lead-in, an upload resumed at a different part size — rewrote the
+	// whole map with its own length, and since Seek(io.SeekEnd) observes segment 0
+	// first (ensureSizeExact), the atypical article is precisely the one that got
+	// the vote: an 8x error across every unobserved segment, which no bounded
+	// locate walk can recover from.
+	anchorEst int64
+	anchorLen int64
+
+	// obsEncoded/obsDecoded accumulate the encoded and decoded lengths of the
+	// observed non-final segments. Their ratio is this posting's yEnc overhead —
+	// the one thing estLen is SYSTEMATICALLY wrong about — and scaling a segment's
+	// own estimate by it sharpens a non-uniform posting without discarding the
+	// per-segment shape the NZB already told us about.
+	obsEncoded int64
+	obsDecoded int64
 
 	fileSize  int64 // exact total once sizeExact, else the running estimate
 	sizeExact bool
@@ -134,31 +152,67 @@ func (ix *OffsetIndex) Observe(segIdx int, part *yenc.Part) {
 		return
 	}
 
+	// Observe runs on every Read, cache hit included, so a segment is re-observed
+	// many times over a session — only its FIRST observation may feed the running
+	// ratio, or the accumulators grow without bound on a long stream.
+	firstSight := ix.exactLen[segIdx] < 0
+
 	ix.exactStart[segIdx] = part.Begin - 1 // 1-based inclusive -> 0-based
 	ix.exactLen[segIdx] = part.End - part.Begin + 1
 	if part.Size > 0 {
 		ix.fileSize = part.Size
 		ix.sizeExact = true
 	}
-	if segIdx < len(ix.segs)-1 && ix.uniformStep == 0 {
-		ix.uniformStep = ix.exactLen[segIdx]
+	// Only non-final segments inform the layout: the last article is a short
+	// remainder, so neither its length nor its overhead ratio describes the rest.
+	if firstSight && segIdx < len(ix.segs)-1 && ix.estLen[segIdx] > 0 && ix.exactLen[segIdx] > 0 {
+		switch {
+		case ix.anchorLen == 0: // unset: this is the first evidence we have
+			ix.anchorEst, ix.anchorLen = ix.estLen[segIdx], ix.exactLen[segIdx]
+		case ix.anchorLen > 0 && ix.anchorLen != ix.exactLen[segIdx]:
+			ix.anchorLen = -1 // the parts are not all one size
+		}
+		ix.obsEncoded += ix.estLen[segIdx]
+		ix.obsDecoded += ix.exactLen[segIdx]
 	}
 	ix.recompute()
 }
 
 // --- internal layout ---
 
-// stepLen is the length used to advance from segment i to i+1: its exact decoded
-// length when observed, the inferred uniform part size for an unobserved
-// non-final segment, otherwise the encoded-size estimate.
+// stepLen is the length used to advance from segment i to i+1, best evidence
+// first: its exact decoded length when observed; the anchor's exact length when
+// the encoded sizes agree this segment is the same shape (a uniform posting, so
+// one observation pins the whole map byte-exactly); otherwise its own estimate
+// scaled by the observed yEnc overhead.
 func (ix *OffsetIndex) stepLen(i int) int64 {
 	if ix.exactLen[i] >= 0 {
 		return ix.exactLen[i]
 	}
-	if i < len(ix.segs)-1 && ix.uniformStep > 0 {
-		return ix.uniformStep
+	if i < len(ix.segs)-1 {
+		if ix.anchorLen > 0 && sameEncodedShape(ix.estLen[i], ix.anchorEst) {
+			return ix.anchorLen
+		}
+		if ix.obsEncoded > 0 && ix.estLen[i] > 0 {
+			return ix.estLen[i] * ix.obsDecoded / ix.obsEncoded
+		}
 	}
 	return ix.estLen[i]
+}
+
+// sameEncodedShape reports whether two encoded article sizes are close enough to
+// be the same part size. Equal decoded parts still differ a little once encoded,
+// because yEnc escapes are content-dependent, so this cannot demand equality; a
+// genuinely different part size is off by far more than this band.
+func sameEncodedShape(a, ref int64) bool {
+	if a <= 0 || ref <= 0 {
+		return false
+	}
+	diff := a - ref
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff*16 <= ref // within ~6%
 }
 
 // recompute rebuilds starts[] from the current exact anchors and step lengths.
