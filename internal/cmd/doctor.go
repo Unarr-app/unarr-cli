@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
@@ -13,7 +14,7 @@ import (
 )
 
 func newDoctorCmd() *cobra.Command {
-	var fix, dryRun, yes bool
+	var fix, dryRun, yes, quick bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Diagnose configuration and connectivity",
@@ -50,12 +51,14 @@ Use this command to troubleshoot connection issues or verify setup.`,
   unarr doctor --fix
   unarr doctor --fix --dry-run`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDoctor(doctorOpts{fix: fix, dryRun: dryRun, yes: yes})
+			return runDoctor(doctorOpts{fix: fix, dryRun: dryRun, yes: yes, quick: quick})
 		},
 	}
 	cmd.Flags().BoolVar(&fix, "fix", false, "auto-repair common misconfigurations (safe, reversible)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "with --fix, show what would change without writing")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "with --fix, skip confirmation prompts")
+	cmd.Flags().BoolVar(&quick, "quick", false,
+		"only the local, network-free checks, and exit 1 if any fails (for container health probes)")
 	return cmd
 }
 
@@ -63,11 +66,19 @@ type doctorOpts struct {
 	fix    bool
 	dryRun bool
 	yes    bool
+	quick  bool
 }
 
 func runDoctor(opts doctorOpts) error {
 	cfg := loadConfig()
 	specs := doctorSpecs(&cfg)
+	// --quick drops every check that touches the network. This is a hard
+	// requirement, not a speed optimisation: a HEALTHCHECK that calls the API
+	// marks the container unhealthy on any transient blip, Docker restarts it,
+	// and a network hiccup becomes a restart loop across the fleet.
+	if opts.quick {
+		specs = doctor.QuickSpecs(specs)
+	}
 
 	// --json is machine output, so it must be the only thing on stdout: no
 	// banner, no summary, no tip. --fix wins over it, because the repair flow
@@ -76,7 +87,11 @@ func runDoctor(opts doctorOpts) error {
 	// stays human, and a caller that wants the report as data runs the two
 	// invocations separately.
 	if jsonOut && !opts.fix {
-		return doctor.RenderJSON(os.Stdout, doctor.Run(specs, nil))
+		report := doctor.Run(specs, nil)
+		if err := doctor.RenderJSON(os.Stdout, report); err != nil {
+			return err
+		}
+		return quickExitCode(opts, report)
 	}
 
 	// The renderer prints each check as it lands: the connectivity checks take
@@ -94,6 +109,34 @@ func runDoctor(opts doctorOpts) error {
 
 	if opts.fix {
 		return runDoctorRepairs(&cfg, opts)
+	}
+	// Point at the bundle where the user is actually stuck: checks failed and
+	// `--fix` was either not offered or is not going to help. Naming it here
+	// rather than in the issue template alone is the difference between a
+	// report that arrives with evidence and six rounds of "run this, paste
+	// that". Not printed on a WARN-only run — warnings are not a support case.
+	if report.Failed > 0 {
+		color.New(color.Faint).Fprintln(color.Output,
+			"  Reporting this? `unarr support-bundle` collects the details (redacted) into one attachable file.")
+		fmt.Fprintln(color.Output)
+	}
+	return quickExitCode(opts, report)
+}
+
+// quickExitCode turns a --quick run into a process exit status, because that
+// status is the entire output a Docker HEALTHCHECK reads.
+//
+// WARNINGS DO NOT MAKE A CONTAINER UNHEALTHY. A missing par2, no hwaccel, an
+// unknown config key — none of those mean "restart me", and Docker's only
+// response to unhealthy is to restart. Reserving the non-zero code for real
+// failures is what keeps the probe from becoming a restart loop over things
+// the user chose.
+//
+// Without --quick nothing changes: `unarr doctor` has always exited 0 whatever
+// it found, and scripts depend on that.
+func quickExitCode(opts doctorOpts, report doctor.Report) error {
+	if opts.quick && report.Failed > 0 {
+		return errQuietExit
 	}
 	return nil
 }

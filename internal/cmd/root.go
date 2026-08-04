@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -192,9 +193,23 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 	)
 }
 
+// errQuietExit makes a command exit 1 without printing an error line and
+// without reporting to Sentry.
+//
+// It exists for `unarr doctor --quick`, which a Docker HEALTHCHECK runs every
+// 60 seconds: the exit code IS the result, so an unhealthy container is not an
+// application error. Without this, every probe on a container whose daemon is
+// down would print over the JSON the caller is parsing and file a Sentry event
+// a minute — turning a working health probe into an incident stream.
+var errQuietExit = errors.New("quiet exit")
+
 // Execute runs the root command.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		if errors.Is(err, errQuietExit) {
+			sentry.Close()
+			os.Exit(1)
+		}
 		// Report to Sentry with command context
 		command := ""
 		if cmd, _, cerr := rootCmd.Find(os.Args[1:]); cerr == nil && cmd != nil && cmd != rootCmd {

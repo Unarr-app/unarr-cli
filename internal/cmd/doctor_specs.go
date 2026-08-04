@@ -43,9 +43,11 @@ func doctorSpecs(cfg *config.Config) []doctor.Spec {
 	specs = append(specs, doctorConnectivitySpecs(cfg)...)
 	specs = append(specs, doctorDownloadSpecs(cfg)...)
 	specs = append(specs, doctorMediaSpecs(cfg)...)
+	specs = append(specs, doctorDaemonSpec())
 	return append(specs, doctor.Spec{
 		Group: "Version",
 		Name:  "unarr version",
+		Quick: true,
 		Fn: func() (string, error) {
 			return fmt.Sprintf("%s (%s/%s)", Version, runtime.GOOS, runtime.GOARCH), nil
 		},
@@ -57,6 +59,7 @@ func doctorConfigSpecs(cfg *config.Config) []doctor.Spec {
 		{
 			Group:  "Config",
 			Name:   "Config file",
+			Quick:  true,
 			Remedy: remedyDoctorFix,
 			Fn: func() (string, error) {
 				path := resolvedConfigPath()
@@ -74,6 +77,7 @@ func doctorConfigSpecs(cfg *config.Config) []doctor.Spec {
 		{
 			Group: "Config",
 			Name:  "Config keys",
+			Quick: true,
 			Fn:    func() (string, error) { return configKeysCheckResult(*cfg) },
 		},
 		{
@@ -179,6 +183,7 @@ func doctorDownloadSpecs(cfg *config.Config) []doctor.Spec {
 		{
 			Group:  "Downloads",
 			Name:   "Download directory",
+			Quick:  true,
 			Remedy: remedyDoctorFix,
 			Fn: func() (string, error) {
 				dir := cfg.Download.Dir
@@ -198,6 +203,7 @@ func doctorDownloadSpecs(cfg *config.Config) []doctor.Spec {
 		{
 			Group: "Downloads",
 			Name:  "Download dir writable",
+			Quick: true,
 			// NOT remedyDoctorFix. `--fix` creates a MISSING download dir
 			// (planRepairs 3 and 4) and chmods the config FILE, but nothing in
 			// it touches the mode of a directory that exists and is not
@@ -223,6 +229,7 @@ func doctorDownloadSpecs(cfg *config.Config) []doctor.Spec {
 		{
 			Group: "Downloads",
 			Name:  "Disk space",
+			Quick: true,
 			Fn: func() (string, error) {
 				dir := cfg.Download.Dir
 				if dir == "" {
@@ -247,6 +254,37 @@ func doctorDownloadSpecs(cfg *config.Config) []doctor.Spec {
 			Name:   "Managed VPN (P2P kill-switch)",
 			Remedy: "run `unarr vpn enable`, set [downloads.vpn] config_file, or set required=false",
 			Fn:     func() (string, error) { return checkManagedVPN(*cfg) },
+		},
+	}
+}
+
+// doctorDaemonSpec reports whether the daemon this machine is supposed to be
+// running is alive. It reads the state file and checks the PID — no network.
+//
+// It is the reason `--quick` exists. A container whose daemon has died keeps
+// reporting "running" to Docker forever without this: the entrypoint process
+// is still up, and nothing else looks at whether the thing it supervises is.
+//
+// A daemon that was never installed is a PASS, not a failure: `unarr` is a CLI
+// too, and someone running one-off commands has no daemon by design. Only a
+// registered-then-vanished daemon is a fault, and that is what a stale state
+// file with a dead PID means.
+func doctorDaemonSpec() doctor.Spec {
+	return doctor.Spec{
+		Group: "Daemon",
+		Name:  "Daemon process",
+		Quick: true,
+		Fn: func() (string, error) {
+			state := agent.ReadState()
+			if state == nil {
+				return "not running (no daemon installed on this machine)", nil
+			}
+			if isDaemonAlive(state) {
+				return fmt.Sprintf("running (pid %d, up %s)", state.PID,
+					time.Since(state.StartedAt).Round(time.Second)), nil
+			}
+			return fmt.Sprintf("state file says pid %d, but that process is gone", state.PID),
+				fmt.Errorf("daemon died")
 		},
 	}
 }

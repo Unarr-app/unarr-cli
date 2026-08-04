@@ -34,6 +34,7 @@ func TestDoctorSpecsOrderAndGroups(t *testing.T) {
 		{"Media", "zscale (HDR tonemap)"},
 		{"Media", "Hardware acceleration"},
 		{"Media", "Transcode ceiling"},
+		{"Daemon", "Daemon process"},
 		{"Version", "unarr version"},
 	}
 	if len(specs) != len(want) {
@@ -45,6 +46,53 @@ func TestDoctorSpecsOrderAndGroups(t *testing.T) {
 		}
 		if specs[i].Fn == nil {
 			t.Errorf("spec %d (%s) has no Fn", i, specs[i].Name)
+		}
+	}
+}
+
+// The --quick subset is what a Docker HEALTHCHECK runs every 60 seconds, and
+// the one thing it must never do is touch the network: a probe that calls the
+// API turns an ISP blip into a container restart loop.
+//
+// This pins the membership by name. Spec.Quick defaults to false, so a check
+// added later is excluded until someone states otherwise — the failure mode of
+// forgetting the field is a probe that tests too little, never one that
+// restarts a healthy container. Adding a name here is therefore a deliberate
+// act, and this test is where it gets reviewed.
+func TestQuickSpecsAreLocalOnly(t *testing.T) {
+	withDataDir(t)
+
+	cfg := config.Default()
+	quick := doctor.QuickSpecs(doctorSpecs(&cfg))
+
+	want := []string{
+		"Config file",
+		"Config keys",
+		"Download directory",
+		"Download dir writable",
+		"Disk space",
+		"Daemon process",
+		"unarr version",
+	}
+	got := make([]string, len(quick))
+	for i, s := range quick {
+		got[i] = s.Name
+	}
+	if len(got) != len(want) {
+		t.Fatalf("quick specs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("quick spec %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// Belt and braces: every check that talks to the API must be absent, named
+	// explicitly so a rename cannot silently let one slip into the probe.
+	for _, s := range quick {
+		switch s.Name {
+		case "API reachable", "Discovery API (search/stats)", "Agent registration":
+			t.Errorf("%q makes a network call and must not be in the --quick set", s.Name)
 		}
 	}
 }

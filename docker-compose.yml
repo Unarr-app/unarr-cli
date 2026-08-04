@@ -16,6 +16,21 @@ services:
     container_name: unarr
     restart: unless-stopped
 
+    # The image ships a HEALTHCHECK, so `docker ps` shows healthy/unhealthy and
+    # `docker compose up --wait` blocks until the daemon is actually up rather
+    # than merely started. Override it here only if you want different timings;
+    # deleting it means a dead daemon shows as "running" forever.
+    #
+    # It runs `unarr doctor --quick`, which is deliberately network-free — a
+    # probe that called the API would flip the container unhealthy on any
+    # internet blip and Docker would restart a container that was fine.
+    healthcheck:
+      test: ["CMD", "unarr", "doctor", "--quick", "--json"]
+      interval: 60s
+      timeout: 15s
+      start_period: 90s
+      retries: 3
+
     # host network is required for:
     #   - streaming to reach your TV / mobile / other LAN devices (port 11818)
     #   - HLS transcode server (port 11819)

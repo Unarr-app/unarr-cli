@@ -41,6 +41,28 @@ type Spec struct {
 	Name   string
 	Fn     func() (string, error)
 	Remedy string
+
+	// Quick marks a check as safe for a Docker HEALTHCHECK: local, cheap, and
+	// making NO network call. A healthcheck that depends on the internet marks
+	// the container unhealthy on every transient blip and triggers cascading
+	// restarts — the container is fine, the ISP hiccuped.
+	//
+	// It defaults to false ON PURPOSE. A check added later is excluded from
+	// --quick until someone states otherwise, so the failure mode of
+	// forgetting this field is a healthcheck that tests too little, never one
+	// that restarts a healthy container.
+	Quick bool
+}
+
+// QuickSpecs returns the subset safe to run as a container health probe.
+func QuickSpecs(specs []Spec) []Spec {
+	out := make([]Spec, 0, len(specs))
+	for _, s := range specs {
+		if s.Quick {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // classify applies the (string, error) convention. An error always wins over
