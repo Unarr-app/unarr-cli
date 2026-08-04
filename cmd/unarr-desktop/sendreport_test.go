@@ -66,6 +66,54 @@ func TestSendReportBodyCarriesBothLogsBounded(t *testing.T) {
 	}
 }
 
+// TestSendReportTransportsNonASCIIIntact settles where the mojibake in the
+// field reports comes from — and it is not this half of the pipe.
+//
+// A crash report arrived with "windows ?" install cloudflared" where the daemon
+// had written an em dash, and the same bytes show up as "ΓÇö" on a Windows
+// console (E2 80 94 read as CP437). Both are DECODING faults at the far end, not
+// transport ones: the body is JSON over HTTPS, which is UTF-8 by definition, and
+// this proves it survives byte for byte — em dash, accents, CJK and all.
+//
+// So the fix had to be at the source (log lines are ASCII now, see
+// internal/logging.TestLogLinesAreASCII), because no amount of care in the
+// client or the server stops a CP437 console from mis-rendering a UTF-8 file.
+// A user's own filenames can still contain anything, hence this guard: whatever
+// the daemon does log must reach the developers unchanged.
+func TestSendReportTransportsNonASCIIIntact(t *testing.T) {
+	isolatePaths(t)
+
+	const tricky = "peliculas/El Niño — Año 2026/Ñandú ⚡ 日本語 «quotes» café"
+	var got agent.SupportReport
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ct := r.Header.Get("Content-Type"); !strings.Contains(ct, "json") {
+			t.Errorf("Content-Type = %q, want JSON (which is UTF-8 by spec)", ct)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	writeAuthConfig(t, srv.URL)
+
+	stubUnarr(t, map[string]reply{
+		"daemon logs": {out: "2026/08/04 01:19:00 [library] scanned " + tricky + "\n"},
+		"version":     {out: "unarr 1.9.0 (windows/amd64)\n"},
+	})
+
+	if err := sendReport("logs", "user submitted "+tricky); err != nil {
+		t.Fatalf("sendReport: %v", err)
+	}
+	if !strings.Contains(got.Logs, tricky) {
+		t.Errorf("the log line was altered in transit:\n got %q\nwant it to contain %q", got.Logs, tricky)
+	}
+	if !strings.Contains(got.Message, tricky) {
+		t.Errorf("the message was altered in transit: %q", got.Message)
+	}
+}
+
 // TestSendReportWithoutCredentialsFails pins the other branch: a never-signed-in
 // box must fail loudly enough for handleCrash to fall back to the mail path,
 // rather than posting to nowhere and reporting success.

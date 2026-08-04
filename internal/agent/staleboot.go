@@ -72,9 +72,28 @@ func StateFromPreviousBoot(st *DaemonState) bool {
 // the heartbeat alone would declare that live daemon's state pre-boot and reap
 // it. StartedAt cannot go stale that way.
 func stateWrittenAt(st *DaemonState) time.Time {
-	written := st.LastHeartbeat
+	written := LastAliveAt(st)
 	if st.StartedAt.After(written) {
 		written = st.StartedAt
 	}
 	return written
+}
+
+// LastAliveAt is the most recent moment this daemon is known to have been
+// running: its liveness stamp, or the last successful sync for a state file
+// written before LastAlive existed. Zero when neither is set.
+//
+// The two fields answer different questions and the difference is load-bearing.
+// LastHeartbeat advances only when the SERVER answered, so it freezes on a box
+// with no network while the daemon keeps working; LastAlive advances on every
+// sync attempt. Reading the heartbeat for liveness is what made `unarr status`
+// call a downloading agent "not running".
+func LastAliveAt(st *DaemonState) time.Time {
+	if st == nil {
+		return time.Time{}
+	}
+	if st.LastAlive.After(st.LastHeartbeat) {
+		return st.LastAlive
+	}
+	return st.LastHeartbeat
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/fatih/color"
@@ -65,11 +66,19 @@ func TestTextRendererGolden(t *testing.T) {
 			r.Finish(rep)
 
 			path := filepath.Join("testdata", "render_text_"+scenario+".golden")
-			want, err := os.ReadFile(path)
+			raw, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatalf("read golden: %v", err)
 			}
-			if got := buf.String(); got != string(want) {
+			// Normalise the FILE's line endings, never the renderer's output: a
+			// checkout can rewrite what is on disk (Git for Windows defaults to
+			// core.autocrlf=true, which is what turned this test red on the
+			// windows-latest runner and nowhere else), but if the code itself
+			// ever emits a CRLF that is a real regression and must still fail.
+			// .gitattributes pins the checkout too; this makes the test correct
+			// even in a clone that predates it.
+			want := strings.ReplaceAll(string(raw), "\r\n", "\n")
+			if got := buf.String(); got != want {
 				t.Errorf("output drifted from %s\n--- got ---\n%q\n--- want ---\n%q", path, got, want)
 			}
 		})

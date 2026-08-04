@@ -1,0 +1,34 @@
+# Line endings, decided here instead of by whatever core.autocrlf each clone
+# happens to have.
+#
+# This file exists because `Test windows-latest` was red for a golden test.
+# actions/checkout on Windows runs Git for Windows, which defaults to
+# core.autocrlf=true and therefore writes testdata/*.golden with CRLF — while
+# the renderer under test emits "\n". The comparison is byte for byte, so it
+# failed on Windows and nowhere else, and the diff was invisible in a CI log
+# (the bytes differ, the rendered text does not).
+
+# Golden files are compared byte for byte. Never translate them.
+*.golden -text
+
+# Source and fixtures the toolchain reads: LF everywhere, including Windows
+# checkouts. Go itself tolerates CRLF, but gofmt diffs and any test that
+# compares file bytes do not.
+*.go text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+
+# PowerShell in the Windows harness wants CRLF (see test/windows/README.md's
+# gotchas — a BOM-less, LF-only .ps1 is read through the ANSI code page and one
+# stray byte becomes a parse error).
+*.ps1 text eol=crlf
+
+# Binaries and archives: hands off.
+*.png binary
+*.ico binary
+*.zip binary
+*.gz binary
+*.exe binary

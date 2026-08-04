@@ -52,15 +52,54 @@ func TestIsDaemonAliveAcceptsALiveDaemon(t *testing.T) {
 
 // TestIsDaemonAliveHeartbeatRuleStillApplies pins the pre-existing rule the
 // boot check sits in front of but does not replace: a PID reused WITHIN this
-// boot is caught by the stale heartbeat, which the boot instant cannot see.
+// boot is caught by a stale state file, which the boot instant cannot see.
 func TestIsDaemonAliveHeartbeatRuleStillApplies(t *testing.T) {
 	state := &agent.DaemonState{
 		Status:        "running",
 		PID:           os.Getpid(),
 		StartedAt:     time.Now().Add(-10 * time.Minute),
 		LastHeartbeat: time.Now().Add(-5 * time.Minute), // this boot, but stale
+		LastAlive:     time.Now().Add(-5 * time.Minute), // and not running either
 	}
 	if isDaemonAlive(state) {
-		t.Fatal("a heartbeat five minutes old must still read as not-running")
+		t.Fatal("a state file five minutes stale must still read as not-running")
+	}
+}
+
+// TestIsDaemonAliveOfflineDaemonIsStillAlive is the false negative this rule
+// used to produce, and the reason DaemonState grew a LastAlive field.
+//
+// LastHeartbeat only advances when the SERVER answers. A daemon on a box whose
+// network has been down for hours — or one whose credential the server keeps
+// rejecting — is alive, downloading, and carries an hours-old heartbeat. Judged
+// by that field, `unarr status` printed "not running" about a process that was
+// actively writing to disk, and the user's next move was to "restart" a daemon
+// that had never stopped.
+func TestIsDaemonAliveOfflineDaemonIsStillAlive(t *testing.T) {
+	state := &agent.DaemonState{
+		Status:        "running",
+		PID:           os.Getpid(),
+		StartedAt:     time.Now().Add(-9 * time.Hour),
+		LastHeartbeat: time.Now().Add(-9 * time.Hour), // no successful sync all day
+		LastAlive:     time.Now().Add(-3 * time.Second),
+	}
+	if !isDaemonAlive(state) {
+		t.Fatal("a daemon that ran its sync loop three seconds ago is running, " +
+			"however long the server has been unreachable")
+	}
+}
+
+// TestIsDaemonAliveToleratesAnOlderDaemonsStateFile: a state file written by a
+// build from before LastAlive existed still has to be read correctly, or a
+// mid-upgrade `unarr status` would call a live daemon dead.
+func TestIsDaemonAliveToleratesAnOlderDaemonsStateFile(t *testing.T) {
+	state := &agent.DaemonState{
+		Status:        "running",
+		PID:           os.Getpid(),
+		StartedAt:     time.Now().Add(-time.Hour),
+		LastHeartbeat: time.Now().Add(-10 * time.Second), // fresh, no LastAlive at all
+	}
+	if !isDaemonAlive(state) {
+		t.Fatal("a fresh heartbeat with no LastAlive must still read as running")
 	}
 }

@@ -255,13 +255,26 @@ func isDaemonAlive(state *agent.DaemonState) bool {
 	if agent.StateFromPreviousBoot(state) {
 		return false
 	}
-	// Reject stale state: if last heartbeat is older than 2 minutes, the daemon
-	// likely crashed and the PID may have been reused by another process.
-	if !state.LastHeartbeat.IsZero() && time.Since(state.LastHeartbeat) > 2*time.Minute {
+	// Reject stale state: a PID reused WITHIN this boot cannot be caught by the
+	// boot instant above, so a state file nobody has touched in a while is not
+	// trusted to still name the daemon.
+	//
+	// This rule is only sound because a LIVE daemon refreshes LastHeartbeat on a
+	// timer regardless of whether its sync reaches the server (see
+	// agent.Daemon.Run). It used to advance on SUCCESSFUL syncs alone, which
+	// made an offline-but-perfectly-alive daemon look dead here after two
+	// minutes — `unarr status` said "not running" about a process that was
+	// downloading at the time.
+	if last := agent.LastAliveAt(state); !last.IsZero() && time.Since(last) > staleStateAfter {
 		return false
 	}
 	return agent.IsProcessAlive(state.PID)
 }
+
+// staleStateAfter is how long a state file may go untouched before it stops
+// being evidence that its PID is the daemon's. Comfortably longer than the
+// daemon's own refresh interval, so a slow tick is never mistaken for a death.
+const staleStateAfter = 2 * time.Minute
 
 // formatFeatures returns a comma-separated list of available features, or "".
 func formatFeatures(f agent.FeatureFlags) string {

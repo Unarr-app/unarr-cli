@@ -57,6 +57,11 @@ type SyncClient struct {
 	OnScan           func()
 	OnWatchingChange func(watching bool)
 	OnSyncSuccess    func() // called after each successful sync (e.g. to update state file)
+	// OnSyncAttempt is called after EVERY sync attempt, successful or not. It
+	// carries liveness, not connectivity: readers of the state file use it to
+	// tell a daemon that is alive-but-offline from one that died and left its
+	// PID behind. See DaemonState.LastAlive.
+	OnSyncAttempt func()
 	// OnBlocked fires once when the server starts rejecting this agent mid-run.
 	// The daemon keeps running (downloads in flight must not be dropped), but
 	// the user has to hear about it: without this the agent went on looking
@@ -200,6 +205,14 @@ func (sc *SyncClient) currentInterval() time.Duration {
 }
 
 func (sc *SyncClient) doSync(ctx context.Context) {
+	// Fires on EVERY attempt, reached or not, which is the whole point: it is
+	// how the daemon says "I am still here" to anything reading the state file.
+	// OnSyncSuccess cannot do that job — it means "the server answered" — and
+	// using it for both is what made `unarr status` report "not running" for a
+	// daemon that was alive and downloading, just without a network.
+	if sc.OnSyncAttempt != nil {
+		defer sc.OnSyncAttempt()
+	}
 	req := sc.buildRequest()
 	resp, err := sc.client.Sync(ctx, req)
 	if err != nil {

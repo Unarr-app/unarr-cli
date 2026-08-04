@@ -495,6 +495,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		WriteState(&d.State)
 	}
+	// Liveness, separate from connectivity: this runs whether or not the server
+	// answered, so a daemon with no network still keeps its state file fresh.
+	// Without it, `unarr status` called an alive-and-downloading agent "not
+	// running" as soon as its last successful sync aged past two minutes.
+	d.sync.OnSyncAttempt = func() {
+		d.State.LastAlive = time.Now()
+		WriteState(&d.State)
+	}
 
 	// Start sync loop (blocks)
 	return d.sync.Run(ctx)

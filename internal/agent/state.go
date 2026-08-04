@@ -22,12 +22,20 @@ var ErrDaemonNotRunning = errors.New("daemon does not appear to be running (stat
 
 // DaemonState is written to disk every heartbeat for external tools to read.
 type DaemonState struct {
-	AgentID         string         `json:"agentId"`
-	Status          string         `json:"status"` // running | upgrading | shutting_down
-	Version         string         `json:"version"`
-	PID             int            `json:"pid"`
-	StartedAt       time.Time      `json:"startedAt"`
-	LastHeartbeat   time.Time      `json:"lastHeartbeat"`
+	AgentID       string    `json:"agentId"`
+	Status        string    `json:"status"` // running | upgrading | shutting_down
+	Version       string    `json:"version"`
+	PID           int       `json:"pid"`
+	StartedAt     time.Time `json:"startedAt"`
+	LastHeartbeat time.Time `json:"lastHeartbeat"`
+	// LastAlive is when the daemon last ran its sync loop — REACHED THE SERVER
+	// OR NOT. LastHeartbeat only advances on success, so on a box with no
+	// network it freezes while the daemon is perfectly alive, and anything
+	// treating a stale heartbeat as "probably dead" (see cmd.isDaemonAlive)
+	// reported a downloading agent as not running. This is the field to read for
+	// "is that PID still the daemon"; LastHeartbeat stays the answer to "when
+	// did it last talk to the server", which is what `unarr status` shows.
+	LastAlive       time.Time      `json:"lastAlive,omitempty"`
 	ActiveTasks     int            `json:"activeTasks"`
 	CompletedCount  int            `json:"completedCount"`
 	FailedCount     int            `json:"failedCount"`
