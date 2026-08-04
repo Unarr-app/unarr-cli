@@ -242,6 +242,19 @@ func isDaemonAlive(state *agent.DaemonState) bool {
 	if state.PID == 0 {
 		return false
 	}
+	// A state file written before this host booted describes a daemon the
+	// MACHINE outlived — a restart, a shutdown, a Windows Update reboot. Its PID
+	// belongs to the previous boot and may now name an unrelated process, so
+	// IsProcessAlive below would answer yes about something that is not the
+	// agent. Checked first for that reason.
+	//
+	// This is NOT what the heartbeat rule below does, and neither subsumes the
+	// other: the heartbeat catches a PID reused WITHIN this boot, the boot
+	// instant catches one reused ACROSS boots (where the heartbeat is stale
+	// anyway, but only by accident of the daemon having been up a while).
+	if agent.StateFromPreviousBoot(state) {
+		return false
+	}
 	// Reject stale state: if last heartbeat is older than 2 minutes, the daemon
 	// likely crashed and the PID may have been reused by another process.
 	if !state.LastHeartbeat.IsZero() && time.Since(state.LastHeartbeat) > 2*time.Minute {
