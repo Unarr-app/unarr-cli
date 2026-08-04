@@ -75,6 +75,15 @@ type Manager struct {
 	// in Submit — and is NOT blocked, because the web clears the error first).
 	storageFailMu   sync.Mutex
 	storageFailedAt map[string]time.Time
+
+	// pausedTasks holds the IDs of tasks paused on purpose (web control, local
+	// `unarr downloads pause`, tray). A pause cancels the task context, so the
+	// download goroutine unwinds through fail() → recordFinished, which would
+	// DROP the resume-store entry and turn a pause into "start from zero after a
+	// restart". Membership here flips recordFinished to the resume-preserving
+	// variant. Cleared on cancel and on the next Submit (a resume is a fresh run).
+	pausedMu    sync.Mutex
+	pausedTasks map[string]struct{}
 }
 
 // storageFailCooldown is how long Submit refuses to re-run a task that just
@@ -113,7 +122,53 @@ func NewManager(cfg ManagerConfig, reporter *ProgressReporter, downloaders ...Do
 		cancels:         make(map[string]context.CancelFunc),
 		sem:             make(chan struct{}, cfg.MaxConcurrent),
 		storageFailedAt: make(map[string]time.Time),
+		pausedTasks:     make(map[string]struct{}),
 	}
+}
+
+// markPaused / clearPaused / isPaused guard the deliberate-pause set. See the
+// pausedTasks field comment for why a pause must not drop the resume entry.
+func (m *Manager) markPaused(taskID string) {
+	m.pausedMu.Lock()
+	m.pausedTasks[taskID] = struct{}{}
+	m.pausedMu.Unlock()
+}
+
+func (m *Manager) clearPaused(taskID string) {
+	m.pausedMu.Lock()
+	delete(m.pausedTasks, taskID)
+	m.pausedMu.Unlock()
+}
+
+func (m *Manager) isPaused(taskID string) bool {
+	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
+	_, ok := m.pausedTasks[taskID]
+	return ok
+}
+
+// PausedTaskIDs returns the IDs currently held in the deliberate-pause set.
+// Read by the local control server so `unarr downloads` can tell a paused task
+// apart from one that simply is not running.
+func (m *Manager) PausedTaskIDs() []string {
+	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
+	ids := make([]string, 0, len(m.pausedTasks))
+	for id := range m.pausedTasks {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// DropResume removes a task from the resume store without touching a running
+// download. It is how a zombie is put down: a task the server no longer knows
+// about (deleted row) is not in m.active after a restart is re-submitted from
+// the store forever, so the entry itself has to go. Safe when no store is wired.
+func (m *Manager) DropResume(taskID string) {
+	if m.taskStore != nil {
+		m.taskStore.Remove(taskID)
+	}
+	m.clearPaused(taskID)
 }
 
 // Submit queues a task for download. Non-blocking if capacity available.
@@ -151,6 +206,10 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 	m.active[task.ID] = task
 	m.cancels[task.ID] = taskCancel
 	m.activeMu.Unlock()
+
+	// A submit is a fresh run: whatever pause held this ID is over. Leaving it in
+	// the set would make the NEXT genuine terminal keep a stale resume entry.
+	m.clearPaused(task.ID)
 
 	// Persist real downloads so a daemon restart can resume them (torrent via
 	// the piece-completion DB, debrid via Range, usenet via its tracker). Stream
@@ -276,7 +335,11 @@ func (m *Manager) recordFinished(update agent.StatusUpdate) {
 // VPN-paused task (keepResume=true) KEEP the entry so the daemon re-submits and
 // resumes them on the next start.
 func (m *Manager) recordFinishedKeep(update agent.StatusUpdate, keepResume bool) {
-	if m.taskStore != nil && !m.shuttingDown.Load() && !keepResume {
+	// A deliberately paused task unwinds through fail() (its context was
+	// cancelled), which would otherwise drop the resume entry and make the
+	// pause unresumable. See pausedTasks.
+	keep := keepResume || m.isPaused(update.TaskID)
+	if m.taskStore != nil && !m.shuttingDown.Load() && !keep {
 		m.taskStore.Remove(update.TaskID)
 	}
 
@@ -290,14 +353,26 @@ func (m *Manager) recordFinishedKeep(update agent.StatusUpdate, keepResume bool)
 }
 
 // CancelTask cancels an active download by task ID (keeps partial files).
-func (m *Manager) CancelTask(taskID string) {
+// Reports whether a running task was actually stopped — false means the ID is
+// not active here, which the caller turns into "not found" (or, for a zombie,
+// into a resume-store drop via DropResume).
+func (m *Manager) CancelTask(taskID string) bool {
 	m.activeMu.RLock()
 	task, ok := m.active[taskID]
 	cancel := m.cancels[taskID]
 	m.activeMu.RUnlock()
 
 	if !ok {
-		return
+		return false
+	}
+
+	// A cancel is terminal: the resume entry must go BEFORE the goroutine
+	// unwinds, or a shutdown racing the cancel (shuttingDown gates the removal
+	// in recordFinished) would leave the entry behind and the daemon would
+	// resurrect the download on its next start.
+	m.clearPaused(taskID)
+	if m.taskStore != nil {
+		m.taskStore.Remove(taskID)
 	}
 
 	// Cancel the task's context first — this unblocks the goroutine
@@ -316,18 +391,24 @@ func (m *Manager) CancelTask(taskID string) {
 	task.Transition(StatusCancelled)
 
 	log.Printf("[%s] cancelled: %s", agent.ShortID(taskID), task.Title)
+	return true
 }
 
 // PauseTask pauses an active download (keeps partial files for resume).
-func (m *Manager) PauseTask(taskID string) {
+// Reports whether a running task was actually paused.
+func (m *Manager) PauseTask(taskID string) bool {
 	m.activeMu.RLock()
 	task, ok := m.active[taskID]
 	cancel := m.cancels[taskID]
 	m.activeMu.RUnlock()
 
 	if !ok {
-		return
+		return false
 	}
+
+	// Mark BEFORE cancelling the context: the goroutine unwinds through fail(),
+	// and recordFinished consults this set to keep the resume entry.
+	m.markPaused(taskID)
 
 	if cancel != nil {
 		cancel()
@@ -339,17 +420,25 @@ func (m *Manager) PauseTask(taskID string) {
 
 	task.Transition(StatusCancelled) // will be re-created as pending by server
 	log.Printf("[%s] paused: %s", agent.ShortID(taskID), task.Title)
+	return true
 }
 
 // CancelAndDeleteFiles cancels a download and removes its files from disk.
-func (m *Manager) CancelAndDeleteFiles(taskID string) {
+// Reports whether a running task was actually stopped.
+func (m *Manager) CancelAndDeleteFiles(taskID string) bool {
 	m.activeMu.RLock()
 	task, ok := m.active[taskID]
 	cancel := m.cancels[taskID]
 	m.activeMu.RUnlock()
 
 	if !ok {
-		return
+		return false
+	}
+
+	// Terminal — drop the resume entry up front, same reasoning as CancelTask.
+	m.clearPaused(taskID)
+	if m.taskStore != nil {
+		m.taskStore.Remove(taskID)
 	}
 
 	if cancel != nil {
@@ -366,6 +455,7 @@ func (m *Manager) CancelAndDeleteFiles(taskID string) {
 	task.Transition(StatusCancelled)
 
 	log.Printf("[%s] cancelled + files deleted: %s", agent.ShortID(taskID), task.Title)
+	return true
 }
 
 // Wait blocks until all active downloads finish.

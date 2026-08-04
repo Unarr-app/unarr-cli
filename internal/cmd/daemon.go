@@ -18,6 +18,7 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/acme"
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/control"
 	"github.com/Unarr-app/unarr-cli/internal/davfs"
 	"github.com/Unarr-app/unarr-cli/internal/engine"
 	"github.com/Unarr-app/unarr-cli/internal/funnel"
@@ -735,8 +736,14 @@ func runDaemonStart() error {
 	// the piece-completion DB, debrid via Range, usenet via its tracker). Done
 	// before the sync loop starts; a later web re-dispatch of the same id is
 	// deduped by the manager.
+	//
+	// Re-submission is unconditional on purpose (the server may be unreachable
+	// at boot, and a resumable download must not depend on that), but it is no
+	// longer unaccountable: a task the server has forgotten gets reaped after
+	// unknownTaskThreshold status reports (see ProgressReporter), and
+	// `unarr downloads purge` drops the whole queue by hand.
 	if resume := taskStore.Load(); len(resume) > 0 {
-		log.Printf("[resume] re-submitting %d interrupted download(s)", len(resume))
+		log.Printf("[resume] re-submitting %d interrupted download(s) — any the server no longer knows about will be dropped after a few status reports", len(resume))
 		for _, t := range resume {
 			t.ForceStart = false // respect MaxConcurrent on bulk auto-resume
 			log.Printf("[resume] %s — %s", agent.ShortID(t.ID), t.Title)
@@ -744,28 +751,42 @@ func runDaemonStart() error {
 		}
 	}
 
+	// The single owner of pause/resume/cancel/retry, whatever asked for it —
+	// the web (sync controls or status flags) or this machine (`unarr
+	// downloads`, the tray). See daemon_task_control.go.
+	controller := &taskController{
+		manager: manager,
+		store:   taskStore,
+		client:  agentClient,
+		agentID: cfg.Agent.ID,
+		submit:  func(t agent.Task) { manager.Submit(ctx, t) },
+		stopStream: func(taskID string) {
+			cancelStreamTask(taskID)
+			if streamSrv.CurrentTaskID() == taskID {
+				streamSrv.ClearFile()
+			}
+		},
+		triggerSync: d.TriggerSync,
+	}
+
+	// Control signals that ride on a STATUS RESPONSE rather than on the sync
+	// control list. These four handlers existed but were never wired outside
+	// tests, so a cancel arriving this way logged a line, stopped reporting the
+	// task, and left the download running — unstoppable from the web and
+	// resurrected on every restart (user report 2026-08-03). Wire them to the
+	// same controller the sync path uses.
+	reporter.SetCancelHandler(func(id string) { controller.ApplyWebAction(control.ActionCancel, id, false) })
+	reporter.SetDeleteFilesHandler(func(id string) { controller.ApplyWebAction(control.ActionCancel, id, true) })
+	reporter.SetPauseHandler(func(id string) { controller.ApplyWebAction(control.ActionPause, id, false) })
+	// A task the server has forgotten (deleted row) can no longer be cancelled
+	// from anywhere but here.
+	reporter.SetUnknownTaskHandler(controller.ReapUnknown)
+
 	// Wire: sync receives control signals → act on manager
 	d.OnControlAction = func(action, taskID string, deleteFiles bool) {
 		switch action {
-		case "cancel":
-			if deleteFiles {
-				manager.CancelAndDeleteFiles(taskID)
-			} else {
-				manager.CancelTask(taskID)
-			}
-			cancelStreamTask(taskID)
-			if streamSrv.CurrentTaskID() == taskID {
-				streamSrv.ClearFile()
-			}
-		case "pause":
-			manager.PauseTask(taskID)
-			cancelStreamTask(taskID)
-			if streamSrv.CurrentTaskID() == taskID {
-				streamSrv.ClearFile()
-			}
-		case "resume":
-			log.Printf("[%s] resume requested, triggering sync", agent.ShortID(taskID))
-			d.TriggerSync()
+		case "cancel", "pause", "resume":
+			controller.ApplyWebAction(action, taskID, deleteFiles)
 		case "stream":
 			if streamSrv.CurrentTaskID() == taskID {
 				return
@@ -790,12 +811,32 @@ func runDaemonStart() error {
 			streamRegistry.cancels["watch:"+taskID] = watchCancel
 			streamRegistry.mu.Unlock()
 			go engine.NewWatchReporter(agentClient, streamSrv, taskID).Run(watchCtx)
-		case "stop-stream":
+		case "stop-stream": //nolint:goconst // action names are literals across three call sites
 			cancelStreamTask(taskID)
 			if streamSrv.CurrentTaskID() == taskID {
 				streamSrv.ClearFile()
 			}
 		}
+	}
+
+	// A stream request can also arrive as a flag on a status response. Same
+	// destination as the sync control signal above.
+	reporter.SetStreamRequestedHandler(func(id string) {
+		if d.OnControlAction != nil {
+			d.OnControlAction("stream", id, false)
+		}
+	})
+
+	// Local control plane: the loopback endpoint `unarr downloads` and the
+	// desktop tray drive. It is what makes a download stoppable when the web
+	// cannot reach it — server down, account logged out, or the task row deleted
+	// out from under a still-running download.
+	if ctrlSrv, err := control.NewServer(controller); err != nil {
+		log.Printf("[control] could not create the local control plane: %v — `unarr downloads` will fall back to offline mode", err)
+	} else if err := ctrlSrv.Listen(ctx); err != nil {
+		log.Printf("[control] could not start the local control plane: %v — `unarr downloads` will fall back to offline mode", err)
+	} else {
+		d.SetControlPlane(ctrlSrv.Port(), ctrlSrv.Token())
 	}
 
 	// Wire: sync receives file deletion requests from the server.

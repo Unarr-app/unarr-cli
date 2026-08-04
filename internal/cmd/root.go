@@ -102,6 +102,13 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 	// Downloads & Streaming
 	downloadCmd := newDownloadCmd()
 	downloadCmd.GroupID = "download"
+	downloadsCmd := newDownloadsCmd()
+	downloadsCmd.GroupID = "download"
+	// `unarr download stop|pause|resume|list …` is the phrasing users reach for,
+	// so accept it as an alias of the real command rather than making them
+	// discover the plural. Cobra resolves a matching subcommand before the
+	// positional magnet/hash argument, and no info hash is spelled "stop".
+	addDownloadAliases(downloadCmd)
 	streamCmd := newStreamCmd()
 	streamCmd.GroupID = "download"
 
@@ -158,6 +165,7 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 		watchCmd,
 		// Downloads & Streaming
 		downloadCmd,
+		downloadsCmd,
 		streamCmd,
 		// Daemon Management
 		upCmd,

@@ -35,6 +35,11 @@ type trayUI struct {
 	mLogs, mSendLogs, mDocs               *systray.MenuItem
 	mAutostart, mUpdate, mQuit            *systray.MenuItem
 
+	// downloads is the per-download section (pause/resume/stop per row). See
+	// downloadsmenu.go — it is what makes a runaway download stoppable from the
+	// machine running it, without the website being involved at all.
+	downloads *downloadsMenu
+
 	// playerChoices are the Player submenu entries (playerpicker.go), each
 	// bound to the config value it writes.
 	playerChoices []playerChoice
@@ -151,6 +156,10 @@ func newTrayUI() *trayUI {
 	ui.mEnableDownloads = systray.AddMenuItem("Enable downloads & library…",
 		"Install the unarr agent to download and build your library")
 	ui.mEnableDownloads.Hide()
+	systray.AddSeparator()
+	// Per-download controls, above the navigation block: this is the section a
+	// user opens the menu FOR when something is downloading.
+	ui.downloads = buildDownloadsMenu()
 	systray.AddSeparator()
 	ui.mOpen = systray.AddMenuItem("Open unarr.app", "Open the unarr web app")
 	ui.mLibrary = systray.AddMenuItem("Open library (web)", "Your unarr library on the web")
@@ -285,6 +294,25 @@ func (ui *trayUI) renderPlayerStatus() {
 	ui.mStatus.SetTooltip("unarr:// links open in your local player")
 }
 
+// renderDownloads refreshes the per-download rows. With the daemon down there
+// is no control plane to ask, so the section collapses rather than showing rows
+// whose buttons could not work.
+//
+// The fetch is a loopback HTTP call on the render path, which is only tolerable
+// because it is bounded (controlCallTimeout) and the daemon answers it from
+// memory. If that ever stops being true, move it to its own ticker and render
+// from a cached snapshot.
+func (ui *trayUI) renderDownloads(daemonRunning bool) {
+	if ui.downloads == nil {
+		return
+	}
+	if !daemonRunning {
+		ui.downloads.hideAll()
+		return
+	}
+	ui.downloads.render(fetchDownloads())
+}
+
 // renderDaemonStatus reflects daemon state into the status row + pause/resume/
 // restart enablement. Read from the same state file `unarr status` uses.
 func (ui *trayUI) renderDaemonStatus() {
@@ -314,6 +342,7 @@ func (ui *trayUI) renderDaemonStatus() {
 	ui.showLogin(signInNeeded(ui.accountOK.Load(), st, fail, blocked))
 	ui.applyState(st)
 	ui.setTooltip(trayTooltip(st, s, blocked))
+	ui.renderDownloads(s.running)
 	switch st {
 	case stateVPNBlocked:
 		// Not a failure — the kill-switch is doing what it was asked to. But

@@ -261,6 +261,23 @@ func (c *Client) BatchReportStatus(ctx context.Context, updates []StatusUpdate) 
 	return &resp, nil
 }
 
+// ReportTaskControl tells the server that a download was paused, resumed,
+// cancelled or retried LOCALLY — from `unarr downloads`, from the desktop tray,
+// or by the agent putting a zombie down. Without it the web keeps showing a
+// download that stopped minutes ago (or, worse, keeps a "cancelled" row for one
+// the user just resumed by hand).
+//
+// Best-effort by design: the local action has already happened, and a server
+// that is unreachable must never make the local plane fail. Callers log and
+// move on.
+func (c *Client) ReportTaskControl(ctx context.Context, req TaskControlRequest) error {
+	var resp TaskControlResponse
+	if err := c.doPost(ctx, "/api/internal/agent/task-control", req, &resp); err != nil {
+		return fmt.Errorf("report task control: %w", err)
+	}
+	return nil
+}
+
 // Sync sends the CLI's full state and receives all pending server actions.
 // This is the single endpoint for bidirectional state synchronization.
 func (c *Client) Sync(ctx context.Context, req SyncRequest) (*SyncResponse, error) {
