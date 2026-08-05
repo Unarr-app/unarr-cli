@@ -42,6 +42,7 @@ func doctorSpecs(cfg *config.Config) []doctor.Spec {
 	specs := doctorConfigSpecs(cfg)
 	specs = append(specs, doctorConnectivitySpecs(cfg)...)
 	specs = append(specs, doctorDownloadSpecs(cfg)...)
+	specs = append(specs, doctorMethodSpecs(cfg)...)
 	specs = append(specs, doctorLibrarySpecs(cfg)...)
 	specs = append(specs, doctorStreamSpecs(cfg)...)
 	specs = append(specs, doctorMediaSpecs(cfg)...)
