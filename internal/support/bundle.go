@@ -170,7 +170,15 @@ func collectors(in Inputs) []collector {
 func buildSection(c collector, scrub *Scrubber) Section {
 	body, err := c.fn()
 	if err != nil {
-		return Section{Name: c.name, Absent: err.Error()}
+		// THE REASON GETS SCRUBBED TOO. It was not, and it is made of exactly
+		// the material that leaks: these errors are os.Open failures, so the
+		// string is a full filesystem path — "/home/<name>/.local/share/unarr/
+		// unarr.log does not exist" — and it lands in manifest.json, which is
+		// the one file in the bundle a reader opens first. Every section that
+		// was absent (a daemon that never ran, no cached benchmark: the common
+		// case on the machine of someone filing a bug) published the account
+		// name while the section bodies next to it were being cleaned.
+		return Section{Name: c.name, Absent: string(scrub.Text([]byte(err.Error())))}
 	}
 	body = scrub.Text(body)
 	body, note := capBytes(body)

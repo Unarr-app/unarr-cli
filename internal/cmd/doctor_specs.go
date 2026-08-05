@@ -181,7 +181,19 @@ func doctorAgentRegistration(cfg *config.Config) (string, error) {
 	if err != nil {
 		return "", classifyAuthError(err)
 	}
-	return fmt.Sprintf("%s (%s) [%s]", resp.User.Name, resp.User.Email, resp.User.Plan), nil
+	// NO NAME, NO EMAIL. This message is not only printed on the user's own
+	// terminal: `unarr doctor --json` feeds the web health panel, and
+	// `unarr support-bundle` embeds the whole report in a file the user attaches
+	// to a public issue. Printing the account holder's name and email address
+	// put both into every bundle ever generated.
+	//
+	// Nothing is lost by dropping them. The bundle now publishes the agent ID
+	// (see internal/support/redact_config.go), which resolves to the same
+	// account server-side and is what support actually looks the user up by —
+	// the email was a second, weaker copy of an identifier we already ship.
+	// The plan stays because it is diagnostic: a feature failing on a free
+	// account is not a bug.
+	return fmt.Sprintf("registered [%s]", resp.User.Plan), nil
 }
 
 func doctorDownloadSpecs(cfg *config.Config) []doctor.Spec {

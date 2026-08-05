@@ -48,6 +48,15 @@ const keyPrefixLen = 8
 type Scrubber struct {
 	literals []string
 	patterns []*regexp.Regexp
+	rewrites []rewrite
+}
+
+// rewrite replaces a match with a readable stand-in rather than erasing it.
+// Used for the home directory, where "[REDACTED]/Media" would be worse than
+// "~/Media" for both the reader and the person diagnosing the problem.
+type rewrite struct {
+	re *regexp.Regexp
+	to string
 }
 
 // secretPatterns are the shapes of credentials that never pass through Config.
@@ -71,13 +80,21 @@ var secretPatterns = []*regexp.Regexp{
 	// A bare 44-character base64 blob with the trailing '=' — the exact shape of
 	// a WireGuard key, and of most 32-byte secrets rendered for a config file.
 	regexp.MustCompile(`([A-Za-z0-9+/]{43}=)`),
+	// An email address, anywhere. Not a credential — an identity, and the one
+	// piece of PII that arrives in text nobody wrote for the bundle: an API
+	// error quoting the account, a WebDAV 401, a notification target. The
+	// doctor report used to print the account holder's address outright (see
+	// doctorAgentRegistration); this is the net under that fix, for the copies
+	// that come from somewhere else. The whole match goes: unlike a key=value
+	// secret, there is no useful prefix to keep.
+	regexp.MustCompile(`(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`),
 }
 
 // NewScrubber builds the scrubber for one bundle run. It reads the values of
 // every field classified Secret — by path, through reflection — so a newly
 // classified credential starts being erased from logs with no further wiring.
 func NewScrubber(c config.Config) *Scrubber {
-	s := &Scrubber{patterns: secretPatterns}
+	s := &Scrubber{patterns: secretPatterns, rewrites: homeRewrites()}
 	v := reflect.ValueOf(c)
 	for _, path := range secretPaths() {
 		fv := valueAt(v, path)
@@ -117,6 +134,12 @@ func (s *Scrubber) Text(b []byte) []byte {
 		out = re.ReplaceAllStringFunc(out, func(m string) string {
 			return keepPrefix(re, m)
 		})
+	}
+	// Paths go LAST. A home directory that contained a secret literal has
+	// already had it erased, and running the rewrite first would have produced
+	// "~" for a path the literal pass then could not recognise.
+	for _, r := range s.rewrites {
+		out = r.re.ReplaceAllLiteralString(out, r.to)
 	}
 	return []byte(out)
 }
