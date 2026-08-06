@@ -211,27 +211,93 @@ func TestCleanupArchives_KeepsUserFiles(t *testing.T) {
 }
 
 // Two unrelated sets in one directory: only the unpacked one is removed.
+//
+// REGRESSION (review finding): the earlier version of this test used
+// "showA.part01.rar" / "showB.part01.rar" — single-segment names in .partNN
+// form, the ONE combination where the stem bug could not show. Real scene names
+// are dotted and differ only in a trailing segment, and archiveStem used to drop
+// one segment too many, collapsing both sets onto "Movie.2024". Measured then:
+// archiveVolumesOf returned 4 files for a 2-file set, and cleanup deleted the
+// set that was never unpacked. Table-driven over BOTH volume forms so neither
+// can regress unnoticed.
 func TestCleanupArchives_OnlyTouchesItsOwnSet(t *testing.T) {
-	dir := t.TempDir()
-	writeFiles(t, dir, "showA.part01.rar", "showA.part02.rar", "showB.part01.rar", "showB.part02.rar")
+	for _, tc := range []struct {
+		name  string
+		mine  []string
+		other []string
+	}{
+		{
+			name:  "plain .rar/.rNN",
+			mine:  []string{"Movie.2024.1080p.BluRay.x264-GRP.rar", "Movie.2024.1080p.BluRay.x264-GRP.r00"},
+			other: []string{"Movie.2024.720p.BluRay.x264-OTHER.rar", "Movie.2024.720p.BluRay.x264-OTHER.r00"},
+		},
+		{
+			name:  "partNN.rar",
+			mine:  []string{"Show.S01E01.1080p.WEB-GRP.part01.rar", "Show.S01E01.1080p.WEB-GRP.part02.rar"},
+			other: []string{"Show.S01E01.720p.WEB-OTHER.part01.rar", "Show.S01E01.720p.WEB-OTHER.part02.rar"},
+		},
+		{
+			name:  "numbered split keeps container stripping",
+			mine:  []string{"Movie.2024.1080p-GRP.zip.001", "Movie.2024.1080p-GRP.zip.002"},
+			other: []string{"Movie.2024.720p-OTHER.zip.001", "Movie.2024.720p-OTHER.zip.002"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFiles(t, dir, append(append([]string{}, tc.mine...), tc.other...)...)
 
-	res := &ExtractDirResult{
-		Extracted:    true,
-		archiveParts: archiveVolumesOf(dir, filepath.Join(dir, "showA.part01.rar")),
-	}
-	if err := CleanupArchives(res); err != nil {
-		t.Fatal(err)
-	}
+			parts := archiveVolumesOf(dir, filepath.Join(dir, tc.mine[0]))
+			if len(parts) != len(tc.mine) {
+				t.Errorf("archiveVolumesOf returned %d files, want %d — it reached outside its own set",
+					len(parts), len(tc.mine))
+			}
 
-	for _, name := range []string{"showB.part01.rar", "showB.part02.rar"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Errorf("unrelated set member %s was deleted: %v", name, err)
+			res := &ExtractDirResult{Extracted: true, archiveParts: parts}
+			if err := CleanupArchives(res); err != nil {
+				t.Fatal(err)
+			}
+
+			for _, name := range tc.other {
+				if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+					t.Errorf("unrelated set member %s was deleted: %v", name, err)
+				}
+			}
+			// COUNTERFACTUAL: our own set really is gone, so the assertions above
+			// are not passing merely because cleanup did nothing.
+			for _, name := range tc.mine {
+				if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+					t.Errorf("own set member %s survived cleanup", name)
+				}
+			}
+		})
+	}
+}
+
+// archiveStem must not drop a segment of the release name. It decides which
+// files get deleted, so a stem shared by two different releases is data loss.
+func TestArchiveStem_KeepsFullReleaseName(t *testing.T) {
+	cases := map[string]string{
+		// Dotted scene names: everything before the volume suffix is the stem.
+		"Movie.2024.1080p.BluRay.x264-GRP.rar": "Movie.2024.1080p.BluRay.x264-GRP",
+		"Movie.2024.1080p.BluRay.x264-GRP.r00": "Movie.2024.1080p.BluRay.x264-GRP",
+		"Show.S01E01.1080p.WEB-GRP.part01.rar": "Show.S01E01.1080p.WEB-GRP",
+		// A numbered split DOES wrap a container extension, which is stripped.
+		"Movie.2024.1080p-GRP.zip.001": "Movie.2024.1080p-GRP",
+		"Movie.2024.1080p-GRP.7z.002":  "Movie.2024.1080p-GRP",
+		// ...but a numbered volume with no container keeps its last segment.
+		"Movie.2024.1080p-GRP.001": "Movie.2024.1080p-GRP",
+	}
+	for name, want := range cases {
+		if got := archiveStem(name); got != want {
+			t.Errorf("archiveStem(%q) = %q, want %q", name, got, want)
 		}
 	}
-	for _, name := range []string{"showA.part01.rar", "showA.part02.rar"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			t.Errorf("own set member %s survived: %v", name, err)
-		}
+
+	// Two releases differing only in the trailing segment MUST NOT share a stem.
+	a := archiveStem("Movie.2024.1080p-GRP.rar")
+	b := archiveStem("Movie.2024.720p-OTHER.rar")
+	if a == b {
+		t.Errorf("distinct releases collapsed onto one stem %q — cleanup would delete both", a)
 	}
 }
 

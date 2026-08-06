@@ -63,6 +63,9 @@ func TestPackedRelease_FullChain(t *testing.T) {
 			if err != nil {
 				t.Fatalf("organize: %v", err)
 			}
+			// finalizeVerified reclaims the holder right after organize; call it
+			// here so this E2E covers the same sequence the daemon runs.
+			m.removeEmptyUnpackHolder(result.FilePath)
 
 			// 1. THE POINT OF THE FIX: a playable video reached the library, not a
 			//    pile of .001/.002 parts.
@@ -89,6 +92,21 @@ func TestPackedRelease_FullChain(t *testing.T) {
 						t.Errorf("seeding torrent lost %s after organize: %v", e.Name(), err)
 					}
 				}
+			}
+
+			// 3. No leftovers: the download dir holds the seeding release and
+			//    nothing else. An orphaned ".unpacked" holder used to survive here.
+			left, err := os.ReadDir(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range left {
+				if e.Name() != filepath.Base(releaseDir) {
+					t.Errorf("leftover in the download dir: %s", e.Name())
+				}
+			}
+			if !tc.seed && len(left) != 0 {
+				t.Errorf("not seeding: the release dir should be gone, found %d entrie(s)", len(left))
 			}
 		})
 	}

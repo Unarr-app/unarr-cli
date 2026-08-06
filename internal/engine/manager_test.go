@@ -645,6 +645,89 @@ func TestExistingUnpackedSibling_IgnoresIncompleteUnpack(t *testing.T) {
 	}
 }
 
+// REGRESSION (review finding): the ".unpacked" holder is transient — organize
+// empties it and nobody owns it afterwards, so it must be reclaimed. Measured
+// before the fix: 4 re-downloads left .unpacked, .2, .3 and .4 in the download
+// dir, each one bumping the collision counter for the next unpack.
+func TestRemoveEmptyUnpackHolder(t *testing.T) {
+	m := &Manager{}
+
+	t.Run("removes our own empty holder", func(t *testing.T) {
+		out := t.TempDir()
+		child := unpackedSiblingDir(filepath.Join(out, "Show.S01E01-GRP"))
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(child); err != nil { // organize consumed the child
+			t.Fatal(err)
+		}
+
+		m.removeEmptyUnpackHolder(child)
+
+		if _, err := os.Stat(filepath.Dir(child)); !os.IsNotExist(err) {
+			t.Error("empty holder survived")
+		}
+	})
+
+	// A holder that still carries files is NOT ours to destroy: organize's
+	// no-video fallback may have left the release in there.
+	t.Run("keeps a non-empty holder", func(t *testing.T) {
+		out := t.TempDir()
+		child := unpackedSiblingDir(filepath.Join(out, "Show.S01E02-GRP"))
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(child, "show.mkv"), []byte("payload"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		m.removeEmptyUnpackHolder(child)
+
+		if _, err := os.Stat(child); err != nil {
+			t.Errorf("holder with content was removed: %v", err)
+		}
+	})
+
+	// THE guard that matters: a directory the user made must never be touched,
+	// however empty it is. Without the suffix check this would delete the parent
+	// of every in-place (non-seeding) release.
+	t.Run("never touches a directory that is not ours", func(t *testing.T) {
+		out := t.TempDir()
+		rel := filepath.Join(out, "Movies", "Show.S01E03-GRP")
+		if err := os.MkdirAll(rel, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(rel); err != nil {
+			t.Fatal(err)
+		}
+
+		m.removeEmptyUnpackHolder(rel)
+
+		if _, err := os.Stat(filepath.Join(out, "Movies")); err != nil {
+			t.Errorf("a user directory was deleted: %v", err)
+		}
+	})
+
+	t.Run("numbered holder is recognised", func(t *testing.T) {
+		out := t.TempDir()
+		holder := filepath.Join(out, "Show.S01E04-GRP"+unpackedSuffix+".3")
+		child := filepath.Join(holder, "Show.S01E04-GRP")
+		if err := os.MkdirAll(holder, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		m.removeEmptyUnpackHolder(child)
+
+		if _, err := os.Stat(holder); !os.IsNotExist(err) {
+			t.Error("numbered holder survived")
+		}
+	})
+
+	t.Run("empty path is a no-op", func(t *testing.T) {
+		m.removeEmptyUnpackHolder("")
+	})
+}
+
 // A re-download must not unpack onto a previous result.
 func TestUnpackedSiblingDir_AvoidsCollision(t *testing.T) {
 	work := t.TempDir()

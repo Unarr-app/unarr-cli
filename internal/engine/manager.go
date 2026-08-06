@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -818,6 +820,30 @@ func (m *Manager) extractPackedRelease(task *Task, result *Result) {
 	}
 }
 
+// removeEmptyUnpackHolder deletes the "<release>.unpacked" wrapper once organize
+// has emptied it. unpackedPath is the child organize worked on, so the holder is
+// its parent.
+//
+// Three guards, because this deletes a directory: the parent must carry OUR
+// suffix (never a directory the user made), os.Remove refuses a non-empty one
+// (so a partial unpack or a folder organize moved away survives), and every
+// failure is silent — an orphaned empty dir is untidy, not harmful.
+func (m *Manager) removeEmptyUnpackHolder(unpackedPath string) {
+	if unpackedPath == "" {
+		return
+	}
+	holder := filepath.Dir(unpackedPath)
+	if !strings.HasSuffix(holder, unpackedSuffix) && !unpackedNumberedRe.MatchString(holder) {
+		return // not one of ours
+	}
+	if err := os.Remove(holder); err == nil {
+		log.Printf("[extract] removed empty unpack dir %s", filepath.Base(holder))
+	}
+}
+
+// unpackedNumberedRe matches the collision-suffixed holders (".unpacked.2").
+var unpackedNumberedRe = regexp.MustCompile(regexp.QuoteMeta(unpackedSuffix) + `\.\d+$`)
+
 // releaseDirLocks serializes post-processing per release directory. Entries are
 // reference-counted and dropped when the last holder releases, so the map does
 // not grow with every download the daemon ever ran.
@@ -934,6 +960,16 @@ func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Resu
 	if result.Method != MethodUsenet {
 		m.extractPackedRelease(task, result)
 	}
+
+	// The unpack holder is transient: organize moves the video out of the child
+	// and cleanupReleaseDir removes the child, leaving an empty "<release>.unpacked"
+	// that nobody owns — seedAndDrop knows only about the torrent. Left alone they
+	// pile up in the user's download dir (measured: 4 re-downloads → .unpacked, .2,
+	// .3, .4) and each one bumps the collision counter for the next unpack.
+	// Deliberately AFTER organize and best-effort: os.Remove refuses a non-empty
+	// directory, so a holder still carrying files (organize's no-video fallback
+	// moved the child away, or a partial unpack) is never destroyed here.
+	defer m.removeEmptyUnpackHolder(result.FilePath)
 
 	finalPath, err := organize(result, task, m.cfg.Organize)
 	if err != nil {

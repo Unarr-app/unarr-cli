@@ -198,16 +198,40 @@ func archiveVolumesOf(dir, entryPath string) []string {
 // volume of a set maps to the same key:
 //
 //	show.part01.rar → show    show.r00  → show    show.zip.001 → show
-var volumeSuffixRe = regexp.MustCompile(`(?i)(\.part\d+)?\.(rar|r\d{2}|s\d{2}|\d{3})$`)
+//
+// The stem decides which files CleanupArchives deletes, so collapsing two
+// different sets onto one key silently destroys the set that was never
+// unpacked. Scene names are dotted (Movie.2024.1080p.BluRay-GRP), which makes
+// "drop one more dotted segment" a data-loss bug rather than a cosmetic one.
+var volumeSuffixRe = regexp.MustCompile(`(?i)(\.part\d+)?\.(rar|r\d{2}|s\d{2}|(\d{3}))$`)
+
+// archiveContainerExts are the inner extensions a numbered split may wrap:
+// "<base>.zip.001". Only these are stripped, so a release whose name merely
+// ends in a dotted segment keeps it.
+var archiveContainerExts = map[string]bool{
+	".zip": true, ".7z": true, ".rar": true, ".tar": true,
+}
 
 func archiveStem(name string) string {
-	trimmed := volumeSuffixRe.ReplaceAllString(name, "")
-	if trimmed == name {
+	m := volumeSuffixRe.FindStringSubmatch(name)
+	if m == nil {
 		return "" // not a recognised volume name
 	}
-	// A split set names its members "<base>.zip.001"; drop the inner container
-	// extension so .001/.002 share the stem of the set.
-	return strings.TrimSuffix(trimmed, filepath.Ext(trimmed))
+	trimmed := name[:len(name)-len(m[0])]
+
+	// ONLY a numbered volume (.001) can carry a container extension inside the
+	// name. For .rar/.rNN/.partNN.rar the regex already consumed the whole
+	// suffix, and trimming another extension would eat a real segment of the
+	// release name: "Movie.2024.1080p-GRP.rar" and "Movie.2024.720p-OTHER.rar"
+	// both collapsed to "Movie.2024", so cleaning up one set deleted the other.
+	// Measured: archiveVolumesOf returned 4 files for a 2-file set.
+	if m[3] == "" {
+		return trimmed
+	}
+	if ext := filepath.Ext(trimmed); archiveContainerExts[strings.ToLower(ext)] {
+		return strings.TrimSuffix(trimmed, ext)
+	}
+	return trimmed
 }
 
 // findFirstRarInDir is findFirstRar addressed by directory instead of by the
@@ -253,6 +277,15 @@ func findFirstRarInDir(dir string) string {
 	}
 	if len(rars) > 0 {
 		sort.Slice(rars, func(i, j int) bool { return len(rars[i]) < len(rars[j]) })
+		// KNOWN GAP (deliberate, not an oversight): unlike priority 3 this does
+		// NOT check for an archive header, so a junk ".rar" sitting next to a
+		// valid split set wins on name length and the release reaches the library
+		// packed. No data is lost — the failed extraction aborts before any
+		// cleanup — and requiring magic here is NOT a free tightening: it would
+		// discard a real archive whose first bytes cannot be read (permissions, a
+		// flaky mount) and silently reclassify the release as "no archive". That
+		// trade needs its own decision, so the gap is documented rather than
+		// papered over.
 		return filepath.Join(dir, rars[0])
 	}
 
