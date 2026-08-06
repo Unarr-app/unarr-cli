@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
@@ -227,4 +228,43 @@ func TestProbeDHTReachesTheBootstrapNodes(t *testing.T) {
 		t.Fatalf("reported success with %d nodes", n)
 	}
 	t.Logf("%d bootstrap node(s) answered", n)
+}
+
+// An unregistered agent must not be registered as a SIDE EFFECT of running
+// doctor: that mints a server-side record for a machine nobody set up, which is
+// a change, not a check.
+func TestFeatureCacheRefusesToRegisterAnUnregisteredAgent(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.APIKey = "sk_live_whatever"
+	cfg.Agent.ID = "" // never registered
+
+	// No HTTP server is stubbed here on purpose: if this reached the network at
+	// all the test would hang or fail on dial, so a fast "not registered" is
+	// itself the evidence that no call was made.
+	_, err := newFeatureCache(&cfg)()
+	if err == nil {
+		t.Fatal("an unregistered agent must not be registered by a diagnostic")
+	}
+	if !strings.Contains(err.Error(), "not registered") {
+		t.Errorf("err = %v, want it to name the reason", err)
+	}
+}
+
+// The cache exists so three checks share one Register round-trip instead of
+// making three.
+func TestFeatureCacheCallsOnce(t *testing.T) {
+	calls := 0
+	var once sync.Once
+	fn := featureFn(func() (agent.FeatureFlags, error) {
+		once.Do(func() { calls++ })
+		return agent.FeatureFlags{Torrent: true}, nil
+	})
+	for range 3 {
+		if _, err := fn(); err != nil {
+			t.Fatalf("unexpected: %v", err)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("memoised call ran %d times", calls)
+	}
 }

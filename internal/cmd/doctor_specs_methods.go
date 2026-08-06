@@ -80,6 +80,16 @@ func newFeatureCache(cfg *config.Config) featureFn {
 				err = fmt.Errorf("no API key")
 				return
 			}
+			// An UNREGISTERED agent must not call Register here. This is a
+			// diagnostic: registering as a side effect of running `unarr
+			// doctor` would mint an agent record on the server for a machine
+			// that has not been set up, which is a change, not a check. The
+			// "Agent registration" check guards the same way and points the
+			// user at `unarr doctor --fix` or `unarr init`.
+			if cfg.Agent.ID == "" {
+				err = fmt.Errorf("agent not registered")
+				return
+			}
 			ac := agent.NewClient(cfg.Auth.APIURL, key, "unarr/"+Version)
 			ctx, cancel := context.WithTimeout(context.Background(), methodProbeTimeout)
 			defer cancel()
@@ -126,19 +136,25 @@ func usenetConnectivityResult(cfg *config.Config, features featureFn) (string, e
 		return "!usenet is in preferred_methods but this account has no usenet add-on", nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), methodProbeTimeout)
-	defer cancel()
-
 	// The agent holds no usenet credentials of its own — the server issues them
 	// per session (see UsenetDownloader.getOrCreateNNTP), so this is the same
 	// path a real download takes, not a parallel one that could drift.
+	credCtx, cancelCreds := context.WithTimeout(context.Background(), methodProbeTimeout)
+	defer cancelCreds()
 	key := effectiveAPIKey(cfg)
 	ac := agent.NewClient(cfg.Auth.APIURL, key, "unarr/"+Version)
-	creds, err := ac.GetUsenetCredentials(ctx)
+	creds, err := ac.GetUsenetCredentials(credCtx)
 	if err != nil {
 		return "the API would not issue usenet credentials", err
 	}
-	return probeNNTP(ctx, creds)
+
+	// A BUDGET OF ITS OWN, not the remainder of the one above. Sharing a single
+	// deadline meant a slow credential call silently ate the login's time, so a
+	// healthy NNTP server would be reported as unreachable because the API took
+	// eight of the ten seconds.
+	loginCtx, cancelLogin := context.WithTimeout(context.Background(), methodProbeTimeout)
+	defer cancelLogin()
+	return probeNNTP(loginCtx, creds)
 }
 
 // probeNNTP opens ONE connection and authenticates.
@@ -228,53 +244,76 @@ func probeDHT() (int, error) {
 		conn.Close()
 		return 0, err
 	}
-	defer server.Close()
 
 	addrs, err := dht.GlobalBootstrapAddrs("udp")
 	if err != nil {
+		server.Close()
 		return 0, fmt.Errorf("bootstrap addresses did not resolve: %w", err)
 	}
-	return pingBootstrapNodes(server, addrs)
+
+	answered, wait, err := pingBootstrapNodes(server, addrs)
+	// CLOSED ONLY ONCE EVERY PING HAS RETURNED, and in the background so the
+	// deadline above is still what the user waits for.
+	//
+	// `defer server.Close()` was wrong here. This function returns as soon as
+	// the deadline fires, which leaves ping goroutines sitting inside
+	// Server.Query — and Query is called with context.TODO() upstream, so
+	// nothing cancels them but the library's own transaction timeout. Closing
+	// underneath them means calling into a server whose socket is being closed
+	// concurrently. Reading dht's Close() suggests it survives that; "suggests"
+	// is not a guarantee worth taking when waiting costs nothing.
+	go func() {
+		wait()
+		server.Close()
+	}()
+	return answered, err
 }
 
-// pingBootstrapNodes pings every bootstrap address at once and returns as soon
-// as one answers. They are pinged in parallel because the failure being tested
-// for is silence: walking them one at a time would multiply the timeout by the
-// number of nodes, and one answer is all the question needs.
-func pingBootstrapNodes(server *dht.Server, addrs []dht.Addr) (int, error) {
-	type result struct{ ok bool }
-	ch := make(chan result, len(addrs))
+// pingBootstrapNodes pings every bootstrap address at once, in parallel because
+// the failure being tested for is silence: walking them one at a time would
+// multiply the timeout by the number of nodes, and one answer is all the
+// question needs.
+//
+// It returns a wait function alongside the count. The caller must not close the
+// server until that returns — the goroutines outlive the deadline (see
+// probeDHT). The result channel is buffered to the full width so a goroutine
+// finishing after everyone stopped listening still exits instead of leaking.
+func pingBootstrapNodes(server *dht.Server, addrs []dht.Addr) (int, func(), error) {
+	var wg sync.WaitGroup
+	ch := make(chan bool, len(addrs))
 	for _, a := range addrs {
-		udp := a.Raw()
-		ua, ok := udp.(*net.UDPAddr)
+		ua, ok := a.Raw().(*net.UDPAddr)
 		if !ok {
-			ch <- result{}
+			ch <- false
 			continue
 		}
+		wg.Add(1)
 		go func(node *net.UDPAddr) {
-			ch <- result{ok: server.Ping(node).ToError() == nil}
+			defer wg.Done()
+			ch <- server.Ping(node).ToError() == nil
 		}(ua)
 	}
+	wait := wg.Wait
 
 	deadline := time.After(dhtProbeTimeout)
 	answered := 0
 	for range addrs {
 		select {
-		case r := <-ch:
-			if r.ok {
+		case ok := <-ch:
+			if ok {
 				answered++
 			}
 		case <-deadline:
 			if answered > 0 {
-				return answered, nil
+				return answered, wait, nil
 			}
-			return 0, fmt.Errorf("no bootstrap node answered in %s (UDP may be blocked)", dhtProbeTimeout)
+			return 0, wait, fmt.Errorf("no bootstrap node answered in %s (UDP may be blocked)", dhtProbeTimeout)
 		}
 	}
 	if answered == 0 {
-		return 0, fmt.Errorf("every bootstrap node refused or timed out")
+		return 0, wait, fmt.Errorf("every bootstrap node refused or timed out")
 	}
-	return answered, nil
+	return answered, wait, nil
 }
 
 // debridResult is the one method with nothing local to probe: the agent holds
