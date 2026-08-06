@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-08-06
+
+
+### Added
+
+- **bench**: expose the transcode ceiling the code already measures, plus disk and net
+- **config**: report unknown and out-of-range keys instead of dropping them
+- **docker**: add a HEALTHCHECK, and `unarr doctor --quick` to drive it
+- **doctor**: probe the download methods that are actually in use (A1.6)
+- **doctor**: check the library directories and the streaming ports (A1.3, A1.5)
+- **doctor**: add a Media group, because a host with no ffmpeg passed every check
+- **funnel**: download cloudflared on Windows, and fix what the CI was hiding
+- **logs**: give the daemon ownership of its log, add `unarr logs`, make rotation opt-in
+- **support**: add `unarr support-bundle`, allowlist-redacted and never uploaded
+
+### Changed
+
+- **doctor**: make the checks data, and add `unarr doctor --json`
+
+### Fixed
+
+- **ci**: make the windows and macos jobs pass, and fix the bug they were hiding
+- **daemon**: write the service file atomically so a reinstall cannot destroy a working install
+- **desktop**: make a crash report carry the crash, and stop calling a reboot one
+- **doctor**: par2 said "not needed" on a machine that downloads usenet
+- **doctor**: a wildcard bind is not proof a port is free on Windows
+- **doctor**: three defects the review of A1.6 found in its own code
+- **doctor**: report out-of-range config values, not just misspelled keys
+- **doctor**: spell out the pass case so exhaustive keeps guarding the switch
+- **engine**: a cross-device move that cannot delete its source is a duplication, not a move
+- **engine**: serialise every Task field access behind its mutex
+- **funnel**: stop retrying a download the code knows can never succeed
+- **logs**: keep every log line ASCII, so every reader can read it
+- **status**: reject a state file written before this host booted
+- **support**: stop the bundle publishing the user's name, and publish the agent ID instead
 ## [1.9.0] - 2026-08-04
 
 
@@ -18,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **usenet-stream**: make the cost guards hold what their comments promise
 - **usenet-stream**: keep each segment's own size estimate in the offset index
 - **usenet-stream**: stop the stream path overfetching hundreds of MB
+
+### Other
+
+- **release**: 1.9.0
 ## [1.8.2] - 2026-08-03
 
 
@@ -1441,6 +1480,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.10.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.8.2...v1.9.0
 [1.8.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.8.0...v1.8.1
