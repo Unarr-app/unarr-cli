@@ -162,16 +162,30 @@ func lanReachabilityResult(port int) (string, error) {
 	return fmt.Sprintf("%s answers", url), nil
 }
 
-// portIsFree reports whether the port can be bound right now. It binds on all
-// interfaces, not loopback: a daemon listening on 0.0.0.0 leaves 127.0.0.1
-// bindable on some stacks, and a check that came back "free" for a port our own
-// daemon is serving would be worse than no check.
+// portIsFree reports whether the port can be bound right now.
+//
+// BOTH the wildcard address and loopback are tried, and the port counts as free
+// only if both succeed. One is not enough, and Windows is why: there, binding
+// 0.0.0.0:P SUCCEEDS while another process holds 127.0.0.1:P — the two are not
+// considered a conflict without SO_EXCLUSIVEADDRUSE. A wildcard-only test
+// therefore reported "port is free" for a port that was demonstrably taken,
+// which is the worst answer this check can give: it is the reassuring one.
+// (Found by running these tests on the Windows VM; on Linux the wildcard bind
+// fails in that situation and the bug is invisible.)
+//
+// Checking loopback alone has the mirror problem — a daemon bound to 0.0.0.0
+// can leave 127.0.0.1 bindable on some stacks — so the answer is to ask both.
 func portIsFree(port int) (bool, error) {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return false, err
+	for _, addr := range []string{fmt.Sprintf(":%d", port), fmt.Sprintf("127.0.0.1:%d", port)} {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return false, err
+		}
+		if err := ln.Close(); err != nil {
+			return false, err
+		}
 	}
-	return true, ln.Close()
+	return true, nil
 }
 
 // isAddrInUse distinguishes "taken" from every other bind failure without

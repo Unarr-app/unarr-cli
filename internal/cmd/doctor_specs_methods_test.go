@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -266,5 +269,70 @@ func TestFeatureCacheCallsOnce(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("memoised call ran %d times", calls)
+	}
+}
+
+// The whole usenet chain, end to end, with no credentials and no network: a
+// stub API issues NNTP credentials that point at the fake NNTP server, and the
+// check logs in against it.
+//
+// The unit tests above each cover one link. This is the one that would catch
+// the links being wired to each other wrongly — a changed endpoint path, a
+// field that stops being populated, a context that is already expired by the
+// time the login starts.
+func TestUsenetCheckEndToEndThroughAStubbedAPI(t *testing.T) {
+	nntpSrv := nntptest.NewFakeServer(t)
+	nntpSrv.RequireCorrectAuth()
+	c := nntpSrv.Config()
+
+	var credsHits int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/internal/agent/usenet-credentials" {
+			http.NotFound(w, r)
+			return
+		}
+		credsHits++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"host": c.Host, "port": c.Port, "ssl": false,
+			"username": c.Username, "password": c.Password,
+			"maxConnections": 8,
+		})
+	}))
+	t.Cleanup(api.Close)
+
+	cfg := config.Default()
+	cfg.Auth.APIURL = api.URL
+	cfg.Auth.APIKey = "sk_live_stub"
+	cfg.Download.PreferredMethods = []string{"usenet"}
+
+	msg, err := usenetConnectivityResult(&cfg, staticFeatures(agent.FeatureFlags{Usenet: true}))
+	if err != nil {
+		t.Fatalf("the full chain must succeed: %v (%s)", err, msg)
+	}
+	if credsHits != 1 {
+		t.Errorf("the credentials endpoint was called %d times, want exactly 1", credsHits)
+	}
+	if !strings.Contains(msg, "8 connection slots") {
+		t.Errorf("the slot count did not survive the round-trip: %q", msg)
+	}
+}
+
+// An API that will not issue credentials is a FAILURE, not a warning: usenet is
+// in preferred_methods, the account has the add-on, and downloads cannot start.
+func TestUsenetCheckFailsWhenTheAPIWillNotIssueCredentials(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"subscription expired"}`, http.StatusForbidden)
+	}))
+	t.Cleanup(api.Close)
+
+	cfg := config.Default()
+	cfg.Auth.APIURL = api.URL
+	cfg.Auth.APIKey = "sk_live_stub"
+	cfg.Download.PreferredMethods = []string{"usenet"}
+
+	msg, err := usenetConnectivityResult(&cfg, staticFeatures(agent.FeatureFlags{Usenet: true}))
+	if err == nil {
+		t.Fatalf("a refused credential issue must FAIL, got %q", msg)
 	}
 }

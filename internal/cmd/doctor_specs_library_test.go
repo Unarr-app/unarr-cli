@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -77,6 +78,15 @@ func TestProbeLibraryDirReportsMissingAndNotADirectory(t *testing.T) {
 }
 
 func TestProbeLibraryDirReportsAnUnwritableDirectory(t *testing.T) {
+	// Windows does not implement the POSIX write bit: os.Mkdir(dir, 0o500)
+	// produces a directory files can still be created in, so the condition
+	// cannot be set up at all. Measured on the Windows VM, where this test
+	// failed with an empty finding — the harness's fault, not the check's.
+	// Permission problems there present as ACL denials, which need a real ACL
+	// to reproduce and are out of this test's scope.
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows ignores the POSIX write bit; an unwritable directory needs an ACL to set up")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the write bit, so there is nothing to detect")
 	}
