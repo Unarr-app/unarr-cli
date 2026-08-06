@@ -19,6 +19,11 @@ import (
 // archive that confuses the tool) hangs the post-process pipeline forever.
 const extractTimeout = 30 * time.Minute
 
+// passwordProbeTimeout caps the encryption probe. It only reads the archive's
+// headers, so anything longer means a hung process (typically a volume on an
+// unresponsive network mount) rather than slow work.
+const passwordProbeTimeout = 60 * time.Second
+
 // validatePassword rejects passwords containing control characters that could
 // inject extra answers into unrar/7z prompts via stdin (e.g. a newline lets an
 // attacker-controlled NZB password feed a second response to overwrite or
@@ -194,20 +199,41 @@ func IsPasswordProtected(archivePath string) bool {
 		return false
 	}
 
+	// Bounded, and much tighter than extractTimeout: this only has to read the
+	// archive's headers, so a probe that runs for minutes is a hung process, not
+	// slow work. It used to have no timeout at all — tolerable while only usenet
+	// reached it, but this is now on the path of every multi-file torrent, and a
+	// volume on a wedged NFS mount would block the task goroutine forever while
+	// holding the release-directory lock.
+	//
+	// A timeout answers "not password protected": the caller then attempts the
+	// extraction, which has its own timeout and reports a real error. Answering
+	// "protected" instead would silently skip a release nobody locked.
+	ctx, cancel := context.WithTimeout(context.Background(), passwordProbeTimeout)
+	defer cancel()
+
 	switch extType { //nolint:exhaustive // ExtractorNone handled above
 	case ExtractorUnrar:
-		cmd := exec.Command(extPath, "t", "-p-", archivePath)
+		cmd := exec.CommandContext(ctx, extPath, "t", "-p-", archivePath)
 		winproc.HideWindow(cmd)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
+			if ctx.Err() != nil {
+				log.Printf("[extract] password probe timed out after %s on %s", passwordProbeTimeout, filepath.Base(archivePath))
+				return false
+			}
 			outStr := string(output)
 			return strings.Contains(outStr, "password") || strings.Contains(outStr, "encrypted")
 		}
 	case Extractor7z:
-		cmd := exec.Command(extPath, "t", "-p", archivePath)
+		cmd := exec.CommandContext(ctx, extPath, "t", "-p", archivePath)
 		winproc.HideWindow(cmd)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
+			if ctx.Err() != nil {
+				log.Printf("[extract] password probe timed out after %s on %s", passwordProbeTimeout, filepath.Base(archivePath))
+				return false
+			}
 			outStr := string(output)
 			return strings.Contains(outStr, "Wrong password") || strings.Contains(outStr, "encrypted")
 		}

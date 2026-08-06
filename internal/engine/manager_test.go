@@ -830,3 +830,70 @@ func TestExtractPackedRelease_IgnoresSingleFileResult(t *testing.T) {
 		t.Errorf("single-file result was touched: %v", err)
 	}
 }
+
+// REGRESSION (review finding, CRITICAL): a daemon killed mid-extraction left a
+// half-written video behind, and the resumed task ADOPTED it as finished — a
+// 3 MiB file of a 2 GB film filed into the library, reported COMPLETED, resume
+// entry dropped, no recovery. Measured.
+//
+// The fix makes existence mean completion: the unpack is written to a ".tmp"
+// holder and renamed into place only after the extractor succeeds. A size floor
+// cannot substitute for that — any real video crosses it in the first second of
+// writing.
+func TestExtractPackedRelease_NeverAdoptsUnfinishedUnpack(t *testing.T) {
+	out := t.TempDir()
+	rel := filepath.Join(out, "Show.S01E01-GRP")
+	if err := os.MkdirAll(rel, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// What a crash during extraction leaves: a ".tmp" holder with a partial
+	// video that is comfortably over the plausible-video floor.
+	final := unpackedSiblingDir(rel)
+	tmpHolder := filepath.Dir(final) + unpackedTmpSuffix
+	partial := filepath.Join(tmpHolder, filepath.Base(final))
+	if err := os.MkdirAll(partial, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(partial, "show.mkv"), make([]byte, 3<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := existingUnpackedSibling(rel); got != "" {
+		t.Errorf("adopted an unfinished unpack at %q", got)
+	}
+}
+
+// The other half of the guarantee: a COMPLETED unpack really is renamed into
+// place, adoptable, and leaves no ".tmp" behind. Without this the test above
+// would pass with adoption broken outright.
+func TestExtractPackedRelease_FinishedUnpackIsRenamedIntoPlace(t *testing.T) {
+	out := t.TempDir()
+	src := buildPackedRelease(t, "show.mkv")
+	rel := filepath.Join(out, "Show.S01E02-GRP")
+	if err := os.Rename(src, rel); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Manager{cfg: ManagerConfig{SeedEnabled: true, OutputDir: out}}
+	result := &Result{FilePath: rel, Method: MethodTorrent}
+	m.extractPackedRelease(&Task{ID: "rename-test"}, result)
+
+	if _, err := os.Stat(filepath.Join(result.FilePath, "show.mkv")); err != nil {
+		t.Fatalf("payload missing after the finalizing rename: %v", err)
+	}
+	entries, err := os.ReadDir(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), unpackedTmpSuffix) {
+			t.Errorf("a %q holder survived a successful extraction: %s", unpackedTmpSuffix, e.Name())
+		}
+	}
+	// And it is now adoptable, which is what makes the concurrent-task and
+	// resume paths reuse it instead of unpacking again.
+	if existingUnpackedSibling(rel) == "" {
+		t.Error("a finished unpack is not adoptable")
+	}
+}

@@ -757,6 +757,9 @@ func (m *Manager) extractPackedRelease(task *Task, result *Result) {
 	// release dir was gone while the torrent was still being served.
 	srcDir := result.FilePath
 	destDir := srcDir
+	// finalDir is where a seeding unpack ENDS UP; destDir is the ".tmp" it is
+	// written to first. Equal to destDir (both srcDir) on the in-place path.
+	finalDir := srcDir
 	if m.cfg.SeedEnabled {
 		// A sibling from a concurrent finalization of this same release is a
 		// finished unpack, not a collision: adopt it instead of unpacking the
@@ -769,13 +772,46 @@ func (m *Manager) extractPackedRelease(task *Task, result *Result) {
 			result.FilePath = existing
 			return
 		}
-		destDir = unpackedSiblingDir(srcDir)
+		// Unpack into a ".tmp" holder and rename it into place only once the
+		// extractor has finished. The rename is what makes "the sibling exists"
+		// mean "the unpack completed": without it a daemon killed mid-extraction
+		// (OOM, power cut) left a half-written video that the resumed task then
+		// ADOPTED as finished — a 3 MiB file of a 2 GB film filed into the
+		// library, reported COMPLETED, resume entry dropped. Measured.
+		// A size floor cannot substitute for this: any real video crosses it in
+		// the first second of writing.
+		finalDir = unpackedSiblingDir(srcDir)
+		// The ".tmp" marker goes on the HOLDER, not on the child: the child is
+		// named after the release (organize's no-video fallback renames it into
+		// the library as-is), and it is the holder that gets renamed into place.
+		tmpHolder := filepath.Dir(finalDir) + unpackedTmpSuffix
+		destDir = filepath.Join(tmpHolder, filepath.Base(finalDir))
+		// A ".tmp" left by an earlier crash is stale by definition — the rename
+		// never happened — so it is never adopted, only replaced.
+		if err := os.RemoveAll(tmpHolder); err != nil {
+			log.Printf("[%s] could not clear stale unpack dir %s: %v", shortID, filepath.Base(tmpHolder), err)
+			return
+		}
 	}
 
 	// NzbPassword is the only password the task carries. It is usenet-sourced,
 	// but a user who typed one for a release is describing THAT release, so
 	// honour it here too rather than adding a second field that means the same
 	// thing. Empty for the overwhelming majority of torrents.
+	// Any exit that is not a completed unpack leaves no ".tmp" behind: a partial
+	// one is dead weight (it is never adopted) and, on a 40 GB release, a lot of
+	// it.
+	if destDir != srcDir {
+		tmpHolder := filepath.Dir(destDir)
+		defer func() {
+			if _, err := os.Stat(tmpHolder); err == nil {
+				if rmErr := os.RemoveAll(tmpHolder); rmErr != nil {
+					log.Printf("[%s] could not remove partial unpack %s: %v", shortID, filepath.Base(tmpHolder), rmErr)
+				}
+			}
+		}()
+	}
+
 	res, err := postprocess.ExtractInDirTo(srcDir, destDir, task.NzbPassword)
 	if err != nil {
 		if _, ok := err.(*postprocess.PasswordError); ok {
@@ -794,6 +830,19 @@ func (m *Manager) extractPackedRelease(task *Task, result *Result) {
 	}
 
 	log.Printf("[%s] extracted packed release (%d file(s))", shortID, len(res.Files))
+
+	if destDir != srcDir {
+		// THE completion marker: the unpack only becomes visible under its final
+		// name once the extractor has returned successfully. A rename within one
+		// directory is atomic, so a crash leaves either a ".tmp" (ignored, and
+		// cleared on the next attempt) or a finished unpack — never a truncated
+		// one wearing the finished name.
+		if err := os.Rename(filepath.Dir(destDir), filepath.Dir(finalDir)); err != nil {
+			log.Printf("[%s] could not finalize unpack %s: %v", shortID, filepath.Base(finalDir), err)
+			return // the deferred cleanup removes the ".tmp"
+		}
+		destDir = finalDir
+	}
 
 	if destDir != srcDir {
 		// Seeding: the payload now lives in the sibling, so organize must look
@@ -911,6 +960,11 @@ func (m *Manager) lockReleaseDir(dir string) func() {
 
 // unpackedSuffix marks a directory as our unpack of the sibling release.
 const unpackedSuffix = ".unpacked"
+
+// unpackedTmpSuffix marks an unpack still being written. It is renamed onto the
+// final name only after the extractor succeeds, so a directory WITHOUT this
+// suffix is by definition complete.
+const unpackedTmpSuffix = ".tmp"
 
 // maxUnpackedSiblings bounds the collision search, mirroring versionDistinctPath.
 // Reaching it means something is wrong (a directory nobody is consuming); loop
