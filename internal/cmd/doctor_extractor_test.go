@@ -7,10 +7,14 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/usenet/postprocess"
 )
 
-// The extractor check must warn when NOTHING is installed. This is the branch
-// that matters and the one a real machine never exercises, so it is stubbed
-// rather than skipped.
-func TestExtractorCheckResult_WarnsWhenMissing(t *testing.T) {
+// With nothing installed the check must NOT warn any more.
+//
+// It used to: before extraction moved in-process, no binary meant a packed
+// release was left as raw .rNN parts, and the "!" prefix rendered that as a
+// warning telling the user to apt-install unrar. Now the built-in extractor
+// handles it, so warning here would send users to install something they do not
+// need — and a doctor that cries wolf is a doctor nobody reads.
+func TestExtractorCheckResult_NoWarningWhenNothingInstalled(t *testing.T) {
 	orig := findExtractor
 	findExtractor = func() (postprocess.ExtractorType, string) {
 		return postprocess.ExtractorNone, ""
@@ -19,22 +23,22 @@ func TestExtractorCheckResult_WarnsWhenMissing(t *testing.T) {
 
 	msg, err := extractorCheckResult()
 	if err != nil {
-		t.Fatalf("a missing extractor is a warning, not an error: %v", err)
+		t.Fatalf("a missing external extractor is not an error: %v", err)
 	}
-	// The leading "!" is what renders the line as a warning instead of a pass;
-	// without it the user sees a green tick saying nothing is installed.
-	if !strings.HasPrefix(msg, "!") {
-		t.Errorf("missing extractor did not render as a warning: %q", msg)
+	// The leading "!" is what renders a line as a warning.
+	if strings.HasPrefix(msg, "!") {
+		t.Errorf("missing external extractor still renders as a warning: %q", msg)
 	}
-	if !strings.Contains(msg, "unrar") && !strings.Contains(msg, "7z") {
-		t.Errorf("warning does not tell the user what to install: %q", msg)
+	// The user must still learn that extraction IS covered, or the line reads
+	// as if nothing can unpack anything.
+	if !strings.Contains(msg, "built-in") {
+		t.Errorf("result does not say extraction is built in: %q", msg)
 	}
 }
 
-// COUNTERFACTUAL: with an extractor present the check passes and names it.
-// Without this, the test above would still pass if the check warned
-// unconditionally — which would train users to ignore the line.
-func TestExtractorCheckResult_PassesWhenInstalled(t *testing.T) {
+// COUNTERFACTUAL: an installed binary is named, so the test above is not
+// passing merely because the check returns the same string regardless.
+func TestExtractorCheckResult_NamesTheFallbackWhenInstalled(t *testing.T) {
 	orig := findExtractor
 	findExtractor = func() (postprocess.ExtractorType, string) {
 		return postprocess.ExtractorUnrar, "/usr/bin/unrar"
@@ -50,6 +54,11 @@ func TestExtractorCheckResult_PassesWhenInstalled(t *testing.T) {
 	}
 	if !strings.Contains(msg, "unrar") {
 		t.Errorf("result does not name the extractor found: %q", msg)
+	}
+	// And it is described as what it now is — a fallback, not the thing doing
+	// the work.
+	if !strings.Contains(msg, "fallback") {
+		t.Errorf("external extractor not described as a fallback: %q", msg)
 	}
 }
 
