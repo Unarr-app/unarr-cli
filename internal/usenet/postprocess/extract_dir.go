@@ -213,29 +213,40 @@ func archiveVolumesOf(dir, entryPath string) []string {
 // both became "Movie-GRP". Both returned 4 files for a 2-file set.
 //
 // Returns "" for a name that is not a recognised volume.
-var volumeSuffixRe = regexp.MustCompile(`(?i)(\.part\d+)?\.(rar|r\d{2}|s\d{2}|(\d{3}))$`)
+//
+// The three families are matched by SEPARATE patterns rather than one regex with
+// an optional group. The optional "(\.partNN)?" version stripped that group off
+// the base whether or not it belonged to the suffix, so "Movie.part01.001" and
+// "Movie.001" both keyed "Movie" — the round-1 segment-eating bug surviving
+// inside an optional group. Measured: 4 files deleted for a 2-file set.
+var (
+	// A part-numbered rar set: ".partNN.rar". ONLY here does ".partNN" belong to
+	// the suffix — before anything else it is part of the release name.
+	partRarVolumeRe = regexp.MustCompile(`(?i)\.part\d+\.rar$`)
+	// A classic rar set: ".rar" continuing into ".r00"…".r99", then ".s00"…
+	plainRarVolumeRe = regexp.MustCompile(`(?i)\.(rar|r\d{2}|s\d{2})$`)
+	// A numbered split: ".001", ".002"… possibly wrapping a container
+	// ("show.zip.001"), which stays in the base because it identifies the set.
+	numberedVolumeRe = regexp.MustCompile(`\.\d{3}$`)
+)
 
 func archiveStem(name string) string {
-	m := volumeSuffixRe.FindStringSubmatch(name)
-	if m == nil {
-		return "" // not a recognised volume name
+	// Order matters: ".part01.rar" also matches plainRarVolumeRe (on ".rar"),
+	// and the part-numbered reading is the correct one.
+	//
+	// The three families never share a key even on the same base, because a
+	// release ships in ONE of these forms — a directory holding two of them
+	// holds two different archives, and merging them deletes the one that was
+	// never unpacked.
+	switch {
+	case partRarVolumeRe.MatchString(name):
+		return name[:len(name)-len(partRarVolumeRe.FindString(name))] + "|partrar"
+	case plainRarVolumeRe.MatchString(name):
+		return name[:len(name)-len(plainRarVolumeRe.FindString(name))] + "|rar"
+	case numberedVolumeRe.MatchString(name):
+		return name[:len(name)-len(numberedVolumeRe.FindString(name))] + "|num"
 	}
-	base := name[:len(name)-len(m[0])]
-
-	// A numbered volume (.001) is its own family. Nothing is trimmed from the
-	// base: every volume of one split shares the SAME text before ".00N"
-	// ("show.zip.001"/"show.zip.002" → "show.zip"), so grouping needs no
-	// normalisation, and trimming would resurrect the very bug fixed above —
-	// "Movie.2024.1080p-GRP.001" would lose "-GRP" and collide with
-	// "Movie.2024.720p-OTHER.001". Keeping the container extension in the key is
-	// what also separates "show.zip.001" from "show.7z.001", two different
-	// archives of the same release.
-	if m[3] != "" {
-		return base + "|num"
-	}
-	// .rar / .rNN / .sNN / .partNN.rar all belong to ONE set — a rar archive
-	// continues into .r00 and then .s00 — so they must share a key.
-	return base + "|rar"
+	return ""
 }
 
 // findFirstRarInDir is findFirstRar addressed by directory instead of by the
