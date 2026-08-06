@@ -761,9 +761,10 @@ func (m *Manager) extractPackedRelease(task *Task, result *Result) {
 		return
 	}
 
-	// Not seeding: drop the parts, but only after a SUCCESSFUL extraction, so a
-	// release that failed to unpack keeps everything the user was served.
-	if err := postprocess.CleanupArchives(result.FilePath); err != nil {
+	// Not seeding: drop the volumes of the set we just unpacked. CleanupArchives
+	// removes exactly those and nothing else — the user's subtitles, poster and
+	// notes living in the same directory are not ours to sweep.
+	if err := postprocess.CleanupArchives(res); err != nil {
 		log.Printf("[%s] archive cleanup warning: %v", shortID, err)
 	}
 }

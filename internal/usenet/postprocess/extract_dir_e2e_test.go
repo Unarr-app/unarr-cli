@@ -89,15 +89,27 @@ func TestExtractInDir_RealSplitArchiveE2E(t *testing.T) {
 		t.Errorf("payload size = %d, want 3000000", fi.Size())
 	}
 
-	if err := CleanupArchives(dir); err != nil {
+	// Drop a couple of files that a real release carries and the user cares
+	// about. The old extension-sweep cleanup ate exactly these; the payload
+	// being a .mkv is what made the earlier version of this test miss it.
+	writeFiles(t, dir, "payload.en.srt", "poster.jpg")
+
+	if err := CleanupArchives(res); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
 	if _, err := os.Stat(out); err != nil {
 		t.Errorf("cleanup removed the payload: %v", err)
 	}
+	for _, name := range []string{"payload.en.srt", "poster.jpg"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("cleanup removed the user's %s: %v", name, err)
+		}
+	}
 	left, _ := os.ReadDir(dir)
 	for _, e := range left {
-		if e.Name() != "payload.mkv" {
+		switch e.Name() {
+		case "payload.mkv", "payload.en.srt", "poster.jpg":
+		default:
 			t.Errorf("archive part survived cleanup: %s", e.Name())
 		}
 	}

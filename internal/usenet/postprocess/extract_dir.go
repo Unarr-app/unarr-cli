@@ -5,9 +5,16 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+// findExtractorFn is an indirection over FindExtractor so the no-extractor path
+// is testable on a machine that HAS unrar/7z installed (same pattern as
+// par2VerifyFn). Without it that branch could only be covered by skipping the
+// test everywhere it matters — CI included.
+var findExtractorFn = FindExtractor
 
 // ExtractDirResult reports what ExtractInDir did.
 type ExtractDirResult struct {
@@ -16,10 +23,17 @@ type ExtractDirResult struct {
 	// Files lists the extracted files. Empty when Extracted is false.
 	Files []string
 	// Note is non-empty when an archive was present but could NOT be unpacked
-	// for a recoverable reason (no extractor installed). The caller keeps the
-	// raw payload and surfaces this, rather than failing the download — the
-	// user still gets the .rNN files and can unpack them by hand.
+	// for a recoverable reason (no extractor installed, or an extractor that
+	// produced nothing). The caller keeps the raw payload and surfaces this,
+	// rather than failing the download — the user still gets the .rNN files and
+	// can unpack them by hand.
 	Note string
+
+	// archiveParts are the volumes of the set that was unpacked. Unexported so
+	// only CleanupArchives can act on it: the deletable set is decided here,
+	// where the archive was identified, instead of re-derived by a caller that
+	// would have to guess which files in the directory belonged to it.
+	archiveParts []string
 }
 
 // ExtractInDir unpacks a RAR/split archive sitting in dir, when there is one.
@@ -48,7 +62,7 @@ func ExtractInDir(dir string, password string) (*ExtractDirResult, error) {
 		return res, nil // no archive: nothing to do, not an error
 	}
 
-	if _, extPath := FindExtractor(); extPath == "" {
+	if _, extPath := findExtractorFn(); extPath == "" {
 		res.Note = fmt.Sprintf("archive %s left packed: no extractor found (install unrar or 7z)", filepath.Base(archive))
 		log.Printf("[extract] WARNING: %s", res.Note)
 		return res, nil
@@ -64,16 +78,105 @@ func ExtractInDir(dir string, password string) (*ExtractDirResult, error) {
 		return nil, err // includes *PasswordError — the caller distinguishes it
 	}
 
+	// An extractor that exits 0 having produced NOTHING is not a success.
+	// listExtractedFiles reports the directory minus the archive parts, so a
+	// release that already held a loose video would come back non-empty even if
+	// the archive yielded nothing — and the caller would then delete "leftovers"
+	// that were never leftovers. Require real output before claiming extraction.
+	if len(files) == 0 {
+		res.Note = fmt.Sprintf("archive %s produced no files", filepath.Base(archive))
+		log.Printf("[extract] WARNING: %s", res.Note)
+		return res, nil
+	}
+
 	res.Extracted = true
 	res.Files = files
+	res.archiveParts = archiveVolumesOf(dir, archive)
 	return res, nil
 }
 
-// CleanupArchives removes the archive parts and parity/junk left behind after a
-// successful extraction. Separate from ExtractInDir so a caller can inspect the
-// extraction before destroying the source.
-func CleanupArchives(dir string) error {
-	return Cleanup(dir)
+// CleanupArchives removes the volumes of the archive that ExtractInDir actually
+// unpacked — and nothing else.
+//
+// It deliberately does NOT reuse Cleanup(): that one deletes by extension list
+// (.nfo .txt .jpg .png .sfv .url …), which is safe for usenet, where the
+// directory is a scratch space the downloader created and owns. A torrent's
+// directory is what the SWARM served: the same sweep eats the user's subtitles
+// (.txt), the poster (.jpg), the fanart (.png) and any notes they kept there.
+// Measured on a 7-file release, only the .mkv survived.
+//
+// Passing an ExtractDirResult whose extraction did not happen is a no-op.
+func CleanupArchives(res *ExtractDirResult) error {
+	if res == nil || !res.Extracted {
+		return nil
+	}
+	var firstErr error
+	for _, part := range res.archiveParts {
+		if err := os.Remove(part); err != nil && !os.IsNotExist(err) {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		log.Printf("[extract] cleanup: removing %s", filepath.Base(part))
+	}
+	return firstErr
+}
+
+// archiveVolumesOf returns every volume belonging to the archive set entered at
+// entryPath: the entry volume plus its continuation parts.
+//
+// Matching is anchored on the entry volume's own stem, so a directory holding
+// two unrelated sets only ever loses the one that was unpacked. Nothing outside
+// the set is considered, whatever its extension.
+func archiveVolumesOf(dir, entryPath string) []string {
+	entry := filepath.Base(entryPath)
+	stem := archiveStem(entry)
+	if stem == "" {
+		return []string{entryPath}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return []string{entryPath}
+	}
+
+	var parts []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if archiveStem(name) != stem {
+			continue
+		}
+		// Only ever remove things that look like archive volumes — never the
+		// payload that was just extracted next to them.
+		if !isArchiveFile(name) {
+			continue
+		}
+		parts = append(parts, filepath.Join(dir, name))
+	}
+	if len(parts) == 0 {
+		return []string{entryPath}
+	}
+	return parts
+}
+
+// archiveStem strips the volume suffix from an archive member name so every
+// volume of a set maps to the same key:
+//
+//	show.part01.rar → show    show.r00  → show    show.zip.001 → show
+var volumeSuffixRe = regexp.MustCompile(`(?i)(\.part\d+)?\.(rar|r\d{2}|s\d{2}|\d{3})$`)
+
+func archiveStem(name string) string {
+	trimmed := volumeSuffixRe.ReplaceAllString(name, "")
+	if trimmed == name {
+		return "" // not a recognised volume name
+	}
+	// A split set names its members "<base>.zip.001"; drop the inner container
+	// extension so .001/.002 share the stem of the set.
+	return strings.TrimSuffix(trimmed, filepath.Ext(trimmed))
 }
 
 // findFirstRarInDir is findFirstRar addressed by directory instead of by the
@@ -122,12 +225,53 @@ func findFirstRarInDir(dir string) string {
 		return filepath.Join(dir, rars[0])
 	}
 
-	// Priority 3: .001 split format.
+	// Priority 3: .001 split format — but ONLY when the file really is an
+	// archive. ".001" is just a numbering convention: a release can ship
+	// "video.001/.002" that are raw split DATA, not a container. Handing those
+	// to 7z makes it concatenate them into a single output, report success, and
+	// the caller would then delete the originals — turning a recoverable release
+	// into a truncated file with no source left. The magic check is what keeps
+	// "looks like a volume" from being confused with "is an archive".
 	for _, name := range names {
-		if strings.HasSuffix(strings.ToLower(name), ".001") {
-			return filepath.Join(dir, name)
+		if !strings.HasSuffix(strings.ToLower(name), ".001") {
+			continue
 		}
+		path := filepath.Join(dir, name)
+		if hasArchiveMagic(path) {
+			return path
+		}
+		log.Printf("[extract] %s looks like a split volume but carries no archive header - leaving it alone", name)
 	}
 
 	return ""
+}
+
+// hasArchiveMagic reports whether the file starts with a known archive
+// signature (RAR4/RAR5, ZIP, 7z). Used to tell a real split archive from a set
+// of raw data chunks that merely share the .00N naming convention.
+func hasArchiveMagic(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 8)
+	n, err := f.Read(buf)
+	if err != nil || n < 4 {
+		return false
+	}
+	head := string(buf[:n])
+
+	switch {
+	case strings.HasPrefix(head, "Rar!\x1a\x07"): // RAR4 and RAR5
+		return true
+	case strings.HasPrefix(head, "PK\x03\x04"), // zip: local file header
+		strings.HasPrefix(head, "PK\x05\x06"), // zip: empty archive
+		strings.HasPrefix(head, "PK\x07\x08"): // zip: spanned archive
+		return true
+	case n >= 6 && strings.HasPrefix(head, "7z\xbc\xaf\x27\x1c"):
+		return true
+	}
+	return false
 }

@@ -52,7 +52,13 @@ func TestFindFirstRarInDir_SkipsPartSetWithoutFirstVolume(t *testing.T) {
 
 func TestFindFirstRarInDir_SplitFormat(t *testing.T) {
 	dir := t.TempDir()
-	writeFiles(t, dir, "release.002", "release.001", "release.003")
+	writeFiles(t, dir, "release.002", "release.003")
+	// The entry volume must carry a real archive header: a .00N name alone is
+	// not enough (see TestFindFirstRarInDir_RejectsSplitDataWithoutArchiveMagic
+	// — raw data chunks share that convention and must not be "extracted").
+	if err := os.WriteFile(filepath.Join(dir, "release.001"), []byte("PK\x03\x04zip payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	got := findFirstRarInDir(dir)
 	if filepath.Base(got) != "release.001" {
@@ -138,10 +144,14 @@ func TestPackedReleaseHasNoVideo_TheBugPremise(t *testing.T) {
 
 // A missing extractor must degrade to "left packed", never to an error: the raw
 // parts are still what the swarm served.
+//
+// Stubs the lookup instead of skipping when an extractor is installed — the
+// earlier version skipped on any dev machine and in CI, so it never actually
+// ran and would have passed with this branch broken.
 func TestExtractInDir_NoExtractorLeavesReleaseIntact(t *testing.T) {
-	if _, path := FindExtractor(); path != "" {
-		t.Skip("an extractor is installed; cannot exercise the missing-binary path")
-	}
+	orig := findExtractorFn
+	findExtractorFn = func() (ExtractorType, string) { return ExtractorNone, "" }
+	t.Cleanup(func() { findExtractorFn = orig })
 
 	dir := t.TempDir()
 	writeFiles(t, dir, "movie.part01.rar", "movie.part02.rar")
@@ -156,7 +166,136 @@ func TestExtractInDir_NoExtractorLeavesReleaseIntact(t *testing.T) {
 	if res.Note == "" {
 		t.Error("want a Note explaining the release was left packed")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "movie.part01.rar")); err != nil {
-		t.Errorf("archive part was removed despite no extraction: %v", err)
+	for _, name := range []string{"movie.part01.rar", "movie.part02.rar"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("archive part %s was removed despite no extraction: %v", name, err)
+		}
+	}
+}
+
+// REGRESSION (review finding #2): CleanupArchives must remove ONLY the volumes
+// of the set that was unpacked. The previous implementation delegated to
+// Cleanup(), which sweeps by extension (.txt .jpg .png .nfo …) — safe on a
+// usenet scratch dir, destructive on a torrent dir the swarm served. Measured
+// then: of 7 files, only the .mkv survived.
+func TestCleanupArchives_KeepsUserFiles(t *testing.T) {
+	dir := t.TempDir()
+	keep := []string{"Movie.mkv", "Movie.en.txt", "poster.jpg", "fanart.png", "my_notes.txt", "release.nfo"}
+	parts := []string{"movie.rar", "movie.r00", "movie.r01"}
+	writeFiles(t, dir, append(append([]string{}, keep...), parts...)...)
+
+	res := &ExtractDirResult{
+		Extracted: true,
+		archiveParts: []string{
+			filepath.Join(dir, "movie.rar"),
+			filepath.Join(dir, "movie.r00"),
+			filepath.Join(dir, "movie.r01"),
+		},
+	}
+	if err := CleanupArchives(res); err != nil {
+		t.Fatalf("CleanupArchives: %v", err)
+	}
+
+	for _, name := range keep {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("user file %s was deleted: %v", name, err)
+		}
+	}
+	// COUNTERFACTUAL: the parts really are gone, so the test above is not
+	// passing merely because cleanup did nothing at all.
+	for _, name := range parts {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			t.Errorf("archive part %s survived cleanup", name)
+		}
+	}
+}
+
+// Two unrelated sets in one directory: only the unpacked one is removed.
+func TestCleanupArchives_OnlyTouchesItsOwnSet(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, "showA.part01.rar", "showA.part02.rar", "showB.part01.rar", "showB.part02.rar")
+
+	res := &ExtractDirResult{
+		Extracted:    true,
+		archiveParts: archiveVolumesOf(dir, filepath.Join(dir, "showA.part01.rar")),
+	}
+	if err := CleanupArchives(res); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"showB.part01.rar", "showB.part02.rar"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("unrelated set member %s was deleted: %v", name, err)
+		}
+	}
+	for _, name := range []string{"showA.part01.rar", "showA.part02.rar"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			t.Errorf("own set member %s survived: %v", name, err)
+		}
+	}
+}
+
+// A result that never extracted must delete nothing.
+func TestCleanupArchives_NoOpWhenNotExtracted(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, "movie.rar", "movie.r00")
+
+	if err := CleanupArchives(&ExtractDirResult{Extracted: false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupArchives(nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"movie.rar", "movie.r00"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s deleted despite no extraction: %v", name, err)
+		}
+	}
+}
+
+// REGRESSION (review finding #3): raw data chunks that merely use the .00N
+// naming convention are NOT an archive. Treating them as one made 7z
+// concatenate them and the caller delete the originals.
+func TestFindFirstRarInDir_RejectsSplitDataWithoutArchiveMagic(t *testing.T) {
+	dir := t.TempDir()
+	// Plain bytes: no archive header anywhere.
+	for _, name := range []string{"video.001", "video.002", "video.003"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("not an archive at all"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := findFirstRarInDir(dir); got != "" {
+		t.Errorf("raw split data treated as an archive: %q", filepath.Base(got))
+	}
+}
+
+// COUNTERFACTUAL for the test above: a .001 that DOES carry a zip header is
+// still picked up, so the guard rejects the right thing rather than everything.
+func TestFindFirstRarInDir_AcceptsSplitWithArchiveMagic(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "release.001"), []byte("PK\x03\x04rest of the zip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := findFirstRarInDir(dir)
+	if filepath.Base(got) != "release.001" {
+		t.Errorf("real split archive was rejected, got %q", got)
+	}
+}
+
+func TestArchiveStem(t *testing.T) {
+	cases := map[string]string{
+		"show.part01.rar": "show",
+		"show.part02.rar": "show",
+		"show.rar":        "show",
+		"show.r00":        "show",
+		"show.zip.001":    "show",
+		"show.mkv":        "", // not a volume name
+	}
+	for name, want := range cases {
+		if got := archiveStem(name); got != want {
+			t.Errorf("archiveStem(%q) = %q, want %q", name, got, want)
+		}
 	}
 }
