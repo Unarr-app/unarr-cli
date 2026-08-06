@@ -157,6 +157,10 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	}
 
 	var starts []float64
+	// Whether every interior boundary is a real keyframe. The single-pass local
+	// muxer relies on that (it cuts a linear read at those exact times); a
+	// windowed table is only exact around the resume point, so it must stay lazy.
+	exactKeyframes := false
 	switch {
 	case s.cfg.SourceURL != "":
 		// REMOTE (connector/IPTV/debrid): a keyframe index would download the
@@ -181,28 +185,17 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 		startCopyVODSubtitles(s)
 	case s.cfg.SourcePath != "":
 		// LOCAL: exact keyframe boundaries (frame-accurate seek, no GOP rounding).
-		// Prefer the scan-time sidecar (.unarr/<file>.copyseg.json) so playback
-		// skips the full demux read; on a miss, index now AND warm the sidecar so
-		// the next play (and a re-scan) is instant.
-		src := s.cfg.sourceRef()
-		kfs, ok := mediainfo.ReadCachedKeyframes(src)
-		if ok {
-			log.Printf("[hls %s] copy-vod keyframe index: sidecar hit (%d keyframes)",
-				shortHLSID(s.cfg.SessionID), len(kfs))
-		} else {
-			var err error
-			kfs, err = mediainfo.IndexKeyframes(ctx, s.cfg.Transcode.FFprobePath, src)
-			if err != nil {
-				log.Printf("[hls %s] copy-vod keyframe index failed (%v) - using EVENT copy",
-					shortHLSID(s.cfg.SessionID), err)
-				return false
-			}
-			if werr := mediainfo.WriteCachedKeyframes(src, kfs); werr != nil {
-				log.Printf("[hls %s] copy-vod keyframe sidecar write skipped: %v",
-					shortHLSID(s.cfg.SessionID), werr)
-			}
+		// Prefer the scan-time sidecar (.unarr/<file>.copyseg.json); on a miss,
+		// indexKeyframesFast plans from a bounded window around the resume point
+		// instead of blocking on the whole-file demux, and finishes the exact index
+		// in the background. exactKeyframes=false means the table is only
+		// keyframe-accurate around that window.
+		var exact, ok bool
+		starts, exact, ok = indexKeyframesFast(ctx, s, s.cfg.sourceRef())
+		if !ok {
+			return false
 		}
-		starts = planCopySegments(kfs, s.durationSec)
+		exactKeyframes = exact
 	default:
 		return false
 	}
@@ -227,8 +220,15 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	// whole-file .ts materialisation, stay LAZY: each segment is generated on
 	// demand by a per-index `-ss` spawn (GOP-overlap echo present on scene-cut
 	// sources, but it plays and doesn't download the whole remote file).
+	// The pass also requires an EXACT table: it cuts one linear read at the listed
+	// times, so a windowed table's uniform boundaries would land mid-GOP. A
+	// windowed session stays lazy (per-segment `-ss` rounds down to a real
+	// keyframe) until the background index upgrades the sidecar.
 	mode := "remote/uniform lazy"
-	if s.cfg.SourcePath != "" && launchCopyVODPass(s) {
+	if !exactKeyframes && s.cfg.SourcePath != "" {
+		mode = "local/windowed lazy"
+	}
+	if s.cfg.SourcePath != "" && exactKeyframes && launchCopyVODPass(s) {
 		mode = "local/keyframe pass"
 	} else {
 		s.copyLazy = true

@@ -73,7 +73,20 @@ type prewarmJob struct {
 // the item moves on, and ctx cancellation (Ctrl-C / daemon shutdown) stops
 // cleanly. Safe to call after every scan — only missing/stale caches do work.
 func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptions) {
-	if cache == nil || opts.FFmpegPath == "" || (!opts.CacheSubtitles && !opts.CacheThumbnails && !opts.Trickplay && !opts.Keyframes) {
+	if cache == nil || (!opts.CacheSubtitles && !opts.CacheThumbnails && !opts.Trickplay && !opts.Keyframes) {
+		return
+	}
+	// The keyframe job is the only one driven by ffprobe rather than ffmpeg, so a
+	// missing ffmpeg must not veto it: on a box with ffprobe alone the keyframe
+	// index — the sidecar whose absence costs a COPY-VOD fallback — still gets
+	// built. Conversely a missing ffprobe only disables that one job.
+	if opts.FFmpegPath == "" {
+		opts.CacheSubtitles, opts.CacheThumbnails, opts.Trickplay = false, false, false
+	}
+	if opts.FFprobePath == "" {
+		opts.Keyframes = false
+	}
+	if !opts.CacheSubtitles && !opts.CacheThumbnails && !opts.Trickplay && !opts.Keyframes {
 		return
 	}
 	workers := opts.Workers
@@ -89,6 +102,10 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 	// I/O-bound) keep their `workers` parallelism. Cross-agent dup work is stopped
 	// by the per-file lock inside GenerateTrickplay.
 	trickSem := make(chan struct{}, 1)
+	// Same cap for the keyframe index: it is I/O-heavy rather than CPU-heavy, but
+	// a full-container read per file will saturate a NAS just as thoroughly if
+	// several run at once.
+	kfSem := make(chan struct{}, 1)
 
 	jobs := make(chan prewarmJob)
 	var wg sync.WaitGroup
@@ -106,11 +123,28 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 					return
 				}
 				if j.keyframe {
-					// Demux-only ffprobe pass → tiny sidecar. Idempotent (skips a
-					// fresh cache). 45 min bounds a huge/stalled remux like the subs pass.
+					// Demux-only, but a FULL sequential read of the whole container —
+					// measured at 153 s for a 12 GB file over NFS. Across a large
+					// library that is hours of saturating reads, so it gets the same
+					// treatment as trickplay: one at a time, and only while the box is
+					// idle enough. setIdleIOPriority alone is not enough here — ioprio
+					// arbitrates the local block layer, not NFS network traffic.
+					select {
+					case kfSem <- struct{}{}:
+					case <-ctx.Done():
+						return
+					}
+					waitForLowLoad(ctx, maxLoadRatio)
+					if ctx.Err() != nil {
+						<-kfSem
+						return
+					}
+					// Idempotent (skips a fresh cache). 45 min bounds a huge/stalled
+					// remux like the subs pass.
 					jctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
 					err := mediainfo.PrewarmKeyframes(jctx, opts.FFprobePath, j.path)
 					cancel()
+					<-kfSem
 					mu.Lock()
 					if err != nil {
 						failed++
@@ -337,14 +371,14 @@ func waitForLowLoad(ctx context.Context, maxRatio float64) {
 			return
 		}
 		if !logged {
-			log.Printf("[prewarm] system load %.1f > %.1f - deferring trickplay (<= %s)", load, threshold, prewarmLoadWaitCap)
+			log.Printf("[prewarm] system load %.1f > %.1f - deferring heavy sidecar job (<= %s)", load, threshold, prewarmLoadWaitCap)
 			logged = true
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-deadline:
-			log.Printf("[prewarm] load still high after %s - proceeding with throttled trickplay (nice + idle I/O + single-flight still apply)", prewarmLoadWaitCap)
+			log.Printf("[prewarm] load still high after %s - proceeding throttled (nice + idle I/O + single-flight still apply)", prewarmLoadWaitCap)
 			return
 		case <-time.After(15 * time.Second):
 		}

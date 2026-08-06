@@ -1,21 +1,16 @@
 package mediainfo
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // Keyframe index sidecar. The COPY-VOD streaming model (engine) needs the sorted
@@ -38,10 +33,59 @@ func CopyVODEligibleCodec(videoCodec string) bool {
 	return false
 }
 
-// copyKeyframeIndexTimeout bounds the demux-only keyframe scan. A local 2 h film
-// indexes in a few seconds off warm cache; past this ceiling the caller falls
-// back rather than stranding the player.
-const copyKeyframeIndexTimeout = 45 * time.Second
+// Keyframe-index timeout budget. The old flat 45 s was sized against a WARM
+// cache (a 12 GB h264 re-indexes in ~4 s once the pages are resident) but was
+// applied to the COLD path too. Measured over NFS v3, cold: a 12 GB h264 needs
+// 153 s and a 15 GB one 252 s — so EVERY cold index died at exactly 45.0 s with
+// "signal: killed ()" and dropped the session to EVENT copy, which cannot honour
+// a resume position at all.
+//
+// Size is only a rough proxy: the real cost driver is keyframe DENSITY, which
+// size cannot see. Measured cold, per GB: 12.7 s (Ballerina, 15 GB, 1100 kf) but
+// >30 s (Marty Supreme, 6 GB, a telesync whose GOPs are so dense the window
+// alone yielded 774 keyframes in 300 s) — a 2.5× spread between two files of the
+// same codec. The budget below is therefore deliberately loose, and the real
+// protection against a slow index is IndexKeyframeWindow (the caller starts from
+// a bounded window and finishes the full index in the background) rather than
+// any per-GB number tuned here.
+const (
+	copyKeyframeIndexMinTimeout = 5 * time.Minute
+	copyKeyframeIndexMaxTimeout = 20 * time.Minute
+	copyKeyframeIndexPerGB      = 40 * time.Second
+
+	// A window is a bounded read and sits on the latency-critical path — its job
+	// is to answer fast or get out of the way, so it is capped far below the
+	// full-file budget. Measured over NFS: 7 s for a 300 s window on an idle
+	// mount, but 43 s for a 600 s window while the same mount was busy — so the
+	// cap has to clear the busy case, or the one path that saves a cold resume
+	// dies exactly when the box is under load and needs it most.
+	copyKeyframeWindowTimeout = 2 * time.Minute
+)
+
+// ErrKeyframeIndexTimeout marks an index aborted by its own deadline rather than
+// by a real demux failure. Callers distinguish the two because they mean opposite
+// things: a timeout says "too slow here, try again later / prewarm it", while a
+// demux error says "this file will never index". Mirrors ErrProbeExpired.
+var ErrKeyframeIndexTimeout = errors.New("keyframe index timed out")
+
+// keyframeIndexTimeout sizes the budget from the file's size, falling back to the
+// floor when it can't be stat'ed (a remote/unstattable source indexes fast or not
+// at all).
+func keyframeIndexTimeout(mediaPath string) time.Duration {
+	fi, err := os.Stat(mediaPath)
+	if err != nil {
+		return copyKeyframeIndexMinTimeout
+	}
+	const gib = 1024 * 1024 * 1024
+	budget := time.Duration(fi.Size()/gib) * copyKeyframeIndexPerGB
+	if budget < copyKeyframeIndexMinTimeout {
+		return copyKeyframeIndexMinTimeout
+	}
+	if budget > copyKeyframeIndexMaxTimeout {
+		return copyKeyframeIndexMaxTimeout
+	}
+	return budget
+}
 
 // keyframeSidecarPath is the cached keyframe-index JSON path for mediaPath.
 func keyframeSidecarPath(mediaPath string) string {
@@ -60,57 +104,51 @@ type keyframeSidecar struct {
 // faster than `-skip_frame nokey` (which decodes each keyframe). Still a full
 // demux of the container, hence local-file only. Errors if no keyframes are found.
 func IndexKeyframes(ctx context.Context, ffprobePath, mediaPath string) ([]float64, error) {
+	return indexKeyframes(ctx, ffprobePath, mediaPath, "")
+}
+
+// IndexKeyframeWindow indexes ONLY the keyframes in [fromSec, fromSec+windowSec)
+// via ffprobe's `-read_intervals`, so a cold start can plan segments around the
+// user's resume point without paying the full-file demux (measured over NFS: 7 s
+// for a 300 s window vs 252 s for the whole 15 GB file). The timestamps it
+// returns are identical to the corresponding slice of a full index — verified
+// against one — so a window is a true subset, never an approximation.
+//
+// fromSec <= 0 windows from the start of the file.
+func IndexKeyframeWindow(ctx context.Context, ffprobePath, mediaPath string, fromSec, windowSec float64) ([]float64, error) {
+	if windowSec <= 0 {
+		return nil, errors.New("keyframe window: non-positive window")
+	}
+	// ffprobe interval syntax: "START%+DURATION"; omitting START reads from the
+	// beginning. Seconds with no unit suffix are what ffprobe expects here.
+	interval := fmt.Sprintf("%%+%s", strconv.FormatFloat(windowSec, 'f', 3, 64))
+	if fromSec > 0 {
+		interval = strconv.FormatFloat(fromSec, 'f', 3, 64) + interval
+	}
+	return indexKeyframes(ctx, ffprobePath, mediaPath, interval)
+}
+
+// indexKeyframes is the shared demux+parse used by the full and windowed index.
+// readInterval empty = whole file.
+func indexKeyframes(ctx context.Context, ffprobePath, mediaPath, readInterval string) ([]float64, error) {
 	// Only impose the default ceiling when the caller set no deadline. The
-	// playback path (no deadline) gets the tight 45s cap so a stuck index can't
+	// playback path (no deadline) gets the size-derived cap so a stuck index can't
 	// strand the player; the scan-time prewarm passes its own longer budget
 	// (a huge cold remux may need minutes) and that must win, not be clamped.
+	budget := time.Duration(0) // 0 = caller's own deadline, reported as such below
 	if _, ok := ctx.Deadline(); !ok {
+		budget = indexBudget(mediaPath, readInterval)
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, copyKeyframeIndexTimeout)
+		ctx, cancel = context.WithTimeout(ctx, budget)
 		defer cancel()
 	}
-	cmd := exec.CommandContext(ctx, ffprobePath,
-		"-v", "error",
-		"-select_streams", "v:0",
-		"-show_entries", "packet=pts_time,flags",
-		"-of", "csv=p=0",
-		mediaPath,
-	)
-	winproc.HideWindow(cmd)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("keyframe index: %w (%s)", err, strings.TrimSpace(errBuf.String()))
+	out, err := runKeyframeProbe(ctx, ffprobePath, mediaPath, readInterval, budget)
+	if err != nil {
+		return nil, err
 	}
-	kfs := make([]float64, 0, 1024)
-	sc := bufio.NewScanner(&out)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		// Each line is "pts_time,flags", e.g. "6.006000,K__". The flags field
-		// carries "K" for a keyframe (RAP). Keep only those.
-		line := strings.TrimSpace(sc.Text())
-		comma := strings.IndexByte(line, ',')
-		if comma < 0 {
-			continue
-		}
-		ptsStr := strings.TrimSpace(line[:comma])
-		flags := line[comma+1:]
-		if !strings.Contains(flags, "K") {
-			continue
-		}
-		if ptsStr == "" || ptsStr == "N/A" {
-			continue
-		}
-		v, err := strconv.ParseFloat(ptsStr, 64)
-		if err != nil || v < 0 {
-			continue
-		}
-		kfs = append(kfs, v)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("keyframe index scan: %w", err)
+	kfs, err := parseKeyframeCSV(out)
+	if err != nil {
+		return nil, err
 	}
 	if len(kfs) == 0 {
 		return nil, errors.New("keyframe index: no keyframes found")

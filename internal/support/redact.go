@@ -136,6 +136,7 @@ var configFields = map[string]Sensitivity{
 	"Library.AllowDelete":         Publishable,
 	"Library.CacheSubtitles":      Publishable,
 	"Library.CacheThumbnails":     Publishable,
+	"Library.CacheKeyframes":      Publishable,
 	"Library.SkipDetect":          Publishable,
 	"Library.PrewarmMaxLoadRatio": Publishable,
 	"Library.Trickplay.Enabled":   Publishable,
