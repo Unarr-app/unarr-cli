@@ -55,6 +55,22 @@ type ExtractDirResult struct {
 // raw .rNN files are still what the user was given. Failing the download there
 // would turn "cannot improve this" into "you get nothing". Reported via Note.
 func ExtractInDir(dir string, password string) (*ExtractDirResult, error) {
+	return ExtractInDirTo(dir, dir, password)
+}
+
+// ExtractInDirTo is ExtractInDir with the output written to destDir instead of
+// beside the archive.
+//
+// A seeding torrent must keep serving the EXACT bytes it downloaded, and its
+// directory belongs to the swarm — so nothing may be added to it (a stray file
+// makes organize's cleanup pass judge the directory differently) nor removed
+// from it. Extracting to a sibling directory leaves the torrent bit-for-bit
+// intact while still producing a playable file for the library.
+//
+// destDir == dir reproduces the in-place behaviour, which is what the
+// non-seeding path wants: there the parts are deleted right after, so a sibling
+// would only add a pointless cross-directory move.
+func ExtractInDirTo(dir, destDir string, password string) (*ExtractDirResult, error) {
 	res := &ExtractDirResult{}
 
 	archive := findFirstRarInDir(dir)
@@ -72,8 +88,14 @@ func ExtractInDir(dir string, password string) (*ExtractDirResult, error) {
 		return nil, &PasswordError{Archive: archive}
 	}
 
+	if destDir != dir {
+		if err := os.MkdirAll(destDir, 0o755); err != nil {
+			return nil, fmt.Errorf("create extract dir: %w", err)
+		}
+	}
+
 	log.Printf("[extract] extracting archive: %s", filepath.Base(archive))
-	files, err := Extract(archive, dir, password)
+	files, err := Extract(archive, destDir, password)
 	if err != nil {
 		return nil, err // includes *PasswordError — the caller distinguishes it
 	}
@@ -91,7 +113,16 @@ func ExtractInDir(dir string, password string) (*ExtractDirResult, error) {
 
 	res.Extracted = true
 	res.Files = files
-	res.archiveParts = archiveVolumesOf(dir, archive)
+
+	// The deletable set is recorded ONLY for an in-place extraction. Extracting
+	// elsewhere means the source is something we must not touch — today that is a
+	// seeding torrent's directory, which is the exact data this whole path exists
+	// to protect. Leaving archiveParts nil makes CleanupArchives a no-op instead
+	// of arming it with a deletion list aimed at the swarm's files, so the safety
+	// does not depend on a caller remembering not to call it.
+	if destDir == dir {
+		res.archiveParts = archiveVolumesOf(dir, archive)
+	}
 	return res, nil
 }
 

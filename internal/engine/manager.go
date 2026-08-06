@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -724,13 +725,56 @@ func (m *Manager) extractPackedRelease(task *Task, result *Result) {
 		return
 	}
 
+	// Serialize per directory. Two tasks finalizing the SAME release dir (the
+	// torrent dir is named after t.Name(), which is not unique — dedup upstream
+	// keys on task ID) would otherwise run two extractors over one archive set,
+	// racing on the output files. Keyed by path rather than a single global lock
+	// so unrelated releases still unpack concurrently: extraction is minutes of
+	// CPU, and moveMu — which protects the much shorter reserve-then-rename —
+	// must not be held across it.
+	unlock := m.lockReleaseDir(result.FilePath)
+	defer unlock()
+
+	// Re-stat under the lock: the directory may have been organized/removed by
+	// the task we just waited on.
+	if fi, err := os.Stat(result.FilePath); err != nil || !fi.IsDir() {
+		return
+	}
+
 	shortID := agent.ShortID(task.ID)
+
+	// While seeding, the torrent directory belongs to the swarm: it must keep
+	// serving the EXACT bytes it downloaded, so we neither add to it nor delete
+	// from it. Extract to a sibling instead and point the result there, leaving
+	// the torrent bit-for-bit intact.
+	//
+	// Extracting IN PLACE and merely skipping our own cleanup (the previous
+	// approach) does NOT protect the parts: organize() moves the extracted video
+	// out and cleanupReleaseDir then sees a directory with no real video left and
+	// os.RemoveAll's the whole thing — parts included, mid-seed. Measured: the
+	// release dir was gone while the torrent was still being served.
+	srcDir := result.FilePath
+	destDir := srcDir
+	if m.cfg.SeedEnabled {
+		// A sibling from a concurrent finalization of this same release is a
+		// finished unpack, not a collision: adopt it instead of unpacking the
+		// payload a second time. The re-stat above only catches a source that was
+		// removed, and while seeding the source is deliberately left in place — so
+		// without this, two tasks on one release each produced a full copy (40 GB
+		// release → 80 GB of output, on top of the parts still held for the swarm).
+		if existing := existingUnpackedSibling(srcDir); existing != "" {
+			log.Printf("[%s] release already unpacked at %s - reusing it", agent.ShortID(task.ID), filepath.Base(existing))
+			result.FilePath = existing
+			return
+		}
+		destDir = unpackedSiblingDir(srcDir)
+	}
 
 	// NzbPassword is the only password the task carries. It is usenet-sourced,
 	// but a user who typed one for a release is describing THAT release, so
 	// honour it here too rather than adding a second field that means the same
 	// thing. Empty for the overwhelming majority of torrents.
-	res, err := postprocess.ExtractInDir(result.FilePath, task.NzbPassword)
+	res, err := postprocess.ExtractInDirTo(srcDir, destDir, task.NzbPassword)
 	if err != nil {
 		if _, ok := err.(*postprocess.PasswordError); ok {
 			log.Printf("[%s] release is password protected - leaving it packed (set a password in download options to unpack)", shortID)
@@ -749,15 +793,20 @@ func (m *Manager) extractPackedRelease(task *Task, result *Result) {
 
 	log.Printf("[%s] extracted packed release (%d file(s))", shortID, len(res.Files))
 
-	// Keep the archive parts while seeding: a seeding torrent serves the EXACT
-	// files it downloaded, so deleting the .rNN volumes would break the swarm's
-	// requests and, on a private tracker, the user's ratio obligation. The unusable
-	// pile of parts was the whole complaint here, but "unusable" beats "un-seedable"
-	// — the extracted video sits beside them and organize() moves that out, so the
-	// user gets a playable file either way. Reclaiming the space is seedAndDrop's
-	// business once it stops seeding, not ours mid-flight.
-	if m.cfg.SeedEnabled {
-		log.Printf("[%s] keeping archive parts: torrent is seeding", shortID)
+	if destDir != srcDir {
+		// Seeding: the payload now lives in the sibling, so organize must look
+		// THERE. The torrent directory is left exactly as the swarm served it —
+		// untouched and unswept, since organize only ever cleans the directory it
+		// organized; the user reclaims that space by removing the torrent, on
+		// their own schedule.
+		//
+		// The sibling itself is transient: organize moves the video out of it and
+		// cleanupReleaseDir removes what remains. It is NOT reclaimed by the seed
+		// lifecycle — seedAndDrop drops an anacrolix torrent that knows nothing
+		// about this directory — so anything that leaves it behind (an organize
+		// failure) leaves a full-size orphan next to the release.
+		log.Printf("[%s] torrent is seeding: unpacked to %s, release left intact for the swarm", shortID, filepath.Base(destDir))
+		result.FilePath = destDir
 		return
 	}
 
@@ -767,6 +816,101 @@ func (m *Manager) extractPackedRelease(task *Task, result *Result) {
 	if err := postprocess.CleanupArchives(res); err != nil {
 		log.Printf("[%s] archive cleanup warning: %v", shortID, err)
 	}
+}
+
+// releaseDirLocks serializes post-processing per release directory. Entries are
+// reference-counted and dropped when the last holder releases, so the map does
+// not grow with every download the daemon ever ran.
+var (
+	releaseDirMu    sync.Mutex
+	releaseDirLocks = map[string]*releaseDirLock{}
+)
+
+type releaseDirLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockReleaseDir takes the lock for dir and returns its release function.
+func (m *Manager) lockReleaseDir(dir string) func() {
+	key, err := filepath.Abs(dir)
+	if err != nil {
+		key = dir // best effort: an unresolvable path still gets a stable key
+	}
+
+	releaseDirMu.Lock()
+	l, ok := releaseDirLocks[key]
+	if !ok {
+		l = &releaseDirLock{}
+		releaseDirLocks[key] = l
+	}
+	l.refs++
+	releaseDirMu.Unlock()
+
+	l.mu.Lock()
+
+	return func() {
+		l.mu.Unlock()
+		releaseDirMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(releaseDirLocks, key)
+		}
+		releaseDirMu.Unlock()
+	}
+}
+
+// unpackedSuffix marks a directory as our unpack of the sibling release.
+const unpackedSuffix = ".unpacked"
+
+// maxUnpackedSiblings bounds the collision search, mirroring versionDistinctPath.
+// Reaching it means something is wrong (a directory nobody is consuming); loop
+// forever and a stuck release would spin instead of failing visibly.
+const maxUnpackedSiblings = 1000
+
+// unpackedSiblingDir names the directory a seeding release is unpacked into: the
+// release name with a distinguishing suffix, beside the torrent rather than
+// inside it. Collisions are resolved with a numeric suffix so a re-download (or
+// two releases of the same name) never unpacks onto a previous result.
+// The unpack directory holds a child named after the RELEASE, and organize is
+// pointed at that child. organizeDir's no-video fallback renames the directory
+// it was given into the library as-is, so handing it "<release>.unpacked" would
+// leak an internal detail into the user's media folder; handing it "<release>"
+// yields exactly the name the un-extracted release would have produced.
+func unpackedSiblingDir(srcDir string) string {
+	base := srcDir + unpackedSuffix
+	holder := base
+	for i := 2; i < maxUnpackedSiblings && pathExists(holder); i++ {
+		holder = fmt.Sprintf("%s.%d", base, i)
+	}
+	return filepath.Join(holder, filepath.Base(srcDir))
+}
+
+// existingUnpackedSibling returns a previous unpack of srcDir that already holds
+// a usable video, or "" if there is none.
+//
+// Only a directory containing a real video counts: a half-written sibling from
+// an extraction that died mid-way must NOT be adopted as if it were finished,
+// or the release would be filed into the library truncated.
+func existingUnpackedSibling(srcDir string) string {
+	base := srcDir + unpackedSuffix
+	for i := 1; i < maxUnpackedSiblings; i++ {
+		holder := base
+		if i > 1 {
+			holder = fmt.Sprintf("%s.%d", base, i)
+		}
+		if fi, err := os.Stat(holder); err != nil || !fi.IsDir() {
+			return "" // first gap ends the search: names are allocated in order
+		}
+		candidate := filepath.Join(holder, filepath.Base(srcDir))
+		video, err := largestVideoIn(candidate)
+		if err == nil && video != "" {
+			if vi, err := os.Stat(video); err == nil && vi.Size() >= minPlausibleVideoBytes {
+				return candidate
+			}
+		}
+	}
+	return ""
 }
 
 // finalizeVerified runs organize → upgrade replacement → complete for a download
