@@ -26,6 +26,13 @@ type ManagerConfig struct {
 	// resolveMethod will try, ignoring the per-task preference. Empty/nil → defer
 	// to the task's web-sent preference (legacy auto/torrent-first).
 	PreferredMethods []string
+	// SeedEnabled mirrors TorrentConfig.SeedEnabled. The manager needs it because
+	// a seeding torrent keeps serving the EXACT files it downloaded: deleting the
+	// archive parts after unpacking a packed release would silently break seeding
+	// (and the ratio obligation on a private tracker). Mirrored rather than reached
+	// through the downloader so the post-processing decision does not depend on
+	// which method happened to resolve.
+	SeedEnabled bool
 }
 
 // Manager orchestrates concurrent downloads with method resolution and fallback.
@@ -742,8 +749,20 @@ func (m *Manager) extractPackedRelease(task *Task, result *Result) {
 
 	log.Printf("[%s] extracted packed release (%d file(s))", shortID, len(res.Files))
 
-	// Drop the archive parts only after a successful extraction, so a release
-	// that failed to unpack keeps everything the user was served.
+	// Keep the archive parts while seeding: a seeding torrent serves the EXACT
+	// files it downloaded, so deleting the .rNN volumes would break the swarm's
+	// requests and, on a private tracker, the user's ratio obligation. The unusable
+	// pile of parts was the whole complaint here, but "unusable" beats "un-seedable"
+	// — the extracted video sits beside them and organize() moves that out, so the
+	// user gets a playable file either way. Reclaiming the space is seedAndDrop's
+	// business once it stops seeding, not ours mid-flight.
+	if m.cfg.SeedEnabled {
+		log.Printf("[%s] keeping archive parts: torrent is seeding", shortID)
+		return
+	}
+
+	// Not seeding: drop the parts, but only after a SUCCESSFUL extraction, so a
+	// release that failed to unpack keeps everything the user was served.
 	if err := postprocess.CleanupArchives(result.FilePath); err != nil {
 		log.Printf("[%s] archive cleanup warning: %v", shortID, err)
 	}

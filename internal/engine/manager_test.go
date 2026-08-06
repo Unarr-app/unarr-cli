@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -304,3 +306,105 @@ func (m *slowMockDownloader) Download(ctx context.Context, _ *Task, _ string, _ 
 func (m *slowMockDownloader) Pause(_ string) error             { return nil }
 func (m *slowMockDownloader) Cancel(_ string) error            { return nil }
 func (m *slowMockDownloader) Shutdown(_ context.Context) error { return nil }
+
+// extractPackedRelease must NOT delete the archive parts while the torrent is
+// seeding: anacrolix keeps serving the EXACT files it downloaded, so removing
+// the .rNN volumes breaks the swarm's requests and the user's ratio obligation
+// on a private tracker.
+func TestExtractPackedRelease_KeepsPartsWhileSeeding(t *testing.T) {
+	dir := t.TempDir()
+	// A release that is already unpacked: an extraction is not needed for the
+	// cleanup decision, which is what this test pins down.
+	for _, name := range []string{"show.part01.rar", "show.part02.rar", "show.mkv"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := &Manager{cfg: ManagerConfig{SeedEnabled: true}}
+	task := &Task{ID: "seed-test"}
+	m.extractPackedRelease(task, &Result{FilePath: dir, Method: MethodTorrent})
+
+	for _, name := range []string{"show.part01.rar", "show.part02.rar"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("archive part %s deleted while seeding: %v", name, err)
+		}
+	}
+}
+
+// COUNTERFACTUAL for the test above: with seeding OFF the parts DO get cleaned
+// up. Without this, TestExtractPackedRelease_KeepsPartsWhileSeeding would still
+// pass if the cleanup were dead code that never ran at all.
+//
+// Uses a REAL archive: cleanup only runs after a SUCCESSFUL extraction, so
+// stub files named .rar make the extractor fail and the parts survive for the
+// wrong reason (which is exactly how this test failed when first written).
+func TestExtractPackedRelease_CleansPartsWhenNotSeeding(t *testing.T) {
+	sz, err := exec.LookPath("7z")
+	if err != nil {
+		t.Skip("7z not installed")
+	}
+
+	work := t.TempDir()
+	payload := filepath.Join(work, "show.mkv")
+	// Incompressible, so the archive really splits into volumes.
+	data := make([]byte, 2_000_000)
+	seed := uint32(0x12345678)
+	for i := range data {
+		seed ^= seed << 13
+		seed ^= seed >> 17
+		seed ^= seed << 5
+		data[i] = byte(seed)
+	}
+	if err := os.WriteFile(payload, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Join(work, "release")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(sz, "a", "-tzip", "-v1m", filepath.Join(dir, "show.zip"), payload)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("could not build fixture: %v\n%s", err, b)
+	}
+	os.Remove(payload)
+
+	before, _ := os.ReadDir(dir)
+	if len(before) < 2 {
+		t.Fatalf("fixture did not split: %d file(s)", len(before))
+	}
+
+	m := &Manager{cfg: ManagerConfig{SeedEnabled: false}}
+	m.extractPackedRelease(&Task{ID: "noseed-test"}, &Result{FilePath: dir, Method: MethodTorrent})
+
+	left, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range left {
+		if e.Name() != "show.mkv" {
+			t.Errorf("archive part %s survived cleanup with seeding off", e.Name())
+		}
+	}
+	// The extracted payload must never be touched.
+	if _, err := os.Stat(filepath.Join(dir, "show.mkv")); err != nil {
+		t.Errorf("cleanup removed the extracted video: %v", err)
+	}
+}
+
+// A single-file result cannot be a packed release; it must be left alone.
+func TestExtractPackedRelease_IgnoresSingleFileResult(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "movie.mkv")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Manager{cfg: ManagerConfig{SeedEnabled: false}}
+	m.extractPackedRelease(&Task{ID: "single"}, &Result{FilePath: file, Method: MethodTorrent})
+
+	if _, err := os.Stat(file); err != nil {
+		t.Errorf("single-file result was touched: %v", err)
+	}
+}
