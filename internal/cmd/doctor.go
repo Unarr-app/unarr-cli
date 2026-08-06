@@ -141,6 +141,40 @@ func quickExitCode(opts doctorOpts, report doctor.Report) error {
 	return nil
 }
 
+// usenetInPlay reports whether usenet downloads can actually happen on this
+// machine, and why not when they cannot.
+//
+// It exists because reading MethodOrder() alone got this WRONG on the default
+// config, which is the config almost everyone runs. preferred_method = "auto"
+// makes MethodOrder() return nil, and the old check read nil as "usenet is not
+// in preferred_methods" and reported par2 as "not needed". Seen live on a real
+// pro account: the par2 line said not needed, and the line four rows below it
+// reported a healthy usenet server with ten connection slots. Usenet downloads
+// were going to happen, and they were going to arrive UNVERIFIED, which is the
+// one thing this check exists to prevent.
+//
+// When the account's flags cannot be fetched (offline, no key) it falls back to
+// the config-only reading. That is today's behaviour, and a doctor run with no
+// network should not start inventing new warnings.
+func usenetInPlay(cfg *config.Config, features featureFn) (bool, string) {
+	flags, err := features()
+	if err != nil {
+		for _, m := range cfg.Download.MethodOrder() {
+			if m == "usenet" {
+				return true, ""
+			}
+		}
+		return false, "usenet not in preferred_methods"
+	}
+	if methodWanted(cfg, "usenet", flags.Usenet) {
+		return true, ""
+	}
+	if !flags.Usenet {
+		return false, "this account has no usenet add-on"
+	}
+	return false, "usenet not in preferred_methods"
+}
+
 // par2CheckResult reports whether par2 is available when the usenet method is
 // enabled. Uses the canonical MethodOrder() resolver so it honors the list vs
 // legacy-singular precedence, "auto", casing and whitespace — a hand-rolled
@@ -148,16 +182,10 @@ func quickExitCode(opts doctorOpts, report doctor.Report) error {
 // usenet ships UNVERIFIED. Returns a "!"-prefixed warning message (not an
 // error) when the binary is missing — a missing par2 degrades verification but
 // isn't a hard failure.
-func par2CheckResult(cfg config.Config) (string, error) {
-	usenetEnabled := false
-	for _, m := range cfg.Download.MethodOrder() {
-		if m == "usenet" {
-			usenetEnabled = true
-			break
-		}
-	}
+func par2CheckResult(cfg *config.Config, features featureFn) (string, error) {
+	usenetEnabled, why := usenetInPlay(cfg, features)
 	if !usenetEnabled {
-		return "not needed (usenet not in preferred_methods)", nil
+		return "not needed (" + why + ")", nil
 	}
 	if postprocess.Par2Available() {
 		return "installed", nil

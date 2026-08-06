@@ -31,11 +31,7 @@ const methodProbeTimeout = 10 * time.Second
 // silence, so this timeout IS the result rather than an error to wait for.
 const dhtProbeTimeout = 6 * time.Second
 
-func doctorMethodSpecs(cfg *config.Config) []doctor.Spec {
-	// One Register call for the whole doctor run, shared by the checks that
-	// need to know what the ACCOUNT has rather than what the config asks for.
-	// Built here so it lives exactly as long as this spec list.
-	features := newFeatureCache(cfg)
+func doctorMethodSpecs(cfg *config.Config, features featureFn) []doctor.Spec {
 	return []doctor.Spec{
 		{
 			Group:  "Methods",

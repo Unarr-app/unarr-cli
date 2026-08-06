@@ -41,8 +41,12 @@ func hasRepairableFailure(rep doctor.Report) bool {
 func doctorSpecs(cfg *config.Config) []doctor.Spec {
 	specs := doctorConfigSpecs(cfg)
 	specs = append(specs, doctorConnectivitySpecs(cfg)...)
-	specs = append(specs, doctorDownloadSpecs(cfg)...)
-	specs = append(specs, doctorMethodSpecs(cfg)...)
+	// One Register round-trip for the whole run, shared by every check that
+	// needs to know what the ACCOUNT can do rather than what the config asks
+	// for. Built here so the download and method groups see the same answer.
+	features := newFeatureCache(cfg)
+	specs = append(specs, doctorDownloadSpecs(cfg, features)...)
+	specs = append(specs, doctorMethodSpecs(cfg, features)...)
 	specs = append(specs, doctorLibrarySpecs(cfg)...)
 	specs = append(specs, doctorStreamSpecs(cfg)...)
 	specs = append(specs, doctorMediaSpecs(cfg)...)
@@ -199,7 +203,7 @@ func doctorAgentRegistration(cfg *config.Config) (string, error) {
 	return fmt.Sprintf("registered [%s]", resp.User.Plan), nil
 }
 
-func doctorDownloadSpecs(cfg *config.Config) []doctor.Spec {
+func doctorDownloadSpecs(cfg *config.Config, features featureFn) []doctor.Spec {
 	return []doctor.Spec{
 		{
 			Group:  "Downloads",
@@ -266,7 +270,7 @@ func doctorDownloadSpecs(cfg *config.Config) []doctor.Spec {
 			Group:  "Downloads",
 			Name:   "par2 (usenet verify/repair)",
 			Remedy: "install par2 (apt install par2 / brew install par2)",
-			Fn:     func() (string, error) { return par2CheckResult(*cfg) },
+			Fn:     func() (string, error) { return par2CheckResult(cfg, features) },
 		},
 		// Managed-VPN P2P kill-switch: when [downloads.vpn] required=true, torrent must
 		// have a live tunnel — otherwise it's disabled (safe) and this flags it.
