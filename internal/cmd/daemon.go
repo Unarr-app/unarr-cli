@@ -1805,6 +1805,20 @@ func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore,
 				log.Printf("[auto-scan] sidecar prewarm disabled: ffmpeg unavailable: %v", err)
 			}
 		}
+		// ffprobe is resolved independently of ffmpeg and of the sub/thumb/trickplay
+		// toggles: the keyframe index is the ONE sidecar playback cannot cheaply
+		// rebuild on demand (a cold 12 GB h264 over NFS demuxes in ~150 s, far past
+		// the playback-path ceiling), so a miss costs the user a COPY-VOD fallback to
+		// EVENT copy — which cannot honour a resume position at all. Prewarming it
+		// here is what keeps instant seek working for the recurring daemon scans.
+		prewarmFFprobe := ""
+		if cfg.Library.CacheKeyframes {
+			if ffp, err := mediainfo.ResolveFFprobe(cfg.Library.FFprobePath); err == nil {
+				prewarmFFprobe = ffp
+			} else {
+				log.Printf("[auto-scan] keyframe prewarm disabled: ffprobe unavailable: %v", err)
+			}
+		}
 
 		// Scan every path, then sync ALL of them as ONE session (single
 		// syncStartedAt + final isLastBatch via library.SyncBatches). Per-root
@@ -1836,15 +1850,17 @@ func runAutoScan(ctx context.Context, cfg config.Config, creds *credentialStore,
 				fullCycle = false
 			}
 
-			if prewarmFFmpeg != "" {
+			if prewarmFFmpeg != "" || prewarmFFprobe != "" {
 				library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
 					FFmpegPath:           prewarmFFmpeg,
+					FFprobePath:          prewarmFFprobe,
 					CacheSubtitles:       cfg.Library.CacheSubtitles,
 					CacheThumbnails:      cfg.Library.CacheThumbnails,
 					Workers:              2,
 					Trickplay:            cfg.Library.Trickplay.Enabled,
 					TrickplayIntervalSec: cfg.Library.Trickplay.IntervalSeconds(),
 					TrickplayWidth:       cfg.Library.Trickplay.Width,
+					Keyframes:            prewarmFFprobe != "",
 					MaxLoadRatio:         cfg.Library.PrewarmMaxLoadRatio,
 				})
 			}

@@ -153,6 +153,7 @@ type publishedLibrary struct {
 	AllowDelete         bool    `toml:"allow_delete"`
 	CacheSubtitles      bool    `toml:"cache_subtitles"`
 	CacheThumbnails     bool    `toml:"cache_thumbnails"`
+	CacheKeyframes      bool    `toml:"cache_keyframes"`
 	SkipDetect          bool    `toml:"skip_detect"`
 	PrewarmMaxLoadRatio float64 `toml:"prewarm_max_load_ratio"`
 
@@ -319,6 +320,7 @@ func redactLibrary(l config.LibraryConfig) publishedLibrary {
 		AllowDelete:         l.AllowDelete,
 		CacheSubtitles:      l.CacheSubtitles,
 		CacheThumbnails:     l.CacheThumbnails,
+		CacheKeyframes:      l.CacheKeyframes,
 		SkipDetect:          l.SkipDetect,
 		PrewarmMaxLoadRatio: l.PrewarmMaxLoadRatio,
 		Trickplay:           publishedTrickplay{Enabled: l.Trickplay.Enabled, Interval: shaped(l.Trickplay.Interval, durationShape), Width: l.Trickplay.Width},

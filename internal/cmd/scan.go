@@ -194,30 +194,51 @@ func runScan(ctx context.Context, cfg config.Config, dirPath string, workers int
 	// ".unarr" dir so playback gets instant subtitles/thumbnails and huge remuxes
 	// never hit the on-demand timeout. Best-effort + Ctrl-C interruptible (the scan
 	// itself is already saved).
-	if cfg.Library.CacheSubtitles || cfg.Library.CacheThumbnails || cfg.Library.Trickplay.Enabled {
-		if ff, err := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath); err == nil {
-			fmt.Fprintf(os.Stderr, "  Pre-extracting subtitles + thumbnails to cache... (Ctrl-C to skip)\n")
-			// ffprobe powers the COPY-VOD keyframe-index sidecar; if it can't be
-			// resolved, keyframe prewarm is skipped (playback self-warms it).
-			ffprobe, _ := mediainfo.ResolveFFprobe(ffprobePath)
-			library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
-				FFmpegPath:           ff,
-				FFprobePath:          ffprobe,
-				CacheSubtitles:       cfg.Library.CacheSubtitles,
-				CacheThumbnails:      cfg.Library.CacheThumbnails,
-				Workers:              2,
-				Trickplay:            cfg.Library.Trickplay.Enabled,
-				TrickplayIntervalSec: cfg.Library.Trickplay.IntervalSeconds(),
-				TrickplayWidth:       cfg.Library.Trickplay.Width,
-				Keyframes:            ffprobe != "",
-				MaxLoadRatio:         cfg.Library.PrewarmMaxLoadRatio,
-			})
-		} else {
-			fmt.Fprintf(os.Stderr, "  Skipping sidecar prewarm: ffmpeg unavailable: %v\n", err)
-		}
-	}
+	runScanPrewarm(ctx, cfg, cache, ffprobePath)
 
 	return cache, nil
+}
+
+// runScanPrewarm fills the ".unarr" sidecars for a freshly scanned library.
+//
+// ffmpeg and ffprobe are resolved and gated independently. The keyframe index
+// (ffprobe) must run even with every sub/thumb/trickplay toggle off, because it
+// is the one sidecar playback cannot rebuild cheaply on demand: a cold miss
+// drops the session to EVENT copy, which ignores the resume position outright.
+// PrewarmSidecars disables whichever jobs their tool is missing.
+func runScanPrewarm(ctx context.Context, cfg config.Config, cache *library.LibraryCache, ffprobePath string) {
+	ffprobe := ""
+	if cfg.Library.CacheKeyframes {
+		ffprobe, _ = mediainfo.ResolveFFprobe(ffprobePath)
+	}
+	wantFFmpegJobs := cfg.Library.CacheSubtitles || cfg.Library.CacheThumbnails || cfg.Library.Trickplay.Enabled
+	if !wantFFmpegJobs && ffprobe == "" {
+		return
+	}
+
+	ff, ffErr := mediainfo.ResolveFFmpeg(cfg.Library.FFmpegPath)
+	switch {
+	case ffErr != nil && ffprobe == "":
+		fmt.Fprintf(os.Stderr, "  Skipping sidecar prewarm: ffmpeg unavailable: %v\n", ffErr)
+		return
+	case ffErr != nil:
+		fmt.Fprintf(os.Stderr, "  Pre-indexing keyframes to cache (ffmpeg unavailable: %v)... (Ctrl-C to skip)\n", ffErr)
+	default:
+		fmt.Fprintf(os.Stderr, "  Pre-extracting subtitles + thumbnails to cache... (Ctrl-C to skip)\n")
+	}
+
+	library.PrewarmSidecars(ctx, cache, library.PrewarmOptions{
+		FFmpegPath:           ff,
+		FFprobePath:          ffprobe,
+		CacheSubtitles:       cfg.Library.CacheSubtitles,
+		CacheThumbnails:      cfg.Library.CacheThumbnails,
+		Workers:              2,
+		Trickplay:            cfg.Library.Trickplay.Enabled,
+		TrickplayIntervalSec: cfg.Library.Trickplay.IntervalSeconds(),
+		TrickplayWidth:       cfg.Library.Trickplay.Width,
+		Keyframes:            ffprobe != "",
+		MaxLoadRatio:         cfg.Library.PrewarmMaxLoadRatio,
+	})
 }
 
 // scanAPIClient builds the agent API client for post-scan submissions, using

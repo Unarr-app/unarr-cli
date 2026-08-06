@@ -414,6 +414,15 @@ type LibraryConfig struct {
 	CacheSubtitles  bool `toml:"cache_subtitles"`  // default true
 	CacheThumbnails bool `toml:"cache_thumbnails"` // default true
 
+	// CacheKeyframes builds the COPY-VOD keyframe index (a tiny .copyseg.json)
+	// during the scan. Unlike the other sidecars this one cannot be rebuilt
+	// cheaply at play time — it is a full container demux, measured at 153 s for
+	// a 12 GB h264 over NFS — and without it a session falls back to EVENT copy,
+	// which cannot honour a resume position. Needs only ffprobe, so it runs
+	// independently of the ffmpeg-driven jobs above. Default true; disable to
+	// spare the scan-time read at the cost of resume accuracy on cold files.
+	CacheKeyframes bool `toml:"cache_keyframes"` // default true
+
 	// Skip-segment detection: after each scan, find intro/credits ranges by
 	// comparing chromaprint audio fingerprints between episodes of a season
 	// (plus black-frame credits for movies) and submit them to the web so the
@@ -643,6 +652,7 @@ func Default() Config {
 			Workers:         8,
 			CacheSubtitles:  true,
 			CacheThumbnails: true,
+			CacheKeyframes:  true,
 			SkipDetect:      true,
 			Trickplay: TrickplayConfig{
 				Enabled:  true,
@@ -749,6 +759,12 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	}
 	if !meta.IsDefined("library", "cache_thumbnails") {
 		cfg.Library.CacheThumbnails = true
+	}
+	// Without this every pre-existing config would read as cache_keyframes=false
+	// and the COPY-VOD index would stay unbuilt — the exact "prewarm silently
+	// disabled" failure this key was added to fix.
+	if !meta.IsDefined("library", "cache_keyframes") {
+		cfg.Library.CacheKeyframes = true
 	}
 	if !meta.IsDefined("library", "skip_detect") {
 		cfg.Library.SkipDetect = true

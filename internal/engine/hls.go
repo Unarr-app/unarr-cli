@@ -662,6 +662,17 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		fromCache      bool
 		writerLockHeld bool
 	)
+	// Resolve copy-vs-transcode BEFORE the cache placement below. A copy session
+	// that will actually transcode (COPY-VOD declined + a resume EVENT copy can't
+	// honour — see the VideoCopy branch further down) is a real encode and must be
+	// allowed to cache; deciding after cfg.Cache was already nil'd would make it
+	// the one transcode in the codebase structurally unable to seal its cache, so
+	// every replay would re-encode from scratch.
+	if cfg.VideoCopy && !copyVODViable(cfg, probe) && shouldTranscodeForResume(cfg, probe) {
+		log.Printf("[hls %s] resume=%.0fs with no COPY-VOD path - transcoding (EVENT copy cannot seek)",
+			shortHLSID(cfg.SessionID), cfg.StartSec)
+		cfg.VideoCopy = false
+	}
 	if cfg.VideoCopy && cfg.Cache != nil {
 		// HLS-copy never caches: re-generating costs no encode (I/O-bound), so
 		// persisting segments would only burn cache budget that real transcodes
@@ -758,12 +769,35 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		if startCopyVOD(ctx, s) {
 			return s, nil
 		}
-		// Fallback (remote URL / keyframe-index failure): legacy EVENT copy —
-		// ffmpeg owns a growing media playlist (segments cut at the source's
-		// keyframes → durations unknown upfront). ServeVideoPlaylist reads it
-		// from disk; spawn the continuous copy ffmpeg below.
-		s.manifestVideo = ""
-		s.manifestRoot = renderMasterPlaylistCopy(probe)
+		// COPY-VOD declined for a reason only discoverable here (a failed keyframe
+		// index, or a remote source without range support — the structural refusals
+		// were already handled above, before cache placement). The remaining copy
+		// path is EVENT copy, which CANNOT honour a resume position: it always
+		// produces from 0 and its `-ss` is unusable (see buildHLSCopyArgs — an
+		// offset tfdt under an EVENT playlist breaks iOS's parser). With a
+		// meaningful resume the viewer would watch a black player until the linear
+		// remux reached their position.
+		if shouldTranscodeForResume(cfg, probe) {
+			log.Printf("[hls %s] copy-vod unavailable and resume=%.0fs is set - transcoding instead (EVENT copy cannot seek)",
+				shortHLSID(cfg.SessionID), cfg.StartSec)
+			// Clearing the flag before the startIdx block below is what makes the
+			// resume take effect: that block skips the seek entirely while
+			// VideoCopy is set, and the encode arg builder reads it too. The latch
+			// records that this session has already spent its copy→transcode
+			// transition, so a later failure can't run fallbackToTranscode again.
+			cfg.VideoCopy = false
+			s.cfg.VideoCopy = false
+			s.copyFellBack = true
+			s.manifestVideo = renderVideoPlaylist(probe.DurationSec, segCount)
+			s.manifestRoot = renderMasterPlaylist(probe, cfg.Quality)
+		} else {
+			// Fallback (remote URL / keyframe-index failure): legacy EVENT copy —
+			// ffmpeg owns a growing media playlist (segments cut at the source's
+			// keyframes → durations unknown upfront). ServeVideoPlaylist reads it
+			// from disk; spawn the continuous copy ffmpeg below.
+			s.manifestVideo = ""
+			s.manifestRoot = renderMasterPlaylistCopy(probe)
+		}
 	} else {
 		s.manifestVideo = renderVideoPlaylist(probe.DurationSec, segCount)
 		s.manifestRoot = renderMasterPlaylist(probe, cfg.Quality)
