@@ -227,7 +227,7 @@ func TestCleanupArchives_OnlyTouchesItsOwnSet(t *testing.T) {
 		other []string
 	}{
 		{
-			name:  "plain .rar/.rNN",
+			name: "plain .rar/.rNN",
 			// The DISTINGUISHING segment must be the LAST one before the suffix:
 			// that is the only position the old over-trim consumed. With it two
 			// segments back (…x264-GRP vs …x264-OTHER) the old code still told the
@@ -421,5 +421,114 @@ func TestArchiveStem(t *testing.T) {
 	// A split of the same release is a DIFFERENT set: same base, other form.
 	if got := archiveStem("show.zip.001"); got == key {
 		t.Errorf("show.zip.001 shares the rar set's key %q", key)
+	}
+}
+
+// BRUTE FORCE over the whole key space: for every PAIR of volume names in a
+// corpus of realistic and adversarial bases, the key must match if and only if
+// the two belong to the same set.
+//
+// This exists because three consecutive fixes to archiveStem each looked
+// obviously correct, passed the suite, and each introduced a NEW collision that
+// deleted a user's files. Hand-picked cases kept missing the next one; a
+// property over all pairs does not.
+//
+// The two failure modes, both checked:
+//   - COLLISION: different sets share a key → CleanupArchives deletes the set
+//     that was never unpacked. DATA LOSS.
+//   - LEAK: volumes of one set get different keys → volumes survive cleanup.
+func TestArchiveStem_NoCollisionsOverCorpus(t *testing.T) {
+	bases := []string{
+		"Movie", "Movie.2024", "Movie.2024.1080p-GRP", "Movie.2024.720p-OTHER",
+		// Bases that END in something the parser also treats as a suffix.
+		"Movie.rar", "Movie.zip", "Movie.tar", "Movie.001", "Movie.r00",
+		// A base carrying the key separator, i.e. an attempt to forge a key.
+		"Movie|num", "Movie|rar",
+		"Show.S01E01", "Show.S01E02", "A", "Movie with spaces", "Película.2024",
+		"Movie.2024.zip", "Backup.tar.gz",
+	}
+	// Suffixes that belong to the SAME set, by family. A rar archive continues
+	// .rar → .rNN → .sNN; a numbered split runs .001 → .002.
+	families := map[string][]string{
+		"rar": {".rar", ".r00", ".r01", ".r99", ".s00", ".part01.rar", ".part02.rar"},
+		"num": {".001", ".002", ".003"},
+	}
+
+	type member struct{ name, base, family string }
+	var corpus []member
+	for _, b := range bases {
+		for fam, suffixes := range families {
+			for _, s := range suffixes {
+				corpus = append(corpus, member{b + s, b, fam})
+			}
+		}
+	}
+
+	for i := range corpus {
+		for j := i + 1; j < len(corpus); j++ {
+			a, b := corpus[i], corpus[j]
+			ka, kb := archiveStem(a.name), archiveStem(b.name)
+			if ka == "" || kb == "" {
+				continue // not recognised as a volume: cleanup never sees it
+			}
+			sameSet := a.base == b.base && a.family == b.family
+			switch {
+			case sameSet && ka != kb:
+				t.Errorf("LEAK: %q and %q are one set but key %q vs %q", a.name, b.name, ka, kb)
+			case !sameSet && ka == kb:
+				t.Errorf("COLLISION: %q and %q are different sets but share key %q — cleanup would delete both",
+					a.name, b.name, ka)
+			}
+		}
+	}
+}
+
+// Names that are legal but odd. None may key onto a different release, and the
+// parser must not panic or mis-split. Uppercase DOES share a key with lowercase
+// on purpose: a real rar set mixes cases (.rar + .R00), so splitting them would
+// leak volumes — and two files differing only in case is a pathological case
+// where deleting both is the defensible behaviour.
+func TestArchiveStem_PathologicalNames(t *testing.T) {
+	cases := map[string]string{
+		"Movie.rar.rar":           "Movie.rar|rar",
+		"Movie.r00.r00":           "Movie.r00|rar",
+		"Movie.001.001":           "Movie.001|num",
+		"Movie.part01.part02.rar": "Movie.part01|rar",
+		"Movie.zip.rar":           "Movie.zip|rar",
+		"Movie.rar.001":           "Movie.rar|num",
+		"Movie.tar.gz.001":        "Movie.tar.gz|num",
+		"Movie|num.rar":           "Movie|num|rar", // separator cannot be forged
+		// Not volumes at all: cleanup must never consider them.
+		"001":            "",
+		"":               "",
+		"Movie.r1":       "",
+		"Movie.r000":     "",
+		"Movie.0001":     "",
+		"Movie.2024.mkv": "",
+	}
+	for name, want := range cases {
+		if got := archiveStem(name); got != want {
+			t.Errorf("archiveStem(%q) = %q, want %q", name, got, want)
+		}
+	}
+	if archiveStem("Movie.RAR") != archiveStem("Movie.rar") {
+		t.Error("case-variant volumes of one set must share a key")
+	}
+}
+
+// archiveVolumesOf requires BOTH a matching key AND isArchiveFile. A name the
+// two disagree on is either a leak (grouped but never deleted) or an unexpected
+// deletion, so the two predicates must classify identically.
+func TestArchiveStem_AgreesWithIsArchiveFile(t *testing.T) {
+	for _, name := range []string{
+		"Movie.rar", "Movie.r00", "Movie.s00", "Movie.part01.rar",
+		"Movie.001", "Movie.zip.001", "Movie.7z.002", "Movie.tar.001", "Movie.999",
+		"Movie.mkv", "Movie.nfo", "Movie.r1", "Movie.0001", "Movie.en.srt",
+	} {
+		isVolume := archiveStem(name) != ""
+		if isVolume != isArchiveFile(name) {
+			t.Errorf("%q: archiveStem says volume=%v, isArchiveFile says %v",
+				name, isVolume, isArchiveFile(name))
+		}
 	}
 }
