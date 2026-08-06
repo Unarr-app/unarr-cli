@@ -1,6 +1,8 @@
 package postprocess
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -148,29 +150,68 @@ func TestPackedReleaseHasNoVideo_TheBugPremise(t *testing.T) {
 // Stubs the lookup instead of skipping when an extractor is installed — the
 // earlier version skipped on any dev machine and in CI, so it never actually
 // ran and would have passed with this branch broken.
-func TestExtractInDir_NoExtractorLeavesReleaseIntact(t *testing.T) {
+// A release that CANNOT be unpacked must be left exactly as it arrived.
+//
+// This test used to assert that outcome for "no extractor installed". Native
+// extraction removed that scenario — there is always an extractor now — so the
+// case it guards has moved: an archive whose bytes no decoder accepts. The
+// invariant under test is unchanged and is the one that matters: whatever the
+// reason extraction did not happen, every part the swarm served is still on
+// disk, byte for byte.
+func TestExtractInDir_UnextractableReleaseLeftIntact(t *testing.T) {
+	// No extractor binary either, so the shell fallback cannot quietly rescue
+	// this and mask what is being tested.
 	orig := findExtractorFn
 	findExtractorFn = func() (ExtractorType, string) { return ExtractorNone, "" }
 	t.Cleanup(func() { findExtractorFn = orig })
 
 	dir := t.TempDir()
+	// Named like a RAR set but carrying no RAR header — no decoder can open it.
 	writeFiles(t, dir, "movie.part01.rar", "movie.part02.rar")
 
-	res, err := ExtractInDir(dir, "")
-	if err != nil {
-		t.Fatalf("missing extractor must not be an error, got %v", err)
+	before := fileBytes(t, dir)
+
+	_, err := ExtractInDir(dir, "")
+	if err == nil {
+		t.Error("want an error for an archive nothing can decode")
 	}
-	if res.Extracted {
-		t.Error("Extracted = true without an extractor")
+
+	after := fileBytes(t, dir)
+	if len(after) != len(before) {
+		t.Errorf("file count changed: %d before, %d after", len(before), len(after))
 	}
-	if res.Note == "" {
-		t.Error("want a Note explaining the release was left packed")
-	}
-	for _, name := range []string{"movie.part01.rar", "movie.part02.rar"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Errorf("archive part %s was removed despite no extraction: %v", name, err)
+	for name, want := range before {
+		got, ok := after[name]
+		if !ok {
+			t.Errorf("file %s disappeared", name)
+			continue
+		}
+		if got != want {
+			t.Errorf("file %s was modified", name)
 		}
 	}
+}
+
+// fileBytes maps each top-level file in dir to a hash of its contents, so a
+// test can assert a directory is untouched rather than merely still populated.
+func fileBytes(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		out[e.Name()] = fmt.Sprintf("%x", sha256.Sum256(b))
+	}
+	return out
 }
 
 // REGRESSION (review finding #2): CleanupArchives must remove ONLY the volumes

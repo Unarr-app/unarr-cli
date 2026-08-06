@@ -78,11 +78,10 @@ func ExtractInDirTo(dir, destDir string, password string) (*ExtractDirResult, er
 		return res, nil // no archive: nothing to do, not an error
 	}
 
-	if _, extPath := findExtractorFn(); extPath == "" {
-		res.Note = fmt.Sprintf("archive %s left packed: no extractor found (install unrar or 7z)", filepath.Base(archive))
-		log.Printf("[extract] WARNING: %s", res.Note)
-		return res, nil
-	}
+	// No check for an installed binary any more: extraction is in-process, so a
+	// machine with neither unrar nor 7z unpacks the release just like any other.
+	// That check was this feature's whole reason for existing — it turned "no
+	// extractor in PATH" into "you get the .rNN files and unpack them by hand".
 
 	if password == "" && IsPasswordProtected(archive) {
 		return nil, &PasswordError{Archive: archive}
@@ -305,6 +304,26 @@ func findFirstRarInDir(dir string) string {
 			return path
 		}
 		log.Printf("[extract] %s looks like a split volume but carries no archive header - leaving it alone", name)
+	}
+
+	// Priority 4: a single-volume .7z or .zip.
+	//
+	// Last on purpose. These were invisible to this function until native
+	// extraction arrived (it only ever looked for RAR), so a release shipped as
+	// one .7z was silently left packed. Ranking them below the RAR cases keeps
+	// the established pick unchanged for every release that has a RAR set — the
+	// new formats only decide when nothing else matched.
+	//
+	// Magic-checked like the .001 case: an extension is a claim, not evidence.
+	for _, name := range names {
+		lower := strings.ToLower(name)
+		if !strings.HasSuffix(lower, ".7z") && !strings.HasSuffix(lower, ".zip") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if hasArchiveMagic(path) {
+			return path
+		}
 	}
 
 	return ""

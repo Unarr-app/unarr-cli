@@ -2,6 +2,7 @@ package postprocess
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -39,7 +40,16 @@ const (
 	Extractor7z    ExtractorType = "7z"
 )
 
-// FindExtractor checks which archive extractor is available in PATH.
+// ExtractorNative is reported when no external binary is installed. It is not
+// a "nothing available" answer: the in-process extractor always works.
+const ExtractorNative ExtractorType = "native"
+
+// FindExtractor reports which EXTERNAL archive extractor is available in PATH.
+//
+// It no longer decides whether extraction is possible at all — extraction is
+// always possible via the native path — so ExtractorNone now means only "no
+// shell fallback installed". Callers that used to treat ExtractorNone as fatal
+// must not: see ExtractInDirTo and the doctor check.
 func FindExtractor() (ExtractorType, string) {
 	if path, err := exec.LookPath("unrar"); err == nil {
 		return ExtractorUnrar, path
@@ -50,14 +60,71 @@ func FindExtractor() (ExtractorType, string) {
 	return ExtractorNone, ""
 }
 
-// Extract extracts an archive using the best available tool.
+// extractNativeFn indirects the native extractor so tests can force it to fail
+// and exercise the shell fallback on a machine where the native path succeeds —
+// which is every machine. Without it the fallback branch would be unreachable
+// in tests, i.e. unverified exactly where it matters.
+var extractNativeFn = extractNative
+
+// Extract extracts an archive, preferring the in-process (native) extractor and
+// falling back to unrar/7z when one is installed.
+//
+// Native first, measured rather than assumed. Benchmarked against the shell
+// extractors on real payloads (600 MB RAR set, 246 MB compressed):
+//
+//	RAR  -m0 store, 12×50 MB volumes   go 1.14-1.23s   unrar 0.97-2.16s   (go is STEADIER)
+//	RAR  -m3 compressed, 246 MB        go 0.57s        unrar 0.35s        (1.6x)
+//	7z   store, 600 MB                 go 0.56s        7z    0.55s        (parity, disk-bound)
+//	7z   LZMA2 compressed, 246 MB      go 3.42s        7z    0.75s        (4.6x — the worst case)
+//
+// Output was byte-identical (sha256) in every case. The store rows are the ones
+// that matter: scene releases ship -m0, so the common path is disk-bound and
+// the native decoder is at worst indistinguishable. Only LZMA2 is materially
+// slower, and 3.4s per 250 MB does not threaten a post-processing pipeline.
+//
+// The shell path is kept — not deleted — because a native decoder that chokes on
+// an exotic scene RAR would otherwise leave the user with nothing, where today
+// 7z rescues it. Every rescue is logged: if the log fills with them, the
+// preference order was wrong and the evidence will say so.
+//
 // password is optional — pass "" if not needed.
 // Returns the list of extracted file paths.
 func Extract(archivePath string, outputDir string, password string) ([]string, error) {
+	// Absolutise before anything else. Both shell extractors run with
+	// cmd.Dir = outputDir, so a RELATIVE archive path is resolved from the output
+	// directory instead of the caller's working directory and unrar exits 10
+	// ("cannot open"). Every production caller happens to pass an absolute path,
+	// which is why this never surfaced; it is fixed here rather than in each
+	// extractor so the native and shell paths cannot disagree about what the
+	// argument means.
+	if abs, err := filepath.Abs(archivePath); err == nil {
+		archivePath = abs
+	}
+
+	files, nativeErr := extractNativeFn(archivePath, outputDir, password)
+	if nativeErr == nil {
+		return files, nil
+	}
+
+	// A wrong password is deterministic: every extractor will reject it. Retrying
+	// through the shell only doubles the time spent reaching the same answer.
+	//
+	// EXCEPT when the native verdict was a guess (PasswordError.Uncertain). A
+	// header-encrypted 7z and a corrupt one fail identically in sevenzip, so that
+	// verdict is the better of two indistinguishable readings — and 7z can
+	// actually tell them apart. Letting the ambiguous case through to the
+	// fallback is what turns a guess into an answer whenever a binary is present.
+	var pwErr *PasswordError
+	if errors.As(nativeErr, &pwErr) && !pwErr.Uncertain {
+		return nil, nativeErr
+	}
+
 	extType, extPath := FindExtractor()
 	if extType == ExtractorNone {
-		return nil, fmt.Errorf("no archive extractor found (install unrar or 7z)")
+		return nil, nativeErr
 	}
+
+	log.Printf("[extract] native extractor failed (%v) - retrying with %s", nativeErr, extType)
 
 	// unrar only speaks RAR. A .001/.002 split set is a CONTAINER-agnostic naming
 	// convention — it is just as likely to be a split zip or 7z — so handing such
@@ -66,7 +133,9 @@ func Extract(archivePath string, outputDir string, password string) ([]string, e
 	// first, and only fall back to availability.
 	if extType == ExtractorUnrar && !isRarArchive(archivePath) {
 		if szPath, err := exec.LookPath("7z"); err == nil {
-			return extract7z(szPath, archivePath, outputDir, password)
+			return shellRescue(archivePath, nativeErr, func() ([]string, error) {
+				return extract7z(szPath, archivePath, outputDir, password)
+			})
 		}
 		// No 7z: let unrar try anyway — a .001 CAN be a split RAR, and a clear
 		// extractor error beats refusing to attempt it.
@@ -74,12 +143,36 @@ func Extract(archivePath string, outputDir string, password string) ([]string, e
 
 	switch extType {
 	case ExtractorUnrar:
-		return extractUnrar(extPath, archivePath, outputDir, password)
+		return shellRescue(archivePath, nativeErr, func() ([]string, error) {
+			return extractUnrar(extPath, archivePath, outputDir, password)
+		})
 	case Extractor7z:
-		return extract7z(extPath, archivePath, outputDir, password)
+		return shellRescue(archivePath, nativeErr, func() ([]string, error) {
+			return extract7z(extPath, archivePath, outputDir, password)
+		})
 	default:
-		return nil, fmt.Errorf("unknown extractor: %s", extType)
+		return nil, nativeErr
 	}
+}
+
+// shellRescue runs a shell extractor after the native one failed, logging
+// loudly when it succeeds.
+//
+// The log line is the whole point of keeping the fallback: it is the only
+// evidence that would justify reversing the preference order, and a silent
+// rescue would leave that decision to guesswork forever.
+//
+// When the shell extractor ALSO fails, the native error is reported as the
+// cause — it is the one describing the archive, whereas the shell error is
+// usually a generic non-zero exit — with the shell failure attached.
+func shellRescue(archivePath string, nativeErr error, run func() ([]string, error)) ([]string, error) {
+	files, err := run()
+	if err != nil {
+		return nil, fmt.Errorf("%w (shell fallback also failed: %v)", nativeErr, err)
+	}
+	log.Printf("[extract] NATIVE-FALLBACK: shell extractor succeeded on %s where the native one failed (%v)",
+		filepath.Base(archivePath), nativeErr)
+	return files, nil
 }
 
 // isRarArchive reports whether the file carries the RAR magic signature
@@ -187,8 +280,17 @@ func extract7z(szPath, archivePath, outputDir, password string) ([]string, error
 	return listExtractedFiles(outputDir, archivePath)
 }
 
-// IsPasswordProtected checks if a rar archive requires a password.
+// IsPasswordProtected checks if an archive requires a password.
+//
+// The native check runs first and answers for every supported container without
+// spawning a process. It is also the only check available on a machine with no
+// extractor binary — where this used to return a flat false, letting the
+// pipeline walk into an extraction that could only fail.
 func IsPasswordProtected(archivePath string) bool {
+	if isNativePasswordProtected(archivePath) {
+		return true
+	}
+
 	extType, extPath := FindExtractor()
 	if extType == ExtractorNone {
 		return false
@@ -263,12 +365,21 @@ func Cleanup(dir string) error {
 	return nil
 }
 
-// isArchiveFile returns true for rar/split archive files.
+// isArchiveFile returns true for rar/7z/zip/split archive files.
+//
+// .7z and .zip were added along with native extraction: a single-volume release
+// in either format used to go unrecognised here, so it was never treated as an
+// archive to skip or to clean up. Safe to widen because the two callers are
+// anchored: listExtractedFiles only skips names in the archive's OWN directory,
+// and archiveVolumesOf only considers names sharing the unpacked archive's stem.
+// Deliberately NOT widened in cleanupRarParts, which deletes by extension with
+// no such anchor — a bare ".zip" rule there would eat an unrelated archive the
+// user had parked in a usenet scratch directory.
 func isArchiveFile(name string) bool {
 	lower := strings.ToLower(name)
 	ext := filepath.Ext(lower)
 
-	if ext == ".rar" {
+	if ext == ".rar" || ext == ".7z" || ext == ".zip" {
 		return true
 	}
 	// .r00, .r01, ... .r99, .s00, etc.
@@ -308,8 +419,23 @@ func isNumeric(s string) bool {
 // PasswordError indicates the archive requires a password.
 type PasswordError struct {
 	Archive string
+
+	// Uncertain marks a verdict that was INFERRED rather than reported. A
+	// header-encrypted 7z and a corrupt one produce the same parse failure, so
+	// "needs a password" is the better reading of an ambiguous signal, not a
+	// fact the decoder stated.
+	//
+	// Extract reads this to decide whether the shell fallback is still worth
+	// running: a certain password error is deterministic and retrying wastes
+	// time, while an uncertain one is exactly what a second extractor can
+	// resolve. Without the flag the field would have to be re-derived from the
+	// error message, which PasswordError does not carry.
+	Uncertain bool
 }
 
 func (e *PasswordError) Error() string {
+	if e.Uncertain {
+		return fmt.Sprintf("archive is password protected or corrupt: %s", e.Archive)
+	}
 	return fmt.Sprintf("archive is password protected: %s", e.Archive)
 }

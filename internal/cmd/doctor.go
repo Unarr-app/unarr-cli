@@ -193,8 +193,7 @@ func par2CheckResult(cfg *config.Config, features featureFn) (string, error) {
 	return "!not installed — usenet downloads are delivered UNVERIFIED (install: apt install par2 / brew install par2)", nil
 }
 
-// extractorCheckResult reports whether an archive extractor (unrar or 7z) is
-// installed.
+// extractorCheckResult reports how archives will be unpacked.
 //
 // Unlike par2 this is NOT usenet-specific: torrents are unpacked too (scene
 // releases still ship as .rar/.r00 sets), so the check is unconditional. It was
@@ -202,9 +201,11 @@ func par2CheckResult(cfg *config.Config, features featureFn) (string, error) {
 // repeat the par2 mistake documented above — a "not needed" line on a machine
 // that was about to need it.
 //
-// A warning, not a failure: without an extractor a packed release is left as its
-// raw parts. That is degraded, not lost — the files are exactly what the swarm
-// or the server delivered, and the user can unpack them by hand.
+// No longer a warning when nothing is installed: extraction is in-process
+// (rar/7z/zip), so a bare binary unpacks releases on its own. An external
+// extractor is now only a FALLBACK for an archive the native decoder rejects,
+// which makes its absence worth stating but not worth flagging — a "!" here
+// would send users to install something they do not need.
 // findExtractor is indirected so the "nothing installed" branch is testable on
 // a machine that HAS unrar/7z — every dev box and CI runner. Without it that
 // branch could only be covered by skipping the test exactly where it matters.
@@ -213,10 +214,9 @@ var findExtractor = postprocess.FindExtractor
 func extractorCheckResult() (string, error) {
 	switch extType, path := findExtractor(); extType {
 	case postprocess.ExtractorNone:
-		return "!not installed — packed releases (.rar/.r00 sets) are left unpacked " +
-			"(install: apt install unrar / brew install unrar, or 7z)", nil
+		return "built-in (rar/7z/zip) — no external fallback installed", nil
 	default:
-		return string(extType) + " (" + path + ")", nil
+		return "built-in (rar/7z/zip) + " + string(extType) + " fallback (" + path + ")", nil
 	}
 }
 
