@@ -413,19 +413,22 @@ func (d *Daemon) Run(ctx context.Context) error {
 	log.Printf("Agent registered: %s (%s) [%s]", d.User.Name, d.User.Email, d.User.Plan)
 	log.Printf("Features: torrent=%v debrid=%v usenet=%v", d.Features.Torrent, d.Features.Debrid, d.Features.Usenet)
 
-	// Usenet needs par2 (segment repair) + an extractor (RAR/7z) on the host.
-	// Without par2, a single bad segment corrupts the file silently; without
-	// an extractor, RAR-packed downloads can't be unpacked. Warn loudly at
-	// startup so the operator installs them before the first download fails.
+	// par2 is usenet-only: without it a single bad segment corrupts the file
+	// silently.
 	if d.Features.Usenet {
 		if _, err := exec.LookPath("par2"); err != nil {
 			log.Printf("[usenet] WARNING: par2 not found in PATH - corrupted segments cannot be repaired and extraction may fail. Install par2 (apt install par2 / brew install par2).")
 		}
-		_, unrarErr := exec.LookPath("unrar")
-		_, sevenZErr := exec.LookPath("7z")
-		if unrarErr != nil && sevenZErr != nil {
-			log.Printf("[usenet] WARNING: no archive extractor (unrar or 7z) found - RAR-packed downloads cannot be unpacked. Install unrar or 7z.")
-		}
+	}
+
+	// The extractor is NOT usenet-only. Scene torrents ship as .rar/.r00 sets
+	// too, and those are unpacked on the torrent path as well — gating this
+	// warning on Features.Usenet left a torrent-only user with no signal at all
+	// until a packed release quietly landed in their library as a pile of parts.
+	_, unrarErr := exec.LookPath("unrar")
+	_, sevenZErr := exec.LookPath("7z")
+	if unrarErr != nil && sevenZErr != nil {
+		log.Printf("WARNING: no archive extractor (unrar or 7z) found in PATH - packed releases (.rar/.r00 sets) will be left unpacked. Install unrar or 7z (apt install unrar / brew install unrar).")
 	}
 
 	// Wire sync callbacks

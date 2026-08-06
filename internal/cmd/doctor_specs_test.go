@@ -28,6 +28,7 @@ func TestDoctorSpecsOrderAndGroups(t *testing.T) {
 		{"Downloads", "Download dir writable"},
 		{"Downloads", "Disk space"},
 		{"Downloads", "par2 (usenet verify/repair)"},
+		{"Downloads", "Archive extractor (unrar/7z)"},
 		{"Downloads", "Managed VPN (P2P kill-switch)"},
 		{"Methods", "Usenet server"},
 		{"Methods", "Torrent network"},

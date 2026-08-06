@@ -272,6 +272,16 @@ func doctorDownloadSpecs(cfg *config.Config, features featureFn) []doctor.Spec {
 			Remedy: "install par2 (apt install par2 / brew install par2)",
 			Fn:     func() (string, error) { return par2CheckResult(cfg, features) },
 		},
+		// An extractor is needed by BOTH methods — usenet delivers RAR sets by
+		// design, and scene torrents still ship packed — so this one is never
+		// "not needed". Warning, not failure: a packed release is left as its raw
+		// parts, which is degraded, not lost.
+		{
+			Group:  "Downloads",
+			Name:   "Archive extractor (unrar/7z)",
+			Remedy: "install unrar or 7z (apt install unrar / brew install unrar)",
+			Fn:     func() (string, error) { return extractorCheckResult() },
+		},
 		// Managed-VPN P2P kill-switch: when [downloads.vpn] required=true, torrent must
 		// have a live tunnel — otherwise it's disabled (safe) and this flags it.
 		{
