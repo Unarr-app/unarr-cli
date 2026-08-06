@@ -12,6 +12,7 @@ import (
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/notify"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/postprocess"
 )
 
 // ManagerConfig holds download manager settings.
@@ -696,6 +697,58 @@ func removeBrokenResult(taskID string, result *Result) {
 	}
 }
 
+// extractPackedRelease unpacks a scene-style archived release in place so the
+// subsequent organize() finds a real video instead of a folder of .rNN parts.
+//
+// Deliberately non-fatal in every failure mode. Unlike usenet — where the
+// archive IS the delivery format and an unextracted payload is useless — a
+// torrent's raw parts are exactly what the swarm served. Failing the task here
+// would downgrade "we could not improve this" into "you get nothing", losing a
+// download that completed and verified fine. Every problem is logged and the
+// raw release is left for organize()'s existing move-the-folder fallback.
+func (m *Manager) extractPackedRelease(task *Task, result *Result) {
+	if result == nil || result.FilePath == "" {
+		return
+	}
+	// Only a multi-file (directory) result can be a packed release; a
+	// single-file result is already the payload.
+	fi, err := os.Stat(result.FilePath)
+	if err != nil || !fi.IsDir() {
+		return
+	}
+
+	shortID := agent.ShortID(task.ID)
+
+	// NzbPassword is the only password the task carries. It is usenet-sourced,
+	// but a user who typed one for a release is describing THAT release, so
+	// honour it here too rather than adding a second field that means the same
+	// thing. Empty for the overwhelming majority of torrents.
+	res, err := postprocess.ExtractInDir(result.FilePath, task.NzbPassword)
+	if err != nil {
+		if _, ok := err.(*postprocess.PasswordError); ok {
+			log.Printf("[%s] release is password protected - leaving it packed (set a password in download options to unpack)", shortID)
+			return
+		}
+		log.Printf("[%s] extract failed, leaving release packed: %v", shortID, err)
+		return
+	}
+	if res.Note != "" {
+		log.Printf("[%s] %s", shortID, res.Note)
+		return
+	}
+	if !res.Extracted {
+		return // no archive in there: the common case
+	}
+
+	log.Printf("[%s] extracted packed release (%d file(s))", shortID, len(res.Files))
+
+	// Drop the archive parts only after a successful extraction, so a release
+	// that failed to unpack keeps everything the user was served.
+	if err := postprocess.CleanupArchives(result.FilePath); err != nil {
+		log.Printf("[%s] archive cleanup warning: %v", shortID, err)
+	}
+}
+
 // finalizeVerified runs organize → upgrade replacement → complete for a download
 // that already passed verify.
 func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Result) {
@@ -704,6 +757,20 @@ func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Resu
 		m.fail(ctx, task, "transition error: "+err.Error())
 		return
 	}
+
+	// Unpack a packed release BEFORE organizing. organize() picks the principal
+	// video out of a release dir; with the payload still inside a .rar set there
+	// is no video to pick, so it fell back to moving the raw folder and the user
+	// got a pile of .r00/.r01 files instead of something playable.
+	//
+	// Usenet is excluded: its own pipeline already extracted (and par2-verified)
+	// before it ever reaches here — running it twice would find no archive and
+	// merely waste a directory scan, but the exclusion keeps the ownership of
+	// each method's post-processing unambiguous.
+	if result.Method != MethodUsenet {
+		m.extractPackedRelease(task, result)
+	}
+
 	finalPath, err := organize(result, task, m.cfg.Organize)
 	if err != nil {
 		// A failed organize is NOT a completed download: the file is stranded in the

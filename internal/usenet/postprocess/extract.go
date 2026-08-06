@@ -59,6 +59,19 @@ func Extract(archivePath string, outputDir string, password string) ([]string, e
 		return nil, fmt.Errorf("no archive extractor found (install unrar or 7z)")
 	}
 
+	// unrar only speaks RAR. A .001/.002 split set is a CONTAINER-agnostic naming
+	// convention — it is just as likely to be a split zip or 7z — so handing such
+	// a set to unrar merely because unrar is installed fails with "is not RAR
+	// archive" even though 7z sits right there and would open it. Pick by format
+	// first, and only fall back to availability.
+	if extType == ExtractorUnrar && !isRarArchive(archivePath) {
+		if szPath, err := exec.LookPath("7z"); err == nil {
+			return extract7z(szPath, archivePath, outputDir, password)
+		}
+		// No 7z: let unrar try anyway — a .001 CAN be a split RAR, and a clear
+		// extractor error beats refusing to attempt it.
+	}
+
 	switch extType {
 	case ExtractorUnrar:
 		return extractUnrar(extPath, archivePath, outputDir, password)
@@ -67,6 +80,28 @@ func Extract(archivePath string, outputDir string, password string) ([]string, e
 	default:
 		return nil, fmt.Errorf("unknown extractor: %s", extType)
 	}
+}
+
+// isRarArchive reports whether the file carries the RAR magic signature
+// (RAR4 "Rar!\x1a\x07\x00" / RAR5 "Rar!\x1a\x07\x01\x00").
+//
+// Content-sniffed rather than name-matched on purpose: the whole problem is
+// that a .001 extension says nothing about the container inside. An unreadable
+// file returns false and takes the caller down the tolerant path.
+func isRarArchive(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 8)
+	n, err := f.Read(buf)
+	if err != nil || n < 7 {
+		return false
+	}
+	return string(buf[:7]) == "Rar!\x1a\x07\x00" ||
+		(n >= 8 && string(buf[:8]) == "Rar!\x1a\x07\x01\x00")
 }
 
 // extractUnrar extracts using unrar.

@@ -299,6 +299,12 @@ func findPar2File(files map[string]string) string {
 // Patterns: .part01.rar, .part1.rar, or just .rar (single/first volume)
 var firstRarRe = regexp.MustCompile(`(?i)\.part0*1\.rar$`)
 
+// partRarRe matches ANY volume of a .partNN.rar set (including part01).
+// findFirstRarInDir uses it to skip middle volumes when no part01 is present:
+// handing unrar a .part07.rar fails, so a set missing its entry volume is
+// better left packed than "extracted" into an error.
+var partRarRe = regexp.MustCompile(`(?i)\.part\d+\.rar$`)
+
 // findFirstRar returns the path to the first rar volume.
 // For multi-part rars (part01.rar, part02.rar...), returns part01 specifically.
 func findFirstRar(files map[string]string) string {
