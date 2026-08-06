@@ -760,6 +760,17 @@ func (m *Manager) extractPackedRelease(task *Task, result *Result) {
 	// finalDir is where a seeding unpack ENDS UP; destDir is the ".tmp" it is
 	// written to first. Equal to destDir (both srcDir) on the in-place path.
 	finalDir := srcDir
+
+	// Reap stale ".tmp" holders for THIS release regardless of which path runs
+	// below. The reap used to live inside the seeding branch only, so a daemon
+	// killed mid-extraction whose user then turned seeding OFF left the orphan —
+	// up to the full release size — forever: nothing else matches the suffix,
+	// and an in-place retry never looked for it. Also covers numbered holders
+	// (".unpacked.2.tmp"), which the branch's own reap missed when the base
+	// ".unpacked" later disappeared. Safe under the release-dir lock: every
+	// writer of these paths holds the same lock.
+	m.reapStaleTmpHolders(srcDir)
+
 	if m.cfg.SeedEnabled {
 		// A sibling from a concurrent finalization of this same release is a
 		// finished unpack, not a collision: adopt it instead of unpacking the
@@ -915,6 +926,33 @@ func (m *Manager) removeEmptyUnpackHolder(unpackedPath string) {
 
 // unpackedNumberedRe matches the collision-suffixed holders (".unpacked.2").
 var unpackedNumberedRe = regexp.MustCompile(regexp.QuoteMeta(unpackedSuffix) + `\.\d+$`)
+
+// reapStaleTmpHolders removes every "<release>.unpacked*.tmp" holder beside
+// srcDir. A ".tmp" is stale by definition — the finalizing rename never
+// happened — so it is never adopted, only deleted. Prefix+suffix matched on the
+// release's own name so nothing belonging to another release (or to the user)
+// is ever considered. Best-effort: a failed removal is logged and the caller
+// proceeds — the seeding path re-checks its own specific holder anyway.
+func (m *Manager) reapStaleTmpHolders(srcDir string) {
+	parent := filepath.Dir(srcDir)
+	prefix := filepath.Base(srcDir) + unpackedSuffix
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, unpackedTmpSuffix) {
+			continue
+		}
+		stale := filepath.Join(parent, name)
+		if err := os.RemoveAll(stale); err != nil {
+			log.Printf("[extract] could not reap stale unpack dir %s: %v", name, err)
+			continue
+		}
+		log.Printf("[extract] reaped stale unpack dir %s", name)
+	}
+}
 
 // releaseDirLocks serializes post-processing per release directory. Entries are
 // reference-counted and dropped when the last holder releases, so the map does

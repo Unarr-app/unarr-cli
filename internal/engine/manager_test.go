@@ -864,6 +864,55 @@ func TestExtractPackedRelease_NeverAdoptsUnfinishedUnpack(t *testing.T) {
 	}
 }
 
+// REGRESSION (review finding): the stale-".tmp" reap lived inside the seeding
+// branch only. A daemon killed mid-extraction whose user then turned seeding
+// OFF left the orphan — up to the full release size — forever: the in-place
+// retry never looked for it, nothing else matches the suffix, and adoption
+// (correctly) refuses it. Numbered holders (".unpacked.2.tmp") were equally
+// unreachable when their base ".unpacked" later disappeared.
+func TestExtractPackedRelease_ReapsStaleTmpOnNonSeedingPath(t *testing.T) {
+	out := t.TempDir()
+	src := buildPackedRelease(t, "show.mkv")
+	rel := filepath.Join(out, "Show.S01E03-GRP")
+	if err := os.Rename(src, rel); err != nil {
+		t.Fatal(err)
+	}
+
+	// What a crash during a SEEDING extraction leaves behind, plus a numbered
+	// variant from an earlier collision.
+	for _, holder := range []string{
+		rel + unpackedSuffix + unpackedTmpSuffix,
+		rel + unpackedSuffix + ".2" + unpackedTmpSuffix,
+	} {
+		if err := os.MkdirAll(holder, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(holder, "half.mkv"), make([]byte, 2<<20), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Seeding is now OFF: the retry takes the in-place path.
+	m := &Manager{cfg: ManagerConfig{SeedEnabled: false, OutputDir: out}}
+	result := &Result{FilePath: rel, Method: MethodTorrent}
+	m.extractPackedRelease(&Task{ID: "reap-test"}, result)
+
+	entries, err := os.ReadDir(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), unpackedTmpSuffix) {
+			t.Errorf("stale %q holder survived the non-seeding retry: %s", unpackedTmpSuffix, e.Name())
+		}
+	}
+	// COUNTERFACTUAL: the retry itself really worked — the release was unpacked
+	// in place — so the reap is not passing because nothing ran at all.
+	if _, err := os.Stat(filepath.Join(rel, "show.mkv")); err != nil {
+		t.Errorf("in-place retry did not unpack: %v", err)
+	}
+}
+
 // The other half of the guarantee: a COMPLETED unpack really is renamed into
 // place, adoptable, and leaves no ".tmp" behind. Without this the test above
 // would pass with adoption broken outright.
