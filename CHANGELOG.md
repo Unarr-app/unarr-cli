@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.1] - 2026-08-06
+
+
+### Added
+
+- **doctor**: check for an archive extractor, and stop gating the warning on usenet
+- **postprocess**: unpack archives in-process, no unrar/7z required
+
+### Fixed
+
+- **engine**: reap stale ".tmp" unpack holders on every path, not only seeding
+- **engine**: make an unpack visible only once it has finished
+- **engine**: unpack a seeding release to a sibling, never inside the torrent
+- **engine**: keep archive parts while the torrent is seeding
+- **engine**: extract packed releases on the torrent path
+- **hls**: honour the resume position when COPY-VOD is unavailable
+- **postprocess**: match each volume family on its own, not via an optional group
+- **postprocess**: key archive volumes by set identity, not just base name
+- **postprocess**: stop archiveStem from eating a segment of the release name
+- **postprocess**: delete only the volumes we unpacked, never the user's files
 ## [1.10.0] - 2026-08-06
 
 
@@ -40,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **logs**: keep every log line ASCII, so every reader can read it
 - **status**: reject a state file written before this host booted
 - **support**: stop the bundle publishing the user's name, and publish the agent ID instead
+
+### Other
+
+- **release**: 1.10.0
 ## [1.9.0] - 2026-08-04
 
 
@@ -1480,6 +1504,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.10.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.8.2...v1.9.0
 [1.8.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.8.1...v1.8.2
