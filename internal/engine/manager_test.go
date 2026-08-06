@@ -650,7 +650,11 @@ func TestExistingUnpackedSibling_IgnoresIncompleteUnpack(t *testing.T) {
 // before the fix: 4 re-downloads left .unpacked, .2, .3 and .4 in the download
 // dir, each one bumping the collision counter for the next unpack.
 func TestRemoveEmptyUnpackHolder(t *testing.T) {
-	m := &Manager{}
+	// withOut builds a manager whose download dir is out — the containment
+	// boundary the cleanup must respect.
+	withOut := func(out string) *Manager {
+		return &Manager{cfg: ManagerConfig{OutputDir: out}}
+	}
 
 	t.Run("removes our own empty holder", func(t *testing.T) {
 		out := t.TempDir()
@@ -662,10 +666,67 @@ func TestRemoveEmptyUnpackHolder(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		m.removeEmptyUnpackHolder(child)
+		withOut(out).removeEmptyUnpackHolder(child)
 
 		if _, err := os.Stat(filepath.Dir(child)); !os.IsNotExist(err) {
 			t.Error("empty holder survived")
+		}
+	})
+
+	// REGRESSION (review finding): the suffix check alone let this delete the
+	// user's DOWNLOAD DIR. Someone whose downloads live in "~/media.unpacked"
+	// lost it the first time a release organized cleanly out of it (measured).
+	// The holder must be strictly inside the download dir, never the dir itself.
+	t.Run("never deletes the download dir itself", func(t *testing.T) {
+		home := t.TempDir()
+		out := filepath.Join(home, "media"+unpackedSuffix) // the user named it
+		rel := filepath.Join(out, "Movie.2024-GRP")
+		if err := os.MkdirAll(rel, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(rel); err != nil {
+			t.Fatal(err)
+		}
+
+		withOut(out).removeEmptyUnpackHolder(rel)
+
+		if _, err := os.Stat(out); err != nil {
+			t.Errorf("the user's download dir was deleted: %v", err)
+		}
+	})
+
+	// A holder outside the download dir is not ours to remove either.
+	t.Run("ignores a holder outside the download dir", func(t *testing.T) {
+		home := t.TempDir()
+		out := filepath.Join(home, "downloads")
+		if err := os.MkdirAll(out, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		holder := filepath.Join(home, "elsewhere"+unpackedSuffix)
+		if err := os.MkdirAll(holder, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		withOut(out).removeEmptyUnpackHolder(filepath.Join(holder, "Movie-GRP"))
+
+		if _, err := os.Stat(holder); err != nil {
+			t.Errorf("holder outside the download dir was deleted: %v", err)
+		}
+	})
+
+	// With no download dir configured there is nothing to contain against, so
+	// nothing may be deleted.
+	t.Run("no-op without a configured download dir", func(t *testing.T) {
+		home := t.TempDir()
+		holder := filepath.Join(home, "Movie-GRP"+unpackedSuffix)
+		if err := os.MkdirAll(holder, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		(&Manager{}).removeEmptyUnpackHolder(filepath.Join(holder, "Movie-GRP"))
+
+		if _, err := os.Stat(holder); err != nil {
+			t.Errorf("holder removed with no OutputDir configured: %v", err)
 		}
 	})
 
@@ -681,7 +742,7 @@ func TestRemoveEmptyUnpackHolder(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		m.removeEmptyUnpackHolder(child)
+		withOut(out).removeEmptyUnpackHolder(child)
 
 		if _, err := os.Stat(child); err != nil {
 			t.Errorf("holder with content was removed: %v", err)
@@ -701,7 +762,7 @@ func TestRemoveEmptyUnpackHolder(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		m.removeEmptyUnpackHolder(rel)
+		withOut(out).removeEmptyUnpackHolder(rel)
 
 		if _, err := os.Stat(filepath.Join(out, "Movies")); err != nil {
 			t.Errorf("a user directory was deleted: %v", err)
@@ -716,7 +777,7 @@ func TestRemoveEmptyUnpackHolder(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		m.removeEmptyUnpackHolder(child)
+		withOut(out).removeEmptyUnpackHolder(child)
 
 		if _, err := os.Stat(holder); !os.IsNotExist(err) {
 			t.Error("numbered holder survived")
@@ -724,7 +785,7 @@ func TestRemoveEmptyUnpackHolder(t *testing.T) {
 	})
 
 	t.Run("empty path is a no-op", func(t *testing.T) {
-		m.removeEmptyUnpackHolder("")
+		withOut(t.TempDir()).removeEmptyUnpackHolder("")
 	})
 }
 

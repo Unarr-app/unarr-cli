@@ -836,8 +836,31 @@ func (m *Manager) removeEmptyUnpackHolder(unpackedPath string) {
 	if !strings.HasSuffix(holder, unpackedSuffix) && !unpackedNumberedRe.MatchString(holder) {
 		return // not one of ours
 	}
-	if err := os.Remove(holder); err == nil {
-		log.Printf("[extract] removed empty unpack dir %s", filepath.Base(holder))
+
+	// Containment, mirroring cleanupReleaseDir: the holder must be strictly
+	// INSIDE the download dir, never the download dir itself. The name check
+	// alone is not enough — a user whose download dir is "~/media.unpacked"
+	// would see it deleted the first time a release organized cleanly out of it
+	// (measured). Without a configured OutputDir there is nothing to contain
+	// against, so nothing is removed.
+	outputDir := m.cfg.Organize.OutputDir
+	if outputDir == "" {
+		outputDir = m.cfg.OutputDir
+	}
+	if outputDir == "" {
+		return
+	}
+	absOut, err1 := filepath.Abs(outputDir)
+	absHolder, err2 := filepath.Abs(holder)
+	if err1 != nil || err2 != nil {
+		return
+	}
+	if absHolder == absOut || !strings.HasPrefix(absHolder, absOut+string(os.PathSeparator)) {
+		return
+	}
+
+	if err := os.Remove(absHolder); err == nil {
+		log.Printf("[extract] removed empty unpack dir %s", filepath.Base(absHolder))
 	}
 }
 

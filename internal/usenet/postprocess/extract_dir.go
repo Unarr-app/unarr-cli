@@ -194,44 +194,48 @@ func archiveVolumesOf(dir, entryPath string) []string {
 	return parts
 }
 
-// archiveStem strips the volume suffix from an archive member name so every
-// volume of a set maps to the same key:
+// archiveStem builds the grouping key for an archive volume: every volume of a
+// set maps to the same key, and NO two sets ever share one.
 //
-//	show.part01.rar → show    show.r00  → show    show.zip.001 → show
+//	show.part01.rar → "show|rar"    show.r00 → "show|rar"
+//	show.zip.001    → "show|num"    show.001 → "show|num"
 //
-// The stem decides which files CleanupArchives deletes, so collapsing two
-// different sets onto one key silently destroys the set that was never
-// unpacked. Scene names are dotted (Movie.2024.1080p.BluRay-GRP), which makes
-// "drop one more dotted segment" a data-loss bug rather than a cosmetic one.
+// The key carries the volume FORM, not just the base name, because the form is
+// what tells two sets apart when they share a base: a directory can hold
+// "Movie-GRP.zip.001/.002" beside "Movie-GRP.rar/.r00", and a base-only key
+// merges them.
+//
+// This matters because the key decides what CleanupArchives DELETES. Merging
+// two sets silently destroys the one that was never unpacked — measured twice
+// on this function: first when it dropped a dotted segment of the release name
+// ("Movie.2024.1080p-GRP.rar" and "Movie.2024.720p-OTHER.rar" both became
+// "Movie.2024"), then when a numbered split and a rar set with the same base
+// both became "Movie-GRP". Both returned 4 files for a 2-file set.
+//
+// Returns "" for a name that is not a recognised volume.
 var volumeSuffixRe = regexp.MustCompile(`(?i)(\.part\d+)?\.(rar|r\d{2}|s\d{2}|(\d{3}))$`)
-
-// archiveContainerExts are the inner extensions a numbered split may wrap:
-// "<base>.zip.001". Only these are stripped, so a release whose name merely
-// ends in a dotted segment keeps it.
-var archiveContainerExts = map[string]bool{
-	".zip": true, ".7z": true, ".rar": true, ".tar": true,
-}
 
 func archiveStem(name string) string {
 	m := volumeSuffixRe.FindStringSubmatch(name)
 	if m == nil {
 		return "" // not a recognised volume name
 	}
-	trimmed := name[:len(name)-len(m[0])]
+	base := name[:len(name)-len(m[0])]
 
-	// ONLY a numbered volume (.001) can carry a container extension inside the
-	// name. For .rar/.rNN/.partNN.rar the regex already consumed the whole
-	// suffix, and trimming another extension would eat a real segment of the
-	// release name: "Movie.2024.1080p-GRP.rar" and "Movie.2024.720p-OTHER.rar"
-	// both collapsed to "Movie.2024", so cleaning up one set deleted the other.
-	// Measured: archiveVolumesOf returned 4 files for a 2-file set.
-	if m[3] == "" {
-		return trimmed
+	// A numbered volume (.001) is its own family. Nothing is trimmed from the
+	// base: every volume of one split shares the SAME text before ".00N"
+	// ("show.zip.001"/"show.zip.002" → "show.zip"), so grouping needs no
+	// normalisation, and trimming would resurrect the very bug fixed above —
+	// "Movie.2024.1080p-GRP.001" would lose "-GRP" and collide with
+	// "Movie.2024.720p-OTHER.001". Keeping the container extension in the key is
+	// what also separates "show.zip.001" from "show.7z.001", two different
+	// archives of the same release.
+	if m[3] != "" {
+		return base + "|num"
 	}
-	if ext := filepath.Ext(trimmed); archiveContainerExts[strings.ToLower(ext)] {
-		return strings.TrimSuffix(trimmed, ext)
-	}
-	return trimmed
+	// .rar / .rNN / .sNN / .partNN.rar all belong to ONE set — a rar archive
+	// continues into .r00 and then .s00 — so they must share a key.
+	return base + "|rar"
 }
 
 // findFirstRarInDir is findFirstRar addressed by directory instead of by the

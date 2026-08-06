@@ -228,18 +228,45 @@ func TestCleanupArchives_OnlyTouchesItsOwnSet(t *testing.T) {
 	}{
 		{
 			name:  "plain .rar/.rNN",
-			mine:  []string{"Movie.2024.1080p.BluRay.x264-GRP.rar", "Movie.2024.1080p.BluRay.x264-GRP.r00"},
-			other: []string{"Movie.2024.720p.BluRay.x264-OTHER.rar", "Movie.2024.720p.BluRay.x264-OTHER.r00"},
+			// The DISTINGUISHING segment must be the LAST one before the suffix:
+			// that is the only position the old over-trim consumed. With it two
+			// segments back (…x264-GRP vs …x264-OTHER) the old code still told the
+			// sets apart and this test passed on the broken implementation.
+			mine:  []string{"Movie.2024.1080p-GRP.rar", "Movie.2024.1080p-GRP.r00"},
+			other: []string{"Movie.2024.720p-OTHER.rar", "Movie.2024.720p-OTHER.r00"},
 		},
 		{
 			name:  "partNN.rar",
-			mine:  []string{"Show.S01E01.1080p.WEB-GRP.part01.rar", "Show.S01E01.1080p.WEB-GRP.part02.rar"},
-			other: []string{"Show.S01E01.720p.WEB-OTHER.part01.rar", "Show.S01E01.720p.WEB-OTHER.part02.rar"},
+			mine:  []string{"Show.S01E01.1080p-GRP.part01.rar", "Show.S01E01.1080p-GRP.part02.rar"},
+			other: []string{"Show.S01E01.720p-OTHER.part01.rar", "Show.S01E01.720p-OTHER.part02.rar"},
 		},
 		{
 			name:  "numbered split keeps container stripping",
 			mine:  []string{"Movie.2024.1080p-GRP.zip.001", "Movie.2024.1080p-GRP.zip.002"},
 			other: []string{"Movie.2024.720p-OTHER.zip.001", "Movie.2024.720p-OTHER.zip.002"},
+		},
+		{
+			// SAME base name, DIFFERENT volume form. The second data-loss round:
+			// stripping the container extension made "Movie-GRP.zip.001" and
+			// "Movie-GRP.rar" share a key, so unpacking the split deleted the rar
+			// set. Measured: 4 files returned for a 2-file set.
+			name:  "same base, different form",
+			mine:  []string{"Movie.2024-GRP.zip.001", "Movie.2024-GRP.zip.002"},
+			other: []string{"Movie.2024-GRP.rar", "Movie.2024-GRP.r00"},
+		},
+		{
+			// The inverse: entering through the rar set must not drag the split's
+			// volumes along either.
+			name:  "same base, entered from the rar side",
+			mine:  []string{"Movie.2024-GRP.rar", "Movie.2024-GRP.r00"},
+			other: []string{"Movie.2024-GRP.zip.001", "Movie.2024-GRP.zip.002"},
+		},
+		{
+			// A rar set continues .rar → .r00 → … → .r99 → .s00, so every form
+			// must share ONE key. Over-narrowing would leave volumes behind.
+			name:  "rar set spanning .rNN and .sNN",
+			mine:  []string{"Movie.2024-GRP.rar", "Movie.2024-GRP.r99", "Movie.2024-GRP.s00"},
+			other: []string{"Other.2024-GRP.rar", "Other.2024-GRP.r00"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -277,15 +304,19 @@ func TestCleanupArchives_OnlyTouchesItsOwnSet(t *testing.T) {
 // files get deleted, so a stem shared by two different releases is data loss.
 func TestArchiveStem_KeepsFullReleaseName(t *testing.T) {
 	cases := map[string]string{
-		// Dotted scene names: everything before the volume suffix is the stem.
-		"Movie.2024.1080p.BluRay.x264-GRP.rar": "Movie.2024.1080p.BluRay.x264-GRP",
-		"Movie.2024.1080p.BluRay.x264-GRP.r00": "Movie.2024.1080p.BluRay.x264-GRP",
-		"Show.S01E01.1080p.WEB-GRP.part01.rar": "Show.S01E01.1080p.WEB-GRP",
-		// A numbered split DOES wrap a container extension, which is stripped.
-		"Movie.2024.1080p-GRP.zip.001": "Movie.2024.1080p-GRP",
-		"Movie.2024.1080p-GRP.7z.002":  "Movie.2024.1080p-GRP",
-		// ...but a numbered volume with no container keeps its last segment.
-		"Movie.2024.1080p-GRP.001": "Movie.2024.1080p-GRP",
+		// Dotted scene names: the whole name before the volume suffix is kept.
+		"Movie.2024.1080p.BluRay.x264-GRP.rar": "Movie.2024.1080p.BluRay.x264-GRP|rar",
+		"Movie.2024.1080p.BluRay.x264-GRP.r00": "Movie.2024.1080p.BluRay.x264-GRP|rar",
+		"Movie.2024.1080p.BluRay.x264-GRP.s00": "Movie.2024.1080p.BluRay.x264-GRP|rar",
+		"Show.S01E01.1080p.WEB-GRP.part01.rar": "Show.S01E01.1080p.WEB-GRP|rar",
+		// Numbered volumes keep the container extension: it is part of what
+		// identifies the set, and dropping it collided with other releases.
+		"Movie.2024.1080p-GRP.zip.001": "Movie.2024.1080p-GRP.zip|num",
+		"Movie.2024.1080p-GRP.7z.002":  "Movie.2024.1080p-GRP.7z|num",
+		"Movie.2024.1080p-GRP.001":     "Movie.2024.1080p-GRP|num",
+		// Not volumes at all.
+		"Movie.2024.1080p-GRP.mkv": "",
+		"Movie.2024-GRP.r1":        "",
 	}
 	for name, want := range cases {
 		if got := archiveStem(name); got != want {
@@ -293,11 +324,32 @@ func TestArchiveStem_KeepsFullReleaseName(t *testing.T) {
 		}
 	}
 
-	// Two releases differing only in the trailing segment MUST NOT share a stem.
-	a := archiveStem("Movie.2024.1080p-GRP.rar")
-	b := archiveStem("Movie.2024.720p-OTHER.rar")
-	if a == b {
-		t.Errorf("distinct releases collapsed onto one stem %q — cleanup would delete both", a)
+	// Pairs that MUST NOT share a key. Each one was a measured data-loss bug or
+	// is one trim away from becoming one: a shared key means CleanupArchives
+	// deletes the set that was never unpacked.
+	for _, p := range [][2]string{
+		// Round 1: the trailing segment was eaten.
+		{"Movie.2024.1080p-GRP.rar", "Movie.2024.720p-OTHER.rar"},
+		// Round 2: same base, different volume form.
+		{"Movie.2024-GRP.zip.001", "Movie.2024-GRP.rar"},
+		// Round 3: the container strip ate the trailing segment inside .00N.
+		{"Movie.2024.1080p-GRP.001", "Movie.2024.720p-OTHER.001"},
+		// Two different archives of the SAME release are still two sets.
+		{"Movie.2024-GRP.zip.001", "Movie.2024-GRP.7z.001"},
+	} {
+		if a, b := archiveStem(p[0]), archiveStem(p[1]); a == b {
+			t.Errorf("%q and %q share key %q — cleanup would delete both", p[0], p[1], a)
+		}
+	}
+
+	// ...and the inverse: every volume of ONE set must share a key, or cleanup
+	// leaves volumes behind. A rar set runs .rar → .rNN → .sNN.
+	same := []string{"Movie-GRP.rar", "Movie-GRP.r00", "Movie-GRP.r99", "Movie-GRP.s00"}
+	for _, n := range same[1:] {
+		if archiveStem(n) != archiveStem(same[0]) {
+			t.Errorf("%q (%q) does not share the key of %q (%q)",
+				n, archiveStem(n), same[0], archiveStem(same[0]))
+		}
 	}
 }
 
@@ -350,18 +402,24 @@ func TestFindFirstRarInDir_AcceptsSplitWithArchiveMagic(t *testing.T) {
 	}
 }
 
+// Every volume of one rar set shares a key, whichever form it takes.
+// (Exact key values and the non-collision pairs live in
+// TestArchiveStem_KeepsFullReleaseName.)
 func TestArchiveStem(t *testing.T) {
-	cases := map[string]string{
-		"show.part01.rar": "show",
-		"show.part02.rar": "show",
-		"show.rar":        "show",
-		"show.r00":        "show",
-		"show.zip.001":    "show",
-		"show.mkv":        "", // not a volume name
+	key := archiveStem("show.rar")
+	if key == "" {
+		t.Fatal("show.rar is not recognised as a volume")
 	}
-	for name, want := range cases {
-		if got := archiveStem(name); got != want {
-			t.Errorf("archiveStem(%q) = %q, want %q", name, got, want)
+	for _, name := range []string{"show.part01.rar", "show.part02.rar", "show.r00", "show.s00"} {
+		if got := archiveStem(name); got != key {
+			t.Errorf("archiveStem(%q) = %q, want %q (same set)", name, got, key)
 		}
+	}
+	if got := archiveStem("show.mkv"); got != "" {
+		t.Errorf("archiveStem(%q) = %q, want \"\" (not a volume)", "show.mkv", got)
+	}
+	// A split of the same release is a DIFFERENT set: same base, other form.
+	if got := archiveStem("show.zip.001"); got == key {
+		t.Errorf("show.zip.001 shares the rar set's key %q", key)
 	}
 }
