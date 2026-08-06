@@ -41,7 +41,14 @@ func hasRepairableFailure(rep doctor.Report) bool {
 func doctorSpecs(cfg *config.Config) []doctor.Spec {
 	specs := doctorConfigSpecs(cfg)
 	specs = append(specs, doctorConnectivitySpecs(cfg)...)
-	specs = append(specs, doctorDownloadSpecs(cfg)...)
+	// One Register round-trip for the whole run, shared by every check that
+	// needs to know what the ACCOUNT can do rather than what the config asks
+	// for. Built here so the download and method groups see the same answer.
+	features := newFeatureCache(cfg)
+	specs = append(specs, doctorDownloadSpecs(cfg, features)...)
+	specs = append(specs, doctorMethodSpecs(cfg, features)...)
+	specs = append(specs, doctorLibrarySpecs(cfg)...)
+	specs = append(specs, doctorStreamSpecs(cfg)...)
 	specs = append(specs, doctorMediaSpecs(cfg)...)
 	specs = append(specs, doctorDaemonSpec())
 	return append(specs, doctor.Spec{
@@ -181,10 +188,22 @@ func doctorAgentRegistration(cfg *config.Config) (string, error) {
 	if err != nil {
 		return "", classifyAuthError(err)
 	}
-	return fmt.Sprintf("%s (%s) [%s]", resp.User.Name, resp.User.Email, resp.User.Plan), nil
+	// NO NAME, NO EMAIL. This message is not only printed on the user's own
+	// terminal: `unarr doctor --json` feeds the web health panel, and
+	// `unarr support-bundle` embeds the whole report in a file the user attaches
+	// to a public issue. Printing the account holder's name and email address
+	// put both into every bundle ever generated.
+	//
+	// Nothing is lost by dropping them. The bundle now publishes the agent ID
+	// (see internal/support/redact_config.go), which resolves to the same
+	// account server-side and is what support actually looks the user up by —
+	// the email was a second, weaker copy of an identifier we already ship.
+	// The plan stays because it is diagnostic: a feature failing on a free
+	// account is not a bug.
+	return fmt.Sprintf("registered [%s]", resp.User.Plan), nil
 }
 
-func doctorDownloadSpecs(cfg *config.Config) []doctor.Spec {
+func doctorDownloadSpecs(cfg *config.Config, features featureFn) []doctor.Spec {
 	return []doctor.Spec{
 		{
 			Group:  "Downloads",
@@ -251,7 +270,7 @@ func doctorDownloadSpecs(cfg *config.Config) []doctor.Spec {
 			Group:  "Downloads",
 			Name:   "par2 (usenet verify/repair)",
 			Remedy: "install par2 (apt install par2 / brew install par2)",
-			Fn:     func() (string, error) { return par2CheckResult(*cfg) },
+			Fn:     func() (string, error) { return par2CheckResult(cfg, features) },
 		},
 		// Managed-VPN P2P kill-switch: when [downloads.vpn] required=true, torrent must
 		// have a live tunnel — otherwise it's disabled (safe) and this flags it.

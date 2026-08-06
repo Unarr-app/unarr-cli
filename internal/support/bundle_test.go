@@ -28,6 +28,9 @@ import (
 const (
 	sentinelSecret = "SECRET-SENTINEL-DO-NOT-LEAK"
 	sentinelPublic = "PUBLIC-FIELD-SENTINEL-DO-NOT-LEAK"
+	// The one value the bundle is SUPPOSED to carry out. Separate from the two
+	// above so the leak assertions stay exhaustive over everything else.
+	sentinelAgentID = "AGENT-ID-SENTINEL-MUST-TRAVEL"
 )
 
 // TestBundleLeaksNoSentinel is the empirical proof of the redaction.
@@ -74,6 +77,12 @@ func TestBundleLeaksNoSentinel(t *testing.T) {
 		if n := strings.Count(whole, marker); n != 0 {
 			t.Errorf("marker %q leaked %d time(s) into the bundle:\n%s", marker, n, whole)
 		}
+	}
+	// The mirror image, and it belongs in this test rather than a separate one:
+	// the cheapest way to make the loop above pass is to publish nothing, and
+	// this is the assertion that says which single value must survive it.
+	if !strings.Contains(whole, sentinelAgentID) {
+		t.Errorf("the agent ID did not reach the bundle — support cannot look the user up without it")
 	}
 }
 
@@ -316,6 +325,11 @@ func populatedConfig() config.Config {
 			fv.SetString(sentinelSecret)
 		}
 	}
+	// agent.id ships verbatim on purpose, so it gets its own marker. Leaving
+	// sentinelPublic here would make the leak test fail for the one field that
+	// is supposed to travel, and the obvious fix — exempting the marker — would
+	// have quietly exempted every other field carrying it too.
+	cfg.Agent.ID = sentinelAgentID
 	return cfg
 }
 

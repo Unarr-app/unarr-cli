@@ -62,8 +62,14 @@ func TestSecretFieldsAreTheExpectedOnes(t *testing.T) {
 // custom api_url) would still travel. Nothing the user typed is copied out.
 func TestRedactedConfigNeverCopiesFreeText(t *testing.T) {
 	const marker = "USER-TYPED-VALUE-DO-NOT-COPY"
+	const agentID = "AGENT-ID-PUBLISHED-ON-PURPOSE"
 	cfg := config.Default()
 	fillStrings(reflect.ValueOf(&cfg).Elem(), marker)
+	// agent.id is the single deliberate exception, and it is given its own
+	// marker so the guard above keeps its full strength: every other field is
+	// still filled with `marker`, so a second field going verbatim fails here
+	// exactly as it did before the exception existed.
+	cfg.Agent.ID = agentID
 
 	out, err := configTOML(cfg)
 	if err != nil {
@@ -71,6 +77,11 @@ func TestRedactedConfigNeverCopiesFreeText(t *testing.T) {
 	}
 	if n := strings.Count(string(out), marker); n != 0 {
 		t.Fatalf("redacted config copied a user-typed value %d time(s):\n%s", n, out)
+	}
+	// Asserted positively, or the exception could silently regress to "<set>"
+	// and take the support round-trip back with it.
+	if !strings.Contains(string(out), agentID) {
+		t.Errorf("agent.id must be published verbatim — support looks the user up by it:\n%s", out)
 	}
 }
 

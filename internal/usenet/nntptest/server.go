@@ -36,6 +36,7 @@ type FakeServer struct {
 	failCount int
 	username  string
 	password  string
+	checkAuth bool
 }
 
 // NewFakeServer starts a FakeServer on a loopback port and registers cleanup
@@ -57,6 +58,20 @@ func NewFakeServer(tb testing.TB) *FakeServer {
 	go s.acceptLoop()
 	tb.Cleanup(func() { _ = s.ln.Close() })
 	return s
+}
+
+// RequireCorrectAuth makes the server actually VERIFY the credentials instead
+// of answering "281 authenticated" to anything.
+//
+// Opt-in, and it has to stay that way: every existing caller connects with
+// Config()'s own username and password, so turning verification on by default
+// would be harmless today and a trap the first time someone writes a test that
+// does not care about auth. Off, this server cannot express a rejected login at
+// all — which made a test asserting one pass while proving nothing.
+func (s *FakeServer) RequireCorrectAuth() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkAuth = true
 }
 
 // AddArticle registers a raw yEnc body under a message-id (angle brackets, if
@@ -153,14 +168,40 @@ func (s *FakeServer) handleConn(conn net.Conn) {
 	}
 }
 
+// authAccepts reports whether the AUTHINFO PASS line carries the right
+// password. Always true unless RequireCorrectAuth was called, which is what
+// keeps this invisible to the tests that predate it.
+func (s *FakeServer) authAccepts(line string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.checkAuth {
+		return true
+	}
+	// Split rather than TrimPrefix: dispatch matches the verb case-insensitively,
+	// so the raw line may spell it any way, while the password itself is
+	// case-SENSITIVE and must be taken verbatim.
+	parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
+	if len(parts) < 3 {
+		return false
+	}
+	return parts[2] == s.password
+}
+
 // dispatch handles one command line, returning false when the connection should
 // close (QUIT or a fatal error).
 func (s *FakeServer) dispatch(w *bufio.Writer, line string) bool {
 	verb := strings.ToUpper(line)
 	switch {
 	case strings.HasPrefix(verb, "AUTHINFO USER"):
+		// The username is echoed back as accepted either way: a real server
+		// defers the verdict to the PASS step, and reporting "wrong user" here
+		// would leak which half of the pair was wrong.
 		fmt.Fprint(w, "381 password required\r\n")
 	case strings.HasPrefix(verb, "AUTHINFO PASS"):
+		if !s.authAccepts(line) {
+			fmt.Fprint(w, "481 authentication failed\r\n")
+			return false
+		}
 		fmt.Fprint(w, "281 authenticated\r\n")
 	case strings.HasPrefix(verb, "BODY"):
 		return s.handleBody(w, line)

@@ -223,7 +223,17 @@ func redactConfig(c config.Config) publishedConfig {
 			Mirrors: count(c.Auth.Mirrors),
 		},
 		Agent: publishedAgent{
-			ID:   presence(c.Agent.ID),
+			// VERBATIM, and it is the one identifier this bundle carries on
+			// purpose. `presence()` reduced it to "<set>", which cost every
+			// support thread a round-trip: the first thing anyone asks for is
+			// which agent this is, and the bundle answered "there is one".
+			//
+			// It is not a credential — Agent.Hash is, and that stays withheld.
+			// The ID is already classified Publishable in redact.go; this just
+			// stops the projection from being stricter than its own
+			// classification. It is also what lets the doctor report drop the
+			// account's name and email (see doctorAgentRegistration).
+			ID:   orUnset(c.Agent.ID),
 			Name: presence(c.Agent.Name),
 			Hash: withheldOrUnset(c.Agent.Hash),
 		},

@@ -41,6 +41,17 @@ func presence(v string) string {
 	return valueSet
 }
 
+// orUnset publishes v exactly as configured. It is the ONE escape from the
+// allowlist above, and the only field wired to it is agent.id — an identifier
+// the server minted, not something the user typed, so there is no free text to
+// leak. Do not reach for this for anything a human authored: use presence().
+func orUnset(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return valueUnset
+	}
+	return strings.TrimSpace(v)
+}
+
 // pick publishes v verbatim when it is one of the values we documented, and
 // flags anything else as non-standard. A typo'd enum is a real support finding
 // — "<non-standard>" says "this key is set to something we do not recognise"

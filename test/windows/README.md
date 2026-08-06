@@ -199,6 +199,38 @@ stderr → `unarr.boot.log`, which nothing collected.
 Re-run after any change to `internal/sysinfo`, `agent.StateFromPreviousBoot`,
 `readStatus`, or `cmd/unarr-desktop/logsources.go`.
 
+### Doctor / support-bundle package tests — `smoke-doctorwin.ps1`
+
+Deploy the package test binaries first:
+
+```bash
+for p in ./internal/cmd ./internal/support; do
+  GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o "test/windows/shared/$(basename $p)_test.exe" "$p"
+done
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass \\host.lan\Data\smoke-doctorwin.ps1
+```
+
+**What only this can prove.** It caught a real bug in `doctor`'s port check
+that Linux cannot expose: `net.Listen` on `:P` (wildcard) **succeeds on
+Windows while another process holds `127.0.0.1:P`** — the two are not a
+conflict without `SO_EXCLUSIVEADDRUSE`. A wildcard-only test therefore
+reported "port is free" for a port that was demonstrably taken, which is the
+worst answer that check can give: the reassuring one. `portIsFree` now binds
+both and counts the port free only if both succeed.
+
+Also settles the home-path scrubbing against a real `C:\Users\…`, where the
+separator and the case-insensitive filesystem both differ from the unix
+assumptions.
+
+Re-run after any change to `internal/support`'s scrubber or the doctor port
+checks. Note the script SKIPS the AST-guard tests (`stopintent_wiring_test.go`
+and friends): they read their own package's `.go` sources, which do not travel
+next to a `go test -c` binary. Those failures are the harness, not findings —
+letting them show red trains the reader to ignore red.
+
 ### Gotchas that cost real time here (read before writing a .ps1)
 
 - **Copy binaries to a LOCAL directory before running them.** A process started
