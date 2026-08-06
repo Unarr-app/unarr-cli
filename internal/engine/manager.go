@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/notify"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/postprocess"
 )
 
 // ManagerConfig holds download manager settings.
@@ -25,6 +29,13 @@ type ManagerConfig struct {
 	// resolveMethod will try, ignoring the per-task preference. Empty/nil → defer
 	// to the task's web-sent preference (legacy auto/torrent-first).
 	PreferredMethods []string
+	// SeedEnabled mirrors TorrentConfig.SeedEnabled. The manager needs it because
+	// a seeding torrent keeps serving the EXACT files it downloaded: deleting the
+	// archive parts after unpacking a packed release would silently break seeding
+	// (and the ratio obligation on a private tracker). Mirrored rather than reached
+	// through the downloader so the post-processing decision does not depend on
+	// which method happened to resolve.
+	SeedEnabled bool
 }
 
 // Manager orchestrates concurrent downloads with method resolution and fallback.
@@ -696,6 +707,353 @@ func removeBrokenResult(taskID string, result *Result) {
 	}
 }
 
+// extractPackedRelease unpacks a scene-style archived release in place so the
+// subsequent organize() finds a real video instead of a folder of .rNN parts.
+//
+// Deliberately non-fatal in every failure mode. Unlike usenet — where the
+// archive IS the delivery format and an unextracted payload is useless — a
+// torrent's raw parts are exactly what the swarm served. Failing the task here
+// would downgrade "we could not improve this" into "you get nothing", losing a
+// download that completed and verified fine. Every problem is logged and the
+// raw release is left for organize()'s existing move-the-folder fallback.
+func (m *Manager) extractPackedRelease(task *Task, result *Result) {
+	if result == nil || result.FilePath == "" {
+		return
+	}
+	// Only a multi-file (directory) result can be a packed release; a
+	// single-file result is already the payload.
+	fi, err := os.Stat(result.FilePath)
+	if err != nil || !fi.IsDir() {
+		return
+	}
+
+	// Serialize per directory. Two tasks finalizing the SAME release dir (the
+	// torrent dir is named after t.Name(), which is not unique — dedup upstream
+	// keys on task ID) would otherwise run two extractors over one archive set,
+	// racing on the output files. Keyed by path rather than a single global lock
+	// so unrelated releases still unpack concurrently: extraction is minutes of
+	// CPU, and moveMu — which protects the much shorter reserve-then-rename —
+	// must not be held across it.
+	unlock := m.lockReleaseDir(result.FilePath)
+	defer unlock()
+
+	// Re-stat under the lock: the directory may have been organized/removed by
+	// the task we just waited on.
+	if fi, err := os.Stat(result.FilePath); err != nil || !fi.IsDir() {
+		return
+	}
+
+	shortID := agent.ShortID(task.ID)
+
+	// While seeding, the torrent directory belongs to the swarm: it must keep
+	// serving the EXACT bytes it downloaded, so we neither add to it nor delete
+	// from it. Extract to a sibling instead and point the result there, leaving
+	// the torrent bit-for-bit intact.
+	//
+	// Extracting IN PLACE and merely skipping our own cleanup (the previous
+	// approach) does NOT protect the parts: organize() moves the extracted video
+	// out and cleanupReleaseDir then sees a directory with no real video left and
+	// os.RemoveAll's the whole thing — parts included, mid-seed. Measured: the
+	// release dir was gone while the torrent was still being served.
+	srcDir := result.FilePath
+	destDir := srcDir
+	// finalDir is where a seeding unpack ENDS UP; destDir is the ".tmp" it is
+	// written to first. Equal to destDir (both srcDir) on the in-place path.
+	finalDir := srcDir
+
+	// Reap stale ".tmp" holders for THIS release regardless of which path runs
+	// below. The reap used to live inside the seeding branch only, so a daemon
+	// killed mid-extraction whose user then turned seeding OFF left the orphan —
+	// up to the full release size — forever: nothing else matches the suffix,
+	// and an in-place retry never looked for it. Also covers numbered holders
+	// (".unpacked.2.tmp"), which the branch's own reap missed when the base
+	// ".unpacked" later disappeared. Safe under the release-dir lock: every
+	// writer of these paths holds the same lock.
+	m.reapStaleTmpHolders(srcDir)
+
+	if m.cfg.SeedEnabled {
+		// A sibling from a concurrent finalization of this same release is a
+		// finished unpack, not a collision: adopt it instead of unpacking the
+		// payload a second time. The re-stat above only catches a source that was
+		// removed, and while seeding the source is deliberately left in place — so
+		// without this, two tasks on one release each produced a full copy (40 GB
+		// release → 80 GB of output, on top of the parts still held for the swarm).
+		if existing := existingUnpackedSibling(srcDir); existing != "" {
+			log.Printf("[%s] release already unpacked at %s - reusing it", agent.ShortID(task.ID), filepath.Base(existing))
+			result.FilePath = existing
+			return
+		}
+		// Unpack into a ".tmp" holder and rename it into place only once the
+		// extractor has finished. The rename is what makes "the sibling exists"
+		// mean "the unpack completed": without it a daemon killed mid-extraction
+		// (OOM, power cut) left a half-written video that the resumed task then
+		// ADOPTED as finished — a 3 MiB file of a 2 GB film filed into the
+		// library, reported COMPLETED, resume entry dropped. Measured.
+		// A size floor cannot substitute for this: any real video crosses it in
+		// the first second of writing.
+		finalDir = unpackedSiblingDir(srcDir)
+		// The ".tmp" marker goes on the HOLDER, not on the child: the child is
+		// named after the release (organize's no-video fallback renames it into
+		// the library as-is), and it is the holder that gets renamed into place.
+		tmpHolder := filepath.Dir(finalDir) + unpackedTmpSuffix
+		destDir = filepath.Join(tmpHolder, filepath.Base(finalDir))
+		// A ".tmp" left by an earlier crash is stale by definition — the rename
+		// never happened — so it is never adopted, only replaced.
+		if err := os.RemoveAll(tmpHolder); err != nil {
+			log.Printf("[%s] could not clear stale unpack dir %s: %v", shortID, filepath.Base(tmpHolder), err)
+			return
+		}
+	}
+
+	// NzbPassword is the only password the task carries. It is usenet-sourced,
+	// but a user who typed one for a release is describing THAT release, so
+	// honour it here too rather than adding a second field that means the same
+	// thing. Empty for the overwhelming majority of torrents.
+	// Any exit that is not a completed unpack leaves no ".tmp" behind: a partial
+	// one is dead weight (it is never adopted) and, on a 40 GB release, a lot of
+	// it.
+	if destDir != srcDir {
+		tmpHolder := filepath.Dir(destDir)
+		defer func() {
+			if _, err := os.Stat(tmpHolder); err == nil {
+				if rmErr := os.RemoveAll(tmpHolder); rmErr != nil {
+					log.Printf("[%s] could not remove partial unpack %s: %v", shortID, filepath.Base(tmpHolder), rmErr)
+				}
+			}
+		}()
+	}
+
+	res, err := postprocess.ExtractInDirTo(srcDir, destDir, task.NzbPassword)
+	if err != nil {
+		if _, ok := err.(*postprocess.PasswordError); ok {
+			log.Printf("[%s] release is password protected - leaving it packed (set a password in download options to unpack)", shortID)
+			return
+		}
+		log.Printf("[%s] extract failed, leaving release packed: %v", shortID, err)
+		return
+	}
+	if res.Note != "" {
+		log.Printf("[%s] %s", shortID, res.Note)
+		return
+	}
+	if !res.Extracted {
+		return // no archive in there: the common case
+	}
+
+	log.Printf("[%s] extracted packed release (%d file(s))", shortID, len(res.Files))
+
+	if destDir != srcDir {
+		// THE completion marker: the unpack only becomes visible under its final
+		// name once the extractor has returned successfully. A rename within one
+		// directory is atomic, so a crash leaves either a ".tmp" (ignored, and
+		// cleared on the next attempt) or a finished unpack — never a truncated
+		// one wearing the finished name.
+		if err := os.Rename(filepath.Dir(destDir), filepath.Dir(finalDir)); err != nil {
+			log.Printf("[%s] could not finalize unpack %s: %v", shortID, filepath.Base(finalDir), err)
+			return // the deferred cleanup removes the ".tmp"
+		}
+		destDir = finalDir
+	}
+
+	if destDir != srcDir {
+		// Seeding: the payload now lives in the sibling, so organize must look
+		// THERE. The torrent directory is left exactly as the swarm served it —
+		// untouched and unswept, since organize only ever cleans the directory it
+		// organized; the user reclaims that space by removing the torrent, on
+		// their own schedule.
+		//
+		// The sibling itself is transient: organize moves the video out of it and
+		// cleanupReleaseDir removes what remains. It is NOT reclaimed by the seed
+		// lifecycle — seedAndDrop drops an anacrolix torrent that knows nothing
+		// about this directory — so anything that leaves it behind (an organize
+		// failure) leaves a full-size orphan next to the release.
+		log.Printf("[%s] torrent is seeding: unpacked to %s, release left intact for the swarm", shortID, filepath.Base(destDir))
+		result.FilePath = destDir
+		return
+	}
+
+	// Not seeding: drop the volumes of the set we just unpacked. CleanupArchives
+	// removes exactly those and nothing else — the user's subtitles, poster and
+	// notes living in the same directory are not ours to sweep.
+	if err := postprocess.CleanupArchives(res); err != nil {
+		log.Printf("[%s] archive cleanup warning: %v", shortID, err)
+	}
+}
+
+// removeEmptyUnpackHolder deletes the "<release>.unpacked" wrapper once organize
+// has emptied it. unpackedPath is the child organize worked on, so the holder is
+// its parent.
+//
+// Three guards, because this deletes a directory: the parent must carry OUR
+// suffix (never a directory the user made), os.Remove refuses a non-empty one
+// (so a partial unpack or a folder organize moved away survives), and every
+// failure is silent — an orphaned empty dir is untidy, not harmful.
+func (m *Manager) removeEmptyUnpackHolder(unpackedPath string) {
+	if unpackedPath == "" {
+		return
+	}
+	holder := filepath.Dir(unpackedPath)
+	if !strings.HasSuffix(holder, unpackedSuffix) && !unpackedNumberedRe.MatchString(holder) {
+		return // not one of ours
+	}
+
+	// Containment, mirroring cleanupReleaseDir: the holder must be strictly
+	// INSIDE the download dir, never the download dir itself. The name check
+	// alone is not enough — a user whose download dir is "~/media.unpacked"
+	// would see it deleted the first time a release organized cleanly out of it
+	// (measured). Without a configured OutputDir there is nothing to contain
+	// against, so nothing is removed.
+	outputDir := m.cfg.Organize.OutputDir
+	if outputDir == "" {
+		outputDir = m.cfg.OutputDir
+	}
+	if outputDir == "" {
+		return
+	}
+	absOut, err1 := filepath.Abs(outputDir)
+	absHolder, err2 := filepath.Abs(holder)
+	if err1 != nil || err2 != nil {
+		return
+	}
+	if absHolder == absOut || !strings.HasPrefix(absHolder, absOut+string(os.PathSeparator)) {
+		return
+	}
+
+	if err := os.Remove(absHolder); err == nil {
+		log.Printf("[extract] removed empty unpack dir %s", filepath.Base(absHolder))
+	}
+}
+
+// unpackedNumberedRe matches the collision-suffixed holders (".unpacked.2").
+var unpackedNumberedRe = regexp.MustCompile(regexp.QuoteMeta(unpackedSuffix) + `\.\d+$`)
+
+// reapStaleTmpHolders removes every "<release>.unpacked*.tmp" holder beside
+// srcDir. A ".tmp" is stale by definition — the finalizing rename never
+// happened — so it is never adopted, only deleted. Prefix+suffix matched on the
+// release's own name so nothing belonging to another release (or to the user)
+// is ever considered. Best-effort: a failed removal is logged and the caller
+// proceeds — the seeding path re-checks its own specific holder anyway.
+func (m *Manager) reapStaleTmpHolders(srcDir string) {
+	parent := filepath.Dir(srcDir)
+	prefix := filepath.Base(srcDir) + unpackedSuffix
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, unpackedTmpSuffix) {
+			continue
+		}
+		stale := filepath.Join(parent, name)
+		if err := os.RemoveAll(stale); err != nil {
+			log.Printf("[extract] could not reap stale unpack dir %s: %v", name, err)
+			continue
+		}
+		log.Printf("[extract] reaped stale unpack dir %s", name)
+	}
+}
+
+// releaseDirLocks serializes post-processing per release directory. Entries are
+// reference-counted and dropped when the last holder releases, so the map does
+// not grow with every download the daemon ever ran.
+var (
+	releaseDirMu    sync.Mutex
+	releaseDirLocks = map[string]*releaseDirLock{}
+)
+
+type releaseDirLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockReleaseDir takes the lock for dir and returns its release function.
+func (m *Manager) lockReleaseDir(dir string) func() {
+	key, err := filepath.Abs(dir)
+	if err != nil {
+		key = dir // best effort: an unresolvable path still gets a stable key
+	}
+
+	releaseDirMu.Lock()
+	l, ok := releaseDirLocks[key]
+	if !ok {
+		l = &releaseDirLock{}
+		releaseDirLocks[key] = l
+	}
+	l.refs++
+	releaseDirMu.Unlock()
+
+	l.mu.Lock()
+
+	return func() {
+		l.mu.Unlock()
+		releaseDirMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(releaseDirLocks, key)
+		}
+		releaseDirMu.Unlock()
+	}
+}
+
+// unpackedSuffix marks a directory as our unpack of the sibling release.
+const unpackedSuffix = ".unpacked"
+
+// unpackedTmpSuffix marks an unpack still being written. It is renamed onto the
+// final name only after the extractor succeeds, so a directory WITHOUT this
+// suffix is by definition complete.
+const unpackedTmpSuffix = ".tmp"
+
+// maxUnpackedSiblings bounds the collision search, mirroring versionDistinctPath.
+// Reaching it means something is wrong (a directory nobody is consuming); loop
+// forever and a stuck release would spin instead of failing visibly.
+const maxUnpackedSiblings = 1000
+
+// unpackedSiblingDir names the directory a seeding release is unpacked into: the
+// release name with a distinguishing suffix, beside the torrent rather than
+// inside it. Collisions are resolved with a numeric suffix so a re-download (or
+// two releases of the same name) never unpacks onto a previous result.
+// The unpack directory holds a child named after the RELEASE, and organize is
+// pointed at that child. organizeDir's no-video fallback renames the directory
+// it was given into the library as-is, so handing it "<release>.unpacked" would
+// leak an internal detail into the user's media folder; handing it "<release>"
+// yields exactly the name the un-extracted release would have produced.
+func unpackedSiblingDir(srcDir string) string {
+	base := srcDir + unpackedSuffix
+	holder := base
+	for i := 2; i < maxUnpackedSiblings && pathExists(holder); i++ {
+		holder = fmt.Sprintf("%s.%d", base, i)
+	}
+	return filepath.Join(holder, filepath.Base(srcDir))
+}
+
+// existingUnpackedSibling returns a previous unpack of srcDir that already holds
+// a usable video, or "" if there is none.
+//
+// Only a directory containing a real video counts: a half-written sibling from
+// an extraction that died mid-way must NOT be adopted as if it were finished,
+// or the release would be filed into the library truncated.
+func existingUnpackedSibling(srcDir string) string {
+	base := srcDir + unpackedSuffix
+	for i := 1; i < maxUnpackedSiblings; i++ {
+		holder := base
+		if i > 1 {
+			holder = fmt.Sprintf("%s.%d", base, i)
+		}
+		if fi, err := os.Stat(holder); err != nil || !fi.IsDir() {
+			return "" // first gap ends the search: names are allocated in order
+		}
+		candidate := filepath.Join(holder, filepath.Base(srcDir))
+		video, err := largestVideoIn(candidate)
+		if err == nil && video != "" {
+			if vi, err := os.Stat(video); err == nil && vi.Size() >= minPlausibleVideoBytes {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
 // finalizeVerified runs organize → upgrade replacement → complete for a download
 // that already passed verify.
 func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Result) {
@@ -704,6 +1062,30 @@ func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Resu
 		m.fail(ctx, task, "transition error: "+err.Error())
 		return
 	}
+
+	// Unpack a packed release BEFORE organizing. organize() picks the principal
+	// video out of a release dir; with the payload still inside a .rar set there
+	// is no video to pick, so it fell back to moving the raw folder and the user
+	// got a pile of .r00/.r01 files instead of something playable.
+	//
+	// Usenet is excluded: its own pipeline already extracted (and par2-verified)
+	// before it ever reaches here — running it twice would find no archive and
+	// merely waste a directory scan, but the exclusion keeps the ownership of
+	// each method's post-processing unambiguous.
+	if result.Method != MethodUsenet {
+		m.extractPackedRelease(task, result)
+	}
+
+	// The unpack holder is transient: organize moves the video out of the child
+	// and cleanupReleaseDir removes the child, leaving an empty "<release>.unpacked"
+	// that nobody owns — seedAndDrop knows only about the torrent. Left alone they
+	// pile up in the user's download dir (measured: 4 re-downloads → .unpacked, .2,
+	// .3, .4) and each one bumps the collision counter for the next unpack.
+	// Deliberately AFTER organize and best-effort: os.Remove refuses a non-empty
+	// directory, so a holder still carrying files (organize's no-video fallback
+	// moved the child away, or a partial unpack) is never destroyed here.
+	defer m.removeEmptyUnpackHolder(result.FilePath)
+
 	finalPath, err := organize(result, task, m.cfg.Organize)
 	if err != nil {
 		// A failed organize is NOT a completed download: the file is stranded in the

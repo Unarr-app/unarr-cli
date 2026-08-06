@@ -19,6 +19,11 @@ import (
 // archive that confuses the tool) hangs the post-process pipeline forever.
 const extractTimeout = 30 * time.Minute
 
+// passwordProbeTimeout caps the encryption probe. It only reads the archive's
+// headers, so anything longer means a hung process (typically a volume on an
+// unresponsive network mount) rather than slow work.
+const passwordProbeTimeout = 60 * time.Second
+
 // validatePassword rejects passwords containing control characters that could
 // inject extra answers into unrar/7z prompts via stdin (e.g. a newline lets an
 // attacker-controlled NZB password feed a second response to overwrite or
@@ -59,6 +64,19 @@ func Extract(archivePath string, outputDir string, password string) ([]string, e
 		return nil, fmt.Errorf("no archive extractor found (install unrar or 7z)")
 	}
 
+	// unrar only speaks RAR. A .001/.002 split set is a CONTAINER-agnostic naming
+	// convention — it is just as likely to be a split zip or 7z — so handing such
+	// a set to unrar merely because unrar is installed fails with "is not RAR
+	// archive" even though 7z sits right there and would open it. Pick by format
+	// first, and only fall back to availability.
+	if extType == ExtractorUnrar && !isRarArchive(archivePath) {
+		if szPath, err := exec.LookPath("7z"); err == nil {
+			return extract7z(szPath, archivePath, outputDir, password)
+		}
+		// No 7z: let unrar try anyway — a .001 CAN be a split RAR, and a clear
+		// extractor error beats refusing to attempt it.
+	}
+
 	switch extType {
 	case ExtractorUnrar:
 		return extractUnrar(extPath, archivePath, outputDir, password)
@@ -67,6 +85,28 @@ func Extract(archivePath string, outputDir string, password string) ([]string, e
 	default:
 		return nil, fmt.Errorf("unknown extractor: %s", extType)
 	}
+}
+
+// isRarArchive reports whether the file carries the RAR magic signature
+// (RAR4 "Rar!\x1a\x07\x00" / RAR5 "Rar!\x1a\x07\x01\x00").
+//
+// Content-sniffed rather than name-matched on purpose: the whole problem is
+// that a .001 extension says nothing about the container inside. An unreadable
+// file returns false and takes the caller down the tolerant path.
+func isRarArchive(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 8)
+	n, err := f.Read(buf)
+	if err != nil || n < 7 {
+		return false
+	}
+	return string(buf[:7]) == "Rar!\x1a\x07\x00" ||
+		(n >= 8 && string(buf[:8]) == "Rar!\x1a\x07\x01\x00")
 }
 
 // extractUnrar extracts using unrar.
@@ -159,20 +199,41 @@ func IsPasswordProtected(archivePath string) bool {
 		return false
 	}
 
+	// Bounded, and much tighter than extractTimeout: this only has to read the
+	// archive's headers, so a probe that runs for minutes is a hung process, not
+	// slow work. It used to have no timeout at all — tolerable while only usenet
+	// reached it, but this is now on the path of every multi-file torrent, and a
+	// volume on a wedged NFS mount would block the task goroutine forever while
+	// holding the release-directory lock.
+	//
+	// A timeout answers "not password protected": the caller then attempts the
+	// extraction, which has its own timeout and reports a real error. Answering
+	// "protected" instead would silently skip a release nobody locked.
+	ctx, cancel := context.WithTimeout(context.Background(), passwordProbeTimeout)
+	defer cancel()
+
 	switch extType { //nolint:exhaustive // ExtractorNone handled above
 	case ExtractorUnrar:
-		cmd := exec.Command(extPath, "t", "-p-", archivePath)
+		cmd := exec.CommandContext(ctx, extPath, "t", "-p-", archivePath)
 		winproc.HideWindow(cmd)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
+			if ctx.Err() != nil {
+				log.Printf("[extract] password probe timed out after %s on %s", passwordProbeTimeout, filepath.Base(archivePath))
+				return false
+			}
 			outStr := string(output)
 			return strings.Contains(outStr, "password") || strings.Contains(outStr, "encrypted")
 		}
 	case Extractor7z:
-		cmd := exec.Command(extPath, "t", "-p", archivePath)
+		cmd := exec.CommandContext(ctx, extPath, "t", "-p", archivePath)
 		winproc.HideWindow(cmd)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
+			if ctx.Err() != nil {
+				log.Printf("[extract] password probe timed out after %s on %s", passwordProbeTimeout, filepath.Base(archivePath))
+				return false
+			}
 			outStr := string(output)
 			return strings.Contains(outStr, "Wrong password") || strings.Contains(outStr, "encrypted")
 		}
