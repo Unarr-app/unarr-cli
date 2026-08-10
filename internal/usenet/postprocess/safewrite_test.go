@@ -13,6 +13,27 @@ import (
 // path was ignored" for an escaping symlink (measured before this change).
 // Decoding in Go moves that guarantee here, so these tests assert it directly.
 
+// resolvedTempDir is t.TempDir() put through the same resolution newSafeWriter
+// applies to its destination, and is what any containment assertion in this
+// package must be given.
+//
+// newSafeWriter resolves destDir through symlinks ONCE and returns paths under
+// that resolved base, so comparing its output against a raw t.TempDir() compares
+// two spellings of the same directory. That is invisible on Linux, where the
+// temp dir is already canonical, and fails on every platform where it is not:
+// macOS hands out /var/folders/... while the writer resolves /var → /private/var,
+// and the Windows runner hands out the 8.3 short name C:\Users\RUNNER~1\...
+// which resolves to C:\Users\runneradmin\.... Both were red in CI, on a writer
+// that had placed every file exactly where it promised.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	return dir
+}
+
 // TestSafeWriter_RejectsTraversal covers zip-slip in the form the member name
 // spells out.
 func TestSafeWriter_RejectsTraversal(t *testing.T) {
@@ -57,7 +78,7 @@ func TestSafeWriter_RejectsTraversal(t *testing.T) {
 // written. Without this, every assertion above would still pass if writeFile
 // refused everything unconditionally.
 func TestSafeWriter_WritesNormalMembers(t *testing.T) {
-	dest := t.TempDir()
+	dest := resolvedTempDir(t)
 	w, err := newSafeWriter(dest)
 	if err != nil {
 		t.Fatalf("newSafeWriter: %v", err)

@@ -187,7 +187,9 @@ func TestExtractInDirTo_LeavesSourceUntouched(t *testing.T) {
 	}
 	before := fileBytes(t, src)
 
-	destDir := filepath.Join(t.TempDir(), "extracted")
+	// The parent is resolved, not the "extracted" child: it does not exist yet,
+	// and EvalSymlinks needs the path to be on disk.
+	destDir := filepath.Join(resolvedTempDir(t), "extracted")
 	res, err := ExtractInDirTo(src, destDir, "")
 	if err != nil {
 		t.Fatalf("ExtractInDirTo: %v", err)
