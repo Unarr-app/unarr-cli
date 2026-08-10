@@ -258,7 +258,7 @@ func handleCrash(s agentStatus) {
 	}
 	notify.Send("unarr agent stopped unexpectedly", "Collecting a crash report…")
 	msg := fmt.Sprintf("Agent process (PID %d, v%s) died without a clean shutdown; detected by unarr-desktop.", s.pid, s.version)
-	if err := sendReport("crash", msg); err != nil {
+	if err := sendReport("crash", msg, s); err != nil {
 		fmt.Fprintln(os.Stderr, "unarr-desktop: crash report:", err)
 		sentry.CaptureError(err, "desktop:crash-report")
 		notify.Send("Crash report not sent",
@@ -274,7 +274,9 @@ func handleCrash(s agentStatus) {
 // on-disk log dump the user can attach by hand.
 func sendLogsToSupport() {
 	notify.Send("Sending logs to support…", "Collecting agent logs.")
-	err := sendReport("logs", "User-initiated log submission from the desktop tray.")
+	// No specific agent is under discussion here, so sendReport falls back to
+	// reading the state file for identity — see its doc comment.
+	err := sendReport("logs", "User-initiated log submission from the desktop tray.", agentStatus{})
 	if err == nil {
 		notify.Send("Logs sent", "Thanks — the developers received your logs (support@unarr.app).")
 		return

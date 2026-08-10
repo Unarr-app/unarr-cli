@@ -18,5 +18,5 @@
 
   4 passed, 2 failed, 1 warnings
 
-  Tip: run `unarr doctor --fix` to auto-repair common issues.
+  Tip: `unarr doctor --fix` repairs common issues.
 

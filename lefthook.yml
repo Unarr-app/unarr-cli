@@ -53,7 +53,14 @@ pre-commit:
       run: |
         bash scripts/check-arch.sh || exit 1
         if command -v golangci-lint &> /dev/null; then
-          golangci-lint run -c .golangci.arch.yml ./...
+          # Once per GOOS, exactly like `make arch`: a single pass never loads
+          # //go:build windows|darwin files, so the ~35 platform-constrained
+          # non-test files would commit unanalysed while golangci prints
+          # "0 issues". Skipping the loop here is the half-fix that lets a
+          # commit through and fails `make arch` afterwards.
+          for goos in linux windows darwin; do
+            GOOS=$goos golangci-lint run -c .golangci.arch.yml ./... || exit 1
+          done
         else
           echo "golangci-lint not installed, skipping arch lint (file-length gate still ran)"
         fi

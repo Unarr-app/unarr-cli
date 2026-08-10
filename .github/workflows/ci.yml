@@ -9,6 +9,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # A push trigger that does not fire cannot be replayed: `gh run rerun` needs a
+  # run to exist, and re-running an older one re-tests the older commit. That is
+  # not hypothetical — three consecutive pushes to main on 2026-08-06 (6a18671,
+  # 0ea4fcc and the 1.10.1 release commit 2052156) produced pages-build runs and
+  # no CI run at all, so v1.10.1 shipped without a single test having run on it.
+  # workflow_dispatch is the only way to point this workflow at a given ref by
+  # hand afterwards: `gh workflow run ci.yml --ref main` (dispatch takes a branch
+  # or tag, never a bare SHA — tag the commit first if it is not a branch head).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -85,6 +94,65 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.11.4
+
+  arch:
+    name: Arch gate
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is REQUIRED, and the failure it prevents is SILENT. Both
+      # halves of the gate diff against a base rev, and a shallow clone has none:
+      #   - scripts/check-arch.sh then sees only working-tree changes, which on a
+      #     clean checkout is ZERO files. Measured on a `clone --depth 1`:
+      #     "✓ file-length gate: 0 changed .go file(s)", exit 0. A green that
+      #     inspected nothing.
+      #   - golangci-lint runs unscoped, so any legacy issue would surface as a
+      #     regression on a PR that changed one line.
+      # A green from an empty file set is worse than a red, so keep this at 0.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Install the binary directly rather than via golangci-lint-action: that
+      # action runs a lint pass of its own against .golangci.yml (correctness/
+      # security, already covered by the `lint` job), and this job needs the
+      # SEPARATE .golangci.arch.yml driven once per GOOS by `make arch`.
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.11.4
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      # The base rev has to be computed per event, and getting it wrong is a
+      # silent pass, not an error — both halves of the gate diff against it and
+      # an empty diff inspects nothing.
+      #
+      #   PR:   `main` locally is the merge commit GitHub synthesised, not the
+      #         branch point, so diffing against it would call the target
+      #         branch's own commits "new". Use the real merge base.
+      #   push: do NOT fall through to the Makefile's `origin/main`. On a push
+      #         checkout leaves origin/main AT the pushed commit with HEAD
+      #         detached on the same SHA, so base...HEAD is empty by
+      #         construction — a green that looked at zero files. Use the
+      #         commit that preceded the push instead.
+      #
+      # github.event.before is all-zeros on a branch's first push (nothing
+      # preceded it); HEAD^ covers that and merge commits alike.
+      - name: Architectural gate (per GOOS)
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -n "$PR_BASE" ]; then
+            BASE=$(git merge-base "$PR_BASE" HEAD)
+          elif [ -n "$PUSH_BEFORE" ] && git rev-parse --verify --quiet "$PUSH_BEFORE^{commit}" >/dev/null; then
+            BASE="$PUSH_BEFORE"
+          else
+            BASE=$(git rev-parse --verify --quiet 'HEAD^' || true)
+          fi
+          echo "arch base: ${BASE:-<none — gate runs unscoped>}"
+          make arch ARCH_BASE="$BASE"
 
   shell:
     name: Shellcheck

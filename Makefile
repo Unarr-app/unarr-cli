@@ -39,15 +39,35 @@ lint:
 ## does NOT error on an unresolvable new-from-rev, it silently falls back to reporting the
 ## ENTIRE legacy codebase (~165 issues), which reads as a catastrophic regression and makes
 ## the gate unusable. Clones name the remote differently (origin vs github), so try both
-## before falling back to the local branch. Empty means "no base" → check-arch.sh degrades
-## to checking every file, and golangci-lint is run unscoped.
+## before falling back to the local branch.
+##
+## Empty means "no base", and the degradation is ASYMMETRIC — measured, not assumed:
+## golangci-lint runs unscoped (every file, no grandfathering), but check-arch.sh does NOT
+## fall back to "every file" as an earlier version of this comment claimed. Its collect()
+## drops the base-vs-HEAD diff and keeps only working-tree changes, so on a CLEAN checkout
+## it inspects ZERO files and still prints a tick. That is why the CI job pins
+## `fetch-depth: 0`: a shallow clone there would be a green that checked nothing.
 ARCH_BASE := $(shell git rev-parse --verify --quiet origin/main \
 	|| git rev-parse --verify --quiet github/main \
 	|| git rev-parse --verify --quiet main)
 
+# Build-constrained code is INVISIBLE to a single golangci pass: on a linux host the
+# loader never parses //go:build windows|darwin, so ~35 non-test files (the Windows
+# daemon/launcher, the launchd agent, the platform reload paths) were never analysed at
+# all. Verified by planting a 7-param function in a _windows.go file: the default pass
+# reported "0 issues", GOOS=windows caught it. "0 issues" from an unloaded package reads
+# exactly like a clean one, which is why this went unnoticed.
+#
+# So run the gate once per platform the project ships. Cheap (analysis only, no build)
+# and the only way the constrained half of the tree is ever seen.
+ARCH_GOOS ?= linux windows darwin
+
 arch:
 	@bash scripts/check-arch.sh $(ARCH_BASE)
-	@golangci-lint run -c .golangci.arch.yml $(if $(ARCH_BASE),--new-from-rev=$(ARCH_BASE),) ./...
+	@for goos in $(ARCH_GOOS); do \
+		echo "── arch gate: GOOS=$$goos"; \
+		GOOS=$$goos golangci-lint run -c .golangci.arch.yml $(if $(ARCH_BASE),--new-from-rev=$(ARCH_BASE),) ./... || exit 1; \
+	done
 
 ## Run tests with coverage report (excludes CLI layer — cmd/ is glue code)
 COVER_PKGS = $(shell go list ./... | grep -v '/cmd')

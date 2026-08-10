@@ -81,12 +81,7 @@ func logSections() []logSection {
 
 	out, err := runUnarrOutput("daemon", "logs")
 	if len(out) == 0 {
-		msg := "No logs available."
-		if err != nil {
-			msg += " (" + err.Error() + ")"
-		}
-		out = []byte(msg + "\nIf the agent runs in the foreground, logs go to its" +
-			" terminal. Install it as a service (unarr daemon install) to persist them.\n")
+		out = []byte(noLogsExplanation(err))
 	}
 	sections := []logSection{{
 		title:  "daemon log (unarr logs)",
@@ -97,6 +92,37 @@ func logSections() []logSection {
 		sections = append(sections, boot)
 	}
 	return sections
+}
+
+// noLogsExplanation says why a log read came back with nothing — and it
+// distinguishes the two reasons, because they point at opposite things.
+//
+// "The CLI ran and printed nothing" IS usually a foreground daemon whose output
+// went to a terminal, and telling the user to install it as a service is the
+// right advice.
+//
+// "The CLI could not be run at all" is not that, and giving the same advice for
+// it is actively misleading. A field crash report came back with a log tail of
+// nothing but `No logs available. (exit status 0xc0000142)` followed by the
+// advice to install the agent as a service — on a box where the agent WAS
+// installed as a service, and where 0xc0000142 (STATUS_DLL_INIT_FAILED) means
+// the Windows loader killed the collector before main(). The report blamed the
+// user's setup for a corrupt binary, and pointed whoever read it away from the
+// actual fault.
+//
+// So a failed exec is reported as a failed exec, and the report says the
+// collection failed rather than implying the daemon had nothing to say.
+func noLogsExplanation(err error) string {
+	if err != nil {
+		return "COULD NOT READ THE LOGS: running `unarr daemon logs` failed (" +
+			err.Error() + ").\nThis is a failure of the log collection itself, NOT" +
+			" evidence about the agent - the agent's own logs, if any, are not in" +
+			" this report.\nOn Windows, an 'exit status 0xc...' here means the binary" +
+			" could not start at all (a corrupt or partially written unarr.exe, or an" +
+			" antivirus holding it).\n"
+	}
+	return "No logs available.\nIf the agent runs in the foreground, logs go to its" +
+		" terminal. Install it as a service (unarr daemon install) to persist them.\n"
 }
 
 // bootLogSection reads the launcher's own log, and is allowed to come back

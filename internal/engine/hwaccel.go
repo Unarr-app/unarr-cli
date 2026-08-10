@@ -154,10 +154,15 @@ func (d HWAccelDiagnostic) LogLine() string {
 	b.WriteString(", HW=")
 	b.WriteString(string(d.Pick))
 	if d.Pick == HWAccelNone {
+		// ASCII only: LogLine() is printed with log.Printf into unarr.log, which
+		// Windows consoles decode as CP437/850. The em dashes that used to be here
+		// reached a real daemon log on the VM harness as the bytes C7 F6, inside
+		// "HW=none (software libx264) ... encoders found". See
+		// internal/logging.TestLogLinesAreASCII.
 		if len(d.Encoders) == 0 {
-			b.WriteString(" (software libx264) — no HW encoders compiled in")
+			b.WriteString(" (software libx264) - no HW encoders compiled in")
 		} else {
-			b.WriteString(" (software libx264) — encoders found but no matching device: ")
+			b.WriteString(" (software libx264) - encoders found but no matching device: ")
 			b.WriteString(strings.Join(d.Encoders, ","))
 		}
 	} else {

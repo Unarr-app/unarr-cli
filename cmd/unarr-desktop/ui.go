@@ -540,7 +540,10 @@ func (ui *trayUI) reportControlFailure(action string, err error) {
 func reportFailureToSupport(action, detail string, cause error) {
 	msg := fmt.Sprintf("Desktop tray: %q failed.\n\nShown to the user: %s\n\nUnderlying error: %v",
 		action, detail, cause)
-	if err := sendReport("error", msg); err != nil {
+	// A tray action failed while the agent itself is presumably still up, so
+	// there is no captured agentStatus to describe — the LIVE daemon is the
+	// right thing to identify, and sendReport reads it for a zero value.
+	if err := sendReport("error", msg, agentStatus{}); err != nil {
 		notify.Send("unarr agent", "Could not send the report: "+err.Error())
 		return
 	}

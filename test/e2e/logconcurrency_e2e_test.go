@@ -13,16 +13,35 @@ import (
 )
 
 // Concurrency shape: eight writers is more than the two (stdout + stderr) the
-// daemon really points at one descriptor, and 2000 records each puts ~3.9 MiB
+// daemon really points at one descriptor, and 6000 records each puts ~11.7 MiB
 // through a 1 MiB budget — several rotations happen WHILE every goroutine is
 // still writing, which is the only interesting moment.
 const (
 	concurrentWriters = 8
-	recordsPerWriter  = 2000
+	// The volume has to exceed what the ring can hold by a wide margin, or the
+	// ceiling assertion is vacuous. At the previous 2000 records per writer
+	// (~3.9 MiB) it was: a GitHub runner ended the storm with 15996 of 16000
+	// records STILL IN THE RING at 4,094,976 bytes — the whole run had fitted in
+	// three slots, so nothing was ever evicted and a rotator that had stopped
+	// rotating would have measured the same thing. It failed the 3,145,984-byte
+	// ceiling not because the ring was unbounded but because each slot carries
+	// the copy-window overshoot below. At ~11.7 MiB most of the run MUST be
+	// dropped, which is the property this test exists to observe.
+	recordsPerWriter = 6000
 	// keep is deliberately small so the ceiling actually bites: the assertion
 	// worth making under load is that the ring stops growing, not that every
 	// record is archived.
 	concurrentKeep = 2
+	// copyOvershoot is the headroom one slot gets above log_max_size_mb.
+	// RotateNow triggers at 1 MiB but snapshots the live file and truncates
+	// AFTERWARDS, so a slot holds everything that arrived up to the end of the
+	// copy, not up to the trigger. With eight goroutines appending into page
+	// cache the measured slot was ~1.3 MiB on a GitHub runner. The allowance is
+	// 1 MiB — roughly three times the measured overshoot, because the number is
+	// a function of the runner's write-to-copy throughput ratio and nothing here
+	// bounds it — and it stays honest: a ring that never evicted would hold
+	// ~11.7 MiB, still four times over the resulting ceiling.
+	copyOvershoot = mib
 	// sweepInterval stands in for logging.DefaultSweepInterval, compressed so
 	// the rotator turns many times inside a test that runs for a fraction of a
 	// second.
@@ -38,9 +57,13 @@ const (
 //
 // What is asserted is what copy-truncate actually promises: the ring stays
 // bounded, retention is respected, the holder never gets stranded on a dead
-// inode, and no record is duplicated or shredded mid-file. Records lost in the
-// window between the snapshot and the truncate are the documented cost of
-// copytruncate, so they are counted and reported rather than failed on.
+// inode, and no record is duplicated or shredded mid-file. Bounded is asserted
+// twice, in bytes and in records: the ring must stay under its ceiling AND must
+// have thrown records away, since a ring big enough to hold the whole run says
+// nothing about a rotator that quit. Records lost in the window between the
+// snapshot and the truncate are the documented cost of copytruncate, so they are
+// reported rather than failed on — and once eviction is in play they cannot be
+// told apart from records that simply aged out.
 //
 // Run with -race: the writers share the descriptor with the rotator.
 func TestConcurrentWritesSurviveRotation(t *testing.T) {
@@ -87,8 +110,10 @@ func TestConcurrentWritesSurviveRotation(t *testing.T) {
 		t.Errorf("unarr.log.%d exists with log_max_files = %d (stat err: %v)",
 			concurrentKeep+1, concurrentKeep, err)
 	}
-	if got, ceiling := ringBytes(s.logPath(), opts.MaxFiles), int64((concurrentKeep+1)*mib+lineBytes); got > ceiling {
-		t.Errorf("ring grew to %d bytes under load, ceiling is %d", got, ceiling)
+	if got, ceiling := ringBytes(s.logPath(), opts.MaxFiles), int64((concurrentKeep+1)*(mib+copyOvershoot)); got > ceiling {
+		t.Errorf("ring grew to %d bytes under load, ceiling is %d (%d slots of "+
+			"%d bytes, copy-window overshoot included)",
+			got, ceiling, concurrentKeep+1, mib+copyOvershoot)
 	}
 
 	assertRingIsIntactUnderLoad(t, s.logPath(), opts.MaxFiles)
@@ -160,8 +185,19 @@ func assertRingIsIntactUnderLoad(t *testing.T, path string, keep int) {
 	if len(seen) > written {
 		t.Errorf("ring holds %d records but only %d were written", len(seen), written)
 	}
-	t.Logf("%d of %d records from %d goroutines survived the rotation storm "+
-		"(%d lost to the copy-truncate race, %d snapshot tails cut mid-record)",
+	// Eviction is what makes the byte ceiling mean anything. A rotator that had
+	// stopped dropping slots would finish with every record still present, and
+	// at a volume that happens to fit the ring that reads exactly like success —
+	// which is how the 2000-record version of this test passed on a fast disk.
+	if len(seen) == written {
+		t.Errorf("all %d records are still in the ring: nothing was evicted, so "+
+			"this run cannot tell a bounded ring from one that stopped rotating",
+			written)
+	}
+	t.Logf("%d of %d records from %d goroutines are still in the ring after the "+
+		"rotation storm (%d gone: evicted with their slot, plus whatever the "+
+		"copy-truncate race dropped — indistinguishable from here; %d snapshot "+
+		"tails cut mid-record)",
 		len(seen), written, concurrentWriters, written-len(seen), torn)
 }
 

@@ -27,7 +27,7 @@ func fixture(t *testing.T, name string) string {
 // TestExtractNative_RAR covers the ordinary case: nested dirs, unicode names,
 // spaces. This is what the whole feature exists to do without a binary.
 func TestExtractNative_RAR(t *testing.T) {
-	dest := t.TempDir()
+	dest := resolvedTempDir(t)
 	files, err := extractNative(fixture(t, "rar5-subdirs.rar"), dest, "")
 	if err != nil {
 		t.Fatalf("extractNative: %v", err)
