@@ -568,13 +568,20 @@ func contains(s []string, v string) bool {
 	return false
 }
 
+// DefaultAPIURL is the API base a fresh install talks to. Exported so callers
+// that need a fallback for an empty `auth.api_url` use THIS value instead of
+// hardcoding their own: the managed-VPN call sites each hardcoded
+// "https://torrentclaw.com", which silently aimed VPN fetches at a different
+// deployment than the rest of the agent.
+const DefaultAPIURL = "https://unarr.app"
+
 // Default returns a Config with sensible defaults. Used both for fresh
 // installs (no config file yet) and as the baseline for Load — fields not
 // present in the user's TOML keep their Default() value.
 func Default() Config {
 	return Config{
 		Auth: AuthConfig{
-			APIURL: "https://unarr.app",
+			APIURL: DefaultAPIURL,
 			// Default mirror list (failover order). Primary is unarr.app — the
 			// unarr brand's own deployment. Kept in sync with the brand-aware list
 			// in src/lib/mirrors-config.ts; `unarr mirrors update` pulls the live
@@ -716,7 +723,7 @@ func Load(path string) (Config, error) {
 // edit the TOML, while still letting power users disable features.
 func applyDefaults(cfg *Config, meta toml.MetaData) {
 	if !meta.IsDefined("auth", "api_url") {
-		cfg.Auth.APIURL = "https://unarr.app"
+		cfg.Auth.APIURL = DefaultAPIURL
 	}
 	if !meta.IsDefined("auth", "mirrors") {
 		cfg.Auth.Mirrors = []string{"https://torrentclaw.to", "https://torrentclaw.com"}
