@@ -5,6 +5,18 @@
 pre-commit:
   parallel: true
   commands:
+    # Este repo es PUBLICO. docs/ son notas y planes internos (infra, nombres de
+    # secretos, decisiones sin publicar) y esta en .gitignore — pero .gitignore no
+    # frena un `git add -f`, que es exactamente como se colaron la primera vez.
+    no-internal-docs:
+      run: |
+        staged=$(git diff --cached --name-only --diff-filter=ACMR | grep -iE '^docs/' || true)
+        if [ -n "$staged" ]; then
+          echo "Rutas de docs/ internas en el commit (repo publico):"
+          echo "$staged"
+          echo "Sacalas con: git restore --staged <ruta>"
+          exit 1
+        fi
     gofmt-check:
       glob: "*.go"
       run: test -z "$(gofmt -l .)" || { echo "Files not formatted:"; gofmt -l .; exit 1; }

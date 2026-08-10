@@ -38,6 +38,13 @@ Thumbs.db
 dist/
 dist-ffbinaries/
 
+# Notas y planes internos de trabajo. Este repo es PUBLICO: los planes citan
+# infra, nombres de secretos y decisiones internas que no deben salir. Se
+# untrackearon en su dia; los ficheros siguen en disco, solo dejan de ir a git.
+# Ambas cajas: ext4 distingue mayusculas, `docs/` no tapa `Docs/`.
+docs/
+Docs/
+
 # Docker
 tmp/
 # Anchored: the docker bind-mount is the REPO-ROOT config/ only. Unanchored,
