@@ -544,6 +544,16 @@ never got going, a crash dump — output that never reaches the daemon's own log
 come up at all. On a systemd install there is no such file: the startup output
 is in the journal, so `unarr logs` already shows it and `--boot` says so.
 
+**On a systemd install, `log_max_size_mb` and `log_max_files` do nothing at all.**
+The unit sends the daemon's output to the journal, so there is no `unarr.log` to
+rotate and retention is journald's business, not unarr's — set it in
+`journald.conf` (`SystemMaxUse`, `MaxRetentionSec`); the defaults are 10% of the
+filesystem, capped at 4 GB. Check what it currently costs with
+`journalctl --user -u unarr --disk-usage`. Setting `log_max_size_mb = 1` there and
+expecting a bounded disk is the one misreading worth calling out: it bounds
+nothing. (`unarr logs rotate` is correspondingly a no-op that exits 0 — it will
+not conjure an empty `unarr.log` just to have something to rotate.)
+
 **Rotation is OPT-IN, and off by default** (`log_max_size_mb = 0`). Out of the
 box unarr never rotates anything: `unarr.log` and `unarr.boot.log` just grow.
 Bound them with `unarr clean`, or with an external `logrotate` — and if you use
