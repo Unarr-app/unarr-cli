@@ -90,7 +90,11 @@ func (r *TextRenderer) Finish(rep Report) {
 	fmt.Fprintln(r.w)
 
 	if r.ShowFixTip && rep.Failed > 0 {
-		r.dim.Fprintln(r.w, "  Tip: run `unarr doctor --fix` to auto-repair common issues.")
+		// Kept at 60 columns or under: this is the widest line the renderer
+		// emits on its own, and a 60-col terminal (a split pane) wrapping the
+		// closing hint is the ugliest place to lose a column. Pinned by
+		// TestRenderFrameFitsSixtyColumns.
+		r.dim.Fprintln(r.w, "  Tip: `unarr doctor --fix` repairs common issues.")
 		fmt.Fprintln(r.w)
 	}
 }
