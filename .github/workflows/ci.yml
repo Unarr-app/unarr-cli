@@ -9,6 +9,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # A push trigger that does not fire cannot be replayed: `gh run rerun` needs a
+  # run to exist, and re-running an older one re-tests the older commit. That is
+  # not hypothetical — three consecutive pushes to main on 2026-08-06 (6a18671,
+  # 0ea4fcc and the 1.10.1 release commit 2052156) produced pages-build runs and
+  # no CI run at all, so v1.10.1 shipped without a single test having run on it.
+  # workflow_dispatch is the only way to point this workflow at a given ref by
+  # hand afterwards: `gh workflow run ci.yml --ref main` (dispatch takes a branch
+  # or tag, never a bare SHA — tag the commit first if it is not a branch head).
+  workflow_dispatch:
 
 permissions:
   contents: read
