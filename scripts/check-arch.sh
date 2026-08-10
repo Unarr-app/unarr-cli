@@ -6,6 +6,12 @@
 #
 # Usage: bash scripts/check-arch.sh [base-rev]   (default base: origin/main)
 # Exit 0 = clean, 1 = a changed file exceeds the limit.
+#
+# NEEDS A REAL BASE REV TO MEAN ANYTHING. With no resolvable base (a shallow clone, a
+# detached checkout) collect() keeps only working-tree changes, so on a clean checkout it
+# inspects ZERO files and still exits 0 with a tick. Verified on `git clone --depth 1`:
+# "✓ file-length gate: 0 changed .go file(s)". A green here is only as meaningful as the
+# base it was given — CI must fetch full history.
 set -euo pipefail
 
 LIMIT=500
@@ -19,6 +25,18 @@ fi
 # Changed/added .go files: committed-vs-base + staged + unstaged + untracked (not yet
 # git-added — git diff is blind to these, so list them explicitly). Exclude tests,
 # generated, vendored, dist.
+#
+# Tests are excluded ON PURPOSE, matching the `path: _test\.go` exemption in
+# .golangci.arch.yml: table-driven tests grow long by design (upgrade_test.go is 1236
+# lines, parser_test.go 1050) and capping them would push authors toward fewer cases,
+# which is the opposite of what this gate is for. Consequence worth knowing: NO linter
+# and NO length check covers test code, including everything under test/e2e/ — a
+# `golangci-lint ... --build-tags e2e` run still reports 0 issues there because the
+# exemption, not the build tag, is what governs. That is the policy, not a gap.
+#
+# Build-constrained NON-test files are a different story and WERE a real gap: this
+# script sees them (git does not care about //go:build), but golangci on a linux host
+# does not. `make arch` now runs the golangci pass once per GOOS for that reason.
 collect() {
   {
     [ -n "$BASE" ] && git diff --name-only --diff-filter=AM "$BASE"...HEAD 2>/dev/null || true

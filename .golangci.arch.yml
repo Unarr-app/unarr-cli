@@ -7,9 +7,23 @@
 # 1980, daemon.go 1860, ...) are grandfathered — exactly like eslint-suppressions.json.
 # New code MUST pass; legacy is not retro-broken.
 #
-# Run: golangci-lint run -c .golangci.arch.yml ./...   (or `make arch`)
+# Run: `make arch` — NOT a bare `golangci-lint run -c .golangci.arch.yml ./...`.
 # File-length (>500) is enforced separately by scripts/check-arch.sh (golangci has no
 # file-line linter).
+#
+# WHY `make arch` AND NOT A BARE RUN: build-constrained files are invisible to a single
+# pass. On a linux host the loader never parses a `//go:build windows` file, so ~35
+# non-test files (the Windows daemon/launcher/reload paths, the launchd agent) are not
+# analysed — and golangci prints "0 issues", which is indistinguishable from clean.
+# Confirmed by planting a 7-param function in a _windows.go: default pass 0 issues,
+# GOOS=windows 1 issue. `make arch` therefore loops the gate over ARCH_GOOS
+# (linux windows darwin). Adding a `build-tags:` key here does NOT solve it — build tags
+# and GOOS are separate axes, and the e2e suite stays exempt regardless (see below).
+#
+# NOT COVERED, DELIBERATELY: test code. The `path: _test\.go` rule below exempts every
+# *_test.go from these linters, and scripts/check-arch.sh skips them for length too, so
+# nothing under test/e2e/ is gated at all. Table-driven tests are long on purpose
+# (upgrade_test.go 1236 lines); capping them would push authors toward fewer cases.
 version: "2"
 
 run:
