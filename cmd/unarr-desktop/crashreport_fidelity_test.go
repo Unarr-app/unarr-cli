@@ -194,9 +194,9 @@ func TestCrashReportSurvivesTheStateFileBeingReaped(t *testing.T) {
 	}
 }
 
-// TestCrashReportIsNotSentForAnUninstall guards the blast radius of any fix to
-// the above: a state file whose PID is dead because the user removed the agent
-// must not mail a crash report. Kept here because the fixes touch exactly the
+// TestCrashReportIsNotSentForACleanStop guards the blast radius of the fixes
+// above: a state file whose PID is dead because the daemon recorded a shutdown
+// must not mail a crash report. Kept here because those fixes touch exactly the
 // readStatus -> handleCrash path this asserts about.
 func TestCrashReportIsNotSentForACleanStop(t *testing.T) {
 	isolatePaths(t)
@@ -219,5 +219,4 @@ func TestCrashReportIsNotSentForACleanStop(t *testing.T) {
 	if n := len(reports()); n != 0 {
 		t.Fatalf("%d report(s) sent for a clean stop", n)
 	}
-	_ = os.Getpid()
 }
