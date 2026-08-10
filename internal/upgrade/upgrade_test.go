@@ -1095,8 +1095,16 @@ func TestInstallBinaryUnwritableDestination(t *testing.T) {
 	if err == nil {
 		t.Error("installBinary to non-writable destination should return error")
 	}
-	if !strings.Contains(err.Error(), "write binary") {
-		t.Errorf("error = %q, want to contain 'write binary'", err)
+	// The failure is now caught while STAGING the binary rather than while
+	// writing it in place — installBinary writes a sibling temp file and renames
+	// it, so an unwritable directory fails at create. What matters is that the
+	// error names the binary install, not which of its steps tripped.
+	if !strings.Contains(err.Error(), "binary") {
+		t.Errorf("error = %q, want it to mention the binary install", err)
+	}
+	// Nothing may be left behind for a later run to mistake for an executable.
+	if _, statErr := os.Stat(dst + ".new"); statErr == nil {
+		t.Error("a failed install left a staged .new file behind")
 	}
 }
 
