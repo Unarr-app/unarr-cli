@@ -23,6 +23,7 @@ package upgrade
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -134,7 +135,13 @@ func TestInstallBinaryIsDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm()&0o111 == 0 {
+	// Windows has no executable bit to assert on: os.Chmod there toggles the
+	// read-only attribute and nothing else, so Go reports 0666 for every writable
+	// file and what makes unarr.exe runnable is its extension. Measured on the CI
+	// runner as "destination mode -rw-rw-rw- is not executable" — a green install
+	// failing a POSIX assumption. The chmod in installBinary still runs there and
+	// is still worth keeping (it clears read-only); it is only unobservable.
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o111 == 0 {
 		t.Errorf("destination mode %v is not executable", fi.Mode().Perm())
 	}
 
