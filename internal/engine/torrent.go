@@ -315,6 +315,20 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 		log.Printf("[torrent] VPN split-tunnel enabled (peer + tracker + DHT routed through WireGuard; clear-net peer/DHT/inbound disabled)")
 	}
 
+	// From here to the successful return, every failure has to close the storage.
+	// It owns the piece-completion DB handle and torrent.Client.Close() does not
+	// touch DefaultStorage, so an early return leaks it for the life of the
+	// process — on Windows that is an open `.torrent.db` and a data dir that
+	// cannot be deleted. Seen in CI as a TempDir cleanup failure ("the process
+	// cannot access the file because it is being used by another process")
+	// immediately after a client creation that had failed.
+	installed := false
+	defer func() {
+		if !installed {
+			_ = store.Close()
+		}
+	}()
+
 	// Try to create client; if the port is in use, try the next few ports.
 	var client *torrent.Client
 	var err error
@@ -323,7 +337,7 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 		if err == nil {
 			break
 		}
-		if !strings.Contains(err.Error(), "address already in use") {
+		if !isAddrInUse(err) {
 			return nil, fmt.Errorf("create torrent client: %w", err)
 		}
 		tcfg.ListenPort++
@@ -354,6 +368,7 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	}
 
 	seedCtx, seedCancel := context.WithCancel(context.Background())
+	installed = true // the downloader owns the storage from here; Shutdown closes it
 	return &TorrentDownloader{
 		client:            client,
 		store:             store,
