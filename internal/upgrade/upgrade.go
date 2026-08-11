@@ -191,17 +191,71 @@ func CheckLatest(ctx context.Context) (string, error) {
 	return v, err
 }
 
-// installBinary copies the new binary to the target path, preserving original permissions.
+// installBinary puts the new binary at the target path ATOMICALLY: a sibling
+// temp file, fsynced, then renamed over the destination.
+//
+// It used to be os.ReadFile + os.WriteFile straight onto dst, and that is a
+// data-loss bug on the one path that matters. os.WriteFile opens O_TRUNC — it
+// empties the destination and then streams tens of MB back into it, so for the
+// whole of that write the file at the path everything else EXECS is short. A
+// short PE is not a loadable image: Windows answers it with
+// STATUS_DLL_INIT_FAILED (0xc0000142), and a field crash report arrived carrying
+// exactly that status, in the log tail, from the unarr.exe the tray had spawned
+// to collect the logs. Nothing waits for an upgrade — the tray polls this same
+// binary on a timer (runUnarrOutput in cmd/unarr-desktop/agentctl.go) — so an
+// upgrade running underneath it WILL be exec'd mid-write. Measured on a 8 MiB
+// image: the destination was observed at 4096 bytes.
+//
+// A rename is atomic at the directory entry, so a concurrent open sees either
+// the whole old image or the whole new one, never a prefix of either. Both
+// callers rename the previous binary aside first (backupPath in Upgrade,
+// parkOldBinary in UpdateDesktopBinary), so on Windows — where an open exe
+// cannot be replaced, only renamed — the destination is already free.
+//
+// The Sync is not decoration: os.WriteFile returned once the bytes reached the
+// page cache, so an upgrade that reported success and then lost power could
+// leave a zero-length executable and no unarr at all on the next boot. Syncing
+// the temp file BEFORE the rename is what makes the rename meaningful.
+//
+// The temp file is a sibling, not in os.TempDir(): a rename across filesystems
+// fails with EXDEV, and /tmp is very often a different mount.
 func installBinary(src, dst string) error {
-	// Read new binary
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return fmt.Errorf("read new binary: %w", err)
 	}
 
-	// Write to destination with executable permissions
-	if err := os.WriteFile(dst, data, 0o755); err != nil {
-		return fmt.Errorf("write binary: %w", err)
+	tmp := dst + ".new"
+	// Never inherit a stale temp file from an update that died mid-write.
+	_ = os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("create staged binary: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write staged binary: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("sync staged binary: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close staged binary: %w", err)
+	}
+	// O_CREATE honours the umask, so the mode above is a ceiling rather than a
+	// guarantee. The binary must be executable for every caller regardless of
+	// the umask the upgrade happened to run under.
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("chmod staged binary: %w", err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("install binary: %w", err)
 	}
 
 	return nil

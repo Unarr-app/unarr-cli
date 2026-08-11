@@ -43,7 +43,8 @@ func TestSendReportBodyCarriesBothLogsBounded(t *testing.T) {
 		"version":            {out: "unarr 1.8.1 (windows/amd64)\n"},
 	})
 
-	if err := sendReport("crash", "Agent process (PID 12272, v1.8.1) died"); err != nil {
+	if err := sendReport("crash", "Agent process (PID 12272, v1.8.1) died",
+		agentStatus{crashed: true, pid: 12272, version: "1.8.1", agentID: "test-agent"}); err != nil {
 		t.Fatalf("sendReport: %v", err)
 	}
 
@@ -75,9 +76,9 @@ func TestSendReportBodyCarriesBothLogsBounded(t *testing.T) {
 // transport ones: the body is JSON over HTTPS, which is UTF-8 by definition, and
 // this proves it survives byte for byte — em dash, accents, CJK and all.
 //
-// So the fix had to be at the source (log lines are ASCII now, see
-// internal/logging.TestLogLinesAreASCII), because no amount of care in the
-// client or the server stops a CP437 console from mis-rendering a UTF-8 file.
+// So the fix has to be at the source (see internal/logging.TestLogLinesAreASCII),
+// because no amount of care in the client or the server stops a CP437 console
+// from mis-rendering a UTF-8 file.
 // A user's own filenames can still contain anything, hence this guard: whatever
 // the daemon does log must reach the developers unchanged.
 func TestSendReportTransportsNonASCIIIntact(t *testing.T) {
@@ -103,7 +104,7 @@ func TestSendReportTransportsNonASCIIIntact(t *testing.T) {
 		"version":     {out: "unarr 1.9.0 (windows/amd64)\n"},
 	})
 
-	if err := sendReport("logs", "user submitted "+tricky); err != nil {
+	if err := sendReport("logs", "user submitted "+tricky, agentStatus{}); err != nil {
 		t.Fatalf("sendReport: %v", err)
 	}
 	if !strings.Contains(got.Logs, tricky) {
@@ -121,7 +122,7 @@ func TestSendReportWithoutCredentialsFails(t *testing.T) {
 	isolatePaths(t)
 	stubUnarr(t, map[string]reply{"daemon logs": {out: "x\n"}})
 
-	if err := sendReport("crash", "no creds"); err == nil {
+	if err := sendReport("crash", "no creds", agentStatus{}); err == nil {
 		t.Fatal("sendReport must fail when the agent has no API key")
 	}
 }

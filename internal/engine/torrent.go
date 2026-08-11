@@ -597,7 +597,12 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 
 			// Terminal progress
 			pct := int(float64(downloaded) / float64(totalBytes) * 100)
-			line := fmt.Sprintf("[%s] %d%% — %s/%s @ %s/s  peers:%d seeds:%d",
+			// ASCII only: this line goes to log.Print below, i.e. into unarr.log,
+			// which a Windows console (code page 437/850) and a CP1252 reader both
+			// decode byte-wise. The em dash that used to be here reached users' logs
+			// and the crash reports as the bytes C7 F6; a field report shows the run
+			// of them. See internal/logging.TestLogLinesAreASCII.
+			line := fmt.Sprintf("[%s] %d%% - %s/%s @ %s/s  peers:%d seeds:%d",
 				task.ShortID(), pct,
 				formatBytes(downloaded), formatBytes(totalBytes), formatBytes(speed),
 				stats.ActivePeers, stats.ConnectedSeeders)

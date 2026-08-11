@@ -156,26 +156,52 @@ func TestReportLogsWithoutABootLog(t *testing.T) {
 	}
 }
 
-// TestReportLogsPlaceholderSurvives: on a player-only box (no CLI installed at
-// all) the user still gets the actionable placeholder, not an empty report —
-// and the placeholder stays bare, with no section headers wrapped around it,
-// because there is only one section.
+// TestReportLogsPlaceholderSurvives: an empty read still produces an actionable
+// placeholder rather than an empty report — and it says the RIGHT thing, which
+// depends on why the read came back empty.
+//
+// The two cases are opposites and used to share one message. "The CLI ran and
+// printed nothing" really is the foreground-daemon case, and "install it as a
+// service" is the fix. "The CLI could not be run" is not: a field crash report
+// carried `No logs available. (exit status 0xc0000142)` plus that same advice,
+// on a box where the agent WAS a service and where the loader had killed the
+// collector before main(). It blamed the user's setup for a broken binary.
 func TestReportLogsPlaceholderSurvives(t *testing.T) {
-	stubUnarr(t, map[string]reply{})
+	// A CLI that ran fine and had nothing to say.
+	t.Run("no logs to show", func(t *testing.T) {
+		stubUnarr(t, map[string]reply{"daemon logs": {out: ""}})
 
-	body := string(collectReportLogs())
-	if !strings.Contains(body, "No logs available.") {
-		t.Fatalf("lost the no-logs placeholder:\n%s", body)
-	}
-	if !strings.Contains(body, "unarr daemon install") {
-		t.Fatalf("the placeholder must still say how to get logs:\n%s", body)
-	}
-	if !strings.Contains(body, "executable file not found") {
-		t.Fatalf("the placeholder must carry the reason there are no logs:\n%s", body)
-	}
-	if strings.Contains(body, "=====") {
-		t.Fatalf("a lone section must render bare, without headers:\n%s", body)
-	}
+		body := string(collectReportLogs())
+		if !strings.Contains(body, "No logs available.") {
+			t.Fatalf("lost the no-logs placeholder:\n%s", body)
+		}
+		if !strings.Contains(body, "unarr daemon install") {
+			t.Fatalf("the placeholder must still say how to get logs:\n%s", body)
+		}
+		if strings.Contains(body, "=====") {
+			t.Fatalf("a lone section must render bare, without headers:\n%s", body)
+		}
+	})
+
+	// A player-only box: no CLI on disk at all, so the exec itself fails.
+	t.Run("the collector could not run", func(t *testing.T) {
+		stubUnarr(t, map[string]reply{})
+
+		body := string(collectReportLogs())
+		if !strings.Contains(body, "executable file not found") {
+			t.Fatalf("the placeholder must carry the reason there are no logs:\n%s", body)
+		}
+		if !strings.Contains(body, "COULD NOT READ THE LOGS") {
+			t.Fatalf("a failed collection must say the COLLECTION failed:\n%s", body)
+		}
+		if strings.Contains(body, "unarr daemon install") {
+			t.Fatalf("a collector that could not start is not a foreground daemon — "+
+				"this advice sends the reader at the wrong fault:\n%s", body)
+		}
+		if strings.Contains(body, "=====") {
+			t.Fatalf("a lone section must render bare, without headers:\n%s", body)
+		}
+	})
 }
 
 // TestReportLogsBudgets: each source is trimmed to its own budget, so a noisy
