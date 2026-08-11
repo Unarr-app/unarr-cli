@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -130,16 +131,27 @@ func runVPNStatus(check bool) error {
 		if cfg.Auth.APIKey == "" {
 			yellow.Println("  ⚠  No API key — run `unarr init` first.")
 		} else {
-			apiURL := cfg.Auth.APIURL
-			if apiURL == "" {
-				apiURL = "https://torrentclaw.com"
-			}
+			apiURL := apiURLOrDefault(cfg)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_, err := vpn.FetchConfig(ctx, apiURL, cfg.Auth.APIKey, "unarr/"+Version, cfg.Agent.ID, true)
+			_, err := vpn.FetchConfig(ctx, vpn.FetchRequest{
+				APIURL:    apiURL,
+				APIKey:    cfg.Auth.APIKey,
+				UserAgent: "unarr/" + Version,
+				AgentID:   cfg.Agent.ID,
+				Probe:     true,
+			})
 			cancel()
+			var fe *vpn.FetchError
 			switch {
 			case err == nil:
 				green.Println("  ✓ Account provisioned — a VPN config is available.")
+			case errors.As(err, &fe) && fe.Code == vpn.ErrDisabled:
+				// Do NOT let this read as "your VPN add-on is broken" — it isn't.
+				// The server this agent talks to just doesn't serve the feature.
+				yellow.Printf("  ⚠  The VPN feature is not available on %s.\n", fe.Host)
+				dim.Println("     This is a SERVER setting — your account provisioning is not the problem.")
+				dim.Printf("     Check which server this agent uses: `unarr config get auth.api_url`\n")
+				dim.Println("     Then update the agent (`unarr update`). If it persists, contact support.")
 			default:
 				yellow.Printf("  ⚠  %s\n", err)
 			}

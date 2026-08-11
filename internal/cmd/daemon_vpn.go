@@ -99,12 +99,41 @@ func vpnEndpoint(t *vpn.Tunnel) string {
 	return t.Endpoint
 }
 
+// apiURLOrDefault is the API base to talk to. Belt-and-braces: config.Load now
+// normalizes an empty api_url to config.DefaultAPIURL, so this only fires for a
+// Config built by hand (tests, or a caller that skipped Load).
+//
+// It exists at all because the three VPN/agent call sites used to hardcode a
+// fallback of "https://torrentclaw.com" while config.Default() returns
+// "https://unarr.app" — two different deployments, each with its own env, so the
+// VPN fetch could land somewhere the rest of the agent never talks to. Whatever
+// the default is, it must be decided in ONE place.
+func apiURLOrDefault(cfg config.Config) string {
+	if cfg.Auth.APIURL != "" {
+		return cfg.Auth.APIURL
+	}
+	return config.DefaultAPIURL
+}
+
 // logVPNBringUpError logs the initial bring-up failure with a message tuned to
 // both the cause (the single WireGuard slot being held by another device is a
 // distinct, common case) and whether the kill-switch is on.
 func logVPNBringUpError(err error, required bool) {
 	var fe *vpn.FetchError
 	slotHeld := errors.As(err, &fe) && fe.Code == vpn.ErrSlotOnDevice
+	// "The server says the VPN feature is off" is NOT a problem with the user's
+	// account, and the old wording ("VPN disabled server-side") read exactly like
+	// one — a PRO subscriber with a correctly provisioned add-on filed a bug
+	// because of it. Name the host and point at the setting that selects it.
+	if errors.As(err, &fe) && fe.Code == vpn.ErrDisabled {
+		log.Printf("[vpn] the VPN feature is not available on %s - your account provisioning is NOT the problem. Check `unarr config get auth.api_url` and `unarr update`; if it persists, contact support.", fe.Host)
+		if required {
+			log.Printf("[vpn] VPN REQUIRED, so torrent/P2P is DISABLED (debrid/usenet still available); the supervisor will keep retrying")
+		} else {
+			log.Printf("[vpn] downloading in the clear until the VPN becomes available")
+		}
+		return
+	}
 	switch {
 	case slotHeld && required:
 		log.Printf("[vpn] the single WireGuard slot is held by another unarr agent - VPN REQUIRED, so THIS agent's torrent/P2P is DISABLED (debrid/usenet still work). Free the slot or run OpenVPN on this machine. See https://unarr.app/vpn")
@@ -129,13 +158,15 @@ func loadVPNConf(ctx context.Context, cfg config.Config) (string, error) {
 		return string(raw), nil
 	}
 
-	apiURL := cfg.Auth.APIURL
-	if apiURL == "" {
-		apiURL = "https://torrentclaw.com"
-	}
+	apiURL := apiURLOrDefault(cfg)
 	fetchCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
-	return vpn.FetchConfig(fetchCtx, apiURL, cfg.Auth.APIKey, "unarr/"+Version, cfg.Agent.ID, false)
+	return vpn.FetchConfig(fetchCtx, vpn.FetchRequest{
+		APIURL:    apiURL,
+		APIKey:    cfg.Auth.APIKey,
+		UserAgent: "unarr/" + Version,
+		AgentID:   cfg.Agent.ID,
+	})
 }
 
 // superviseVPNTunnel is the kill-switch reconnect loop. While the VPN is required

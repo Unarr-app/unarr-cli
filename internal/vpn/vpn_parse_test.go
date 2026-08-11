@@ -319,7 +319,12 @@ func TestFetchConfig(t *testing.T) {
 	}{
 		{name: "200 with content", status: 200, body: `{"content":"` + strings.ReplaceAll(confBody, "\n", `\n`) + `"}`, wantContent: confBody},
 		{name: "200 empty body", status: 200, body: `{"content":""}`, wantCode: ErrUpstream, wantMsg: "empty config"},
-		{name: "503 disabled", status: 503, body: `{}`, wantCode: ErrDisabled},
+		// A 503 is only "the feature is off" when the APPLICATION said so (it
+		// answers a JSON error body). A bare 503 is an edge/proxy/deploy blip and
+		// must stay retryable — reporting "VPN disabled server-side" for one told
+		// a paying user their add-on was broken when it was fine.
+		{name: "503 from the app is disabled", status: 503, body: `{"error":"VPN disabled"}`, wantCode: ErrDisabled},
+		{name: "bare 503 from a proxy is upstream, not disabled", status: 503, body: ``, wantCode: ErrUpstream, wantMsg: "temporarily unavailable"},
 		{name: "403 not provisioned", status: 403, body: `{}`, wantCode: ErrNotProvisioned},
 		{name: "409 slot on device", status: 409, body: `{}`, wantCode: ErrSlotOnDevice},
 		{name: "500 unknown", status: 500, body: `{}`, wantCode: ErrUpstream},
@@ -340,7 +345,7 @@ func TestFetchConfig(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			content, err := FetchConfig(context.Background(), srv.URL, "secret-key", "unarr/test", "agent-123", true)
+			content, err := FetchConfig(context.Background(), FetchRequest{APIURL: srv.URL, APIKey: "secret-key", UserAgent: "unarr/test", AgentID: "agent-123", Probe: true})
 
 			// Request shape is the same regardless of the response.
 			if gotAuth != "Bearer secret-key" {
@@ -388,6 +393,35 @@ func TestFetchConfig(t *testing.T) {
 
 // TestFetchConfigOmitsProbeAndAgent asserts the query params are only added when
 // requested (agentId="" + probe=false → no query string).
+// TestFetchErrorCarriesHost locks the host into the error. "The VPN is disabled
+// server-side" is only actionable together with WHICH server said it: the agent
+// defaults to unarr.app, and a deployment missing the VPN env answers 503 for
+// every account. Without the host the user cannot tell a wrong `auth.api_url`
+// from a broken subscription — the exact confusion that produced a bug report
+// from a correctly provisioned PRO account.
+func TestFetchErrorCarriesHost(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":"VPN disabled"}`)
+	}))
+	defer srv.Close()
+
+	_, err := FetchConfig(context.Background(), FetchRequest{APIURL: srv.URL, APIKey: "k", UserAgent: "unarr/test"})
+	var fe *FetchError
+	if !errors.As(err, &fe) {
+		t.Fatalf("error %v is not a *FetchError", err)
+	}
+	// httptest serves on 127.0.0.1:<port> — the host label must be the authority,
+	// never the full URL (it is rendered inline in a user-facing sentence).
+	wantHost := strings.TrimPrefix(srv.URL, "http://")
+	if fe.Host != wantHost {
+		t.Errorf("Host = %q, want %q", fe.Host, wantHost)
+	}
+	if !strings.Contains(err.Error(), wantHost) {
+		t.Errorf("Error() = %q, want it to name the host %q", err.Error(), wantHost)
+	}
+}
+
 func TestFetchConfigOmitsProbeAndAgent(t *testing.T) {
 	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -396,7 +430,7 @@ func TestFetchConfigOmitsProbeAndAgent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := FetchConfig(context.Background(), srv.URL, "k", "ua", "", false); err != nil {
+	if _, err := FetchConfig(context.Background(), FetchRequest{APIURL: srv.URL, APIKey: "k", UserAgent: "ua"}); err != nil {
 		t.Fatalf("FetchConfig: %v", err)
 	}
 	if gotQuery != "" {

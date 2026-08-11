@@ -91,6 +91,33 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 }
 
+// TestLoadEmptyAPIURLFallsBackToDefault covers an EXPLICIT `api_url = ""`, which
+// `meta.IsDefined` reports as defined — so the empty string used to survive Load
+// and every request went to a path with no host. Call sites papered over it with
+// their own fallbacks, and three of them fell back to a DIFFERENT deployment
+// than config.Default(), which is how a VPN fetch could be aimed at a host the
+// rest of the agent never talks to.
+func TestLoadEmptyAPIURLFallsBackToDefault(t *testing.T) {
+	for _, tt := range []struct{ name, value string }{
+		{"empty", `api_url = ""`},
+		{"whitespace only", `api_url = "   "`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte("[auth]\n"+tt.value+"\n"), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.Auth.APIURL != DefaultAPIURL {
+				t.Errorf("APIURL = %q, want the default %q", cfg.Auth.APIURL, DefaultAPIURL)
+			}
+		})
+	}
+}
+
 func TestLoadPreservesDefaults(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "config.toml")

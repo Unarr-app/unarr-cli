@@ -640,10 +640,7 @@ func manualInstanceEntry() ([]arr.Instance, error) {
 }
 
 func importWantedList(cfg config.Config, items []arr.WantedItem, excludeHashes []string, green, yellow, dim *color.Color) error {
-	apiURL := cfg.Auth.APIURL
-	if apiURL == "" {
-		apiURL = "https://torrentclaw.com"
-	}
+	apiURL := apiURLOrDefault(cfg)
 
 	ac := agent.NewClient(apiURL, cfg.Auth.APIKey, "unarr/"+Version)
 

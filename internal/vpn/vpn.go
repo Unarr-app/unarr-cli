@@ -13,14 +13,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"net/netip"
-	neturl "net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,90 +41,6 @@ const (
 	// without a grace window the very first torrent task would be wrongly blocked.
 	postUpGrace = 45 * time.Second
 )
-
-// ErrCode classifies fetch failures the agent should react to differently.
-type ErrCode string
-
-const (
-	ErrDisabled       ErrCode = "disabled"        // 503 — VPN feature off server-side
-	ErrNotProvisioned ErrCode = "not_provisioned" // 403 — user has no active VPN
-	ErrSlotOnDevice   ErrCode = "slot_on_device"  // 409 — slot claimed by a device
-	ErrUpstream       ErrCode = "upstream"        // network / 5xx / parse
-)
-
-// FetchError carries an ErrCode so callers can decide whether to retry, warn, or
-// fall back to a clear (non-VPN) download.
-type FetchError struct {
-	Code ErrCode
-	Msg  string
-}
-
-func (e *FetchError) Error() string { return fmt.Sprintf("vpn fetch: %s (%s)", e.Msg, e.Code) }
-
-type fetchResponse struct {
-	Content  string `json:"content"`
-	Filename string `json:"filename"`
-	ServerID int    `json:"serverId"`
-	Mode     string `json:"mode"`
-	Error    string `json:"error"`
-	CodeStr  string `json:"code"`
-}
-
-// FetchConfig retrieves the agent's WireGuard .conf from the web API. Auth is
-// `Authorization: Bearer <apiKey>` (the agent-auth scheme). agentId lets the web
-// arbitrate the single WireGuard slot (first agent to ask claims it; others get
-// 409 → ErrSlotOnDevice and should use OpenVPN on their host instead).
-func FetchConfig(ctx context.Context, apiURL, apiKey, userAgent, agentID string, probe bool) (string, error) {
-	q := neturl.Values{}
-	if agentID != "" {
-		q.Set("agentId", agentID)
-	}
-	if probe {
-		// Validate provisioning without claiming the WireGuard slot (status --check).
-		q.Set("probe", "1")
-	}
-	url := strings.TrimSuffix(apiURL, "/") + "/api/internal/agent/vpn-config"
-	if len(q) > 0 {
-		url += "?" + q.Encode()
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", &FetchError{ErrUpstream, err.Error()}
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "application/json")
-
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", &FetchError{ErrUpstream, err.Error()}
-	}
-	defer resp.Body.Close()
-
-	var body fetchResponse
-	_ = json.NewDecoder(resp.Body).Decode(&body)
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		if body.Content == "" {
-			return "", &FetchError{ErrUpstream, "empty config"}
-		}
-		return body.Content, nil
-	case http.StatusServiceUnavailable:
-		return "", &FetchError{ErrDisabled, "VPN disabled server-side"}
-	case http.StatusForbidden:
-		return "", &FetchError{ErrNotProvisioned, "no active VPN for this account"}
-	case http.StatusConflict:
-		return "", &FetchError{ErrSlotOnDevice, "VPN slot is active on one of your devices"}
-	default:
-		msg := body.Error
-		if msg == "" {
-			msg = "unexpected status " + strconv.Itoa(resp.StatusCode)
-		}
-		return "", &FetchError{ErrUpstream, msg}
-	}
-}
 
 // tunnelInner is the live userspace WireGuard device + its gVisor netstack. It is
 // held behind an atomic pointer on Tunnel so Reconnect can hot-swap a fresh device
