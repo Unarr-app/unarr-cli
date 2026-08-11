@@ -99,11 +99,15 @@ func vpnEndpoint(t *vpn.Tunnel) string {
 	return t.Endpoint
 }
 
-// apiURLOrDefault is the API base the managed-VPN fetch targets. It mirrors the
-// config default (unarr.app) rather than hardcoding a TorrentClaw host: the
-// three VPN call sites used to fall back to torrentclaw.com while
-// config.Default() returns unarr.app, so an agent with an empty api_url talked
-// to a DIFFERENT deployment for VPN than for everything else.
+// apiURLOrDefault is the API base to talk to. Belt-and-braces: config.Load now
+// normalizes an empty api_url to config.DefaultAPIURL, so this only fires for a
+// Config built by hand (tests, or a caller that skipped Load).
+//
+// It exists at all because the three VPN/agent call sites used to hardcode a
+// fallback of "https://torrentclaw.com" while config.Default() returns
+// "https://unarr.app" — two different deployments, each with its own env, so the
+// VPN fetch could land somewhere the rest of the agent never talks to. Whatever
+// the default is, it must be decided in ONE place.
 func apiURLOrDefault(cfg config.Config) string {
 	if cfg.Auth.APIURL != "" {
 		return cfg.Auth.APIURL

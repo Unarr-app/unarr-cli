@@ -722,7 +722,12 @@ func Load(path string) (Config, error) {
 // install work out of the box for streaming without forcing every user to
 // edit the TOML, while still letting power users disable features.
 func applyDefaults(cfg *Config, meta toml.MetaData) {
-	if !meta.IsDefined("auth", "api_url") {
+	// `IsDefined` only covers a MISSING key, so an explicit `api_url = ""` used to
+	// survive as an empty base URL — every request then went to a path with no
+	// host. Treat empty as unset too, so the default is guaranteed after Load and
+	// no call site has to carry its own fallback (three of them used to, and they
+	// fell back to a DIFFERENT host than this default).
+	if !meta.IsDefined("auth", "api_url") || strings.TrimSpace(cfg.Auth.APIURL) == "" {
 		cfg.Auth.APIURL = DefaultAPIURL
 	}
 	if !meta.IsDefined("auth", "mirrors") {
