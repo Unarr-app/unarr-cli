@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.2] - 2026-08-11
+
+
+### CI/CD
+
+- let CI be dispatched, because a missed push cannot be replayed
+- run the architectural gate, which CI never did
+
+### Documentation
+
+- **logs**: say that log_max_size_mb bounds nothing under systemd
+
+### Fixed
+
+- **arch**: run the gate once per GOOS, so platform code stops slipping through
+- **config**: treat an explicit empty api_url as unset
+- **desktop**: stop crash reports describing an agent that is not the one that died
+- **doctor**: keep the closing tip inside 60 columns
+- **logs**: keep every log line ASCII, and guard the rule mechanically
+- **upgrade**: install the binary atomically, so nothing ever execs a prefix
+- **vpn**: say WHICH server disabled the VPN, and stop blaming the account
+
+### Other
+
+- untrack docs/ — notas internas fuera de un repo publico
 ## [1.10.1] - 2026-08-06
 
 
@@ -25,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **postprocess**: key archive volumes by set identity, not just base name
 - **postprocess**: stop archiveStem from eating a segment of the release name
 - **postprocess**: delete only the volumes we unpacked, never the user's files
+
+### Other
+
+- **release**: 1.10.1
 ## [1.10.0] - 2026-08-06
 
 
@@ -1504,6 +1533,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.10.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.8.2...v1.9.0
