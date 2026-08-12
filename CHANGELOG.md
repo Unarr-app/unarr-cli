@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.3] - 2026-08-12
+
+
+### CI/CD
+
+- refuse to publish a release whose CI is not green
+
+### Fixed
+
+- **torrent**: make the busy-port walk work on Windows, and stop leaking the DB on failure
+- **upgrade**: wait out a Windows holder instead of failing the install
 ## [1.10.2] - 2026-08-11
 
 
@@ -29,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- **release**: 1.10.2
 - untrack docs/ — notas internas fuera de un repo publico
 ## [1.10.1] - 2026-08-06
 
@@ -1533,6 +1545,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.10.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.2...v1.10.3
 [1.10.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.9.0...v1.10.0
