@@ -18,30 +18,17 @@ import (
 // still writing, which is the only interesting moment.
 const (
 	concurrentWriters = 8
-	// The volume has to exceed what the ring can hold by a wide margin, or the
-	// ceiling assertion is vacuous. At the previous 2000 records per writer
-	// (~3.9 MiB) it was: a GitHub runner ended the storm with 15996 of 16000
-	// records STILL IN THE RING at 4,094,976 bytes — the whole run had fitted in
-	// three slots, so nothing was ever evicted and a rotator that had stopped
-	// rotating would have measured the same thing. It failed the 3,145,984-byte
-	// ceiling not because the ring was unbounded but because each slot carries
-	// the copy-window overshoot below. At ~11.7 MiB most of the run MUST be
-	// dropped, which is the property this test exists to observe.
+	// ~11.7 MiB through a 1 MiB budget, which is several rotations deep.
 	recordsPerWriter = 6000
-	// keep is deliberately small so the ceiling actually bites: the assertion
-	// worth making under load is that the ring stops growing, not that every
-	// record is archived.
+	// keep is deliberately small so rotation bites early: the assertion worth
+	// making under load is that the ring stops growing, not that every record is
+	// archived.
 	concurrentKeep = 2
-	// copyOvershoot is the headroom one slot gets above log_max_size_mb.
-	// RotateNow triggers at 1 MiB but snapshots the live file and truncates
-	// AFTERWARDS, so a slot holds everything that arrived up to the end of the
-	// copy, not up to the trigger. With eight goroutines appending into page
-	// cache the measured slot was ~1.3 MiB on a GitHub runner. The allowance is
-	// 1 MiB — roughly three times the measured overshoot, because the number is
-	// a function of the runner's write-to-copy throughput ratio and nothing here
-	// bounds it — and it stays honest: a ring that never evicted would hold
-	// ~11.7 MiB, still four times over the resulting ceiling.
-	copyOvershoot = mib
+	// growthFactor is how much MORE goes through the same ring in the second
+	// round. Four times the volume in total is what makes the comparison below
+	// decisive: a ring that stopped rotating ends four times bigger, one that
+	// works ends where it already was.
+	growthFactor = 3
 	// sweepInterval stands in for logging.DefaultSweepInterval, compressed so
 	// the rotator turns many times inside a test that runs for a fraction of a
 	// second.
@@ -57,13 +44,27 @@ const (
 //
 // What is asserted is what copy-truncate actually promises: the ring stays
 // bounded, retention is respected, the holder never gets stranded on a dead
-// inode, and no record is duplicated or shredded mid-file. Bounded is asserted
-// twice, in bytes and in records: the ring must stay under its ceiling AND must
-// have thrown records away, since a ring big enough to hold the whole run says
-// nothing about a rotator that quit. Records lost in the window between the
-// snapshot and the truncate are the documented cost of copytruncate, so they are
-// reported rather than failed on — and once eviction is in play they cannot be
-// told apart from records that simply aged out.
+// inode, and no record is duplicated or shredded mid-file. Records lost in the
+// window between the snapshot and the truncate are the documented cost of
+// copytruncate, so they are reported rather than failed on — and once eviction
+// is in play they cannot be told apart from records that simply aged out.
+//
+// BOUNDED IS MEASURED, NOT ASSUMED. The obvious version of this assertion — a
+// byte ceiling of (keep+1) x log_max_size_mb, plus an allowance — cannot be
+// calibrated, and three CI runs proved it by disagreeing three times: the slot a
+// 1 MiB budget actually produces measured 1.15 MiB here, 1.3 MiB on one runner
+// and 2.53 MiB on another. RotateNow triggers at 1 MiB but truncates only after
+// copying, so a slot holds everything that arrived up to the END of the copy,
+// and how much that is depends entirely on how fast the machine writes compared
+// to how fast it copies. Any constant is one slower runner away from a false
+// red, and a constant generous enough to be safe is above the volume written,
+// which makes it vacuous.
+//
+// So the ring is weighed twice instead, either side of putting FOUR TIMES the
+// volume through it. A ring that rotates lands where it already was; one that
+// stopped lands four times higher. Nothing in that comparison is a constant, and
+// it is the actual claim — that the ring stops growing — rather than a proxy for
+// it. The record count backs it up: some of what was written must be gone.
 //
 // Run with -race: the writers share the descriptor with the rotator.
 func TestConcurrentWritesSurviveRotation(t *testing.T) {
@@ -75,6 +76,54 @@ func TestConcurrentWritesSurviveRotation(t *testing.T) {
 	}
 	f := openDaemonLog(t, opts)
 
+	// Round one, then the same ring again with growthFactor times the volume.
+	// Each round quiesces the sweeper before the ring is weighed: measuring it
+	// mid-rotation would read a slot that is halfway through being copied.
+	firstRound := concurrentWriters * recordsPerWriter
+	storm(t, f, opts, 0, recordsPerWriter)
+	afterOne := ringBytes(s.logPath(), opts.MaxFiles)
+	t.Logf("after %d records the ring is %d bytes:\n%s",
+		firstRound, afterOne, ringListing(s.logPath(), opts.MaxFiles))
+
+	storm(t, f, opts, firstRound, growthFactor*recordsPerWriter)
+	afterFour := ringBytes(s.logPath(), opts.MaxFiles)
+	written := firstRound * (1 + growthFactor)
+	t.Logf("after %d records the ring is %d bytes:\n%s",
+		written, afterFour, ringListing(s.logPath(), opts.MaxFiles))
+
+	// The rotation storm has to have actually happened, or the rest proves
+	// nothing about rotating under concurrent writers.
+	if _, err := os.Stat(logging.RotatedPath(s.logPath(), 1)); err != nil {
+		t.Fatalf("no rotation happened during the run: %v", err)
+	}
+	if _, err := os.Stat(logging.RotatedPath(s.logPath(), concurrentKeep+1)); !os.IsNotExist(err) {
+		t.Errorf("unarr.log.%d exists with log_max_files = %d (stat err: %v)",
+			concurrentKeep+1, concurrentKeep, err)
+	}
+	// Four times the input, and the ring may not have doubled. The tolerance is
+	// deliberately loose because the two rounds can settle on slots of slightly
+	// different sizes; what it has to separate is 1x from 4x, and 2x sits
+	// squarely between them.
+	if afterFour > 2*afterOne {
+		t.Errorf("ring went %d -> %d bytes when the input went %d -> %d records: "+
+			"it is growing with what is written, not holding at %d slots",
+			afterOne, afterFour, firstRound, written, concurrentKeep+1)
+	}
+
+	assertRingIsIntactUnderLoad(t, s.logPath(), opts.MaxFiles, written)
+	// The descriptor every goroutine shared must still reach the live file.
+	assertHolderStillReachesTheLiveFile(t, f, s.logPath(), written)
+}
+
+// storm runs one round: concurrentWriters goroutines appending perWriter records
+// each through the shared descriptor, with the rotator sweeping underneath, and
+// returns once the writers are done AND the sweeper has been stopped — so the
+// caller can weigh the ring without racing a copy in progress.
+//
+// base offsets the sequence numbers so a second round cannot reuse the first
+// round's, which is what makes "this record appears twice" mean something.
+func storm(t *testing.T, f *os.File, opts logging.Options, base, perWriter int) {
+	t.Helper()
 	stop := sweepInBackground(t, opts)
 	var wg sync.WaitGroup
 	errs := make(chan error, concurrentWriters)
@@ -82,10 +131,10 @@ func TestConcurrentWritesSurviveRotation(t *testing.T) {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			for i := 0; i < recordsPerWriter; i++ {
+			for i := 0; i < perWriter; i++ {
 				// Globally unique sequence, so a lost or duplicated record is
 				// identifiable rather than merely a count mismatch.
-				if _, werr := f.Write([]byte(seedLine(g*recordsPerWriter + i))); werr != nil {
+				if _, werr := f.Write([]byte(seedLine(base + g*perWriter + i))); werr != nil {
 					errs <- werr
 					return
 				}
@@ -97,28 +146,7 @@ func TestConcurrentWritesSurviveRotation(t *testing.T) {
 	for werr := range errs {
 		t.Fatalf("concurrent write: %v", werr)
 	}
-	stop() // quiesce before inspecting the ring
-
-	t.Logf("ring at %s:\n%s", s.logPath(), ringListing(s.logPath(), opts.MaxFiles))
-
-	// The rotation storm has to have actually happened, or the rest proves
-	// nothing about rotating under concurrent writers.
-	if _, err := os.Stat(logging.RotatedPath(s.logPath(), 1)); err != nil {
-		t.Fatalf("no rotation happened during the run: %v", err)
-	}
-	if _, err := os.Stat(logging.RotatedPath(s.logPath(), concurrentKeep+1)); !os.IsNotExist(err) {
-		t.Errorf("unarr.log.%d exists with log_max_files = %d (stat err: %v)",
-			concurrentKeep+1, concurrentKeep, err)
-	}
-	if got, ceiling := ringBytes(s.logPath(), opts.MaxFiles), int64((concurrentKeep+1)*(mib+copyOvershoot)); got > ceiling {
-		t.Errorf("ring grew to %d bytes under load, ceiling is %d (%d slots of "+
-			"%d bytes, copy-window overshoot included)",
-			got, ceiling, concurrentKeep+1, mib+copyOvershoot)
-	}
-
-	assertRingIsIntactUnderLoad(t, s.logPath(), opts.MaxFiles)
-	// The descriptor every goroutine shared must still reach the live file.
-	assertHolderStillReachesTheLiveFile(t, f, s.logPath(), concurrentWriters*recordsPerWriter)
+	stop() // quiesce before the caller inspects the ring
 }
 
 // sweepInBackground drives logging.RotateNow on a ticker for the duration of
@@ -153,7 +181,7 @@ func sweepInBackground(t *testing.T, opts logging.Options) func() {
 // copy reads forward and appends land past the read offset — so a torn line is
 // tolerated as the LAST line of a rotated slot and nowhere else. A tear in the
 // middle would mean interleaved writes are being shredded, which is a real bug.
-func assertRingIsIntactUnderLoad(t *testing.T, path string, keep int) {
+func assertRingIsIntactUnderLoad(t *testing.T, path string, keep, written int) {
 	t.Helper()
 	seen := make(map[int]bool)
 	torn := 0
@@ -178,7 +206,6 @@ func assertRingIsIntactUnderLoad(t *testing.T, path string, keep int) {
 			seen[n] = true
 		}
 	}
-	const written = concurrentWriters * recordsPerWriter
 	if len(seen) == 0 {
 		t.Fatal("ring is empty after the run")
 	}
