@@ -18,6 +18,12 @@ on:
   # hand afterwards: `gh workflow run ci.yml --ref main` (dispatch takes a branch
   # or tag, never a bare SHA — tag the commit first if it is not a branch head).
   workflow_dispatch:
+  # release.yml calls this before it publishes anything, so a red job stops the
+  # release instead of being noticed afterwards. Calling it beats reading the
+  # status of the run that the same push started: that run may not exist yet,
+  # may still be going, or — measured on 2026-08-06 — may never have been
+  # created at all, and "no run" must not read as "nothing failed".
+  workflow_call:
 
 permissions:
   contents: read

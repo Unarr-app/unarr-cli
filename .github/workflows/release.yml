@@ -29,9 +29,47 @@ permissions:
   actions: write # dispatch desktop.yml so the tray binaries attach to the release
 
 jobs:
+  # NOTHING here publishes until the full CI matrix is green on the very commit
+  # being released. This is a `uses:` and not a status-API lookup on purpose: the
+  # CI run started by the same push may not exist yet when the tag arrives, may
+  # still be running, or may never have been created (three pushes to main on
+  # 2026-08-06 produced no CI run at all), and "no run found" must never be read
+  # as "nothing failed". Calling the workflow means the answer always exists.
+  #
+  # It costs a second full matrix per release, ~6 minutes, which is the price of
+  # the guarantee. v1.10.1 shipped without a single test having run on it, and
+  # v1.10.2's own release commit was red on Windows while the assets uploaded.
+  #
+  # A reusable workflow always runs against the CALLER's ref, so this tests the
+  # tag on a tag push. The workflow_dispatch path is the exception and the
+  # goreleaser job refuses it below unless the two agree.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   goreleaser:
+    needs: ci
     runs-on: ubuntu-latest
     steps:
+      # The gate above ran against github.ref. When a re-release is dispatched
+      # with an `tag` input, goreleaser checks out THAT tag instead — so unless
+      # they are the same commit, what was tested is not what would ship. There
+      # is no way to point a reusable workflow at another ref, so this refuses
+      # rather than publishing something untested. Dispatch on the tag itself
+      # (`gh workflow run release.yml --ref v1.2.3`) and the two agree.
+      - name: The released ref must be the ref CI just tested
+        if: github.event.inputs.tag != ''
+        env:
+          WANT: ${{ github.event.inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          want_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${WANT}" --jq .sha)
+          if [ "$want_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::CI ran on ${GITHUB_SHA} (${GITHUB_REF}) but the release" \
+                 "would ship ${WANT} = ${want_sha}. Re-run with --ref ${WANT}."
+            exit 1
+          fi
+          echo "tag ${WANT} is ${want_sha}, the commit CI tested."
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history for the changelog
