@@ -253,12 +253,43 @@ func installBinary(src, dst string) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("chmod staged binary: %w", err)
 	}
-	if err := os.Rename(tmp, dst); err != nil {
+	if err := renameWithRetry(tmp, dst); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("install binary: %w", err)
 	}
 
 	return nil
+}
+
+// renameRetryWindow is how long renameWithRetry keeps trying. Two seconds is
+// sized against the holders it waits out — an on-access antivirus scan of a
+// freshly written file, a thumbnailer, one poll of the tray — none of which
+// hold on for anything like that long. Failing after it is the honest outcome:
+// something is keeping the binary open for real, and the caller still has the
+// old one parked aside to roll back to.
+const renameRetryWindow = 2 * time.Second
+
+// renameRetryStep is the pause between attempts. Short enough that the common
+// case (one holder, gone in microseconds) costs one sleep.
+const renameRetryStep = 10 * time.Millisecond
+
+// renameWithRetry is os.Rename plus a bounded wait for the Windows case where
+// another process momentarily holds the destination. See isTransientRenameBlock
+// for what that looks like and why it is not an error worth surfacing on the
+// first attempt; on every other platform this is exactly os.Rename, because
+// POSIX rename(2) cannot fail that way.
+//
+// The error returned is the LAST one, so a genuine permission problem still
+// reports itself as a permission problem rather than as a timeout.
+func renameWithRetry(src, dst string) error {
+	deadline := time.Now().Add(renameRetryWindow)
+	for {
+		err := os.Rename(src, dst)
+		if err == nil || !isTransientRenameBlock(err) || !time.Now().Before(deadline) {
+			return err
+		}
+		time.Sleep(renameRetryStep)
+	}
 }
 
 // smokeTest runs the new binary with "version" and checks the output contains the expected version.

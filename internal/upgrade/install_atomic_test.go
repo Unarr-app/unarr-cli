@@ -25,7 +25,33 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
+
+// TestRenameWithRetryDoesNotWaitOutAFailureItCannotFix is the counterfactual to
+// the retry: a rename that fails for a reason no amount of waiting changes must
+// come back immediately, with its own error. Without this, "retry on Windows"
+// could quietly become "every broken install takes two seconds to report", and
+// the message would still be right, so nothing would look wrong.
+func TestRenameWithRetryDoesNotWaitOutAFailureItCannotFix(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "not-there")
+
+	start := time.Now()
+	err := renameWithRetry(missing, filepath.Join(dir, "dst"))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("renaming a source that does not exist succeeded")
+	}
+	if !os.IsNotExist(err.(*os.LinkError).Err) {
+		t.Errorf("err = %v, want the underlying not-exist error preserved", err)
+	}
+	if elapsed >= renameRetryWindow {
+		t.Errorf("took %v — the retry window (%v) was spent on an error that cannot clear",
+			elapsed, renameRetryWindow)
+	}
+}
 
 // TestInstallBinaryNeverLeavesAPartialImage watches the destination while
 // installBinary runs and fails if it is ever observed shorter than the source.
