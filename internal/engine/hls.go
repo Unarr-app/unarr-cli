@@ -295,9 +295,17 @@ type HLSSession struct {
 	// started" and "produced by our ffmpeg", which readyMax alone cannot
 	// express: pollSegments would otherwise read the dead run's files as
 	// progress by the live encoder and never fill the gap after them.
-	inheritedMax  int
-	restartCount  int // bounded auto-restart counter (resets on Close)
-	lastRestartAt time.Time
+	inheritedMax int
+	// lowestEncodedIdx is the lowest segment index any ffmpeg of this session
+	// has been aimed at — a low-water mark, not the live writer position.
+	// ffmpegSegStart moves forward on every seek-restart and so cannot answer
+	// "was everything below this produced by us?": a viewer who scrubs ahead
+	// would make the session look like it started mid-file, and one who scrubs
+	// back to 0 would erase the evidence entirely. Sealing decisions read this
+	// instead. Only ever decreases.
+	lowestEncodedIdx int
+	restartCount     int // bounded auto-restart counter (resets on Close)
+	lastRestartAt    time.Time
 	// copyFellBack latches once a VideoCopy session has fallen back to transcode
 	// (copy → transcode AUTO-FALLBACK): a -c:v copy run that exits non-zero, or
 	// hangs producing 0 kB (the fMP4 muxer rejects damaged/non-monotonic DTS),
@@ -898,6 +906,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		s.inheritedMax = inherited
 	}
 	s.ffmpegSegStart = startIdx
+	s.lowestEncodedIdx = startIdx
 	// readyMax starts at the encoder's first index. When segments were
 	// inherited those two coincide, which is what lets handlers serve the
 	// adopted block immediately while pollSegments still measures only this
@@ -1284,10 +1293,10 @@ func (s *HLSSession) allSegmentsPresent() bool {
 	// it, so the directory is a single unbroken timeline even though two runs
 	// wrote it.
 	s.mu.Lock()
-	segStart := s.ffmpegSegStart
+	lowest := s.lowestEncodedIdx
 	inherited := s.inheritedMax
 	s.mu.Unlock()
-	if segStart > inherited {
+	if lowest > inherited {
 		return false
 	}
 	s.readyMu.Lock()
@@ -1978,6 +1987,12 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 	s.cmd = cmd
 	s.cancel = cancel
 	s.ffmpegSegStart = targetIdx
+	// Track the earliest point any of our encoders has covered. Restarting
+	// further back widens what this session produced; restarting ahead does
+	// not shrink it — those earlier segments are still ours.
+	if targetIdx < s.lowestEncodedIdx {
+		s.lowestEncodedIdx = targetIdx
+	}
 	// A new ffmpeg is running, so the session is no longer permanently dead.
 	// Every relaunch funnels through here (seek-restart AND the auto-restart
 	// supervisor), which makes this the one place that must clear the latch —

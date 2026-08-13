@@ -192,6 +192,105 @@ func TestServeSegmentContinuesPastStaleBlock(t *testing.T) {
 	}
 }
 
+// TestSealSurvivesSeekAfterPartialReuse guards a regression the sealing guard
+// introduced: keyed on the live writer index, a viewer scrubbing forward made
+// a reused session look like it had started mid-file, so a clean full encode
+// was thrown away and the next play re-encoded from scratch. Sealing reads the
+// low-water mark of everything this session encoded, which a forward seek does
+// not move.
+func TestSealSurvivesSeekAfterPartialReuse(t *testing.T) {
+	c := newTestCache(t, 1)
+	const staleCount = 600
+	const segmentCount = 900
+	key := "sealafterseek"
+	videoDir := seedPartialCacheDir(t, c, key, staleCount)
+
+	startIdx, inherited, err := planPartialReuse(videoDir, segmentCount, 0)
+	if err != nil {
+		t.Fatalf("planPartialReuse: %v", err)
+	}
+
+	s := newPartialReuseSession(t, c, key, segmentCount)
+	s.ffmpegSegStart = startIdx
+	s.lowestEncodedIdx = startIdx
+	s.inheritedMax = inherited
+
+	// The encoder fills the gap, then the viewer scrubs ahead and a
+	// seek-restart re-aims ffmpeg — as restartFromSegment does.
+	for i := startIdx; i < segmentCount; i++ {
+		p := filepath.Join(videoDir, fmt.Sprintf("seg-%d.m4s", i))
+		if err := os.WriteFile(p, []byte(fmt.Sprintf("fresh-seg-%d", i)), 0o644); err != nil {
+			t.Fatalf("write seg-%d: %v", i, err)
+		}
+	}
+	const seekTarget = 800
+	s.ffmpegSegStart = seekTarget
+	if seekTarget < s.lowestEncodedIdx {
+		s.lowestEncodedIdx = seekTarget
+	}
+	s.readyMax = segmentCount
+
+	if !s.allSegmentsPresent() {
+		t.Fatal("a complete encode was refused for sealing because the viewer " +
+			"seeked: every later play would re-encode from scratch")
+	}
+}
+
+// TestPartialReuseDropsSegmentsAboveSegmentCount covers leftovers that a
+// bounded 0..segmentCount sweep cannot see. A previous run of a longer source
+// (or one cut at a different segment duration) leaves high-index files behind;
+// VerifyComplete stats the last expected segment, so a stray one is exactly
+// the evidence that later validates a directory holding two encodes.
+func TestPartialReuseDropsSegmentsAboveSegmentCount(t *testing.T) {
+	c := newTestCache(t, 1)
+	const segmentCount = 100
+	key := "abovecount"
+	videoDir := seedPartialCacheDir(t, c, key, 10)
+
+	// Leftovers from a run whose source was far longer.
+	for _, i := range []int{150, 400} {
+		p := filepath.Join(videoDir, fmt.Sprintf("seg-%d.m4s", i))
+		if err := os.WriteFile(p, []byte("from-a-longer-source"), 0o644); err != nil {
+			t.Fatalf("write seg-%d: %v", i, err)
+		}
+	}
+
+	if _, _, err := planPartialReuse(videoDir, segmentCount, 0); err != nil {
+		t.Fatalf("planPartialReuse: %v", err)
+	}
+
+	for _, i := range []int{150, 400} {
+		if _, err := os.Stat(filepath.Join(videoDir, fmt.Sprintf("seg-%d.m4s", i))); !os.IsNotExist(err) {
+			t.Fatalf("seg-%d survived: it sits above this source's segment count "+
+				"and can later satisfy VerifyComplete's last-segment check", i)
+		}
+	}
+}
+
+// TestPartialReuseSingleSegmentSource covers the degenerate short source. The
+// truncation rule would reduce a one-segment block to nothing; re-encoding one
+// segment is cheap, so the dir is simply cleared and rebuilt rather than
+// reasoning about whether that lone segment was complete.
+func TestPartialReuseSingleSegmentSource(t *testing.T) {
+	c := newTestCache(t, 1)
+	key := "oneseg"
+	videoDir := seedPartialCacheDir(t, c, key, 1)
+
+	startIdx, inherited, err := planPartialReuse(videoDir, 1, 0)
+	if err != nil {
+		t.Fatalf("planPartialReuse: %v", err)
+	}
+	if startIdx != 0 || inherited != 0 {
+		t.Fatalf("startIdx=%d inherited=%d, want 0/0", startIdx, inherited)
+	}
+	// ffmpeg re-encodes from 0 and rewrites both, so clearing them loses
+	// nothing — but leaving a stale seg-0 behind would let the fast path serve
+	// it instead of the new encode.
+	if _, err := os.Stat(filepath.Join(videoDir, "seg-0.m4s")); !os.IsNotExist(err) {
+		t.Fatal("stale seg-0 survived on a single-segment source")
+	}
+}
+
 // TestPartialReuseDropsBlockBehindResume covers the case where reuse is not
 // possible: the viewer resumes past the leftovers. ffmpeg writes forward, so
 // honouring the resume would leave an unfillable hole between the block and the
@@ -271,6 +370,7 @@ func TestAllSegmentsPresentRejectsMixedProfileDir(t *testing.T) {
 	// inheritedMax stays 0: nothing reconciled this dir, so the prefix was
 	// never vetted as spliceable.
 	s.ffmpegSegStart = staleCount
+	s.lowestEncodedIdx = staleCount
 	s.inheritedMax = 0
 	for i := staleCount; i < segmentCount; i++ {
 		p := filepath.Join(videoDir, fmt.Sprintf("seg-%d.m4s", i))

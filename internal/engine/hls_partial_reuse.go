@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // Partial cache reuse.
@@ -60,6 +62,15 @@ func scanInheritedSegments(videoDir string, segmentCount int) (count int, hasIni
 	// ffmpeg that ran to the end — but such a dir would carry .complete and be
 	// served as a HIT long before reaching this path, so treating it the same
 	// way costs nothing and keeps the rule single-branched.
+	//
+	// The exception is a source short enough to be one segment: there the
+	// dropped tail IS the whole block, and returning 0 would have the caller
+	// wipe a dir that may hold a perfectly good encode. Re-encoding a single
+	// segment is cheap, so hand it back to ffmpeg rather than reason about
+	// whether it was truncated.
+	if present == 1 {
+		return 0, true
+	}
 	return present - 1, true
 }
 
@@ -71,19 +82,68 @@ func scanInheritedSegments(videoDir string, segmentCount int) (count int, hasIni
 // ServeSegment's on-disk fast path and allSegmentsPresent read the directory
 // directly, so a stale file left in place would still be served to a viewer
 // and still count toward sealing the entry.
-func dropInheritedSegments(videoDir string, from int, segmentCount int) error {
+//
+// The directory is enumerated rather than walked over 0..segmentCount, because
+// leftovers are not bounded by the CURRENT probe's segment count. A previous
+// run of a longer source — or one that used a different segment duration —
+// leaves indices above it, and those survive a bounded loop. VerifyComplete
+// stats the last expected segment, so a stray high-index file is exactly the
+// kind of evidence that later validates a directory it should have condemned.
+func dropInheritedSegments(videoDir string, from int) error {
 	if from <= 0 {
 		if err := os.Remove(filepath.Join(videoDir, "init.mp4")); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("hls: drop init.mp4: %w", err)
 		}
 	}
-	for i := from; i < segmentCount; i++ {
-		p := filepath.Join(videoDir, fmt.Sprintf("seg-%d.m4s", i))
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("hls: drop seg-%d: %w", i, err)
+	names, err := segmentNamesFrom(videoDir, from)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := os.Remove(filepath.Join(videoDir, name)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("hls: drop %s: %w", name, err)
 		}
 	}
 	return nil
+}
+
+// segmentNamesFrom lists the segment files in videoDir whose index is `from`
+// or higher. A missing directory yields nothing rather than an error — the
+// caller's intent is "leave no segment at or above this index", which an
+// absent dir already satisfies.
+func segmentNamesFrom(videoDir string, from int) ([]string, error) {
+	entries, err := os.ReadDir(videoDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("hls: read video dir: %w", err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if idx, ok := segmentIndexFromName(e.Name()); ok && idx >= from {
+			names = append(names, e.Name())
+		}
+	}
+	return names, nil
+}
+
+// segmentIndexFromName parses "seg-<n>.m4s" into n. Anything else — init.mp4,
+// a copy-mode .ts segment, a temp file ffmpeg has not renamed yet — reports
+// false and is left alone.
+func segmentIndexFromName(name string) (int, bool) {
+	const prefix, suffix = "seg-", ".m4s"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(name[len(prefix) : len(name)-len(suffix)])
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // planPartialReuse decides where ffmpeg should start in a cache dir that may
@@ -104,7 +164,7 @@ func planPartialReuse(videoDir string, segmentCount, wantStart int) (startIdx, i
 	if !hasInit || inherited <= 0 {
 		// Nothing usable. Clear whatever is there so no orphan file can be
 		// served later, and encode from wantStart as if the dir were new.
-		if err := dropInheritedSegments(videoDir, 0, segmentCount); err != nil {
+		if err := dropInheritedSegments(videoDir, 0); err != nil {
 			return 0, 0, err
 		}
 		return wantStart, 0, nil
@@ -113,7 +173,7 @@ func planPartialReuse(videoDir string, segmentCount, wantStart int) (startIdx, i
 		// The viewer resumes past the inherited block. Keeping it would leave
 		// a permanent gap; the resume position is what the viewer asked for,
 		// so the block loses.
-		if err := dropInheritedSegments(videoDir, 0, segmentCount); err != nil {
+		if err := dropInheritedSegments(videoDir, 0); err != nil {
 			return 0, 0, err
 		}
 		return wantStart, 0, nil
@@ -122,7 +182,7 @@ func planPartialReuse(videoDir string, segmentCount, wantStart int) (startIdx, i
 	// at or above the start index is discarded — it may come from a different
 	// encoder configuration, and ffmpeg is about to overwrite those indices
 	// anyway.
-	if err := dropInheritedSegments(videoDir, inherited, segmentCount); err != nil {
+	if err := dropInheritedSegments(videoDir, inherited); err != nil {
 		return 0, 0, err
 	}
 	return inherited, inherited, nil
