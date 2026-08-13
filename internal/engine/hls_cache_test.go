@@ -21,22 +21,101 @@ func newTestCache(t *testing.T, sizeGB int) *HLSCache {
 
 func TestKeyForStable(t *testing.T) {
 	c := newTestCache(t, 1)
-	k1 := c.KeyFor("/a/b/movie.mkv", "1080p", 0, -1)
-	k2 := c.KeyFor("/a/b/movie.mkv", "1080p", 0, -1)
-	if k1 != k2 {
+	base := HLSCacheKeyOpts{
+		Source: "/a/b/movie.mkv", Quality: "1080p", AudioIndex: 0, BurnSubtitleIndex: -1,
+	}
+	withOpt := func(mut func(*HLSCacheKeyOpts)) string {
+		o := base
+		mut(&o)
+		return c.Key(o)
+	}
+
+	k1 := c.Key(base)
+	if k2 := c.Key(base); k1 != k2 {
 		t.Fatalf("expected stable keys, got %q vs %q", k1, k2)
 	}
-	if c.KeyFor("/a/b/movie.mkv", "720p", 0, -1) == k1 {
+	if withOpt(func(o *HLSCacheKeyOpts) { o.Quality = "720p" }) == k1 {
 		t.Fatal("quality should change key")
 	}
-	if c.KeyFor("/a/b/movie.mkv", "1080p", 1, -1) == k1 {
+	if withOpt(func(o *HLSCacheKeyOpts) { o.AudioIndex = 1 }) == k1 {
 		t.Fatal("audio index should change key")
 	}
-	if c.KeyFor("/a/b/movie.mkv", "1080p", 0, 2) == k1 {
+	if withOpt(func(o *HLSCacheKeyOpts) { o.BurnSubtitleIndex = 2 }) == k1 {
 		t.Fatal("burn subtitle index should change key")
 	}
-	if c.KeyFor("/x/y/other.mkv", "1080p", 0, -1) == k1 {
+	if withOpt(func(o *HLSCacheKeyOpts) { o.Source = "/x/y/other.mkv" }) == k1 {
 		t.Fatal("path should change key")
+	}
+	// Encoder settings change the bytes of a segment, so they must land on a
+	// different directory: reusing the key is what made editing transcode
+	// config appear to do nothing while old segments kept being served.
+	if withOpt(func(o *HLSCacheKeyOpts) { o.EncodeFingerprint = "videotoolbox|medium|10M||0|false" }) == k1 {
+		t.Fatal("encode fingerprint should change key")
+	}
+	// A path is normalised against the working dir, an ID is taken verbatim.
+	// For an already-absolute path the two agree, which is fine — the point is
+	// that a relative path resolves to its absolute form while an identically
+	// spelled ID does not.
+	relPath := withOpt(func(o *HLSCacheKeyOpts) { o.Source = "movie.mkv" })
+	relID := withOpt(func(o *HLSCacheKeyOpts) { o.Source = "movie.mkv"; o.IsID = true })
+	if relPath == relID {
+		t.Fatal("a relative path must normalise to its absolute form; an ID must not")
+	}
+	// An info_hash keeps one identity no matter where the daemon runs from —
+	// that is what lets a debrid re-play hit the cache despite a fresh URL.
+	if relID != withOpt(func(o *HLSCacheKeyOpts) { o.Source = "movie.mkv"; o.IsID = true }) {
+		t.Fatal("ID keys must be stable")
+	}
+}
+
+// TestEncodeFingerprintTracksBytesAffectingSettings pins which TranscodeRuntime
+// fields participate in cache identity. Adding a bytes-affecting field without
+// adding it here silently resurrects the "reconfiguring does nothing" bug.
+func TestEncodeFingerprintTracksBytesAffectingSettings(t *testing.T) {
+	base := TranscodeRuntime{
+		HWAccel: HWAccelNone, Preset: "veryfast", VideoBitrate: "6000k",
+		AudioBitrate: "128k", MaxHeight: 1080,
+	}
+	fp := base.EncodeFingerprint()
+
+	for _, tc := range []struct {
+		name string
+		mut  func(*TranscodeRuntime)
+	}{
+		{"hwaccel", func(r *TranscodeRuntime) { r.HWAccel = HWAccelVideoToolbox }},
+		{"preset", func(r *TranscodeRuntime) { r.Preset = "medium" }},
+		{"video bitrate", func(r *TranscodeRuntime) { r.VideoBitrate = "10M" }},
+		{"audio bitrate", func(r *TranscodeRuntime) { r.AudioBitrate = "256k" }},
+		{"max height", func(r *TranscodeRuntime) { r.MaxHeight = 720 }},
+		{"tonemap", func(r *TranscodeRuntime) { r.TonemapHDR = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := base
+			tc.mut(&r)
+			if r.EncodeFingerprint() == fp {
+				t.Fatalf("%s changes encoded output but not the fingerprint", tc.name)
+			}
+		})
+	}
+
+	// Host capability probes describe what the machine can do, not what was
+	// requested. Including them would throw away a good cache after an
+	// unrelated ffmpeg upgrade.
+	for _, tc := range []struct {
+		name string
+		mut  func(*TranscodeRuntime)
+	}{
+		{"ffmpeg path", func(r *TranscodeRuntime) { r.FFmpegPath = "/opt/ffmpeg" }},
+		{"libplacebo probe", func(r *TranscodeRuntime) { r.HasLibplacebo = true }},
+		{"scale_cuda probe", func(r *TranscodeRuntime) { r.HasScaleCuda = true }},
+	} {
+		t.Run(tc.name+" ignored", func(t *testing.T) {
+			r := base
+			tc.mut(&r)
+			if r.EncodeFingerprint() != fp {
+				t.Fatalf("%s does not change encoded output; it must not invalidate the cache", tc.name)
+			}
+		})
 	}
 }
 

@@ -150,26 +150,42 @@ func (c *HLSCache) ReleaseWriter(key string) {
 	c.mu.Unlock()
 }
 
-// KeyFor derives a stable cache key for (source, quality, audioIndex). Using
-// the absolute source path means renaming a file invalidates the cache, which
-// is correct — segment content is tied to the encoded source.
-func (c *HLSCache) KeyFor(sourcePath, quality string, audioIndex, burnSubtitleIndex int) string {
-	abs, err := filepath.Abs(sourcePath)
-	if err != nil {
-		abs = sourcePath
-	}
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%d", abs, quality, audioIndex, burnSubtitleIndex)))
-	return hex.EncodeToString(h[:8]) // 16 hex chars — collision-safe enough for per-host cache
+// HLSCacheKeyOpts identifies what a cached encode contains. Every field feeds
+// the key, so a change in any of them lands on a different directory instead
+// of mixing incompatible segments into one.
+//
+// Source identifies the input: a filesystem path for local files, or a stable
+// ID (torrent info_hash) for debrid URLs that are re-resolved per play. IsID
+// selects between them — a path is normalised with filepath.Abs, an ID is not.
+type HLSCacheKeyOpts struct {
+	Source            string
+	IsID              bool
+	Quality           string
+	AudioIndex        int
+	BurnSubtitleIndex int
+	// EncodeFingerprint distinguishes encoder settings that change the bytes
+	// of a segment without changing anything else in this struct. Two encodes
+	// of one file at one quality are only interchangeable if they were
+	// produced the same way; without this, editing transcode config (say
+	// hwaccel auto → videotoolbox) leaves every existing entry addressed by
+	// the same key, so old segments keep being served and reconfiguring
+	// appears to do nothing. See TranscodeRuntime.EncodeFingerprint.
+	EncodeFingerprint string
 }
 
-// KeyForID derives a cache key from a caller-supplied stable identity instead
-// of a filesystem path (hueco #2 / 2b). Used for debrid HLS-from-URL sessions:
-// the debrid direct URL is re-resolved per play and would never cache-hit, so
-// we key by the torrent info_hash — the same content always maps to the same
-// key across plays. NOT run through filepath.Abs (an id/URL is not a path).
-func (c *HLSCache) KeyForID(id, quality string, audioIndex, burnSubtitleIndex int) string {
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%d", id, quality, audioIndex, burnSubtitleIndex)))
-	return hex.EncodeToString(h[:8])
+// Key derives the on-disk cache key for a set of identifying options. Using
+// the absolute source path means renaming a file invalidates the cache, which
+// is correct — segment content is tied to the encoded source.
+func (c *HLSCache) Key(o HLSCacheKeyOpts) string {
+	src := o.Source
+	if !o.IsID {
+		if abs, err := filepath.Abs(src); err == nil {
+			src = abs
+		}
+	}
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%d|%s",
+		src, o.Quality, o.AudioIndex, o.BurnSubtitleIndex, o.EncodeFingerprint)))
+	return hex.EncodeToString(h[:8]) // 16 hex chars — collision-safe enough for per-host cache
 }
 
 // DirFor returns the on-disk directory for a cache key. Caller is responsible

@@ -111,13 +111,18 @@ func TestHLSSourceRefAndCacheID(t *testing.T) {
 
 	c := &HLSCache{root: "/tmp/cache"}
 	// Same CacheID + quality + audio → same key regardless of the (volatile) URL.
-	k1 := c.KeyForID("hash1", "720p", -1, -1)
-	k2 := c.KeyForID("hash1", "720p", -1, -1)
-	if k1 != k2 {
-		t.Errorf("KeyForID not stable: %q != %q", k1, k2)
+	idOpts := HLSCacheKeyOpts{
+		Source: "hash1", IsID: true, Quality: "720p", AudioIndex: -1, BurnSubtitleIndex: -1,
 	}
-	if c.KeyForID("hash2", "720p", -1, -1) == k1 {
-		t.Error("KeyForID collision across distinct ids")
+	k1 := c.Key(idOpts)
+	k2 := c.Key(idOpts)
+	if k1 != k2 {
+		t.Errorf("ID key not stable: %q != %q", k1, k2)
+	}
+	other := idOpts
+	other.Source = "hash2"
+	if c.Key(other) == k1 {
+		t.Error("ID key collision across distinct ids")
 	}
 }
 

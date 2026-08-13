@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 )
@@ -38,6 +39,21 @@ type TranscodeRuntime struct {
 	// back to a SOFTWARE decoder (QSV encode kept) when this is false. Probed
 	// functionally (FFmpegSupportsQSV10BitDecode). Only consulted on QSV hosts.
 	HasQSV10BitDecode bool
+}
+
+// EncodeFingerprint summarises the settings that determine what a transcoded
+// segment's bytes look like. It goes into the HLS cache key so that changing
+// any of them addresses a fresh directory rather than appending to segments
+// produced under the old settings.
+//
+// Only bytes-affecting settings belong here. Binary paths and the capability
+// probes (HasLibplacebo, HasScaleCuda, HasQSV10BitDecode) are excluded: they
+// describe what the host can do, not what was asked for, and including them
+// would discard a perfectly good cache after an unrelated ffmpeg upgrade.
+// Disabled is excluded too — a passthrough session never reaches the cache.
+func (t TranscodeRuntime) EncodeFingerprint() string {
+	return fmt.Sprintf("%s|%s|%s|%s|%d|%t",
+		t.HWAccel, t.Preset, t.VideoBitrate, t.AudioBitrate, t.MaxHeight, t.TonemapHDR)
 }
 
 // qualityCap maps a session's Quality label to a (MaxHeight, VideoBitrate)
