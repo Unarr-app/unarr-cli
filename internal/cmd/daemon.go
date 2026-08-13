@@ -629,17 +629,25 @@ func runDaemonStart() error {
 	if cfg.Download.HLSCache.Enabled {
 		cacheDir := cfg.Download.HLSCache.Dir
 		if cacheDir == "" {
-			if base, err := os.UserCacheDir(); err == nil {
-				cacheDir = filepath.Join(base, "unarr", "hls-cache")
-			} else {
-				cacheDir = filepath.Join(os.TempDir(), "unarr-hls-cache")
-			}
+			cacheDir = config.HLSCacheDir()
 		}
 		c, err := engine.NewHLSCache(cacheDir, cfg.Download.HLSCache.SizeGB)
 		if err != nil {
 			log.Printf("[hls_cache] init failed (%v) - falling back to per-session tmpdirs", err)
 		} else {
 			hlsCache = c
+			// Entries encoded under different settings can never be HIT again
+			// (the settings feed the cache key), so they would sit on the
+			// budget until the LRU happened to reach them. Drop them at start,
+			// while no session can be reading one.
+			// Same construction the sessions use, so the fingerprint recorded
+			// here is the one their cache keys will carry. With hwaccel=auto
+			// this probes the host, which is what should invalidate the cache
+			// if the hardware or ffmpeg build changed underneath it.
+			startupRuntime := buildTranscodeRuntime(ctx, cfg)
+			if _, rerr := hlsCache.ReconcileEncodeConfig(startupRuntime.EncodeFingerprint()); rerr != nil {
+				log.Printf("[hls_cache] encode-config reconcile: %v", rerr)
+			}
 			hlsCache.StartSweeper(ctx, time.Hour)
 			log.Printf("[hls_cache] enabled: dir=%s budget=%dGB", cacheDir, cfg.Download.HLSCache.SizeGB)
 		}

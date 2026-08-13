@@ -56,7 +56,7 @@ func TestFileSize_NonExistent(t *testing.T) {
 }
 
 func TestRunClean_DryRun(t *testing.T) {
-	err := runClean(true, false, false)
+	err := runClean(cleanOpts{dryRun: true})
 	if err != nil {
 		t.Logf("runClean dry-run returned: %v (may be expected)", err)
 	}

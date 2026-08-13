@@ -47,6 +47,24 @@ func LockPath() string {
 	return filepath.Join(Dir(), "unarr.lock")
 }
 
+// HLSCacheDir returns where the persistent HLS segment cache lives when
+// hls_cache.dir is unset:
+//   - Linux:   ~/.cache/unarr/hls-cache
+//   - macOS:   ~/Library/Caches/unarr/hls-cache
+//   - Windows: %LOCALAPPDATA%/unarr/hls-cache
+//
+// Shared by the daemon (which creates it) and `unarr clean` (which empties
+// it) so the two can never disagree about the location — users left guessing
+// at the path delete the wrong directory and conclude the cache cannot be
+// cleared.
+func HLSCacheDir() string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "unarr-hls-cache")
+	}
+	return filepath.Join(base, appName, "hls-cache")
+}
+
 // DataDir returns the data directory for logs, cache, etc.
 //   - Linux:   ~/.local/share/unarr
 //   - macOS:   ~/Library/Application Support/unarr
