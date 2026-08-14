@@ -17,9 +17,10 @@ import (
 
 func newCleanCmd() *cobra.Command {
 	var (
-		dryRun bool
-		all    bool
-		yes    bool
+		dryRun   bool
+		all      bool
+		yes      bool
+		hlsCache bool
 	)
 
 	cmd := &cobra.Command{
@@ -41,8 +42,18 @@ By default, cleans:
 Recent usenet resume files (< 7 days) are kept to preserve download
 progress for paused or interrupted downloads.
 
+With --hls-cache, also removes:
+  - The transcoded HLS segment cache (~/.cache/unarr/hls-cache/ on Linux,
+    ~/Library/Caches/unarr/hls-cache/ on macOS, %LOCALAPPDATA%\unarr\hls-cache\
+    on Windows, or hls_cache.dir when set)
+
+Clearing the HLS cache costs nothing but re-encoding time: the next play of
+each title transcodes again from the source. Use it to reclaim disk, or if a
+title stops playing partway through.
+
 With --all, also removes:
   - ALL usenet resume files (including recent ones)
+  - The HLS segment cache
   - The entire data directory (~/.local/share/unarr/ on Linux,
     ~/Library/Application Support/unarr/ on macOS, %LOCALAPPDATA%\unarr\ on Windows)
 
@@ -50,60 +61,35 @@ Never removes:
   - Configuration file (config.toml)
   - Downloaded media files
   - Partial torrent or debrid downloads (stored in your download dir)`,
-		Example: `  unarr clean            # Show files and confirm before removing
-  unarr clean --dry-run  # Show what would be removed (no prompt)
-  unarr clean --yes      # Skip confirmation
-  unarr clean --all      # Also remove the data directory`,
+		Example: `  unarr clean              # Show files and confirm before removing
+  unarr clean --dry-run    # Show what would be removed (no prompt)
+  unarr clean --yes        # Skip confirmation
+  unarr clean --hls-cache  # Also remove transcoded HLS segments
+  unarr clean --all        # Also remove the data directory`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runClean(dryRun, all, yes)
+			return runClean(cleanOpts{dryRun: dryRun, all: all, yes: yes, hlsCache: hlsCache})
 		},
 	}
 
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be removed without deleting")
 	cmd.Flags().BoolVar(&all, "all", false, "also remove the entire data directory")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip confirmation prompt")
+	cmd.Flags().BoolVar(&hlsCache, "hls-cache", false, "also remove transcoded HLS segments")
 
 	return cmd
 }
 
-type cleanTarget struct {
-	path        string
-	description string
-	isDir       bool
-	isGlob      bool
+// cleanOpts carries the command's flags. A struct rather than four positional
+// booleans, which no call site could read back correctly.
+type cleanOpts struct {
+	dryRun   bool
+	all      bool
+	yes      bool
+	hlsCache bool
 }
 
-// logCleanTargets lists every log file `clean` removes, live files and rings.
-//
-// It must cover exactly what the janitor supervises (daemonLogPaths), or a file
-// one of them knows about and the other does not is a file that survives a
-// clean and grows without a ceiling. The boot log needs its OWN entries: it is
-// not caught by the `unarr.log.*` glob, which matches unarr.log.1 but never
-// unarr.boot.log.
-//
-// The rings are globbed rather than listed from log_max_files, so a ring left
-// behind by an older/larger setting is still swept — the point of `clean` is
-// that nothing survives it.
-func logCleanTargets(dataDir string) []cleanTarget {
-	return []cleanTarget{
-		{filepath.Join(dataDir, logFileName), "daemon log", false, false},
-		{filepath.Join(dataDir, logFileName+".*"), "rotated daemon log", false, true},
-		{filepath.Join(dataDir, bootLogFileName), "daemon startup log", false, false},
-		{filepath.Join(dataDir, bootLogFileName+".*"), "rotated daemon startup log", false, true},
-		{filepath.Join(dataDir, errLogFileName), "daemon error log", false, false},
-		{filepath.Join(dataDir, errLogFileName+".*"), "rotated daemon error log", false, true},
-	}
-}
-
-// foundEntry represents a file or directory found during scanning.
-type foundEntry struct {
-	path  string
-	desc  string
-	size  int64
-	isDir bool
-}
-
-func runClean(dryRun, all, yes bool) error {
+func runClean(o cleanOpts) error {
+	dryRun, all, yes := o.dryRun, o.all, o.yes
 	bold := color.New(color.Bold)
 	green := color.New(color.FgGreen)
 	yellow := color.New(color.FgYellow)
@@ -117,97 +103,18 @@ func runClean(dryRun, all, yes bool) error {
 	}
 
 	dataDir := config.DataDir()
-	tmpDir := os.TempDir()
-
-	// With --all, remove the entire data directory (includes logs, state, resume).
-	// Without --all, target individual files + stale resume files only.
-	var targets []cleanTarget
-	if all {
-		targets = []cleanTarget{
-			{dataDir, "data directory", true, false},
-		}
-	} else {
-		targets = append(logCleanTargets(dataDir),
-			cleanTarget{filepath.Join(dataDir, "daemon.state.json"), "daemon state", false, false},
-			cleanTarget{filepath.Join(dataDir, "daemon.state.json.tmp"), "daemon state temp", false, false},
-			// Resume files handled separately below (stale only)
-		)
-	}
-
-	// Temp targets apply regardless of --all
-	targets = append(targets,
-		cleanTarget{filepath.Join(tmpDir, "unarr-stream"), "stream temp data", true, false},
-		cleanTarget{filepath.Join(tmpDir, "unarr-download-*.tmp"), "upgrade temp files", false, true},
-		cleanTarget{config.FilePath() + ".tmp", "config temp", false, false},
-	)
+	targets := cleanTargetsFor(o, dataDir)
 
 	// Phase 1: Scan and collect what exists
-	var found []foundEntry
-	var totalFiles int
-	var totalBytes int64
+	found, totalFiles, totalBytes := scanCleanTargets(targets)
 
-	for _, t := range targets {
-		if t.isGlob {
-			matches, _ := filepath.Glob(t.path)
-			for _, m := range matches {
-				size := fileSize(m)
-				totalFiles++
-				totalBytes += size
-				found = append(found, foundEntry{m, t.description, size, false})
-			}
-			continue
-		}
-
-		info, err := os.Stat(t.path)
-		if err != nil {
-			continue
-		}
-
-		if t.isDir {
-			files, bytes := dirStats(t.path)
-			if files == 0 {
-				continue
-			}
-			totalFiles += files
-			totalBytes += bytes
-			found = append(found, foundEntry{
-				path:  t.path + "/",
-				desc:  fmt.Sprintf("%s (%d files)", t.description, files),
-				size:  bytes,
-				isDir: true,
-			})
-		} else {
-			totalFiles++
-			totalBytes += info.Size()
-			found = append(found, foundEntry{t.path, t.description, info.Size(), false})
-		}
-	}
-
-	// Resume files: only scan individually when NOT --all (--all already includes them via dataDir)
-	var resumeSkipped int
-	if !all {
-		resumeDir := filepath.Join(dataDir, "resume")
-		var resumeFound []foundEntry
-		resumeFound, resumeSkipped = scanResumeFiles(resumeDir, false)
-		for _, e := range resumeFound {
-			totalFiles++
-			totalBytes += e.size
-			found = append(found, e)
-		}
-	}
-
-	// Replaced-file backups: organize's replaceFile keeps the OLD file under
-	// ~/.local/share/unarr/replaced/ on every upgrade, and nothing ever reaped them
-	// — so the dir grew without bound (RC-6). Sweep stale backups (>7 days) here,
-	// or everything with --all. Like resume, --all already covers replaced/ via the
-	// whole-dataDir target, so only scan it individually when NOT --all.
-	if !all {
-		replacedDir := filepath.Join(dataDir, "replaced")
-		for _, e := range scanReplacedFiles(replacedDir, false) {
-			totalFiles++
-			totalBytes += e.size
-			found = append(found, e)
-		}
+	// Age-filtered extras (resume + replaced backups). Skipped under --all,
+	// which already sweeps them through the whole-dataDir target.
+	aged, resumeSkipped := scanAgedExtras(dataDir, all)
+	for _, e := range aged {
+		totalFiles++
+		totalBytes += e.size
+		found = append(found, e)
 	}
 
 	// Phase 2: Show what was found
@@ -243,37 +150,64 @@ func runClean(dryRun, all, yes bool) error {
 	}
 
 	// Phase 4: Ask for confirmation (unless --yes)
-	if !yes {
-		fmt.Print("  Proceed? [y/N] ")
-		scanner := bufio.NewScanner(os.Stdin)
-		scanner.Scan()
-		answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
-		if answer != "y" && answer != "yes" {
-			fmt.Println()
-			yellow.Println("  Aborted.")
-			fmt.Println()
-			return nil
-		}
+	if !yes && !confirmClean() {
 		fmt.Println()
+		yellow.Println("  Aborted.")
+		fmt.Println()
+		return nil
 	}
 
 	// Phase 5: Delete
-	for _, e := range found {
-		if e.isDir {
-			os.RemoveAll(strings.TrimSuffix(e.path, "/"))
-		} else {
-			os.Remove(e.path)
-		}
-		display := shortenHome(e.path)
-		green.Print("  ✓ ")
-		fmt.Println(display)
-	}
+	freed, failed := deleteCleanEntries(found, green)
 
 	fmt.Println()
-	green.Printf("  ✓ Removed %d file(s), %s freed\n", totalFiles, ui.FormatBytes(totalBytes))
+	// Report the reclaimed bytes, not the surveyed total: a directory entry
+	// that failed to delete covers many files, so subtracting failures from
+	// the file count would be wrong in both directions.
+	green.Printf("  ✓ Freed %s\n", ui.FormatBytes(freed))
+	if failed > 0 {
+		yellow.Printf("  %d entr(y/ies) could not be removed — see above\n", failed)
+	}
 	fmt.Println()
 
 	return nil
+}
+
+// confirmClean prompts for the interactive y/N confirmation. Anything other
+// than an explicit yes means no — this deletes files, so a stray newline or a
+// closed stdin must not be read as consent.
+func confirmClean() bool {
+	fmt.Print("  Proceed? [y/N] ")
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+	return answer == "y" || answer == "yes"
+}
+
+// deleteCleanEntries removes each entry and prints it as it goes. Failures are
+// not fatal: one undeletable path (open handle, permissions) should not stop
+// the rest of the cleanup, and the entry is simply not ticked off.
+// Returns the bytes actually reclaimed, so the summary reports what happened
+// rather than what was planned.
+func deleteCleanEntries(found []foundEntry, green *color.Color) (freedBytes int64, failed int) {
+	for _, e := range found {
+		var err error
+		if e.isDir {
+			err = os.RemoveAll(strings.TrimSuffix(e.path, "/"))
+		} else {
+			err = os.Remove(e.path)
+		}
+		display := shortenHome(e.path)
+		if err != nil {
+			fmt.Printf("  ✗ %s (%v)\n", display, err)
+			failed++
+			continue
+		}
+		freedBytes += e.size
+		green.Print("  ✓ ")
+		fmt.Println(display)
+	}
+	return freedBytes, failed
 }
 
 // scanResumeFiles scans the resume directory for cleanable files.

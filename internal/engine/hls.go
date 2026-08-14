@@ -288,8 +288,24 @@ type HLSSession struct {
 	startedAt      time.Time
 	lastTouch      time.Time
 	ffmpegSegStart int // index of the first segment the current ffmpeg writes
-	restartCount   int // bounded auto-restart counter (resets on Close)
-	lastRestartAt  time.Time
+	// inheritedMax is how many leading segments (seg-0 … seg-(inheritedMax-1))
+	// this session adopted from a PREVIOUS run's leftovers in the same cache
+	// dir — see hls_partial_reuse.go. 0 for the ordinary case of a dir this
+	// session created. It is the boundary between "already on disk when we
+	// started" and "produced by our ffmpeg", which readyMax alone cannot
+	// express: pollSegments would otherwise read the dead run's files as
+	// progress by the live encoder and never fill the gap after them.
+	inheritedMax int
+	// lowestEncodedIdx is the lowest segment index any ffmpeg of this session
+	// has been aimed at — a low-water mark, not the live writer position.
+	// ffmpegSegStart moves forward on every seek-restart and so cannot answer
+	// "was everything below this produced by us?": a viewer who scrubs ahead
+	// would make the session look like it started mid-file, and one who scrubs
+	// back to 0 would erase the evidence entirely. Sealing decisions read this
+	// instead. Only ever decreases.
+	lowestEncodedIdx int
+	restartCount     int // bounded auto-restart counter (resets on Close)
+	lastRestartAt    time.Time
 	// copyFellBack latches once a VideoCopy session has fallen back to transcode
 	// (copy → transcode AUTO-FALLBACK): a -c:v copy run that exits non-zero, or
 	// hangs producing 0 kB (the fMP4 muxer rejects damaged/non-monotonic DTS),
@@ -682,11 +698,18 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	if cfg.Cache != nil {
 		// Debrid URL sessions key by CacheID (info_hash) so re-plays hit cache
 		// despite the URL changing each resolution; local files key by path.
-		if cfg.CacheID != "" {
-			cacheKey = cfg.Cache.KeyForID(cfg.CacheID, cfg.Quality, cfg.AudioIndex, cfg.burnSubtitleIndexOrNone())
-		} else {
-			cacheKey = cfg.Cache.KeyFor(cfg.SourcePath, cfg.Quality, cfg.AudioIndex, cfg.burnSubtitleIndexOrNone())
+		keyOpts := HLSCacheKeyOpts{
+			Source:            cfg.SourcePath,
+			Quality:           cfg.Quality,
+			AudioIndex:        cfg.AudioIndex,
+			BurnSubtitleIndex: cfg.burnSubtitleIndexOrNone(),
+			EncodeFingerprint: cfg.Transcode.EncodeFingerprint(),
 		}
+		if cfg.CacheID != "" {
+			keyOpts.Source = cfg.CacheID
+			keyOpts.IsID = true
+		}
+		cacheKey = cfg.Cache.Key(keyOpts)
 		// Integrity gate: HasComplete just stats the marker. If init.mp4 or
 		// the last segment vanished (external rm, partial-disk failure), we
 		// can't actually serve a HIT — drop the dir and re-encode.
@@ -849,7 +872,45 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		log.Printf("[hls %s] startSec %.0f >= duration %.0f - starting from 0",
 			shortHLSID(cfg.SessionID), cfg.StartSec, probe.DurationSec)
 	}
+	// Reconcile with anything a previous run left in this dir. Reached only on
+	// the cache-MISS writer path, and normally a no-op: Close() invalidates a
+	// partial dir, so leftovers exist only when Close never ran (daemon
+	// SIGKILL/panic/host suspend mid-encode) and the restart happened inside
+	// hlsCacheStartupOrphanAge. planPartialReuse either adopts the leading
+	// block and moves ffmpeg to the first hole — the reuse hls_cache.go
+	// promises — or clears the dir so nothing stale can be served. Copy mode
+	// is excluded: its segment indices don't map to uniform slots, so a
+	// prefix count is not an index it could start from.
+	if !cfg.VideoCopy && writerLockHeld {
+		reuseStart, inherited, rerr := planPartialReuse(filepath.Join(tmpDir, "video"), segCount, startIdx)
+		if rerr != nil {
+			// Reconciliation failed, so the dir's contents are unknown and a
+			// stale segment could still be served. Refuse the cache rather
+			// than encode into it.
+			log.Printf("[hls %s] partial-reuse scan failed (%v) - discarding cache dir",
+				shortHLSID(cfg.SessionID), rerr)
+			cleanupOnError()
+			return nil, fmt.Errorf("hls: partial cache reuse: %w", rerr)
+		}
+		if inherited > 0 {
+			log.Printf("[hls %s] cache %s partial: reusing %d/%d segments, encoding from seg-%d",
+				shortHLSID(cfg.SessionID), cacheKey, inherited, segCount, reuseStart)
+		}
+		startIdx = reuseStart
+		// Written without s.mu: nothing else can reach this session yet (it is
+		// returned to the caller below, and no goroutine has been spawned), so
+		// this is construction, not mutation. Readers take s.mu because by then
+		// the handler and supervisor goroutines are live. inheritedMax is never
+		// written again after this point — a restart re-aims ffmpegSegStart but
+		// cannot change which segments were inherited.
+		s.inheritedMax = inherited
+	}
 	s.ffmpegSegStart = startIdx
+	s.lowestEncodedIdx = startIdx
+	// readyMax starts at the encoder's first index. When segments were
+	// inherited those two coincide, which is what lets handlers serve the
+	// adopted block immediately while pollSegments still measures only this
+	// ffmpeg's own progress from there on.
 	s.readyMax = startIdx
 
 	// Spawn ffmpeg under a dedicated context so Close() can kill it without
@@ -1220,6 +1281,24 @@ func (s *HLSSession) allSegmentsPresent() bool {
 	if fi, err := os.Stat(filepath.Join(s.tmpDir, "video", "init.mp4")); err != nil || fi.Size() == 0 {
 		return false
 	}
+	// A session that started mid-file never produced the segments below its
+	// start index, so the stat loop below would be reading someone else's
+	// output. Sealing on that evidence is how a dir holding two encoders'
+	// segments becomes a permanent HIT serving a broken splice — the failure
+	// outlives the crash that caused it, because HasComplete/VerifyComplete
+	// only check init.mp4 and the final segment.
+	//
+	// Inherited segments are the one exception: planPartialReuse verified the
+	// block is contiguous from seg-0 and this ffmpeg encoded everything above
+	// it, so the directory is a single unbroken timeline even though two runs
+	// wrote it.
+	s.mu.Lock()
+	lowest := s.lowestEncodedIdx
+	inherited := s.inheritedMax
+	s.mu.Unlock()
+	if lowest > inherited {
+		return false
+	}
 	s.readyMu.Lock()
 	readyMax := s.readyMax
 	s.readyMu.Unlock()
@@ -1477,6 +1556,15 @@ func (s *HLSSession) fallbackToTranscode(reason string) bool {
 // only after closing the current one (fMP4 temp_file rename in encode mode; the
 // segment muxer's avio_close→open in COPY-VOD pass mode), so "seg-(i+1) exists"
 // proves seg-i is fully written. For the last segment, ffmpeg's exit ends the wait.
+//
+// It infers progress from the filesystem alone and cannot tell which run wrote
+// a file, so it depends on an invariant established before it starts: no
+// segment at or above the encoder's start index exists unless this ffmpeg
+// wrote it. StartHLSSession guarantees that by clearing the dir above the
+// start index (planPartialReuse) on the only path where leftovers can appear.
+// Break that invariant and the count silently becomes a measure of a dead
+// run's output: readyMax races ahead, the gap after the leftovers is never
+// filled, and playback stalls there while ffmpeg re-encodes from far behind.
 func (s *HLSSession) pollSegments(ctx context.Context) {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
@@ -1899,6 +1987,12 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 	s.cmd = cmd
 	s.cancel = cancel
 	s.ffmpegSegStart = targetIdx
+	// Track the earliest point any of our encoders has covered. Restarting
+	// further back widens what this session produced; restarting ahead does
+	// not shrink it — those earlier segments are still ours.
+	if targetIdx < s.lowestEncodedIdx {
+		s.lowestEncodedIdx = targetIdx
+	}
 	// A new ffmpeg is running, so the session is no longer permanently dead.
 	// Every relaunch funnels through here (seek-restart AND the auto-restart
 	// supervisor), which makes this the one place that must clear the latch —
