@@ -970,6 +970,10 @@ func runDaemonStart() error {
 	// from a compromised server.
 	d.OnStreamSession = func(sess agent.StreamSession) {
 		if playerSessionRegistry.has(sess.SessionID) {
+			// Silent on purpose (unlike every other early return below): this
+			// is the SAME sessionID already in flight, so its own watcher owns
+			// the outcome. Reporting here would either duplicate that verdict
+			// or overwrite a healthy session with a failure.
 			return // already running
 		}
 
@@ -1034,6 +1038,12 @@ func runDaemonStart() error {
 						if time.Now().After(deadline) || hlsCtx.Err() != nil {
 							playerSessionRegistry.remove(hlsCfg.SessionID)
 							hlsCancel()
+							// Log-only on purpose: a prewarm is background
+							// cache-fill with NO viewer waiting, so reporting a
+							// session failure would put a row nobody asked to
+							// watch into the playback-success KPI. The web
+							// already excludes prewarm rows from that
+							// aggregation for the same reason.
 							log.Printf("[hls %s] prewarm abandoned (encoder busy %s)",
 								agent.ShortID(hlsCfg.SessionID), "30m")
 							return
@@ -1651,7 +1661,21 @@ const (
 	// (2026-07-22: QSV emitted GPU surfaces into a CPU filter chain, every
 	// transcode session died at exit 218 and the player just spun on "Loading").
 	sessErrTranscodeFailed = "transcode_failed"
+	// sessErrStartTimeout: nothing crashed and nothing errored — the session
+	// simply never produced its first segment inside watchSessionReady's 60 s
+	// budget. Previously this returned after a local log.Printf and NOTHING
+	// else, so the row kept ready_at AND error_code both NULL: indistinguishable
+	// from "the agent never answered", and invisible to every dashboard. Prod
+	// (jul-ago 2026): 287 sessions died that way, 65 of them at exactly this
+	// deadline. Distinct from transcode_failed because the encoder may still be
+	// alive and merely too slow — the honest advice differs.
+	sessErrStartTimeout = "start_timeout"
 )
+
+// startTimeout bounds watchSessionReady: how long a session may take to produce
+// its first HLS segment before we declare it failed. Named (not inlined) so the
+// deadline and the message reporting it can't drift apart.
+const startTimeout = 60 * time.Second
 
 // resolvePlayableFile validates and self-heals a web-provided source path into
 // a playable on-disk video file. Shared by the raw /stream handler and every
@@ -2116,7 +2140,7 @@ func mirrorCORSOrigins(parent context.Context, cfg config.Config, userAgent stri
 // (as opposed to merely being slow) short-circuits that wait: the watcher
 // reports it through failSession so the player gets a real error code.
 func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.HLSSession, sessionID string, failSession func(sessionID, code, message string)) {
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(startTimeout)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	readyPosted := false
@@ -2142,6 +2166,17 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 		// without this check the watcher could keep alive for up to 60 s on
 		// a dead HLSSession that's never going to become ready.
 		if hsess.IsClosed() {
+			// Torn down BEFORE serving a first segment. With MaxStreamSessions
+			// at 1 (the personal-agent default) an impatient retry displaces
+			// the previous session through exactly this path, and returning
+			// silently left it NULL/NULL — the player kept probing a playlist
+			// that would never exist. Report it only when nothing was served
+			// yet: after the ready flip the session did its job and a later
+			// teardown is the normal end of playback, not a failure.
+			if !readyPosted {
+				failSession(sessionID, sessErrStartTimeout,
+					"session was closed before serving its first segment")
+			}
 			return
 		}
 		// Encoder is permanently dead (ffmpeg exited non-zero, auto-restarts
@@ -2215,7 +2250,14 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 		}
 		if time.Now().After(deadline) {
 			if !readyPosted {
-				log.Printf("[hls %s] mark-ready: timeout waiting for seg-0", agent.ShortID(sessionID))
+				// Report it: a silent return here left ready_at AND error_code
+				// both NULL server-side, so the player could only render the
+				// generic "your agent is taking too long" — the same screen a
+				// user with no agent at all sees. The encoder may still be
+				// alive (merely too slow for the budget), which is why this is
+				// its own code and not transcode_failed.
+				failSession(sessionID, sessErrStartTimeout,
+					fmt.Sprintf("no first segment within %s", startTimeout))
 				return
 			}
 			// Ready but never got stable telemetry — report whatever we have so
