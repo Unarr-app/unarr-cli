@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.4] - 2026-08-14
+
+
+### Added
+
+- **hls**: clear the segment cache on a config change, and expose it to clean
+
+### Fixed
+
+- **hls**: key the sealing guard on what this session encoded, not where it is
+- **hls**: finish the cache reuse that left playback stalled at the splice
+- **hls**: reportar las sesiones que morían en silencio
 ## [1.10.3] - 2026-08-12
 
 
@@ -16,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **torrent**: make the busy-port walk work on Windows, and stop leaking the DB on failure
 - **upgrade**: wait out a Windows holder instead of failing the install
+
+### Other
+
+- **release**: 1.10.3
 ## [1.10.2] - 2026-08-11
 
 
@@ -1545,6 +1561,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.10.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.3...v1.10.4
 [1.10.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.2...v1.10.3
 [1.10.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.0...v1.10.1
