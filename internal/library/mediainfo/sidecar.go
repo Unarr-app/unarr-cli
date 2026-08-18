@@ -52,7 +52,24 @@ func sidecarDir(mediaPath string) string {
 // subtitleCachePath is the cached WebVTT path for subtitle stream `index`
 // (0-based, matching ffmpeg's 0:s:N ordering) of mediaPath.
 func subtitleCachePath(mediaPath string, index int) string {
-	return filepath.Join(sidecarDir(mediaPath), fmt.Sprintf("%s.s%d.vtt", filepath.Base(mediaPath), index))
+	return subtitleCachePathExt(mediaPath, index, "vtt")
+}
+
+// subtitleCachePathExt is subtitleCachePath for a given serialisation. The same
+// subtitle stream is cached twice — once as WebVTT for <track> clients, once as
+// raw .ass for the libass renderer — so the extension is part of the key.
+func subtitleCachePathExt(mediaPath string, index int, ext string) string {
+	return filepath.Join(sidecarDir(mediaPath), fmt.Sprintf("%s.s%d.%s", filepath.Base(mediaPath), index, ext))
+}
+
+// fontCachePath is the cached path for font attachment `index` (ffmpeg's t:N)
+// of mediaPath. The original extension is preserved so the HTTP layer can pick
+// a Content-Type and so libass sees the format it expects.
+func fontCachePath(mediaPath string, index int, ext string) string {
+	if ext == "" {
+		ext = ".ttf"
+	}
+	return filepath.Join(sidecarDir(mediaPath), fmt.Sprintf("%s.f%d%s", filepath.Base(mediaPath), index, ext))
 }
 
 // thumbnailCachePath is the cached JPEG path for a single frame at posSec

@@ -199,7 +199,13 @@ func parseFFprobeOutput(data ffprobeOutput) (*MediaInfo, error) {
 
 	var audioTracks []AudioTrack
 	var subtitleTracks []SubtitleTrack
+	var fonts []FontAttachment
 	var videoInfo *VideoInfo
+
+	// Position among ATTACHMENT streams — the `t:N` selector ffmpeg's
+	// -dump_attachment expects. Advances for every attachment, including
+	// non-font ones (cover art, chapter XML), because ffmpeg counts those too.
+	attachmentIdx := 0
 
 	for _, s := range data.Streams {
 		switch s.CodecType {
@@ -231,6 +237,20 @@ func parseFFprobeOutput(data ffprobeOutput) (*MediaInfo, error) {
 				track.Forced = true
 			}
 			subtitleTracks = append(subtitleTracks, track)
+
+		case "attachment":
+			idx := attachmentIdx
+			attachmentIdx++ // counts non-font attachments too — see FontAttachment.Index
+			filename := tagValue(s.Tags, "filename")
+			mimetype := tagValue(s.Tags, "mimetype")
+			if !isFontAttachment(filename, mimetype) {
+				continue
+			}
+			fonts = append(fonts, FontAttachment{
+				Index:    idx,
+				Filename: filename,
+				Mimetype: mimetype,
+			})
 
 		case "video":
 			if videoInfo != nil {
@@ -303,6 +323,7 @@ func parseFFprobeOutput(data ffprobeOutput) (*MediaInfo, error) {
 
 	result := &MediaInfo{
 		Video: videoInfo,
+		Fonts: fonts,
 	}
 	if len(audioTracks) > 0 {
 		result.Audio = audioTracks

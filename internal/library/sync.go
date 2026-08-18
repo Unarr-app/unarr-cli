@@ -216,6 +216,9 @@ func BuildSyncItems(cache *LibraryCache) []agent.LibrarySyncItem {
 			si.SubtitleLanguages = SubtitleLanguages(item.MediaInfo.Subtitles)
 			si.AudioTracks = item.MediaInfo.Audio
 			si.SubtitleTracks = item.MediaInfo.Subtitles
+			if len(item.MediaInfo.Fonts) > 0 {
+				si.FontAttachments = item.MediaInfo.Fonts
+			}
 			si.VideoInfo = item.MediaInfo.Video
 			// Only an affirmative damaged verdict is ever sent. An Unverified entry
 			// (deep probe timed out even on the serial retry) deliberately falls
