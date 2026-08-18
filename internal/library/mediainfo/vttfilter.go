@@ -41,6 +41,14 @@ import (
 // arroz" passes guard 1 but dies on guard 2 ("kg", "de", "arroz"), so it stays.
 var drawingPath = regexp.MustCompile(`^[mn][ \t]+-?[0-9]`)
 
+// drawingBody requires at least one command letter AFTER the opening move.
+// Every real drawing has one (`l` for lines, `b`/`s` for curves) — the
+// production example is `m 0 0 l 290 0 290 42 0 42`. Requiring it stops short
+// numeric strings that merely start like a path, e.g. the caption "m 2 3, 4",
+// from being mistaken for one: guard 2 alone accepts those, since digits and
+// separators are inside the allowed vocabulary.
+var drawingBody = regexp.MustCompile(`[ \t][lbspc][ \t]`)
+
 // drawingVocabulary is the closed set of characters a pure drawing path can
 // contain: the command letters, digits, sign, decimal point and separators.
 var drawingVocabulary = regexp.MustCompile(`^[mnlbspc0-9 \t.,+-]+$`)
@@ -55,7 +63,9 @@ func isDrawingPayload(lines []string) bool {
 		if t == "" {
 			continue
 		}
-		if !drawingPath.MatchString(t) || !drawingVocabulary.MatchString(t) {
+		if !drawingPath.MatchString(t) ||
+			!drawingVocabulary.MatchString(t) ||
+			!drawingBody.MatchString(t) {
 			return false
 		}
 		seen = true
@@ -63,20 +73,54 @@ func isDrawingPayload(lines []string) bool {
 	return seen
 }
 
+// filterBlock decides the fate of one VTT block: it returns the text to emit
+// and whether a drawing cue was dropped. An empty replacement with drop=true
+// means "emit nothing".
+func filterBlock(block string) (replacement string, drop bool) {
+	lines := strings.Split(block, "\n")
+
+	// Find the timing line. Blocks without one (the WEBVTT header, NOTE, STYLE,
+	// REGION) are never candidates and pass through untouched.
+	timing := -1
+	for i, line := range lines {
+		if strings.Contains(line, "-->") {
+			timing = i
+			break
+		}
+	}
+	if timing < 0 || !isDrawingPayload(lines[timing+1:]) {
+		return block, false
+	}
+	// A malformed file can put the WEBVTT signature in the same block as its
+	// first cue (no blank line after the header). Dropping that block would
+	// leave a body with no signature at all, which browsers reject outright —
+	// strictly worse than leaving one junk cue in place.
+	if strings.HasPrefix(block, "WEBVTT") {
+		return "WEBVTT", true
+	}
+	return "", true
+}
+
 // FilterVTTDrawingCues removes cues whose text is an ASS vector-drawing path
 // leaked into WebVTT by ffmpeg's ass→webvtt converter (see the file comment).
 // Everything else — the WEBVTT header, NOTE/STYLE/REGION blocks, cue settings,
 // timings and ordinary cue text — is passed through byte-for-byte.
 //
-// Input that contains no such cue is returned unchanged, so this is safe to run
-// on every subtitle response regardless of the source format.
+// Input that contains no such cue is returned unchanged (same backing array), so
+// this is safe to run on every subtitle response regardless of the source
+// format. When something IS dropped the output is re-emitted with uniform line
+// endings — see the note in the body.
 func FilterVTTDrawingCues(vtt []byte) []byte {
 	if len(vtt) == 0 || !bytes.Contains(vtt, []byte("-->")) {
 		return vtt
 	}
 
-	// Normalise for scanning only; the emitted bytes keep the original line
-	// endings of the blocks we pass through.
+	// Line endings are normalised for scanning and RE-EMITTED uniformly: a file
+	// containing any CRLF comes back fully CRLF. Mixed-ending input is therefore
+	// rewritten, not passed through byte-for-byte. That is harmless for every
+	// WebVTT parser and keeps the block logic from having to track endings
+	// per-block — but only files that actually need filtering are touched at
+	// all, since a clean file returns its original bytes below.
 	crlf := bytes.Contains(vtt, []byte("\r\n"))
 	text := string(vtt)
 	if crlf {
@@ -88,27 +132,13 @@ func FilterVTTDrawingCues(vtt []byte) []byte {
 	dropped := 0
 
 	for _, block := range blocks {
-		lines := strings.Split(block, "\n")
-
-		// Find the timing line. Blocks without one (the WEBVTT header, NOTE,
-		// STYLE, REGION) are never candidates and pass through untouched.
-		timing := -1
-		for i, line := range lines {
-			if strings.Contains(line, "-->") {
-				timing = i
-				break
-			}
-		}
-		if timing < 0 {
-			kept = append(kept, block)
-			continue
-		}
-
-		if isDrawingPayload(lines[timing+1:]) {
+		replacement, drop := filterBlock(block)
+		if drop {
 			dropped++
-			continue
 		}
-		kept = append(kept, block)
+		if replacement != "" || !drop {
+			kept = append(kept, replacement)
+		}
 	}
 
 	if dropped == 0 {

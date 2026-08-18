@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1525,10 +1526,12 @@ func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	if wantASS {
-		ss.serveRawASS(w, ctx, rawPath, langHint, index, external, isURL)
+	if wantASS && ss.serveRawASS(w, ctx, rawPath, langHint, index, external, isURL) {
 		return
 	}
+	// serveRawASS declined (the stream carries no authored ASS styling, so an
+	// "original" would be ffmpeg's synthesised stand-in): fall through and serve
+	// the WebVTT the client would otherwise have got.
 
 	var out []byte
 	if external {
@@ -1724,27 +1727,34 @@ func (ss *StreamServer) writeVTT(w http.ResponseWriter, vtt []byte) {
 // embedded streams are copied out of the container with ffmpeg. Split out of
 // subtitleHandler to keep that function's nesting flat.
 //
+// Returns false when the request could not be honoured as ASS, leaving the
+// response untouched so the caller can serve WebVTT instead.
+//
 //nolint:revive // context-as-argument: the caller owns the timeout, and w reads better first here.
 func (ss *StreamServer) serveRawASS(
 	w http.ResponseWriter, ctx context.Context,
 	rawPath, langHint string, index int, external, isURL bool,
-) {
+) bool {
 	if external {
 		assBytes, err := mediainfo.ReadExternalSubtitleASS(rawPath, langHint)
 		if err != nil {
 			log.Printf("[sub] external ass read failed (path=%q): %v", rawPath, err)
-			http.Error(w, "subtitle read failed", http.StatusInternalServerError)
-			return
+			return false
 		}
 		ss.writeASS(w, assBytes)
-		return
+		return true
 	}
 
 	ass, err := mediainfo.ExtractSubtitleASS(ctx, ss.ffmpegPath, rawPath, index)
+	if errors.Is(err, mediainfo.ErrNotStyledSubtitle) {
+		// Not an error: a token minted for a subrip track is perfectly valid, it
+		// just has no ASS original to serve.
+		log.Printf("[sub] f=ass declined, no authored styling (i=%d path=%q)", index, rawPath)
+		return false
+	}
 	if err != nil {
 		log.Printf("[sub] ass extract failed (i=%d path=%q url=%v): %v", index, rawPath, isURL, err)
-		http.Error(w, "subtitle extract failed", http.StatusInternalServerError)
-		return
+		return false
 	}
 	// Write-through so the next request is a cache hit. URL sources have no
 	// stable on-disk anchor for the sidecar cache → skip.
@@ -1754,6 +1764,7 @@ func (ss *StreamServer) serveRawASS(
 		}
 	}
 	ss.writeASS(w, ass)
+	return true
 }
 
 // writeASS writes the raw ASS/SSA response for the `f=ass` variant of /sub.

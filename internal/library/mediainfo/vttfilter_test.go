@@ -121,3 +121,92 @@ func TestFilterVTTDrawingCuesUnchangedWhenClean(t *testing.T) {
 		t.Error("clean input was copied instead of passed through")
 	}
 }
+
+// Regressions from the code review — each of these was a real defect.
+func TestFilterVTTDrawingCuesReviewRegressions(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		comment string
+	}{
+		{
+			name:    "malformed file with no blank line after the header keeps its signature",
+			in:      "WEBVTT\n00:01.000 --> 00:02.000\nm 0 0 l 5 5\n",
+			want:    "WEBVTT",
+			comment: "dropping that block returned \"\" — a body with no WEBVTT signature, which every browser rejects",
+		},
+		{
+			name:    "short numeric caption is not a drawing",
+			in:      "WEBVTT\n\n00:01.000 --> 00:02.000\nm 2 3, 4\n",
+			want:    "WEBVTT\n\n00:01.000 --> 00:02.000\nm 2 3, 4\n",
+			comment: "opens like a move command and uses only allowed characters, but has no path command — a real drawing always does",
+		},
+		{
+			name:    "a move command alone is not a drawing",
+			in:      "WEBVTT\n\n00:01.000 --> 00:02.000\nm 100 200\n",
+			want:    "WEBVTT\n\n00:01.000 --> 00:02.000\nm 100 200\n",
+			comment: "same guard: no l/b/s command follows",
+		},
+		{
+			name:    "genuine drawing still goes",
+			in:      "WEBVTT\n\n00:01.000 --> 00:02.000\nm 0 0 l 290 0 290 42 0 42\n",
+			want:    "WEBVTT",
+			comment: "the production cue must keep being dropped",
+		},
+		{
+			name:    "bezier drawing goes too",
+			in:      "WEBVTT\n\n00:01.000 --> 00:02.000\nm 0 0 b 1 2 3 4 5 6\n",
+			want:    "WEBVTT",
+			comment: "curves use b/s rather than l",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(FilterVTTDrawingCues([]byte(tc.in))); got != tc.want {
+				t.Errorf("%s\n got: %q\nwant: %q", tc.comment, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSafeFontExt(t *testing.T) {
+	// `n` is an untrusted query parameter. Traversal is already impossible
+	// (filepath.Ext keeps only the extension), but the extension itself must not
+	// be free-form, or a fonts token could litter .unarr/ with arbitrary names.
+	tests := map[string]string{
+		"arial.ttf":               ".ttf",
+		"Adobe Arabic.otf":        ".otf",
+		"custom.WOFF2":            ".woff2",
+		"evil.php":                ".ttf",
+		"a.<svg onload=alert(1)>": ".ttf",
+		"../../../../etc/passwd":  ".ttf",
+		"noext":                   ".ttf",
+		"":                        ".ttf",
+	}
+	for in, want := range tests {
+		if got := SafeFontExt(in); got != want {
+			t.Errorf("SafeFontExt(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestHasAuthoredStyles(t *testing.T) {
+	// `-f ass` on a subrip source does not fail — ffmpeg synthesises a lone
+	// "Default" style, producing a script that claims styling nobody wrote.
+	synthesised := "[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default,Arial\n\n[Events]\n"
+	if hasAuthoredStyles([]byte(synthesised)) {
+		t.Error("ffmpeg's synthesised single Default style must not pass as authored")
+	}
+	authored := "[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default,Arial\nStyle: Sign_Basic,Arial\n\n[Events]\n"
+	if !hasAuthoredStyles([]byte(authored)) {
+		t.Error("a multi-style table is authored")
+	}
+	named := "[Script Info]\n\n[V4 Styles]\nStyle: Main,Trebuchet MS\n\n[Events]\n"
+	if !hasAuthoredStyles([]byte(named)) {
+		t.Error("a single NON-Default style is authored (and [V4 Styles] counts)")
+	}
+	if hasAuthoredStyles([]byte("WEBVTT\n\n00:01.000 --> 00:02.000\nhi\n")) {
+		t.Error("a WebVTT body has no style table at all")
+	}
+}

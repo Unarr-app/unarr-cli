@@ -27,10 +27,22 @@ import (
 // releases (Aegisub-muxed, pysubs2-generated and Erai-raws) — all three came
 // back with PlayResX/Y and their full style table intact.
 
+// ErrNotStyledSubtitle means the extracted script carries no authored styling,
+// so serving it as an ASS original would be a lie. Callers fall back to WebVTT.
+var ErrNotStyledSubtitle = errors.New("subtitle stream carries no ASS styling")
+
 // ExtractSubtitleASS runs ffmpeg to copy subtitle stream `index` of mediaPath out
-// as a raw ASS/SSA script. The caller must have checked the stream's codec is
-// ass or ssa: `-f ass` on a subrip source would SYNTHESISE a default style
-// table, producing a file that claims styling the author never wrote.
+// as a raw ASS/SSA script.
+//
+// `-f ass` on a NON-ass source (subrip, mov_text) does not fail — ffmpeg's ass
+// muxer SYNTHESISES a default style table, producing a file that claims styling
+// the author never wrote. The URL layer only advertises assUrl for ass/ssa
+// tracks, but the /sub token deliberately does not bind the serialisation, so
+// anyone holding a token for a subrip track can still ask for `f=ass`. Rather
+// than trust the caller, the OUTPUT is checked: a genuine ASS original always
+// carries a [V4+ Styles]/[V4 Styles] section with at least one authored Style
+// line, and a synthesised one does not carry the author's. This doubles as the
+// guard for an exotic mux whose extradata failed to round-trip.
 //
 // The caller owns the ctx deadline, as with ExtractSubtitleVTT.
 func ExtractSubtitleASS(ctx context.Context, ffmpegPath, mediaPath string, index int) ([]byte, error) {
@@ -54,7 +66,45 @@ func ExtractSubtitleASS(ctx context.Context, ffmpegPath, mediaPath string, index
 	if len(out) == 0 {
 		return nil, errors.New("ffmpeg produced no subtitle output")
 	}
+	if !hasAuthoredStyles(out) {
+		return nil, ErrNotStyledSubtitle
+	}
 	return out, nil
+}
+
+// hasAuthoredStyles reports whether an ASS script carries a real style table —
+// the marker that separates an author's script from one ffmpeg synthesised while
+// muxing a plain-text subtitle into the ass container.
+func hasAuthoredStyles(ass []byte) bool {
+	s := string(ass)
+	i := strings.Index(s, "[V4+ Styles]")
+	if i < 0 {
+		i = strings.Index(s, "[V4 Styles]")
+	}
+	if i < 0 {
+		return false
+	}
+	// A synthesised table names its lone style "Default"; an authored one names
+	// its own (fansubs ship Main/Sign_Basic/Italics/… — the production corpus had
+	// 13). Requiring either a second Style line or a non-Default name keeps the
+	// rare single-style authored script while rejecting ffmpeg's stand-in.
+	rest := s[i:]
+	if end := strings.Index(rest, "\n["); end > 0 {
+		rest = rest[:end]
+	}
+	styles := 0
+	authored := false
+	for _, line := range strings.Split(rest, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "Style:") {
+			continue
+		}
+		styles++
+		name := strings.TrimSpace(strings.SplitN(strings.TrimPrefix(strings.TrimSpace(line), "Style:"), ",", 2)[0])
+		if !strings.EqualFold(name, "Default") {
+			authored = true
+		}
+	}
+	return styles > 1 || authored
 }
 
 // ReadExternalSubtitleASS returns a standalone .ass/.ssa sidecar as UTF-8 bytes.
@@ -104,10 +154,7 @@ func WriteCachedSubtitleASS(mediaPath string, index int, ass []byte) error {
 // error is therefore only fatal when the dump produced nothing — verified
 // against real MKVs, where the font lands on disk regardless of the exit code.
 func ExtractFontAttachment(ctx context.Context, ffmpegPath, mediaPath string, index int, filename string) ([]byte, error) {
-	ext := strings.ToLower(filepath.Ext(filename))
-	if ext == "" {
-		ext = ".ttf"
-	}
+	ext := SafeFontExt(filename)
 	tmpDir, err := os.MkdirTemp("", "unarr-font-")
 	if err != nil {
 		return nil, err
@@ -131,17 +178,17 @@ func ExtractFontAttachment(ctx context.Context, ffmpegPath, mediaPath string, in
 	// Judge by the artefact, not the exit code (see the doc comment).
 	b, readErr := os.ReadFile(tmpOut) //nolint:gosec // G304: path is inside a temp dir we just created.
 	if readErr != nil || len(b) == 0 {
-		if runErr != nil {
-			return nil, fmt.Errorf("ffmpeg dump_attachment: %w: %s", runErr, strings.TrimSpace(stderr.String()))
-		}
-		return nil, errors.New("ffmpeg produced no font output")
+		// Always surface stderr: this command exits non-zero even when it works,
+		// so the runErr==nil path is the unusual one and needs the message most.
+		return nil, fmt.Errorf("ffmpeg dump_attachment produced no font (exit=%v): %s",
+			runErr, strings.TrimSpace(stderr.String()))
 	}
 	return b, nil
 }
 
 // ReadCachedFont returns the cached font attachment for (mediaPath, index).
 func ReadCachedFont(mediaPath string, index int, filename string) ([]byte, bool) {
-	p := fontCachePath(mediaPath, index, strings.ToLower(filepath.Ext(filename)))
+	p := fontCachePath(mediaPath, index, SafeFontExt(filename))
 	if !sidecarFresh(p, mediaPath) {
 		return nil, false
 	}
@@ -154,7 +201,7 @@ func ReadCachedFont(mediaPath string, index int, filename string) ([]byte, bool)
 
 // WriteCachedFont stores a dumped font next to the media. Best-effort.
 func WriteCachedFont(mediaPath string, index int, filename string, data []byte) error {
-	return writeSidecar(fontCachePath(mediaPath, index, strings.ToLower(filepath.Ext(filename))), data)
+	return writeSidecar(fontCachePath(mediaPath, index, SafeFontExt(filename)), data)
 }
 
 // FontContentType maps a font filename to the MIME type to serve it as. Browsers

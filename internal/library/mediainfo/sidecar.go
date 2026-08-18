@@ -108,8 +108,29 @@ func writeSidecar(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// Unique temp name per writer. There is no in-flight dedupe, so N concurrent
+	// requests for the same track each extract and each write; with a shared
+	// `path + ".tmp"` two of them can interleave their WriteFile calls and rename
+	// a corrupt blend into place. The rename itself is atomic, so a unique temp
+	// is all that is needed to make the whole thing safe.
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	// CreateTemp makes the file 0600; the cache is read by the same user but
+	// match the previous 0644 so an existing deployment sees no change.
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {

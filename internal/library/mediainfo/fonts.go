@@ -46,6 +46,21 @@ var fontExtensions = map[string]bool{
 // Non-font attachments (cover art, chapter XML, the odd README) are excluded —
 // but note they still advance FontAttachment.Index, since ffmpeg's
 // -dump_attachment:t:N counts every attachment stream.
+// SafeFontExt returns the cache-file extension to use for an attachment
+// filename, constrained to the known font extensions.
+//
+// The filename reaches us as an untrusted query parameter. filepath.Ext already
+// prevents traversal (only the extension survives), but without this whitelist
+// `n=x.php` or `n=a.<svg onload=…>` would create a correspondingly-named file
+// inside the user's .unarr/ cache directory — contained, but no reason to allow.
+func SafeFontExt(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if fontExtensions[ext] {
+		return ext
+	}
+	return ".ttf"
+}
+
 func isFontAttachment(filename, mimetype string) bool {
 	if fontMimetypes[strings.ToLower(strings.TrimSpace(mimetype))] {
 		return true
