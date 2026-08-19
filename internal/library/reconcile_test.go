@@ -224,3 +224,36 @@ func TestReconcileDedupOnly(t *testing.T) {
 		t.Errorf("dedup-only must not remove a stub: %v", err)
 	}
 }
+
+// A provenance sidecar whose .part is STILL ON DISK belongs to that partial —
+// it is only dead weight once the partial itself is gone. Reaping it early
+// would destroy the resume metadata of a paused download.
+func TestReconcileKeepsSidecarWhosePartialExists(t *testing.T) {
+	root := t.TempDir()
+	part := filepath.Join(root, "movie.mkv.part")
+	meta := part + ".meta.json"
+	if err := os.WriteFile(part, make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(meta, []byte(`{"url":"https://cdn/x"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := ReconcileOptions{MinVideoBytes: MinPlausibleVideoBytes, RemoveOrphanPartials: true}
+	// The .part is "active" (a live download owns it); its sidecar must survive
+	// on the strength of the .part existing, not on the active-set membership.
+	active := map[string]bool{filepath.Clean(part): true}
+
+	if f := classifyFile(meta, []string{root}, active, opts); f != nil {
+		t.Errorf("sidecar of an existing partial must be kept, got finding %+v", f)
+	}
+
+	// Once the partial is gone, the sidecar IS an orphan and must be reaped.
+	if err := os.Remove(part); err != nil {
+		t.Fatal(err)
+	}
+	f := classifyFile(meta, []string{root}, map[string]bool{}, opts)
+	if f == nil || f.Kind != KindOrphanPartial {
+		t.Errorf("orphaned sidecar must be reaped as %s, got %+v", KindOrphanPartial, f)
+	}
+}

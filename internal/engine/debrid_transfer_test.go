@@ -732,3 +732,51 @@ func TestPathLockerCtxAbortsWhileQueued(t *testing.T) {
 		t.Fatal("cancelled waiter stayed parked behind the holder")
 	}
 }
+
+// A validator alone must NOT authorize a resume: a CDN that ignores If-Range
+// (or a proxy that strips it) answers 206 for a completely different file, and
+// the offset/total checks would pass whenever the two happen to share a size.
+// Provenance (same URL, or same torrent file) is what authorizes; the
+// validator only strengthens it.
+func TestDebridValidatorAloneDoesNotAuthorizeResume(t *testing.T) {
+	content := bigBody("RIGHT_")
+	var sawRange bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			sawRange = true
+		}
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(content))
+	}))
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	dest := filepath.Join(outputDir, "validonly.mkv")
+	// Different URL, different torrent — but it carries a strong ETag.
+	writeResumablePartialMeta(t, dest, []byte("BYTES_OF_SOMETHING_ELSE"), &partMeta{
+		URL:      "https://other-cdn.example.com/old/other.mkv",
+		ETag:     `"strong-etag"`,
+		InfoHash: "1111111111111111111111111111111111111111",
+		FileName: "other.mkv",
+	})
+
+	task := &Task{
+		ID:             "validonly-001",
+		InfoHash:       "2222222222222222222222222222222222222222",
+		DirectURL:      srv.URL + "/f.mkv",
+		DirectFileName: "validonly.mkv",
+		Status:         StatusDownloading,
+	}
+	result, err := runDebridDownload(t, task, outputDir)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if sawRange {
+		t.Error("an unrelated partial must not be resumed just because it carries a validator")
+	}
+	data, _ := os.ReadFile(result.FilePath)
+	if string(data) != content {
+		t.Errorf("unrelated partial was spliced: got %d bytes, want %d", len(data), len(content))
+	}
+}

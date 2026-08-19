@@ -404,12 +404,24 @@ func classifyFile(path string, roots []string, activePartials map[string]bool, o
 		}
 		return nil // a real, playable video — never touch
 
-	case partialExts[ext]:
+	// IsPartialExt, not partialExts[ext]: the debrid provenance sidecar ends in
+	// ".part.meta.json", so matching on the extension alone ('.json') would
+	// leave orphaned sidecars with no reaper at all.
+	case IsPartialExt(path):
 		if !opts.RemoveOrphanPartials {
 			return nil
 		}
 		if activePartials[filepath.Clean(path)] {
 			return nil // an in-flight download owns it
+		}
+		// A sidecar whose .part is still on disk belongs to that partial — it is
+		// only dead weight once the partial itself is gone. (The .part's own
+		// active-download protection is the mtime check above; a paused download
+		// is protected by the caller disabling this category entirely.)
+		if strings.HasSuffix(strings.ToLower(path), PartMetaSuffix) {
+			if _, err := os.Stat(strings.TrimSuffix(path, ".meta.json")); err == nil {
+				return nil
+			}
 		}
 		return fileFinding(path, info, KindOrphanPartial,
 			"partial download marker with no active task")

@@ -177,12 +177,24 @@ func (x *debridTransfer) loadResumeState() {
 
 // metaResumable reports whether the sidecar's provenance lets the partial
 // continue under the CURRENT task.
+//
+// A recorded partial may only be appended to when something ties its bytes to
+// what this task is about to fetch:
+//   - the identical URL, or
+//   - the same torrent file (infohash + name) behind a re-minted link — debrid
+//     serves the torrent's own bytes, so the stream is the same.
+//
+// A VALIDATOR ALONE IS NOT ENOUGH. If-Range makes the server the judge, and a
+// CDN that ignores it (or a proxy that strips it) answers 206 for a completely
+// different file; the offset/total checks in acceptPartial would then pass
+// whenever the two files happen to share a size. So the validator only
+// strengthens a resume we already believe in — it never authorizes one.
 func (x *debridTransfer) metaResumable(m *partMeta) bool {
-	if m.URL == x.url || m.ifRangeValidator() != "" {
+	if m.URL == x.url {
 		return true
 	}
-	// Re-minted link, no validator: same torrent file = same bytes. Both sides
-	// must be known — an empty infohash proves nothing.
+	// Re-minted link: same torrent file = same bytes. Both sides must be known —
+	// an empty infohash proves nothing.
 	return m.InfoHash != "" && m.InfoHash == x.task.InfoHash &&
 		m.FileName != "" && m.FileName == filepath.Base(x.dest)
 }

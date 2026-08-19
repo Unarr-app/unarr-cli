@@ -76,6 +76,18 @@ func TestReconcileEachKind(t *testing.T) {
 			want: KindOrphanPartial,
 		},
 		{
+			// The debrid provenance sidecar ends in ".part.meta.json", so matching
+			// on the extension alone ('.json') left orphaned sidecars with NO reaper
+			// — they accreted in the download dir forever.
+			name: "orphan_part_meta_sidecar",
+			seed: func(t *testing.T, root string) string {
+				p := filepath.Join(root, "movie.mkv.part.meta.json")
+				writeSized(t, p, 180)
+				return p
+			},
+			want: KindOrphanPartial,
+		},
+		{
 			// A loose sidecar with no owning video in its dir → orphaned. Ownership
 			// is dir-level (any real video in the dir owns its sidecars), so the dir
 			// MUST be video-less for the sidecar to be an orphan — which makes it an
