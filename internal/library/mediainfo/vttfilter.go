@@ -53,13 +53,41 @@ var drawingBody = regexp.MustCompile(`[ \t][lbspc][ \t]`)
 // contain: the command letters, digits, sign, decimal point and separators.
 var drawingVocabulary = regexp.MustCompile(`^[mnlbspc0-9 \t.,+-]+$`)
 
+// cueTag matches every inline construct WebVTT allows inside cue text: the
+// formatting spans (<b>, </i>, <u>, <c.classname>, <v Speaker>, <lang ja>,
+// <ruby>/<rt>) and the timestamp spans karaoke uses (<00:00:43.500>). ffmpeg
+// emits the first from the ASS style's bold/italic flags and from override
+// tags, WRAPPING the whole cue payload — including a payload that is nothing
+// but a drawing path. The timestamp form opens with a digit, so it needs its
+// own alternative rather than the letter-led one.
+//
+// The tag names are an EXPLICIT list, not `[a-zA-Z]\w*`: subtitles genuinely
+// write angle brackets as prose — the corpus has 18 distinct skill names like
+// "<Resistencia>" — and stripping those could in principle leave a fragment the
+// drawing heuristics then misread. No such line exists today (measured over
+// 671k cue lines), so this is cheap insurance rather than a fix.
+var cueTag = regexp.MustCompile(`</?(?:[biu]|c|v|lang|ruby|rt)(?:[ .][^>]*)?>|<[0-9][^>]*>`)
+
+// stripCueTags removes inline formatting so the drawing heuristics see the bare
+// payload. Found in production: a sign whose ASS style has Bold=-1 comes out as
+// "<b>m 0 0 l 268 0 268 88 0 88</b>", and the leading "<" made the
+// starts-with-a-move-command guard miss it — the junk path survived into the
+// picture on every WebVTT client. The development corpus had no bold signs, so
+// only a real prod release exposed it.
+func stripCueTags(line string) string {
+	if !strings.Contains(line, "<") {
+		return line // hot path: most cues carry no markup at all
+	}
+	return strings.TrimSpace(cueTag.ReplaceAllString(line, ""))
+}
+
 // isDrawingPayload reports whether every text line of a cue is a drawing path.
 // A cue is dropped only when it carries NO renderable text at all — a sign whose
 // payload mixes a path with a caption keeps the caption.
 func isDrawingPayload(lines []string) bool {
 	seen := false
 	for _, line := range lines {
-		t := strings.TrimSpace(line)
+		t := stripCueTags(strings.TrimSpace(line))
 		if t == "" {
 			continue
 		}

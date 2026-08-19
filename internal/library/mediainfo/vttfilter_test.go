@@ -210,3 +210,140 @@ func TestHasAuthoredStyles(t *testing.T) {
 		t.Error("a WebVTT body has no style table at all")
 	}
 }
+
+// Found in PRODUCTION after the 1.11.0 rollout: a sign whose ASS style carries
+// Bold=-1 comes out of ffmpeg wrapped in <b>…</b>, so the payload no longer
+// STARTS with the move command and the drawing survived into the picture on
+// every WebVTT client (Cast, PiP, pre-1.11 agents). Verified against the real
+// cue from "The Failed Sage's Academy Domination" S01E02 at 00:43.500.
+func TestFilterVTTDrawingCuesStripsInlineTags(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		comment string
+	}{
+		{
+			name:    "bold-wrapped drawing (the production regression)",
+			in:      "WEBVTT\n\n00:43.500 --> 00:45.160\n<b>m 0 0 l 268 0 268 88 0 88</b>\n",
+			want:    "WEBVTT",
+			comment: "the exact cue that survived 1.11.0 in prod",
+		},
+		{
+			name:    "italic-wrapped drawing",
+			in:      "WEBVTT\n\n00:01.000 --> 00:02.000\n<i>m 0 0 l 10 0 10 10</i>\n",
+			want:    "WEBVTT",
+			comment: "italic signs are as common as bold ones",
+		},
+		{
+			name:    "class and voice spans too",
+			in:      "WEBVTT\n\n00:01.000 --> 00:02.000\n<c.sign><v Narrator>m 0 0 b 1 2 3 4 5 6</v></c>\n",
+			want:    "WEBVTT",
+			comment: "WebVTT allows <c.name> and <v Speaker>; both wrap the payload the same way",
+		},
+		{
+			name:    "tagged DIALOGUE is never touched",
+			in:      "WEBVTT\n\n00:01.000 --> 00:02.000\n<i>Menos mal que llegamos.</i>\n",
+			want:    "WEBVTT\n\n00:01.000 --> 00:02.000\n<i>Menos mal que llegamos.</i>\n",
+			comment: "stripping tags must not make ordinary lines look like paths",
+		},
+		{
+			name:    "tagged caption sharing the cue with a path survives whole",
+			in:      "WEBVTT\n\n00:01.000 --> 00:02.000\n<b>m 0 0 l 10 0 10 10</b>\n<b>Cartel</b>\n",
+			want:    "WEBVTT\n\n00:01.000 --> 00:02.000\n<b>m 0 0 l 10 0 10 10</b>\n<b>Cartel</b>\n",
+			comment: "a cue is dropped only when NOTHING in it is renderable text",
+		},
+		{
+			name:    "an empty tag pair is not a drawing",
+			in:      "WEBVTT\n\n00:01.000 --> 00:02.000\n<i></i>\n",
+			want:    "WEBVTT\n\n00:01.000 --> 00:02.000\n<i></i>\n",
+			comment: "stripping leaves \"\", which must not count as a seen drawing line",
+		},
+		{
+			name:    "the served output keeps its markup byte-for-byte",
+			in:      "WEBVTT\n\n00:01.000 --> 00:02.000\n<b>m 0 0 l 5 0 5 5</b>\n\n00:03.000 --> 00:04.000\n<i>Diálogo</i>\n",
+			want:    "WEBVTT\n\n00:03.000 --> 00:04.000\n<i>Diálogo</i>\n",
+			comment: "tags are stripped only to JUDGE; surviving cues are passed through untouched",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(FilterVTTDrawingCues([]byte(tc.in))); got != tc.want {
+				t.Errorf("%s\n got: %q\nwant: %q", tc.comment, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFilterVTTDrawingCuesTagSweep exercises the FULL inline-markup vocabulary
+// WebVTT allows, in both directions: wrapped drawings must still be dropped, and
+// wrapped dialogue must survive byte-for-byte.
+func TestFilterVTTDrawingCuesTagSweep(t *testing.T) {
+	const path = "m 0 0 l 268 0 268 88 0 88"
+	wrappers := map[string]string{
+		"bold":            "<b>" + path + "</b>",
+		"italic":          "<i>" + path + "</i>",
+		"underline":       "<u>" + path + "</u>",
+		"class":           "<c.sign.yellow>" + path + "</c>",
+		"voice":           "<v Narrator>" + path + "</v>",
+		"voice unclosed":  "<v Narrator>" + path,
+		"lang":            "<lang ja>" + path + "</lang>",
+		"nested":          "<b><i><c.sign>" + path + "</c></i></b>",
+		"karaoke stamps":  "<00:00:43.500>" + path + "<00:00:45.160>",
+		"mixed nesting":   "<i><b>" + path + "</b></i>",
+		"attrs with dots": "<c.a.b.c>" + path + "</c>",
+	}
+	for name, payload := range wrappers {
+		t.Run(name, func(t *testing.T) {
+			in := "WEBVTT\n\n00:43.500 --> 00:45.160\n" + payload + "\n"
+			got := string(FilterVTTDrawingCues([]byte(in)))
+			if strings.Contains(got, "268 88") {
+				t.Errorf("drawing survived %s wrapping: %q", name, got)
+			}
+		})
+	}
+	// A ruby annotation carries REAL text in its <rt>, so a cue mixing a path
+	// with one keeps everything — same rule as a caption sharing the cue.
+	t.Run("ruby annotation is renderable text", func(t *testing.T) {
+		in := "WEBVTT\n\n00:01.000 --> 00:02.000\n<ruby>" + path + "<rt>x</rt></ruby>\n"
+		if got := string(FilterVTTDrawingCues([]byte(in))); got != in {
+			t.Errorf("cue with a ruby annotation must survive: %q", got)
+		}
+	})
+
+	// And the mirror image: real dialogue inside the same wrappers is never lost.
+	for name, payload := range map[string]string{
+		"bold":   "<b>Hola mundo</b>",
+		"voice":  "<v Ryan>Vámonos ya</v>",
+		"ruby":   "<ruby>漢<rt>kan</rt></ruby>",
+		"stamps": "<00:00:01.000>Canta<00:00:02.000> conmigo",
+	} {
+		t.Run("keeps "+name, func(t *testing.T) {
+			in := "WEBVTT\n\n00:01.000 --> 00:02.000\n" + payload + "\n"
+			if got := string(FilterVTTDrawingCues([]byte(in))); got != in {
+				t.Errorf("dialogue lost or altered: %q", got)
+			}
+		})
+	}
+}
+
+// Angle brackets are prose in real subtitles — the corpus writes skill names as
+// "<Resistencia>". Only the WebVTT tag vocabulary may be stripped, or an
+// invented tag could leave a fragment the heuristics misread.
+func TestStripCueTagsLeavesProseBrackets(t *testing.T) {
+	for in, want := range map[string]string{
+		"<b>Hola</b>":                "Hola",
+		"<Resistencia> mejorada":     "<Resistencia> mejorada",
+		"<Manos hábiles>":            "<Manos hábiles>",
+		"<c.sign.big>x</c>":          "x",
+		"<v Ryan>hola</v>":           "hola",
+		"<lang ja>ねこ</lang>":         "ねこ",
+		"<00:00:01.500>ya":           "ya",
+		"5 < 10 and 10 > 5":          "5 < 10 and 10 > 5",
+		"<ruby>漢<rt>kan</rt></ruby>": "漢kan",
+	} {
+		if got := stripCueTags(in); got != want {
+			t.Errorf("stripCueTags(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
