@@ -26,10 +26,25 @@ var partialExts = map[string]bool{
 	".partial": true,
 }
 
-// IsPartialExt reports whether name has an in-progress download extension
-// (.part/.!qb/.aria2/.tmp/.partial). Exported so the daemon can identify live
-// partials (by mtime) to protect them from the auto-cleanup sweep.
+// PartialSuffix is the extension the debrid downloader writes in-progress bytes
+// under (engine.partialSuffix). Single source: engine derives its constant from
+// here, so renaming it can never leave this sweep blind to the new name.
+const PartialSuffix = ".part"
+
+// PartMetaSuffix is the provenance sidecar the debrid downloader keeps beside a
+// partial (engine.partMetaPath). Its extension is ".json", so it is NOT caught
+// by partialExts — it needs its own suffix match or an orphaned sidecar would
+// have no reaper at all.
+const PartMetaSuffix = PartialSuffix + ".meta.json"
+
+// IsPartialExt reports whether name is an in-progress download artifact:
+// a partial extension (.part/.!qb/.aria2/.tmp/.partial) or a partial's
+// provenance sidecar. Exported so the daemon can identify live partials (by
+// mtime) to protect them from the auto-cleanup sweep.
 func IsPartialExt(name string) bool {
+	if strings.HasSuffix(strings.ToLower(name), PartMetaSuffix) {
+		return true
+	}
 	return partialExts[strings.ToLower(filepath.Ext(name))]
 }
 

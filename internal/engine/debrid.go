@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -105,19 +104,14 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 		return nil, fmt.Errorf("invalid filename: %w", err)
 	}
 
-	// One writer per destination: take the lock BEFORE reading the partial, so
-	// the resume decision sees the state the previous writer left, not a moving
-	// file being appended to by a concurrent task with the same filename.
-	unlock := d.pathLocks.Lock(destPath)
-	defer unlock()
-
-	x := newDebridTransfer(task, destPath, outputDir)
-
 	// Create cancellable context
 	dlCtx, cancel := context.WithCancel(ctx)
 
 	// Closed by the cleanup defer below, which runs AFTER the deferred closeFile
 	// (defers are LIFO) — so a waiter is only released once the handle is gone.
+	// Tracked BEFORE the (blocking) destination lock: a task parked behind
+	// another writer must still be visible to Pause/Cancel, or cancelling it
+	// would be a silent no-op and the download would run to completion anyway.
 	finished := make(chan struct{})
 	d.track(task.ID, destPath, cancel, finished)
 	defer func() {
@@ -125,6 +119,19 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 		cancel()
 		close(finished)
 	}()
+
+	// One writer per destination: take the lock BEFORE reading the partial, so
+	// the resume decision sees the state the previous writer left, not a moving
+	// file being appended to by a concurrent task with the same filename. The
+	// wait is context-aware, so a cancel while queued unblocks immediately
+	// instead of holding a manager slot for the other download's lifetime.
+	unlock, err := d.pathLocks.LockCtx(dlCtx, destPath)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	x := newDebridTransfer(task, destPath, outputDir)
 
 	resp, err := x.openStream(dlCtx)
 	if err != nil {
@@ -155,13 +162,24 @@ func (d *DebridDownloader) Download(ctx context.Context, task *Task, outputDir s
 	}
 	defer func() { _ = closeFile() }()
 
+	// Provenance goes to disk only NOW: openPartial has truncated a superseded
+	// partial, so the sidecar can never describe an entity the on-disk bytes
+	// don't belong to (a crash in that window used to arm a splicing resume).
+	x.persistMeta()
+
 	meter := newProgressMeter(x, progressCh, fileName)
-	downloaded, err := copyPartialBody(dlCtx, x, resp, file, meter)
+	downloaded, cleanEOF, err := copyPartialBody(dlCtx, x, resp, file, meter)
 	if err != nil {
+		// A guard that rejected the bytes (overlong) wants them GONE, but the
+		// handle must be closed first — Windows refuses to unlink an open file.
+		if IsIntegrity(err) {
+			_ = closeFile()
+			x.removeArtifacts()
+		}
 		return nil, err
 	}
 
-	if err := persistAndCheck(x, file, closeFile, downloaded); err != nil {
+	if err := persistAndCheck(x, file, closeFile, downloaded, cleanEOF); err != nil {
 		return nil, err
 	}
 
@@ -221,176 +239,6 @@ func (d *DebridDownloader) openPartial(x *debridTransfer) (*os.File, error) {
 	return file, nil
 }
 
-// copyPartialBody streams the response into the partial with progress reporting
-// and the overlong guard. Returns the total bytes now in the partial.
-func copyPartialBody(ctx context.Context, x *debridTransfer, resp *http.Response, file *os.File, meter *progressMeter) (int64, error) {
-	downloaded := x.start
-	buf := make([]byte, 256*1024) // 256KB buffer
-
-	for {
-		select {
-		case <-ctx.Done():
-			return downloaded, ctx.Err()
-		default:
-		}
-
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, writeErr := file.Write(buf[:n]); writeErr != nil {
-				return downloaded, fmt.Errorf("write file: %w", writeErr)
-			}
-			downloaded += int64(n)
-		}
-
-		// A stream longer than the advertised length is as untrustworthy as a
-		// short one (a proxy/CDN error page glued after the payload, a resume
-		// against different bytes). Refuse it and start clean next attempt.
-		if x.total > 0 && downloaded > x.total {
-			x.removeArtifacts()
-			return downloaded, integrityErr("overlong", "server sent more data than advertised (%s > %s)",
-				formatBytes(downloaded), formatBytes(x.total))
-		}
-
-		meter.maybeReport(downloaded, readErr == io.EOF)
-
-		if readErr == io.EOF {
-			return downloaded, nil
-		}
-		if readErr != nil {
-			return downloaded, fmt.Errorf("read response: %w", readErr)
-		}
-	}
-}
-
-// progressMeter throttles and emits download progress (log line, task update,
-// non-blocking channel send) at most once per second.
-type progressMeter struct {
-	x         *debridTransfer
-	ch        chan<- Progress
-	fileName  string
-	lastAt    time.Time
-	lastBytes int64
-}
-
-func newProgressMeter(x *debridTransfer, ch chan<- Progress, fileName string) *progressMeter {
-	return &progressMeter{x: x, ch: ch, fileName: fileName, lastAt: time.Now(), lastBytes: x.start}
-}
-
-// maybeReport emits progress when a second has passed since the last report,
-// or unconditionally when force is set (end of stream).
-func (m *progressMeter) maybeReport(downloaded int64, force bool) {
-	now := time.Now()
-	elapsed := now.Sub(m.lastAt)
-	if elapsed < time.Second && !force {
-		return
-	}
-
-	var speed int64
-	if secs := elapsed.Seconds(); secs > 0 {
-		speed = int64(float64(downloaded-m.lastBytes) / secs)
-	}
-
-	var eta int
-	if speed > 0 && m.x.total > 0 {
-		eta = int((m.x.total - downloaded) / speed)
-	}
-
-	pct := 0
-	if m.x.total > 0 {
-		pct = int(float64(downloaded) / float64(m.x.total) * 100)
-	}
-
-	log.Printf("[%s] %d%% - %s/%s @ %s/s  (debrid)",
-		m.x.task.ShortID(), pct,
-		formatBytes(downloaded), formatBytes(m.x.total), formatBytes(speed))
-
-	p := Progress{
-		DownloadedBytes: downloaded,
-		TotalBytes:      m.x.total,
-		SpeedBps:        speed,
-		ETA:             eta,
-		FileName:        m.fileName,
-	}
-	m.x.task.UpdateProgress(p)
-
-	select {
-	case m.ch <- p:
-	default:
-	}
-
-	m.lastAt = now
-	m.lastBytes = downloaded
-}
-
-// persistAndCheck is the post-stream gauntlet: truncation guard, durable flush,
-// checked close, on-disk read-back, anti-stub floor. Only a partial that passes
-// all of it gets finalized (renamed to the real name) by the caller.
-func persistAndCheck(x *debridTransfer, file *os.File, closeFile func() error, downloaded int64) error {
-	outputDir := x.outputDir
-	fileName := filepath.Base(x.dest)
-
-	// Anti-stub floor FIRST, before the truncation guard can "keep the partial
-	// for resume": a debrid CDN answers 200 with a tiny (often all-NUL or HTML)
-	// body when the link is expired / "still caching" / errored. Those bytes are
-	// NOT a prefix of the real file, so a kept partial would splice garbage under
-	// the resumed download. A real video is never this small — delete and retry
-	// from zero, which costs nothing at this size. (With no expected size and no
-	// Content-Length this is also the ONLY guard against filing the stub into the
-	// library — the movie.mkv/movie (N).mkv flood in prod.)
-	if isVideoFile(fileName) && downloaded < minPlausibleVideoBytes {
-		x.removeArtifacts()
-		return integrityErr("stub_response", "debrid returned only %s for %s — link expired or not ready (not a valid video)", formatBytes(downloaded), fileName)
-	}
-
-	// Guard against a premature end-of-stream: if the server advertised a length
-	// and we read fewer bytes, the transfer was truncated (e.g. a debrid CDN edge
-	// closing the connection). Don't hand a short file to verify as if complete.
-	if x.total > 0 && downloaded < x.total {
-		// Integrity, not transport — the manager re-downloads. Keep the partial
-		// AND its sidecar: the bytes written so far are sequentially correct, so
-		// the retry resumes via validated HTTP Range from where the stream was cut
-		// instead of re-fetching the whole file.
-		return integrityErr("truncated", "incomplete download: got %s of %s", formatBytes(downloaded), formatBytes(x.total))
-	}
-
-	// Force the OS to flush the file to durable storage BEFORE we report success.
-	// Without this, every Write() can succeed into the page cache while the actual
-	// write-back to a network mount (the prod download dir is an NFS share at
-	// /mnt/nas/peliculas) lags or fails — verify() then stats a half-flushed file
-	// and rejects it ("size mismatch"). fsync surfaces a write-back error here,
-	// where it's actionable, instead of silently truncating the file.
-	if err := file.Sync(); err != nil {
-		_ = closeFile()
-		x.removeArtifacts() // uncertain on-disk state — drop it so the retry starts clean
-		// The bytes were correct; the DESTINATION failed to persist them. This is a
-		// StorageError, not integrity corruption — re-downloading writes to the same
-		// broken mount. The manager retries once (a mount can briefly stall) then
-		// pauses as resumable with a "check your download folder / NAS" message.
-		return storageErr("flush_failed", outputDir, "could not save to %s — flush to disk failed (write-back/network-mount error): %v", outputDir, err)
-	}
-	if err := closeFile(); err != nil {
-		x.removeArtifacts()
-		return storageErr("close_failed", outputDir, "could not save to %s — close file failed (write-back/network-mount error): %v", outputDir, err)
-	}
-
-	// Safety net: after a durable flush, the on-disk size must match what we wrote.
-	// On a stalled mount a write-back error can still leave the file short even
-	// when Sync/Close returned nil. This is also the ONLY size check when the
-	// server sent no Content-Length (x.total == 0 → the guard above is skipped).
-	// Remove the corrupt partial so a retry starts clean, rather than passing a
-	// truncated file to verify().
-	if fi, statErr := os.Stat(x.partial); statErr == nil && fi.Size() < downloaded {
-		x.removeArtifacts()
-		// A post-flush short file means the mount dropped the write-back even though
-		// Sync/Close returned nil — a DESTINATION failure, not source corruption. Same
-		// StorageError path (retry once, then pause) rather than looping re-downloads.
-		return storageErr("flush_failed", outputDir, "could not save to %s — post-write size mismatch: wrote %s but file is %s on disk (likely a stalled or failing storage mount)",
-			outputDir, formatBytes(downloaded), formatBytes(fi.Size()))
-	}
-
-	return nil
-}
-
 // Pause cancels the in-progress HTTP download but keeps the partial (and its
 // provenance sidecar) for a validated resume.
 func (d *DebridDownloader) Pause(taskID string) error {
@@ -442,14 +290,16 @@ func (d *DebridDownloader) Cancel(taskID string) error {
 	// Delete the partial + sidecar only when we still had an in-flight destPath —
 	// this is a cancel-and-delete, and the bytes on disk are an incomplete download.
 	if hadPath && destPath != "" {
-		for _, p := range []string{partialPath(destPath), partMetaPath(destPath)} {
-			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-				// Never silence: an undeletable partial is worth a log line so it can be
-				// reaped later, but it must not fail the cancel (the download is stopped).
-				log.Printf("[%s] debrid cancel: failed to remove partial %s: %v", agent.ShortID(taskID), p, err)
-			}
+		removePartialArtifacts(agent.ShortID(taskID), destPath)
+		// The cancel can land in the window between finalize()'s rename and the
+		// download goroutine's untrack: the file is then COMPLETE under its final
+		// name while we still hold its destPath. Cancel-and-delete means delete —
+		// leaving it would orphan a full download the user asked to remove (and
+		// the reconcile sweep never touches a finished name).
+		if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[%s] debrid cancel: failed to remove %s: %v", agent.ShortID(taskID), destPath, err)
 		}
-		log.Printf("[%s] debrid download cancelled + partial removed", agent.ShortID(taskID))
+		log.Printf("[%s] debrid download cancelled + files removed", agent.ShortID(taskID))
 	} else if ok {
 		log.Printf("[%s] debrid download cancelled", agent.ShortID(taskID))
 	}

@@ -28,6 +28,11 @@ type Result struct {
 	FileName string
 	Method   DownloadMethod
 	Size     int64
+	// ExpectedBytes is the size the SERVER resolved for this download (debrid
+	// provider listing), when known. 0 = no server-side ground truth. verify()
+	// enforces it as the cross-backend backstop, independent of whether the
+	// transport's own checks ran.
+	ExpectedBytes int64
 }
 
 // Downloader is the interface every download method must implement.

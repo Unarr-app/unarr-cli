@@ -21,6 +21,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 	"golang.org/x/time/rate"
 )
@@ -487,7 +488,13 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 	// (often all-zero) file that passes the size check, because mmap preallocates
 	// the full length. Re-hash before trusting anything inherited from disk; bad
 	// pieces get marked incomplete and re-download normally.
-	if !preExisting {
+	//
+	// A torrent already live in this client is normally trustworthy (its data was
+	// verified within this process's lifetime) — but only while its data is still
+	// THERE: a cancel-and-delete racing a re-dispatch, or a user deleting the
+	// file under a seeding torrent, leaves the same poisoned state. So the skip
+	// requires both: already live AND its files still on disk at the right size.
+	if !preExisting || !torrentDataPresent(t, d.cfg.DataDir) {
 		if err := d.verifyInheritedPieces(ctx, t, task); err != nil {
 			cleanup()
 			return nil, err
@@ -574,25 +581,84 @@ func torrentAlreadyInClient(client *torrent.Client, infoHash string) bool {
 	return ok
 }
 
-// verifyInheritedPieces re-hashes a torrent whose completion state was inherited
-// from the piece-completion DB of a previous session/attempt. BytesCompleted()==0
-// (a genuinely fresh download) skips it, so the common case pays nothing; a
-// resume pays one sequential read of the claimed data — the price of "completed
-// never means corrupt" (the DB is bookkeeping, the hashes are the ground truth).
+// torrentDataPresent reports whether every file the torrent has already
+// downloaded bytes for still exists on disk at (at least) its full length.
+// It is deliberately cheap — a stat per file, no hashing — because it only has
+// to catch the "the data was deleted out from under a live torrent" case; a
+// file that exists but was corrupted in place is caught by the re-hash.
+func torrentDataPresent(t *torrent.Torrent, dataDir string) bool {
+	if t.Info() == nil {
+		return false
+	}
+	for _, f := range t.Files() {
+		if f.BytesCompleted() == 0 {
+			continue // nothing claimed for this file: nothing to lose
+		}
+		fi, err := os.Stat(filepath.Join(dataDir, f.Path()))
+		if err != nil || fi.Size() < f.Length() {
+			return false
+		}
+	}
+	return true
+}
+
+// verifyPieceHashers bounds how many piece re-hashes run at once. The library
+// verifies one piece per blocking call, so fanning out is what lets the
+// client's hasher pool work in parallel; capped so a re-verify can't saturate
+// the disk/CPU a concurrent download is using.
+const verifyPieceHashers = 4
+
+// verifyInheritedPieces re-hashes the pieces a torrent CLAIMS to already hold
+// when that claim was inherited from the piece-completion DB of a previous
+// session/attempt. BytesCompleted()==0 (a genuinely fresh download) skips it,
+// so the common case pays nothing.
+//
+// Only the CLAIMED pieces are hashed: a piece the DB says is missing will be
+// downloaded and hashed by the client anyway, so re-reading it here would be
+// pure I/O — on a 60 GB torrent with one stale piece, hashing everything meant
+// reading 60 GB to validate 1 MB. The claimed ones are read concurrently
+// (VerifyDataContext walks them one at a time, leaving the hasher pool idle).
 func (d *TorrentDownloader) verifyInheritedPieces(ctx context.Context, t *torrent.Torrent, task *Task) error {
 	claimed := t.BytesCompleted()
 	if claimed == 0 {
 		return nil
 	}
-	log.Printf("[%s] %s claimed complete by the piece-completion DB - re-verifying hashes before trusting it", task.ShortID(), formatBytes(claimed))
+	var indices []int
+	for i := 0; i < t.NumPieces(); i++ {
+		if t.PieceState(i).Complete {
+			indices = append(indices, i)
+		}
+	}
+	if len(indices) == 0 {
+		return nil
+	}
+
+	log.Printf("[%s] %s (%d pieces) claimed complete by the piece-completion DB - re-verifying hashes before trusting it",
+		task.ShortID(), formatBytes(claimed), len(indices))
 	start := time.Now()
-	if err := t.VerifyDataContext(ctx); err != nil {
+	if err := verifyPiecesConcurrently(ctx, t, indices); err != nil {
 		return fmt.Errorf("verify resumed data: %w", err)
 	}
 	waitPieceMarkingSettled(ctx, t)
 	log.Printf("[%s] re-verify done in %s: %s of %s intact", task.ShortID(),
 		time.Since(start).Round(time.Second), formatBytes(t.BytesCompleted()), formatBytes(t.Length()))
 	return nil
+}
+
+// verifyPiecesConcurrently re-hashes the given pieces with a bounded worker
+// pool, returning the first error (context cancellation included). The pool is
+// what makes this worth doing: Piece.VerifyDataContext blocks on ONE piece, so
+// hashing them sequentially leaves the client's hasher pool idle.
+func verifyPiecesConcurrently(ctx context.Context, t *torrent.Torrent, indices []int) error {
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(verifyPieceHashers)
+	for _, i := range indices {
+		if gctx.Err() != nil {
+			break
+		}
+		g.Go(func() error { return t.Piece(i).VerifyDataContext(gctx) })
+	}
+	return g.Wait()
 }
 
 // waitPieceMarkingSettled waits (bounded) until no piece is still in the
@@ -605,9 +671,13 @@ func (d *TorrentDownloader) verifyInheritedPieces(ctx context.Context, t *torren
 func waitPieceMarkingSettled(ctx context.Context, t *torrent.Torrent) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && ctx.Err() == nil {
+		// PieceStateRuns returns every piece's state in ONE client-lock
+		// acquisition; polling PieceState(i) per piece took ~15k lock round-trips
+		// per poll on a large torrent, contending with the very marking machinery
+		// we are waiting on.
 		marking := false
-		for i := 0; i < t.NumPieces(); i++ {
-			if t.PieceState(i).Marking {
+		for _, run := range t.PieceStateRuns() {
+			if run.Marking {
 				marking = true
 				break
 			}
@@ -617,6 +687,11 @@ func waitPieceMarkingSettled(ctx context.Context, t *torrent.Torrent) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	// Never silent: if the completion writes are still in flight, the very next
+	// BytesCompleted() read can still count a piece that failed its hash, and
+	// the caller would log "intact" for data it has not confirmed. Say so.
+	log.Printf("[torrent] WARNING: piece completion writes still settling after 5s (%s) - the re-verify counts below may be optimistic",
+		t.Name())
 }
 
 func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent, task *Task, totalBytes int64, fileName string, progressCh chan<- Progress) (*Result, error) {

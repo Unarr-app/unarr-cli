@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Unarr-app/unarr-cli/internal/library"
 )
 
 // partialSuffix marks an in-progress debrid download. The finished file only
@@ -18,11 +20,14 @@ import (
 // wearing a finished name. ".part" is one of the extensions the library
 // reconcile sweep already recognizes as a partial (library.IsPartialExt), so a
 // genuinely orphaned one is reaped by the existing cleanup.
-const partialSuffix = ".part"
+// Derived from the library package so the reconcile sweep (which reaps
+// orphaned partials) and this writer can never disagree about what a partial
+// download is named.
+const partialSuffix = library.PartialSuffix
 
 func partialPath(dest string) string { return dest + partialSuffix }
 
-func partMetaPath(dest string) string { return dest + partialSuffix + ".meta.json" }
+func partMetaPath(dest string) string { return dest + library.PartMetaSuffix }
 
 // partMeta is the sidecar that records the PROVENANCE of a partial: which URL
 // its bytes came from, the server's validators, and the advertised total. A
@@ -37,6 +42,13 @@ type partMeta struct {
 	ETag         string `json:"etag,omitempty"`
 	LastModified string `json:"lastModified,omitempty"`
 	TotalBytes   int64  `json:"totalBytes,omitempty"`
+	// InfoHash + FileName identify the torrent file behind the link. Debrid
+	// serves the torrent's original bytes, so the same (infohash, file) is the
+	// same byte stream even when the CDN URL was re-minted — this is what lets
+	// a resume survive the server re-resolving a fresh link on re-dispatch
+	// (validator-less CDNs would otherwise restart huge downloads from zero).
+	InfoHash string `json:"infoHash,omitempty"`
+	FileName string `json:"fileName,omitempty"`
 }
 
 // ifRangeValidator returns the validator to send in If-Range, preferring a
@@ -68,9 +80,14 @@ func loadPartMeta(path string) (*partMeta, error) {
 	return &m, nil
 }
 
-// parseContentRange parses `bytes <start>-<end>/<total>`; total may be "*"
-// (returned as 0). ok=false means the header was absent or unparseable — the
-// caller must then treat the 206 as unprovable and restart clean.
+// parseContentRange parses the Content-Range header in both of its shapes:
+//
+//	bytes <start>-<end>/<total>   satisfied range (total may be "*" → 0)
+//	bytes */<total>               unsatisfied range (416); start/end = -1
+//
+// ok=false means the header was absent or unparseable — the caller must then
+// treat the response as unprovable and restart clean. Single parser for the
+// header so a tolerance fix can never reach one call site and miss the other.
 func parseContentRange(h string) (start, end, total int64, ok bool) {
 	if h == "" {
 		return 0, 0, 0, false
@@ -80,6 +97,9 @@ func parseContentRange(h string) (start, end, total int64, ok bool) {
 	}
 	if _, err := fmt.Sscanf(h, "bytes %d-%d/*", &start, &end); err == nil {
 		return start, end, 0, true
+	}
+	if _, err := fmt.Sscanf(h, "bytes */%d", &total); err == nil {
+		return -1, -1, total, true
 	}
 	return 0, 0, 0, false
 }
@@ -131,8 +151,10 @@ func newDebridTransfer(task *Task, dest, outputDir string) *debridTransfer {
 // loadResumeState decides whether the on-disk partial may be appended to. Only
 // a partial WITH a sidecar proving where its bytes came from is resumable; one
 // of unknown provenance (no sidecar — an older agent version, a crash between
-// writes we know nothing about) or from a different URL with no validator to
-// revalidate is removed so the download starts clean instead of splicing.
+// writes we know nothing about) is removed so the download starts clean
+// instead of splicing. A recorded partial is resumable when the next response
+// can be proven to continue the same bytes: same URL, a validator to send in
+// If-Range, or the same (infohash, file) behind a re-minted link.
 func (x *debridTransfer) loadResumeState() {
 	x.meta, x.existing = nil, 0
 	fi, err := os.Stat(x.partial)
@@ -145,7 +167,7 @@ func (x *debridTransfer) loadResumeState() {
 		return
 	}
 	m, err := loadPartMeta(x.metaPath)
-	if err != nil || (m.URL != x.url && m.ifRangeValidator() == "") {
+	if err != nil || !x.metaResumable(m) {
 		x.removeArtifacts()
 		return
 	}
@@ -153,13 +175,34 @@ func (x *debridTransfer) loadResumeState() {
 	x.existing = fi.Size()
 }
 
-// removeArtifacts deletes the partial and its sidecar (never the final dest).
-func (x *debridTransfer) removeArtifacts() {
-	for _, p := range []string{x.partial, x.metaPath} {
+// metaResumable reports whether the sidecar's provenance lets the partial
+// continue under the CURRENT task.
+func (x *debridTransfer) metaResumable(m *partMeta) bool {
+	if m.URL == x.url || m.ifRangeValidator() != "" {
+		return true
+	}
+	// Re-minted link, no validator: same torrent file = same bytes. Both sides
+	// must be known — an empty infohash proves nothing.
+	return m.InfoHash != "" && m.InfoHash == x.task.InfoHash &&
+		m.FileName != "" && m.FileName == filepath.Base(x.dest)
+}
+
+// removePartialArtifacts deletes the in-progress artifacts of dest (the .part
+// and its sidecar) — never dest itself. Tolerates absence; logs anything else
+// so an undeletable leftover can be reaped later. THE single place that knows
+// which files a partial download consists of.
+func removePartialArtifacts(shortID, dest string) {
+	for _, p := range []string{partialPath(dest), partMetaPath(dest)} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			log.Printf("[%s] could not remove partial artifact %s: %v", x.task.ShortID(), p, err)
+			log.Printf("[%s] could not remove partial artifact %s: %v", shortID, p, err)
 		}
 	}
+}
+
+// removeArtifacts drops this transfer's partial + sidecar and forgets the
+// resume state that described them.
+func (x *debridTransfer) removeArtifacts() {
+	removePartialArtifacts(x.task.ShortID(), x.dest)
 	x.meta, x.existing = nil, 0
 }
 
@@ -228,8 +271,10 @@ func (x *debridTransfer) acceptFull(resp *http.Response) {
 // when the response cannot be proven to continue the same bytes at the same
 // offset — the caller must then restart clean rather than append.
 func (x *debridTransfer) acceptPartial(resp *http.Response) bool {
+	// start < 0 is the unsatisfied-range ("bytes */N") shape, which a 206 must
+	// never carry — treat it as unprovable rather than comparing it to an offset.
 	start, _, crTotal, ok := parseContentRange(resp.Header.Get("Content-Range"))
-	if !ok || start != x.existing {
+	if !ok || start < 0 || start != x.existing {
 		return false
 	}
 	if x.meta != nil && x.meta.TotalBytes > 0 && crTotal > 0 && crTotal != x.meta.TotalBytes {
@@ -299,33 +344,48 @@ func (x *debridTransfer) handle416(ctx context.Context, resp *http.Response) (*h
 			x.task.ShortID(), formatBytes(x.existing), formatBytes(x.expected))
 		return x.restartFull(ctx)
 	}
-	if cr := resp.Header.Get("Content-Range"); cr != "" {
-		// Content-Range: bytes */12345 — the server's actual size.
-		var serverSize int64
-		if _, err := fmt.Sscanf(cr, "bytes */%d", &serverSize); err == nil && serverSize > 0 && x.existing != serverSize {
-			log.Printf("[%s] local size %s != server size %s, re-downloading",
-				x.task.ShortID(), formatBytes(x.existing), formatBytes(serverSize))
-			return x.restartFull(ctx)
-		}
+	// Content-Range: bytes */12345 — the server's actual size (unsatisfied-range
+	// form, parsed by the same parser as the satisfied one).
+	if _, _, serverSize, ok := parseContentRange(resp.Header.Get("Content-Range")); ok && serverSize > 0 && x.existing != serverSize {
+		log.Printf("[%s] local size %s != server size %s, re-downloading",
+			x.task.ShortID(), formatBytes(x.existing), formatBytes(serverSize))
+		return x.restartFull(ctx)
 	}
 	log.Printf("[%s] file already complete: %s (%s)", x.task.ShortID(), filepath.Base(x.dest), formatBytes(x.existing))
 	return nil, nil
 }
 
-// saveMetaFrom persists the current response's provenance to the sidecar.
-// Best-effort: without it the next attempt merely re-downloads from scratch
-// instead of resuming; a working download is never failed over it.
+// saveMetaFrom stages the current response's provenance. It is NOT written to
+// disk here: on a full-body restart the old partial still holds the previous
+// entity's bytes until openPartial truncates it, and persisting the NEW
+// provenance next to the OLD bytes would arm a splicing resume if the process
+// died in that window. persistMeta writes it once the partial is opened (and
+// truncated where applicable).
 func (x *debridTransfer) saveMetaFrom(resp *http.Response) {
-	m := &partMeta{
+	x.meta = &partMeta{
 		URL:          x.url,
 		ETag:         resp.Header.Get("ETag"),
 		LastModified: resp.Header.Get("Last-Modified"),
 		TotalBytes:   x.total,
+		InfoHash:     x.task.InfoHash,
+		FileName:     filepath.Base(x.dest),
 	}
-	x.meta = m
-	b, err := json.Marshal(m)
+}
+
+// persistMeta writes the staged sidecar atomically (temp + rename — a
+// truncated sidecar would make loadPartMeta fail and throw away a resumable
+// partial). Best-effort: without it the next attempt merely re-downloads from
+// scratch instead of resuming; a working download is never failed over it.
+func (x *debridTransfer) persistMeta() {
+	if x.meta == nil {
+		return
+	}
+	b, err := json.Marshal(x.meta)
 	if err == nil {
-		err = os.WriteFile(x.metaPath, b, 0o644)
+		tmp := x.metaPath + ".tmp"
+		if err = os.WriteFile(tmp, b, 0o644); err == nil {
+			err = os.Rename(tmp, x.metaPath)
+		}
 	}
 	if err != nil {
 		log.Printf("[%s] could not write partial sidecar %s: %v (resume will restart from scratch)",
@@ -356,5 +416,8 @@ func (x *debridTransfer) finalize(fileName string) (*Result, error) {
 		FileName: fileName,
 		Method:   MethodDebrid,
 		Size:     fi.Size(),
+		// Carry the server-resolved size so verify() — the cross-backend
+		// backstop — enforces it too, not just this transport.
+		ExpectedBytes: x.expected,
 	}, nil
 }

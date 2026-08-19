@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeResumablePartial creates the .part bytes AND the provenance sidecar that
@@ -512,5 +513,222 @@ func TestDebridExpectedSizeDiscardsForeignPartial(t *testing.T) {
 	data, _ := os.ReadFile(result.FilePath)
 	if string(data) != content {
 		t.Errorf("foreign partial was spliced: got %d bytes, want %d", len(data), len(content))
+	}
+}
+
+// REGRESSION (review): the server re-mints the debrid CDN link on every
+// re-dispatch, and many CDNs send no ETag/Last-Modified. Resume must survive
+// that — the partial is provably the same bytes when it belongs to the same
+// (infohash, file), so a 40 GB download must not restart from zero.
+func TestDebridResumesAcrossRemintedLinkSameTorrentFile(t *testing.T) {
+	prefix := "PREFIX_" + strings.Repeat("A", 700*1024)
+	rest := "REST_" + strings.Repeat("B", 700*1024)
+	full := prefix + rest
+
+	var sawRange bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var start int64
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-", &start); err == nil && start > 0 {
+			sawRange = true
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(full)-1, len(full)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte(full[start:]))
+			return
+		}
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(full))
+	}))
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	dest := filepath.Join(outputDir, "remint.mkv")
+	const hash = "abc123def456abc123def456abc123def456abc1"
+	// Sidecar recorded against the PREVIOUS (now dead) link, no validators.
+	writeResumablePartialMeta(t, dest, []byte(prefix), &partMeta{
+		URL:      "https://cdn.example.com/OLD-EXPIRED-TOKEN/remint.mkv",
+		InfoHash: hash,
+		FileName: "remint.mkv",
+	})
+
+	task := &Task{
+		ID:             "remint-001",
+		InfoHash:       hash,
+		DirectURL:      srv.URL + "/NEW-TOKEN/remint.mkv",
+		DirectFileName: "remint.mkv",
+		Status:         StatusDownloading,
+	}
+	result, err := runDebridDownload(t, task, outputDir)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if !sawRange {
+		t.Error("a re-minted link for the SAME torrent file must resume, not restart from zero")
+	}
+	data, _ := os.ReadFile(result.FilePath)
+	if string(data) != full {
+		t.Errorf("resumed content wrong: got %d bytes, want %d", len(data), len(full))
+	}
+}
+
+// A partial recorded for a DIFFERENT torrent must never be resumed just because
+// the file name matches — the infohash is what proves the bytes.
+func TestDebridDoesNotResumeAcrossDifferentInfoHash(t *testing.T) {
+	content := bigBody("OTHER_")
+	srv := plainServer(content)
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	dest := filepath.Join(outputDir, "hashswap.mkv")
+	writeResumablePartialMeta(t, dest, []byte("BYTES_OF_ANOTHER_TORRENT"), &partMeta{
+		URL:      "https://cdn.example.com/old/hashswap.mkv",
+		InfoHash: "1111111111111111111111111111111111111111",
+		FileName: "hashswap.mkv",
+	})
+
+	task := &Task{
+		ID:             "hashswap-001",
+		InfoHash:       "2222222222222222222222222222222222222222",
+		DirectURL:      srv.URL + "/f.mkv",
+		DirectFileName: "hashswap.mkv",
+		Status:         StatusDownloading,
+	}
+	result, err := runDebridDownload(t, task, outputDir)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	data, _ := os.ReadFile(result.FilePath)
+	if string(data) != content {
+		t.Errorf("partial of a different torrent was spliced: got %d bytes, want %d", len(data), len(content))
+	}
+}
+
+// The finished Result must carry the server-resolved size so verify() — the
+// cross-backend backstop — can enforce it independently of this transport.
+func TestDebridResultCarriesExpectedBytes(t *testing.T) {
+	content := bigBody("EXPECTED_")
+	srv := plainServer(content)
+	defer srv.Close()
+
+	task := &Task{
+		ID:             "expbytes-001",
+		DirectURL:      srv.URL + "/f.mkv",
+		DirectFileName: "expbytes.mkv",
+		DirectFileSize: int64(len(content)),
+		Status:         StatusDownloading,
+	}
+	result, err := runDebridDownload(t, task, t.TempDir())
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if result.ExpectedBytes != int64(len(content)) {
+		t.Errorf("ExpectedBytes = %d, want %d", result.ExpectedBytes, len(content))
+	}
+	if err := verify(result); err != nil {
+		t.Errorf("verify of a byte-exact download must pass: %v", err)
+	}
+}
+
+// verify() must reject a file whose size disagrees with the server-resolved
+// one even when the transport's own check didn't run (defense in depth).
+func TestVerifyRejectsWrongSizeAgainstExpectedBytes(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "short.mkv")
+	if err := os.WriteFile(p, []byte(strings.Repeat("z", minPlausibleVideoBytes+1024)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := verify(&Result{FilePath: p, FileName: "short.mkv", ExpectedBytes: 8 << 30})
+	if err == nil {
+		t.Fatal("expected an integrity error for a size that disagrees with the resolved file")
+	}
+	if !IsIntegrity(err) {
+		t.Errorf("want IntegrityError, got %T: %v", err, err)
+	}
+}
+
+// A truncated stream of a KNOWN-size file keeps its partial for resume even
+// when the bytes so far are below the anti-stub floor — they are a valid
+// prefix, and deleting them would restart a huge download on every hiccup.
+func TestDebridSmallTruncationKeepsPartialWhenExpectedKnown(t *testing.T) {
+	full := bigBody("BIGFILE_")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(full[:8*1024])) // 8 KiB, well under the 1 MiB floor
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// CUT the connection mid-transfer (no clean EOF): the bytes so far are a
+		// valid prefix, unlike a complete tiny error body.
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, err := hj.Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	task := &Task{
+		ID:             "smalltrunc-001",
+		DirectURL:      srv.URL + "/f.mkv",
+		DirectFileName: "smalltrunc.mkv",
+		DirectFileSize: int64(len(full)),
+		Status:         StatusDownloading,
+	}
+	_, err := runDebridDownload(t, task, outputDir)
+	if err == nil {
+		t.Fatal("expected a truncation error")
+	}
+	dest := filepath.Join(outputDir, "smalltrunc.mkv")
+	if _, statErr := os.Stat(partialPath(dest)); statErr != nil {
+		t.Errorf("a valid prefix of a known-size file must be KEPT for resume: %v", statErr)
+	}
+}
+
+// Cancel landing in the finalize window (file already renamed) must still
+// delete it — cancel-and-delete means delete.
+func TestDebridCancelRemovesFinalizedFile(t *testing.T) {
+	outputDir := t.TempDir()
+	dest := filepath.Join(outputDir, "finalized.mkv")
+	if err := os.WriteFile(dest, []byte(bigBody("DONE_")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewDebridDownloader()
+	// Simulate the race window: the task is still tracked with its destPath
+	// while the file has already been published under its final name.
+	d.track("fin-race-001", dest, func() {}, nil)
+	if err := d.Cancel("fin-race-001"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Errorf("cancel-and-delete must remove a just-finalized file; stat err = %v", err)
+	}
+}
+
+// A queued task (blocked on the per-destination lock) must be cancellable —
+// not parked until the other download finishes.
+func TestPathLockerCtxAbortsWhileQueued(t *testing.T) {
+	l := newPathLocker()
+	release := l.Lock("/tmp/some/dest.mkv")
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := l.LockCtx(ctx, "/tmp/some/dest.mkv")
+		done <- err
+	}()
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("a cancelled waiter must not acquire the lock")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled waiter stayed parked behind the holder")
 	}
 }
