@@ -326,3 +326,24 @@ func TestFilterVTTDrawingCuesTagSweep(t *testing.T) {
 		})
 	}
 }
+
+// Angle brackets are prose in real subtitles — the corpus writes skill names as
+// "<Resistencia>". Only the WebVTT tag vocabulary may be stripped, or an
+// invented tag could leave a fragment the heuristics misread.
+func TestStripCueTagsLeavesProseBrackets(t *testing.T) {
+	for in, want := range map[string]string{
+		"<b>Hola</b>":                "Hola",
+		"<Resistencia> mejorada":     "<Resistencia> mejorada",
+		"<Manos hábiles>":            "<Manos hábiles>",
+		"<c.sign.big>x</c>":          "x",
+		"<v Ryan>hola</v>":           "hola",
+		"<lang ja>ねこ</lang>":         "ねこ",
+		"<00:00:01.500>ya":           "ya",
+		"5 < 10 and 10 > 5":          "5 < 10 and 10 > 5",
+		"<ruby>漢<rt>kan</rt></ruby>": "漢kan",
+	} {
+		if got := stripCueTags(in); got != want {
+			t.Errorf("stripCueTags(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

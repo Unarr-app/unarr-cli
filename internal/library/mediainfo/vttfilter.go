@@ -60,7 +60,13 @@ var drawingVocabulary = regexp.MustCompile(`^[mnlbspc0-9 \t.,+-]+$`)
 // tags, WRAPPING the whole cue payload — including a payload that is nothing
 // but a drawing path. The timestamp form opens with a digit, so it needs its
 // own alternative rather than the letter-led one.
-var cueTag = regexp.MustCompile(`</?[a-zA-Z][^>]*>|<[0-9][^>]*>`)
+//
+// The tag names are an EXPLICIT list, not `[a-zA-Z]\w*`: subtitles genuinely
+// write angle brackets as prose — the corpus has 18 distinct skill names like
+// "<Resistencia>" — and stripping those could in principle leave a fragment the
+// drawing heuristics then misread. No such line exists today (measured over
+// 671k cue lines), so this is cheap insurance rather than a fix.
+var cueTag = regexp.MustCompile(`</?(?:[biu]|c|v|lang|ruby|rt)(?:[ .][^>]*)?>|<[0-9][^>]*>`)
 
 // stripCueTags removes inline formatting so the drawing heuristics see the bare
 // payload. Found in production: a sign whose ASS style has Bold=-1 comes out as
