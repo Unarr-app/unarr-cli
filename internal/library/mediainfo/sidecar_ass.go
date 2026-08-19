@@ -34,15 +34,16 @@ var ErrNotStyledSubtitle = errors.New("subtitle stream carries no ASS styling")
 // ExtractSubtitleASS runs ffmpeg to copy subtitle stream `index` of mediaPath out
 // as a raw ASS/SSA script.
 //
-// `-f ass` on a NON-ass source (subrip, mov_text) does not fail — ffmpeg's ass
-// muxer SYNTHESISES a default style table, producing a file that claims styling
-// the author never wrote. The URL layer only advertises assUrl for ass/ssa
-// tracks, but the /sub token deliberately does not bind the serialisation, so
-// anyone holding a token for a subrip track can still ask for `f=ass`. Rather
-// than trust the caller, the OUTPUT is checked: a genuine ASS original always
-// carries a [V4+ Styles]/[V4 Styles] section with at least one authored Style
-// line, and a synthesised one does not carry the author's. This doubles as the
-// guard for an exotic mux whose extradata failed to round-trip.
+// `-f ass` on a NON-ass source (subrip, mov_text) must DECLINE, not fabricate:
+// the URL layer only advertises assUrl for ass/ssa tracks, but the /sub token
+// deliberately does not bind the serialisation, so anyone holding a token for a
+// subrip track can still ask for `f=ass`. How ffmpeg reacts depends on version:
+// ffmpeg 8's ass muxer refuses `-c:s copy` of a non-ass codec outright ("ass
+// muxer supports only codec ass"), which is mapped to ErrNotStyledSubtitle
+// below; older ffmpeg synthesised a lone "Default" style when TRANSCODING, so
+// the OUTPUT is additionally checked: a genuine ASS original carries an
+// authored style table (see hasAuthoredStyles). The content check doubles as
+// the guard for an exotic mux whose extradata failed to round-trip.
 //
 // The caller owns the ctx deadline, as with ExtractSubtitleVTT.
 func ExtractSubtitleASS(ctx context.Context, ffmpegPath, mediaPath string, index int) ([]byte, error) {
@@ -61,6 +62,11 @@ func ExtractSubtitleASS(ctx context.Context, ffmpegPath, mediaPath string, index
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		// ffmpeg 8: the ass muxer refuses to copy a non-ass stream. That is the
+		// NORMAL decline for a subrip/mov_text track, not an operational error.
+		if strings.Contains(stderr.String(), "ass muxer supports only codec") {
+			return nil, ErrNotStyledSubtitle
+		}
 		return nil, fmt.Errorf("ffmpeg ass extract: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	if len(out) == 0 {
@@ -105,6 +111,32 @@ func hasAuthoredStyles(ass []byte) bool {
 		}
 	}
 	return styles > 1 || authored
+}
+
+// IsASSSubtitleCodec reports whether a probed subtitle codec is ASS/SSA — the
+// only codecs whose original script `-c:s copy -f ass` can round-trip. Shared
+// by the scan-time prewarm and the engine's URL layer so both classify
+// identically.
+func IsASSSubtitleCodec(codec string) bool {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "ass", "ssa":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsASSSubtitlePath reports whether an EXTERNAL sidecar file is an ASS/SSA
+// script, by extension. The extension is the honest signal here: sidecars are
+// author-named files, and serving a .srt's bytes under `f=ass` would hand a
+// libass client an unparseable "script" (200 + no subtitles, no error).
+func IsASSSubtitlePath(subPath string) bool {
+	switch strings.ToLower(filepath.Ext(subPath)) {
+	case ".ass", ".ssa":
+		return true
+	default:
+		return false
+	}
 }
 
 // ReadExternalSubtitleASS returns a standalone .ass/.ssa sidecar as UTF-8 bytes.
@@ -174,6 +206,23 @@ func ExtractFontAttachment(ctx context.Context, ffmpegPath, mediaPath string, in
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
+
+	// A dump that was KILLED mid-write (ctx deadline, or the client hanging up —
+	// the handler's ctx derives from the request) leaves a PARTIAL font on disk.
+	// ffmpeg writes the attachment incrementally, so that file is non-empty,
+	// would pass the size check below, and the handler would then cache it for a
+	// day — a corrupt font served forever. Distrust everything if the run was
+	// aborted; the only benign non-zero exit is the documented "at least one
+	// output file" complaint, which happens AFTER the dump completed.
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("ffmpeg dump_attachment aborted (%v): %s",
+			ctx.Err(), strings.TrimSpace(stderr.String()))
+	}
+	var exitErr *exec.ExitError
+	if runErr != nil && errors.As(runErr, &exitErr) && !exitErr.ProcessState.Exited() {
+		return nil, fmt.Errorf("ffmpeg dump_attachment killed (%v): %s",
+			runErr, strings.TrimSpace(stderr.String()))
+	}
 
 	// Judge by the artefact, not the exit code (see the doc comment).
 	b, readErr := os.ReadFile(tmpOut) //nolint:gosec // G304: path is inside a temp dir we just created.

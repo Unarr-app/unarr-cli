@@ -1480,19 +1480,23 @@ func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) 
 		}
 		if wantASS {
 			// External sidecars need no ffmpeg at all — the file already IS the
-			// script; just transcode its charset. Embedded streams check the
-			// .ass cache first, same as the WebVTT path.
+			// script; just transcode its charset. BUT only a real .ass/.ssa can
+			// be served under f=ass: the token is minted for any sidecar (the
+			// vttUrl exists for .srt too), and handing srt bytes to a libass
+			// client would be a 200 with an unparseable "script". Anything else
+			// declines and falls through to the WebVTT this client can render.
 			if external {
-				assBytes, aerr := mediainfo.ReadExternalSubtitleASS(rawPath, langHint)
-				if aerr != nil {
-					log.Printf("[sub] external ass read failed (path=%q): %v", rawPath, aerr)
-					http.Error(w, "subtitle read failed", http.StatusInternalServerError)
-					return
+				if mediainfo.IsASSSubtitlePath(rawPath) {
+					assBytes, aerr := mediainfo.ReadExternalSubtitleASS(rawPath, langHint)
+					if aerr == nil {
+						ss.writeASS(w, assBytes)
+						return
+					}
+					log.Printf("[sub] external ass read failed, falling back to WebVTT (path=%q): %v", rawPath, aerr)
+				} else {
+					log.Printf("[sub] f=ass declined for non-ass sidecar (path=%q)", rawPath)
 				}
-				ss.writeASS(w, assBytes)
-				return
-			}
-			if ass, ok := mediainfo.ReadCachedSubtitleASS(rawPath, index); ok {
+			} else if ass, ok := mediainfo.ReadCachedSubtitleASS(rawPath, index); ok {
 				ss.writeASS(w, ass)
 				return
 			}
@@ -1513,25 +1517,29 @@ func (ss *StreamServer) subtitleHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// Beyond here we must extract on demand, which needs ffmpeg.
+	// Beyond here we must extract on demand, which needs ffmpeg — except that a
+	// prewarmed WebVTT can still satisfy a declined f=ass request without it.
 	if ss.ffmpegPath == "" {
+		if wantASS && !isURL {
+			if vtt, ok := mediainfo.ReadCachedSubtitle(rawPath, index); ok {
+				ss.writeVTT(w, vtt)
+				return
+			}
+		}
 		http.Error(w, "subtitles unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
 	// A full subtitle track is small (KBs–low MBs); 60s is ample for a normal
 	// movie's text track and bounds a hung/corrupt ffmpeg. Giant remuxes can
-	// exceed this on first play — the prewarm pre-fills the cache so this
-	// on-demand path is the fallback, not the steady state.
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-
-	if wantASS && ss.serveRawASS(w, ctx, rawPath, langHint, index, external, isURL) {
+	// exceed this on first play — the prewarm pre-fills the cache (.vtt AND
+	// .ass) so this on-demand path is the fallback, not the steady state.
+	if wantASS && !external && ss.serveASSOrCachedVTT(w, r, rawPath, index, isURL) {
 		return
 	}
-	// serveRawASS declined (the stream carries no authored ASS styling, so an
-	// "original" would be ffmpeg's synthesised stand-in): fall through and serve
-	// the WebVTT the client would otherwise have got.
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
 
 	var out []byte
 	if external {
@@ -1613,14 +1621,7 @@ func (ss *StreamServer) attachSubtitleVTTURLs(info map[string]any, session *HLSS
 
 // isASSCodec reports whether a probed subtitle codec carries ASS/SSA styling,
 // and so is worth serving raw to a libass renderer.
-func isASSCodec(codec string) bool {
-	switch strings.ToLower(strings.TrimSpace(codec)) {
-	case "ass", "ssa":
-		return true
-	default:
-		return false
-	}
-}
+func isASSCodec(codec string) bool { return mediainfo.IsASSSubtitleCodec(codec) }
 
 // attachFontURLs adds a top-level `fonts` array to a ProbeInfo map: one tokened
 // /fonts URL per font attachment muxed into the source. The player hands these
@@ -1630,10 +1631,14 @@ func isASSCodec(codec string) bool {
 // emitting URLs for them would just produce 404s. One token covers all of a
 // file's fonts (streamScopeFonts).
 func (ss *StreamServer) attachFontURLs(info map[string]any, session *HLSSession) {
+	// The raw attachment list is internal plumbing — pop it FIRST so no early
+	// return below leaks it into the client payload (populated for remote
+	// sources, empty for the common no-fonts case).
+	fonts, ok := info["fontAttachments"].([]map[string]any)
+	delete(info, "fontAttachments")
 	if session.cfg.SourceURL != "" {
 		return // remote source: no local container to dump attachments from
 	}
-	fonts, ok := info["fontAttachments"].([]map[string]any)
 	if !ok || len(fonts) == 0 {
 		return
 	}
@@ -1657,7 +1662,6 @@ func (ss *StreamServer) attachFontURLs(info map[string]any, session *HLSSession)
 	if len(urls) > 0 {
 		info["fonts"] = urls
 	}
-	delete(info, "fontAttachments")
 }
 
 // subtitleVTTURLFor builds the tokened vttUrl for one TEXT subtitle entry, picking
@@ -1722,10 +1726,33 @@ func (ss *StreamServer) writeVTT(w http.ResponseWriter, vtt []byte) {
 	}
 }
 
-// serveRawASS answers the `f=ass` variant of /sub once the cache has missed:
-// external sidecars are read straight off disk (the file already IS the script),
-// embedded streams are copied out of the container with ffmpeg. Split out of
-// subtitleHandler to keep that function's nesting flat.
+// serveASSOrCachedVTT is the on-demand f=ass path for an EMBEDDED stream: try
+// the raw extraction on its own 60s deadline; on decline, prefer the prewarmed
+// WebVTT sidecar over a second full demux — the decline may have burnt the
+// whole budget, and any later extraction must run on a FRESH deadline, never
+// the one the ASS attempt already exhausted. Returns false when the caller
+// should continue to the plain WebVTT extraction path.
+func (ss *StreamServer) serveASSOrCachedVTT(w http.ResponseWriter, r *http.Request, rawPath string, index int, isURL bool) bool {
+	assCtx, assCancel := context.WithTimeout(r.Context(), 60*time.Second)
+	served := ss.serveRawASS(w, assCtx, rawPath, index, isURL)
+	assCancel()
+	if served {
+		return true
+	}
+	if !isURL {
+		if vtt, ok := mediainfo.ReadCachedSubtitle(rawPath, index); ok {
+			ss.writeVTT(w, vtt)
+			return true
+		}
+	}
+	return false
+}
+
+// serveRawASS answers the `f=ass` variant of /sub for an EMBEDDED stream once
+// the cache has missed, copying the script out of the container with ffmpeg.
+// External sidecars are handled earlier in subtitleHandler — they need no
+// ffmpeg at all. Split out of subtitleHandler to keep that function's nesting
+// flat.
 //
 // Returns false when the request could not be honoured as ASS, leaving the
 // response untouched so the caller can serve WebVTT instead.
@@ -1733,18 +1760,8 @@ func (ss *StreamServer) writeVTT(w http.ResponseWriter, vtt []byte) {
 //nolint:revive // context-as-argument: the caller owns the timeout, and w reads better first here.
 func (ss *StreamServer) serveRawASS(
 	w http.ResponseWriter, ctx context.Context,
-	rawPath, langHint string, index int, external, isURL bool,
+	rawPath string, index int, isURL bool,
 ) bool {
-	if external {
-		assBytes, err := mediainfo.ReadExternalSubtitleASS(rawPath, langHint)
-		if err != nil {
-			log.Printf("[sub] external ass read failed (path=%q): %v", rawPath, err)
-			return false
-		}
-		ss.writeASS(w, assBytes)
-		return true
-	}
-
 	ass, err := mediainfo.ExtractSubtitleASS(ctx, ss.ffmpegPath, rawPath, index)
 	if errors.Is(err, mediainfo.ErrNotStyledSubtitle) {
 		// Not an error: a token minted for a subrip track is perfectly valid, it

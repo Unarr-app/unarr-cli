@@ -81,11 +81,32 @@ func (ss *StreamServer) fontsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ss.extractAndServeFont(w, r, rawPath, filename, index)
+}
+
+// extractAndServeFont runs the cold-cache path of fontsHandler: bounded ffmpeg
+// attachment dump, best-effort cache write, response.
+func (ss *StreamServer) extractAndServeFont(w http.ResponseWriter, r *http.Request, rawPath, filename string, index int) {
 	// Attachments live in the container header, so the dump reads the first few
 	// MB and stops — far cheaper than a subtitle extract, which has to demux the
 	// whole runtime. 30s is generous even on slow network storage.
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+
+	// Bound concurrent dumps: unlike /thumbnail (human-paced), a libass player
+	// asks for EVERY font of a file at once — the corpus MKV names 26 — and each
+	// cold-cache request would otherwise spawn its own ffmpeg parsing the same
+	// container header. Three at a time keeps a cold start snappy without
+	// letting a burst (or several clients) stack dozens of processes on a slow
+	// NAS. Cache hits never reach this.
+	select {
+	case fontExtractSem <- struct{}{}:
+		defer func() { <-fontExtractSem }()
+	case <-ctx.Done():
+		log.Printf("[fonts] extract queue timeout (i=%d path=%q)", index, rawPath)
+		http.Error(w, "font extract busy", http.StatusServiceUnavailable)
+		return
+	}
 
 	font, err := mediainfo.ExtractFontAttachment(ctx, ss.ffmpegPath, rawPath, index, filename)
 	if err != nil {
@@ -100,6 +121,9 @@ func (ss *StreamServer) fontsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ss.writeFont(w, font, filename)
 }
+
+// fontExtractSem bounds concurrent ffmpeg attachment dumps (see fontsHandler).
+var fontExtractSem = make(chan struct{}, 3)
 
 // writeFont writes a font attachment response. Fonts inside a container are
 // immutable for that file, so they cache for a day; private because the media
