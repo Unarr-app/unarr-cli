@@ -97,6 +97,13 @@ type debridTransfer struct {
 	existing  int64     // bytes already on disk in the partial (0 = fresh)
 	start     int64     // resume offset the server actually granted
 	total     int64     // expected final size (0 = unknown)
+	// expected is the byte size the SERVER resolved for this task (the debrid
+	// provider's file listing), carried in Task.DirectFileSize. It is the only
+	// end-to-end ground truth the transport can't fake: a CDN that advertises a
+	// different total is serving a different file, and a CDN that advertises
+	// nothing still gets held to this length. 0 = server sent none (older
+	// server, provider without sizes) — transport-level checks only.
+	expected int64
 }
 
 func newDebridTransfer(task *Task, dest, outputDir string) *debridTransfer {
@@ -107,8 +114,17 @@ func newDebridTransfer(task *Task, dest, outputDir string) *debridTransfer {
 		dest:      dest,
 		partial:   partialPath(dest),
 		metaPath:  partMetaPath(dest),
+		expected:  task.DirectFileSize,
 	}
 	x.loadResumeState()
+	// A partial recorded against a different total than the server now expects
+	// was downloaded for a DIFFERENT file (a re-resolve that picked another
+	// one) — appending would splice. Discard it and start clean.
+	if x.expected > 0 && x.meta != nil && x.meta.TotalBytes > 0 && x.meta.TotalBytes != x.expected {
+		log.Printf("[%s] partial was for a %s file but the server now expects %s - discarding it",
+			task.ShortID(), formatBytes(x.meta.TotalBytes), formatBytes(x.expected))
+		x.removeArtifacts()
+	}
 	return x
 }
 
@@ -161,10 +177,10 @@ func (x *debridTransfer) openStream(ctx context.Context) (*http.Response, error)
 		// (If-Range validator changed, no Range support). Either way the partial
 		// is superseded — it gets truncated by openPartial.
 		x.acceptFull(resp)
-		return resp, nil
+		return x.enforceExpectedSize(resp)
 	case http.StatusPartialContent:
 		if x.acceptPartial(resp) {
-			return resp, nil
+			return x.enforceExpectedSize(resp)
 		}
 		// The 206 does not provably continue our bytes (offset mismatch, total
 		// mismatch, unparseable Content-Range). Appending would corrupt — restart.
@@ -231,6 +247,27 @@ func (x *debridTransfer) acceptPartial(resp *http.Response) bool {
 	return true
 }
 
+// enforceExpectedSize reconciles the CDN's advertised total with the size the
+// SERVER resolved for this task. A link that advertises a DIFFERENT total is
+// serving a different file than the one the task was created for (wrong pick
+// behind a regenerated link) — refuse up front rather than download gigabytes
+// of the wrong bytes and fail at the end. A CDN that advertises nothing gets
+// held to the expected length instead, which arms the truncation/overlong
+// guards (and progress %) that x.total==0 would otherwise disable.
+func (x *debridTransfer) enforceExpectedSize(resp *http.Response) (*http.Response, error) {
+	if x.expected <= 0 {
+		return resp, nil
+	}
+	if x.total > 0 && x.total != x.expected {
+		resp.Body.Close()
+		x.removeArtifacts() // whatever was on disk belongs to that other file
+		return nil, integrityErr("size_conflict", "link serves %s but the resolved file is %s — wrong file behind the link",
+			formatBytes(x.total), formatBytes(x.expected))
+	}
+	x.total = x.expected
+	return resp, nil
+}
+
 // restartFull re-issues the request without Range after a resume could not be
 // validated. The stale partial gets truncated by openPartial (start == 0).
 func (x *debridTransfer) restartFull(ctx context.Context) (*http.Response, error) {
@@ -244,7 +281,7 @@ func (x *debridTransfer) restartFull(ctx context.Context) (*http.Response, error
 		return nil, fmt.Errorf("retry unexpected HTTP status: %d %s", resp.StatusCode, resp.Status)
 	}
 	x.acceptFull(resp)
-	return resp, nil
+	return x.enforceExpectedSize(resp)
 }
 
 // handle416 deals with "Range Not Satisfiable": either the partial is already
@@ -254,6 +291,13 @@ func (x *debridTransfer) handle416(ctx context.Context, resp *http.Response) (*h
 	defer resp.Body.Close()
 	if x.existing == 0 {
 		return nil, fmt.Errorf("server returned 416 Range Not Satisfiable")
+	}
+	// The partial can only be adopted as "already complete" if it matches the
+	// size the server resolved — a full file of the WRONG length is the wrong file.
+	if x.expected > 0 && x.existing != x.expected {
+		log.Printf("[%s] partial is %s but the resolved file is %s - re-downloading",
+			x.task.ShortID(), formatBytes(x.existing), formatBytes(x.expected))
+		return x.restartFull(ctx)
 	}
 	if cr := resp.Header.Get("Content-Range"); cr != "" {
 		// Content-Range: bytes */12345 — the server's actual size.

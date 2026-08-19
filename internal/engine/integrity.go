@@ -17,7 +17,10 @@ import (
 // after the page-cache write-back silently dropped ~374 MB).
 type IntegrityError struct {
 	// Reason is a stable short code surfaced to the web / logs:
-	// "truncated", "size_mismatch", "empty", "par2_failed", "flush_failed".
+	// "truncated", "size_mismatch", "empty", "par2_failed", "flush_failed",
+	// "overlong" (stream longer than advertised), "stub_response" (tiny CDN
+	// error body instead of media), "size_conflict" (link advertises a
+	// different total than the server-resolved file size).
 	Reason  string
 	Message string // human-readable detail
 }

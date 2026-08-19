@@ -328,6 +328,20 @@ func (m *progressMeter) maybeReport(downloaded int64, force bool) {
 func persistAndCheck(x *debridTransfer, file *os.File, closeFile func() error, downloaded int64) error {
 	outputDir := x.outputDir
 	fileName := filepath.Base(x.dest)
+
+	// Anti-stub floor FIRST, before the truncation guard can "keep the partial
+	// for resume": a debrid CDN answers 200 with a tiny (often all-NUL or HTML)
+	// body when the link is expired / "still caching" / errored. Those bytes are
+	// NOT a prefix of the real file, so a kept partial would splice garbage under
+	// the resumed download. A real video is never this small — delete and retry
+	// from zero, which costs nothing at this size. (With no expected size and no
+	// Content-Length this is also the ONLY guard against filing the stub into the
+	// library — the movie.mkv/movie (N).mkv flood in prod.)
+	if isVideoFile(fileName) && downloaded < minPlausibleVideoBytes {
+		x.removeArtifacts()
+		return integrityErr("stub_response", "debrid returned only %s for %s — link expired or not ready (not a valid video)", formatBytes(downloaded), fileName)
+	}
+
 	// Guard against a premature end-of-stream: if the server advertised a length
 	// and we read fewer bytes, the transfer was truncated (e.g. a debrid CDN edge
 	// closing the connection). Don't hand a short file to verify as if complete.
@@ -372,19 +386,6 @@ func persistAndCheck(x *debridTransfer, file *os.File, closeFile func() error, d
 		// StorageError path (retry once, then pause) rather than looping re-downloads.
 		return storageErr("flush_failed", outputDir, "could not save to %s — post-write size mismatch: wrote %s but file is %s on disk (likely a stalled or failing storage mount)",
 			outputDir, formatBytes(downloaded), formatBytes(fi.Size()))
-	}
-
-	// Anti-stub floor: a debrid CDN answers 200 with no Content-Length and a tiny
-	// (often all-NUL) body when the link is expired / "still caching" / errored.
-	// With x.total==0 the truncation guard above is skipped, so such a body would
-	// otherwise sail through verify() as a "complete" download and organize() would
-	// file it into the library as a movie — the root cause of the movie.mkv/movie (N).mkv
-	// stub flood in prod. A real video file is never this small; reject it as an
-	// integrity failure and remove the stub so the manager gives up cleanly instead
-	// of accreting one version-tagged sibling per failed resolve.
-	if isVideoFile(fileName) && downloaded < minPlausibleVideoBytes {
-		x.removeArtifacts()
-		return integrityErr("stub_response", "debrid returned only %s for %s — link expired or not ready (not a valid video)", formatBytes(downloaded), fileName)
 	}
 
 	return nil

@@ -55,6 +55,7 @@ type Task struct {
 	PreferredMethod string // auto | torrent | debrid | usenet
 	DirectURL       string // HTTPS download URL (debrid, etc.)
 	DirectFileName  string // Original filename from direct URL
+	DirectFileSize  int64  // Exact provider-listed byte size of that file (0 = unknown)
 	NzbID           string // Pre-resolved NZB ID (usenet)
 	NzbPassword     string // Password for encrypted NZB archives
 	ReplacePath     string // File to replace after download (upgrade mode)
@@ -107,6 +108,7 @@ func NewTaskFromAgent(at agent.Task) *Task {
 		PreferredMethod: at.PreferredMethod,
 		DirectURL:       at.DirectURL,
 		DirectFileName:  at.DirectFileName,
+		DirectFileSize:  at.DirectFileSize,
 		NzbID:           at.NzbID,
 		NzbPassword:     at.NzbPassword,
 		ReplacePath:     at.ReplacePath,

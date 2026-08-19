@@ -370,3 +370,147 @@ func TestPartMetaIfRangeValidator(t *testing.T) {
 		t.Errorf("nil meta: got %q", v)
 	}
 }
+
+// A link whose advertised Content-Length disagrees with the server-resolved
+// file size is serving the WRONG file — refuse before downloading it.
+func TestDebridExpectedSizeConflictRejected(t *testing.T) {
+	content := bigBody("WRONGFILE_")
+	srv := plainServer(content)
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	task := &Task{
+		ID:             "conflict-001",
+		DirectURL:      srv.URL + "/f.mkv",
+		DirectFileName: "conflict.mkv",
+		DirectFileSize: int64(len(content)) + 999_999, // server resolved a DIFFERENT file
+		Status:         StatusDownloading,
+	}
+	_, err := runDebridDownload(t, task, outputDir)
+	if err == nil {
+		t.Fatal("expected a size-conflict error")
+	}
+	if !IsIntegrity(err) {
+		t.Errorf("size conflict must be an IntegrityError, got %T: %v", err, err)
+	}
+	dest := filepath.Join(outputDir, "conflict.mkv")
+	if _, statErr := os.Stat(partialPath(dest)); !os.IsNotExist(statErr) {
+		t.Errorf("conflicting partial must be removed; stat err = %v", statErr)
+	}
+}
+
+// chunkedServer serves the body with no Content-Length (chunked), the shape of
+// the CDN responses the expected size exists to police.
+func chunkedServer(body string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+// With no Content-Length at all, the server-resolved size is what catches a
+// truncated stream — before it, this exact shape sailed through as "complete".
+func TestDebridExpectedSizeCatchesTruncationWithoutContentLength(t *testing.T) {
+	full := bigBody("NOCL_")
+	srv := chunkedServer(full[:len(full)-256*1024]) // short by 256 KiB
+	defer srv.Close()
+
+	task := &Task{
+		ID:             "nocl-trunc-001",
+		DirectURL:      srv.URL + "/f.mkv",
+		DirectFileName: "nocl.mkv",
+		DirectFileSize: int64(len(full)),
+		Status:         StatusDownloading,
+	}
+	_, err := runDebridDownload(t, task, t.TempDir())
+	if err == nil {
+		t.Fatal("expected a truncation error: stream ended short of the resolved size")
+	}
+	if !IsIntegrity(err) {
+		t.Errorf("want IntegrityError, got %T: %v", err, err)
+	}
+}
+
+// The happy path of the same shape: exact expected bytes over chunked encoding
+// must complete and finalize.
+func TestDebridExpectedSizeExactChunkedCompletes(t *testing.T) {
+	full := bigBody("NOCL_OK_")
+	srv := chunkedServer(full)
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	task := &Task{
+		ID:             "nocl-ok-001",
+		DirectURL:      srv.URL + "/f.mkv",
+		DirectFileName: "noclok.mkv",
+		DirectFileSize: int64(len(full)),
+		Status:         StatusDownloading,
+	}
+	result, err := runDebridDownload(t, task, outputDir)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if result.Size != int64(len(full)) {
+		t.Errorf("Size = %d, want %d", result.Size, len(full))
+	}
+}
+
+// A tiny stub body must be deleted (never kept as a resumable partial) even
+// when an expected size would otherwise classify it as merely "truncated" —
+// stub bytes are not a prefix of the real file, resuming over them splices.
+func TestDebridStubDeletedEvenWithExpectedSize(t *testing.T) {
+	srv := chunkedServer(strings.Repeat("e", 12*1024)) // 12 KiB error-page stub
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	task := &Task{
+		ID:             "stub-exp-001",
+		DirectURL:      srv.URL + "/f.mkv",
+		DirectFileName: "stubexp.mkv",
+		DirectFileSize: 4 << 30, // server resolved a 4 GiB file
+		Status:         StatusDownloading,
+	}
+	_, err := runDebridDownload(t, task, outputDir)
+	if err == nil {
+		t.Fatal("expected a stub error")
+	}
+	dest := filepath.Join(outputDir, "stubexp.mkv")
+	if _, statErr := os.Stat(partialPath(dest)); !os.IsNotExist(statErr) {
+		t.Errorf("stub partial must be removed, not kept for resume; stat err = %v", statErr)
+	}
+	if _, statErr := os.Stat(partMetaPath(dest)); !os.IsNotExist(statErr) {
+		t.Errorf("stub sidecar must be removed; stat err = %v", statErr)
+	}
+}
+
+// A resumable partial recorded for a different total than the server now
+// expects belongs to another file — it must be discarded, not appended to.
+func TestDebridExpectedSizeDiscardsForeignPartial(t *testing.T) {
+	content := bigBody("RIGHTFILE_")
+	srv := plainServer(content)
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	dest := filepath.Join(outputDir, "foreign.mkv")
+	url := srv.URL + "/f.mkv"
+	writeResumablePartialMeta(t, dest, []byte("OLD_FILE_PREFIX"), &partMeta{
+		URL:        url,
+		TotalBytes: int64(len(content)) + 4242, // recorded for a different file size
+	})
+
+	task := &Task{
+		ID:             "foreign-001",
+		DirectURL:      url,
+		DirectFileName: "foreign.mkv",
+		DirectFileSize: int64(len(content)),
+		Status:         StatusDownloading,
+	}
+	result, err := runDebridDownload(t, task, outputDir)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	data, _ := os.ReadFile(result.FilePath)
+	if string(data) != content {
+		t.Errorf("foreign partial was spliced: got %d bytes, want %d", len(data), len(content))
+	}
+}
