@@ -693,9 +693,11 @@ func (m *Manager) runDownload(ctx context.Context, task *Task, method DownloadMe
 }
 
 // removeBrokenResult deletes a single-file result that failed the on-disk verify
-// so the retry's downloader starts clean (debrid resumes from a partial via HTTP
-// Range — appending to a truncated stub would compound the corruption). Multi-file
-// (directory) results are left for the downloader/anacrolix to re-verify in place.
+// so the retry's downloader starts clean (a debrid result is already finalized
+// under its real name at this point, so removing it forces a from-scratch
+// re-fetch; the torrent path re-hashes inherited pieces on the next attempt).
+// Multi-file (directory) results are left for the downloader/anacrolix to
+// re-verify in place.
 func removeBrokenResult(taskID string, result *Result) {
 	if result == nil || result.FilePath == "" {
 		return
@@ -954,46 +956,13 @@ func (m *Manager) reapStaleTmpHolders(srcDir string) {
 	}
 }
 
-// releaseDirLocks serializes post-processing per release directory. Entries are
-// reference-counted and dropped when the last holder releases, so the map does
-// not grow with every download the daemon ever ran.
-var (
-	releaseDirMu    sync.Mutex
-	releaseDirLocks = map[string]*releaseDirLock{}
-)
-
-type releaseDirLock struct {
-	mu   sync.Mutex
-	refs int
-}
+// releaseDirLocks serializes post-processing per release directory. See
+// pathLocker for the reference-counted semantics.
+var releaseDirLocks = newPathLocker()
 
 // lockReleaseDir takes the lock for dir and returns its release function.
 func (m *Manager) lockReleaseDir(dir string) func() {
-	key, err := filepath.Abs(dir)
-	if err != nil {
-		key = dir // best effort: an unresolvable path still gets a stable key
-	}
-
-	releaseDirMu.Lock()
-	l, ok := releaseDirLocks[key]
-	if !ok {
-		l = &releaseDirLock{}
-		releaseDirLocks[key] = l
-	}
-	l.refs++
-	releaseDirMu.Unlock()
-
-	l.mu.Lock()
-
-	return func() {
-		l.mu.Unlock()
-		releaseDirMu.Lock()
-		l.refs--
-		if l.refs == 0 {
-			delete(releaseDirLocks, key)
-		}
-		releaseDirMu.Unlock()
-	}
+	return releaseDirLocks.Lock(dir)
 }
 
 // unpackedSuffix marks a directory as our unpack of the sibling release.

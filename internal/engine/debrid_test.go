@@ -237,6 +237,7 @@ func TestDebridDownloadResume(t *testing.T) {
 			var start int64
 			fmt.Sscanf(rangeHeader, "bytes=%d-", &start)
 			if start == int64(len(alreadyDownloaded)) {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(fullContent)-1, len(fullContent)))
 				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(remaining)))
 				w.WriteHeader(http.StatusPartialContent)
 				w.Write([]byte(remaining))
@@ -252,16 +253,16 @@ func TestDebridDownloadResume(t *testing.T) {
 	d := NewDebridDownloader()
 	outputDir := t.TempDir()
 	fileName := "resume-test.mkv"
+	url := srv.URL + "/file.mkv"
 
-	// Create partial file
-	partialPath := filepath.Join(outputDir, fileName)
-	if err := os.WriteFile(partialPath, []byte(alreadyDownloaded), 0o644); err != nil {
-		t.Fatalf("write partial file: %v", err)
-	}
+	// Create a resumable partial: the .part bytes plus the sidecar proving where
+	// they came from (a bare partial with no provenance is deliberately not resumed).
+	dest := filepath.Join(outputDir, fileName)
+	writeResumablePartial(t, dest, url, []byte(alreadyDownloaded))
 
 	task := &Task{
 		ID:             "resume-001",
-		DirectURL:      srv.URL + "/file.mkv",
+		DirectURL:      url,
 		DirectFileName: fileName,
 		Status:         StatusDownloading,
 	}
@@ -370,14 +371,18 @@ func TestDebridDownloadPause(t *testing.T) {
 
 	<-errCh
 
-	// Verify partial file exists on disk (pause keeps files)
-	partialPath := filepath.Join(outputDir, "pauseable.mkv")
-	fi, err := os.Stat(partialPath)
+	// Verify partial file exists on disk (pause keeps files). During the download
+	// bytes live ONLY under the .part name; the final name appears on completion.
+	partial := partialPath(filepath.Join(outputDir, "pauseable.mkv"))
+	fi, err := os.Stat(partial)
 	if err != nil {
 		t.Fatalf("partial file should exist after pause: %v", err)
 	}
 	if fi.Size() == 0 {
 		t.Error("partial file should have some bytes")
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "pauseable.mkv")); !os.IsNotExist(err) {
+		t.Errorf("final name must not exist mid-download; stat err = %v (want not-exist)", err)
 	}
 }
 
@@ -413,7 +418,7 @@ func TestDebridCancelDeletesPartial(t *testing.T) {
 			DirectFileName: "cancelled.mkv",
 			Status:         StatusDownloading,
 		}
-		partialPath := filepath.Join(outputDir, "cancelled.mkv")
+		partial := partialPath(filepath.Join(outputDir, "cancelled.mkv"))
 
 		progressCh := make(chan Progress, 100)
 		errCh := make(chan error, 1)
@@ -425,14 +430,14 @@ func TestDebridCancelDeletesPartial(t *testing.T) {
 		<-started
 		time.Sleep(50 * time.Millisecond) // let the first chunk hit disk
 		// Sanity: the partial exists before we cancel.
-		if _, err := os.Stat(partialPath); err != nil {
+		if _, err := os.Stat(partial); err != nil {
 			t.Fatalf("partial should exist before cancel: %v", err)
 		}
 
 		d.Cancel("rc2-cancel-001")
 		<-errCh
 
-		if _, err := os.Stat(partialPath); !os.IsNotExist(err) {
+		if _, err := os.Stat(partial); !os.IsNotExist(err) {
 			t.Errorf("Cancel must delete the partial; stat err = %v (want not-exist)", err)
 		}
 	})
@@ -450,7 +455,7 @@ func TestDebridCancelDeletesPartial(t *testing.T) {
 			DirectFileName: "paused.mkv",
 			Status:         StatusDownloading,
 		}
-		partialPath := filepath.Join(outputDir, "paused.mkv")
+		partial := partialPath(filepath.Join(outputDir, "paused.mkv"))
 
 		progressCh := make(chan Progress, 100)
 		errCh := make(chan error, 1)
@@ -464,7 +469,7 @@ func TestDebridCancelDeletesPartial(t *testing.T) {
 		d.Pause("rc2-pause-001")
 		<-errCh
 
-		if _, err := os.Stat(partialPath); err != nil {
+		if _, err := os.Stat(partial); err != nil {
 			t.Errorf("Pause must keep the partial for resume; stat err = %v", err)
 		}
 	})

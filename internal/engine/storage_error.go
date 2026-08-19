@@ -31,7 +31,8 @@ import (
 type StorageError struct {
 	// Reason is a stable short code surfaced to the web / logs:
 	// "mkdir_failed", "open_failed", "flush_failed" (fsync error),
-	// "close_failed" (close error), "stat_failed" (read-back stat faulted).
+	// "close_failed" (close error), "stat_failed" (read-back stat faulted),
+	// "rename_failed" (finished partial could not be moved into place).
 	Reason  string
 	Dir     string // target directory, when known — the actionable part for the user
 	Message string // human-readable detail (includes the underlying OS error)
