@@ -318,7 +318,7 @@ func (x *debridTransfer) enforceExpectedSize(resp *http.Response) (*http.Respons
 	if x.total > 0 && x.total != x.expected {
 		resp.Body.Close()
 		x.removeArtifacts() // whatever was on disk belongs to that other file
-		return nil, integrityErr("size_conflict", "link serves %s but the resolved file is %s — wrong file behind the link",
+		return nil, integrityErr(reasonSizeConflict, "link serves %s but the resolved file is %s — wrong file behind the link",
 			formatBytes(x.total), formatBytes(x.expected))
 	}
 	x.total = x.expected

@@ -38,6 +38,23 @@ func IsIntegrity(err error) bool {
 	return errors.As(err, &ie)
 }
 
+// reasonSizeConflict marks a link whose advertised length disagrees with the
+// size the SERVER resolved for the task — i.e. the two disagree about WHICH
+// file this is, before a single byte is trusted.
+const reasonSizeConflict = "size_conflict"
+
+// IsSizeConflict reports whether err is the deterministic "this link is not the
+// resolved file" refusal. It is an IntegrityError (the bytes must not be kept)
+// but NOT a corruption to retry: re-fetching the same link reproduces it
+// exactly, and the cause may equally be a stale/wrong server-side size rather
+// than a bad link. So the manager lets it fall through to the next method
+// (torrent/usenet) instead of burning three identical attempts and reporting a
+// healthy release as damaged.
+func IsSizeConflict(err error) bool {
+	var ie *IntegrityError
+	return errors.As(err, &ie) && ie.Reason == reasonSizeConflict
+}
+
 // integrityErr builds an IntegrityError with a printf-style message.
 func integrityErr(reason, format string, args ...any) *IntegrityError {
 	return &IntegrityError{Reason: reason, Message: fmt.Sprintf(format, args...)}

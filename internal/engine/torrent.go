@@ -637,6 +637,15 @@ func (d *TorrentDownloader) verifyInheritedPieces(ctx context.Context, t *torren
 		task.ShortID(), formatBytes(claimed), len(indices))
 	start := time.Now()
 	if err := verifyPiecesConcurrently(ctx, t, indices); err != nil {
+		// A read fault while re-hashing is the DESTINATION failing (a NAS that
+		// dropped, an EIO on the download volume), not a bad source: reporting it
+		// as a transport error would burn the method fallback and re-download the
+		// whole thing to the same sick mount. Route it to the storage path
+		// (retry once, then pause with the "check your drive" message).
+		if isStorageStatErr(err) {
+			return storageErr("stat_failed", d.cfg.DataDir,
+				"could not read back the resumed download in %s — is your drive/NAS still connected? (%v)", d.cfg.DataDir, err)
+		}
 		return fmt.Errorf("verify resumed data: %w", err)
 	}
 	waitPieceMarkingSettled(ctx, t)

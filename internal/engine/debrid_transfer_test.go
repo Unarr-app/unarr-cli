@@ -780,3 +780,93 @@ func TestDebridValidatorAloneDoesNotAuthorizeResume(t *testing.T) {
 		t.Errorf("unrelated partial was spliced: got %d bytes, want %d", len(data), len(content))
 	}
 }
+
+// REGRESSION (audit): two tasks can resolve to the SAME destination (a
+// re-dispatch racing a retry, two releases with one filename). Cancel deletes
+// by PATH, so cancelling one must never unlink the other's live partial or its
+// just-finished file.
+func TestDebridCancelDoesNotDeleteAnotherTasksFiles(t *testing.T) {
+	outputDir := t.TempDir()
+	dest := filepath.Join(outputDir, "shared.mkv")
+	part := partialPath(dest)
+	if err := os.WriteFile(part, []byte("SURVIVOR_BYTES"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewDebridDownloader()
+	// Task B is the live writer of this destination; task A is a duplicate that
+	// gets cancelled.
+	d.track("task-b-live", dest, func() {}, nil)
+	d.track("task-a-dup", dest, func() {}, nil)
+
+	if err := d.Cancel("task-a-dup"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	if _, err := os.Stat(part); err != nil {
+		t.Errorf("cancelling a duplicate task must not unlink the live task's partial: %v", err)
+	}
+}
+
+// …and once nobody else claims the destination, cancel-and-delete really deletes.
+func TestDebridCancelDeletesWhenDestIsUnclaimed(t *testing.T) {
+	outputDir := t.TempDir()
+	dest := filepath.Join(outputDir, "solo.mkv")
+	part := partialPath(dest)
+	if err := os.WriteFile(part, []byte("DOOMED"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewDebridDownloader()
+	d.track("task-solo", dest, func() {}, nil)
+	if err := d.Cancel("task-solo"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := os.Stat(part); !os.IsNotExist(err) {
+		t.Errorf("cancel-and-delete must remove the partial; stat err = %v", err)
+	}
+}
+
+// A partial whose sidecar carries a validator but belongs to ANOTHER torrent
+// must not be resumed on the strength of that validator (audit finding #2).
+func TestDebridCrossInfoHashWithValidatorIsNotResumed(t *testing.T) {
+	content := bigBody("CORRECT_")
+	var sawRange bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			sawRange = true
+		}
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(content))
+	}))
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	dest := filepath.Join(outputDir, "xhash.mkv")
+	writeResumablePartialMeta(t, dest, []byte("BYTES_OF_ANOTHER_TORRENT"), &partMeta{
+		URL:          "https://other-cdn.example.com/old/xhash.mkv",
+		LastModified: "Wed, 21 Oct 2015 07:28:00 GMT", // weak-ish validator
+		InfoHash:     "1111111111111111111111111111111111111111",
+		FileName:     "xhash.mkv",
+	})
+
+	task := &Task{
+		ID:             "xhash-001",
+		InfoHash:       "2222222222222222222222222222222222222222",
+		DirectURL:      srv.URL + "/f.mkv",
+		DirectFileName: "xhash.mkv",
+		Status:         StatusDownloading,
+	}
+	result, err := runDebridDownload(t, task, outputDir)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if sawRange {
+		t.Error("a partial from a DIFFERENT torrent must not be resumed, validator or not")
+	}
+	data, _ := os.ReadFile(result.FilePath)
+	if string(data) != content {
+		t.Errorf("cross-infohash partial was spliced: got %d bytes, want %d", len(data), len(content))
+	}
+}

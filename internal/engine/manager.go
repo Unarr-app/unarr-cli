@@ -560,6 +560,14 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 				return
 			}
 			if IsIntegrity(err) {
+				// A size conflict is deterministic — the same link answers the same
+				// way every time — and attemptDownload already tried the other
+				// methods. Retrying it as corruption would just burn two more
+				// identical attempts before saying the same thing.
+				if IsSizeConflict(err) {
+					m.failDamaged(ctx, task, err)
+					return
+				}
 				if attempt < maxIntegrityAttempts {
 					log.Printf("[%s] integrity check failed (attempt %d/%d), re-downloading clean: %v",
 						agent.ShortID(task.ID), attempt, maxIntegrityAttempts, err)
@@ -640,7 +648,13 @@ func (m *Manager) attemptDownload(ctx context.Context, task *Task) (*Result, err
 		// caller (same source, clean start); a storage failure means the target
 		// mount faulted (another method writes to the same dir) — don't burn the
 		// method fallback on any of them. Only a plain transport failure tries next.
-		if IsInsufficientDisk(err) || IsIntegrity(err) || IsStorage(err) {
+		//
+		// EXCEPT a size conflict: the link and the server disagree about WHICH
+		// file this is, deterministically. Re-fetching reproduces it exactly, and
+		// the wrong side may be our own metadata — so this one DOES fall through
+		// to the next method (torrent/usenet), which gets the release from a
+		// different source instead of reporting it damaged three attempts later.
+		if IsInsufficientDisk(err) || IsStorage(err) || (IsIntegrity(err) && !IsSizeConflict(err)) {
 			return nil, err
 		}
 		// ErrVPNTunnelDown: the tunnel died mid-download (torrent dropped, partial

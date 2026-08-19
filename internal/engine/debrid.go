@@ -254,6 +254,57 @@ func (d *DebridDownloader) Pause(taskID string) error {
 	return nil
 }
 
+// removeDestFiles deletes the cancelled task's artifacts at destPath: the
+// partial + sidecar, and a file already published under the final name (a
+// cancel can land between finalize()'s rename and the goroutine's untrack, and
+// cancel-and-delete means delete).
+//
+// Two tasks can resolve to the SAME destination (a re-dispatch racing a retry,
+// two releases with one filename). Deleting by path would then unlink the OTHER
+// task's live .part — or its finished file — so we take the destination lock
+// first (the surviving writer holds it while it works) and re-check that nobody
+// else still claims this destination before removing anything.
+func (d *DebridDownloader) removeDestFiles(taskID, destPath string) {
+	shortID := agent.ShortID(taskID)
+
+	// Bounded: a wedged writer must not block the cancel path forever. Without
+	// the lock we skip the delete rather than risk another task's data — the
+	// reconcile sweep reaps an orphaned .part later, whereas a wrong unlink is
+	// unrecoverable.
+	ctx, cancel := context.WithTimeout(context.Background(), cancelDrainTimeout)
+	defer cancel()
+	unlock, err := d.pathLocks.LockCtx(ctx, destPath)
+	if err != nil {
+		log.Printf("[%s] debrid cancel: %s is still held by another download - leaving its files alone", shortID, destPath)
+		return
+	}
+	defer unlock()
+
+	if other, taken := d.destClaimedBy(destPath); taken {
+		log.Printf("[%s] debrid cancel: %s now belongs to task %s - leaving its files alone",
+			shortID, destPath, agent.ShortID(other))
+		return
+	}
+
+	removePartialArtifacts(shortID, destPath)
+	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("[%s] debrid cancel: failed to remove %s: %v", shortID, destPath, err)
+	}
+	log.Printf("[%s] debrid download cancelled + files removed", shortID)
+}
+
+// destClaimedBy reports whether any still-tracked task owns destPath, and which.
+func (d *DebridDownloader) destClaimedBy(destPath string) (string, bool) {
+	d.activeMu.Lock()
+	defer d.activeMu.Unlock()
+	for id, p := range d.destPaths {
+		if p == destPath {
+			return id, true
+		}
+	}
+	return "", false
+}
+
 // Cancel aborts the in-progress HTTP download AND removes the partial + sidecar,
 // per the Downloader contract (torrent.Cancel/usenet.Cancel delete too). This is
 // the method the manager's CancelAndDeleteFiles invokes; the intent is
@@ -290,16 +341,7 @@ func (d *DebridDownloader) Cancel(taskID string) error {
 	// Delete the partial + sidecar only when we still had an in-flight destPath —
 	// this is a cancel-and-delete, and the bytes on disk are an incomplete download.
 	if hadPath && destPath != "" {
-		removePartialArtifacts(agent.ShortID(taskID), destPath)
-		// The cancel can land in the window between finalize()'s rename and the
-		// download goroutine's untrack: the file is then COMPLETE under its final
-		// name while we still hold its destPath. Cancel-and-delete means delete —
-		// leaving it would orphan a full download the user asked to remove (and
-		// the reconcile sweep never touches a finished name).
-		if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[%s] debrid cancel: failed to remove %s: %v", agent.ShortID(taskID), destPath, err)
-		}
-		log.Printf("[%s] debrid download cancelled + files removed", agent.ShortID(taskID))
+		d.removeDestFiles(taskID, destPath)
 	} else if ok {
 		log.Printf("[%s] debrid download cancelled", agent.ShortID(taskID))
 	}
