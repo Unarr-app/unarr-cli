@@ -34,6 +34,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
@@ -1031,16 +1032,27 @@ func (s *HLSSession) ProbeInfo() map[string]any {
 			"path":     sb.Path,
 		})
 	}
+	// fontAttachments is INTERNAL: attachFontURLs turns it into a tokened
+	// `fonts` array and deletes the key, the same way `path` is stripped from
+	// subtitle entries once their URL is built.
+	fonts := make([]map[string]any, 0, len(s.probe.Fonts))
+	for _, f := range s.probe.Fonts {
+		fonts = append(fonts, map[string]any{
+			"index":    f.Index,
+			"filename": f.Filename,
+		})
+	}
 	return map[string]any{
-		"videoCodec":  s.probe.VideoCodec,
-		"width":       s.probe.Width,
-		"height":      s.probe.Height,
-		"bitDepth":    s.probe.BitDepth,
-		"hdr":         s.probe.HDR,
-		"durationSec": s.probe.DurationSec,
-		"container":   s.probe.Container,
-		"audio":       audios,
-		"subtitles":   subs,
+		"videoCodec":      s.probe.VideoCodec,
+		"width":           s.probe.Width,
+		"height":          s.probe.Height,
+		"bitDepth":        s.probe.BitDepth,
+		"hdr":             s.probe.HDR,
+		"durationSec":     s.probe.DurationSec,
+		"container":       s.probe.Container,
+		"audio":           audios,
+		"subtitles":       subs,
+		"fontAttachments": fonts,
 	}
 }
 
@@ -1825,9 +1837,26 @@ func (s *HLSSession) ServeSubtitleVTT(w http.ResponseWriter, r *http.Request, id
 		case <-time.After(150 * time.Millisecond):
 		}
 	}
+	// Read + filter rather than ServeFile: ffmpeg's ass→webvtt converter leaks
+	// vector-drawing paths as cue text (see mediainfo.FilterVTTDrawingCues), and
+	// the sign cues have to be dropped before the browser paints them. Losing
+	// ServeFile's Range support costs nothing here — a subtitle sidecar is tens
+	// of KB and no client range-requests one.
+	vtt, err := os.ReadFile(path) //nolint:gosec // G304: path is built from tmpDir + a caller-validated non-negative index.
+	if err != nil {
+		log.Printf("[hls] subtitle sidecar read failed: %v", err)
+		http.Error(w, "subtitle track unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	vtt = mediainfo.FilterVTTDrawingCues(vtt)
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	// no-cache: the sidecar keeps growing while the copy pass runs, so a client
+	// that fetched it early must be able to pick up the later cues.
 	w.Header().Set("Cache-Control", "no-cache")
-	http.ServeFile(w, r, path)
+	w.Header().Set("Content-Length", strconv.Itoa(len(vtt)))
+	if _, err := w.Write(vtt); err != nil {
+		log.Printf("[hls] subtitle sidecar write failed: %v", err)
+	}
 }
 
 // ServeSegment writes the requested video segment, blocking until ffmpeg

@@ -78,6 +78,17 @@ func streamScopeSub(filePath string, index int) string {
 	return "sub:" + hex.EncodeToString(sum[:]) + ":" + strconv.Itoa(index)
 }
 
+// streamScopeFonts is the token scope for the font attachments of one file (the
+// /fonts endpoint). Unlike streamScopeSub it does NOT bind an index: an .ass
+// track routinely names a dozen fonts, and minting a token per attachment would
+// bloat every session payload for no security gain — a client allowed to read
+// one font of a file may read them all. The web mints the matching scope in
+// src/lib/stream-token.ts (streamScopeFonts), byte-for-byte.
+func streamScopeFonts(filePath string) string {
+	sum := sha256.Sum256([]byte(filePath))
+	return "fonts:" + hex.EncodeToString(sum[:])
+}
+
 // newStreamSecret returns 32 cryptographically-random bytes used to sign stream
 // tokens for the lifetime of the daemon. Regenerated each start, so tokens from
 // a previous run stop validating (the web re-resolves the URL on demand).

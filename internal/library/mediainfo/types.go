@@ -6,6 +6,11 @@ type MediaInfo struct {
 	Audio     []AudioTrack    `json:"audio"`
 	Subtitles []SubtitleTrack `json:"subtitles"`
 	Languages []string        `json:"languages"` // derived from audio tracks
+	// Fonts are the font files muxed into the container as attachments. Fansub
+	// .ass tracks name fonts the viewer's machine almost never has, so a faithful
+	// render needs these shipped alongside the subtitle. Empty for the vast
+	// majority of files — only anime/fansub releases carry them.
+	Fonts []FontAttachment `json:"fonts,omitempty"`
 	// Integrity is non-nil only when the scan found signs of corruption / an
 	// incomplete download. Surfaced in the web library as a "damaged" warning
 	// so the user re-downloads instead of hitting a file that won't play.
@@ -74,4 +79,19 @@ type SubtitleTrack struct {
 	// Path is the absolute filesystem path of the sidecar file (External only).
 	// Empty for embedded streams (those live inside the media container).
 	Path string `json:"path,omitempty"`
+}
+
+// FontAttachment is a font file muxed into the container, needed to render an
+// .ass subtitle the way its author typeset it.
+type FontAttachment struct {
+	// Index addresses the attachment for `ffmpeg -dump_attachment:t:<Index>`.
+	//
+	// It is the position among ATTACHMENT streams — NOT the global stream index,
+	// and NOT the position after filtering to fonts. On a real release those
+	// differ wildly: Skeleton Knight S01E01 has attachments t:0..t:25 whose
+	// stream indices run 16..41. Getting this wrong silently dumps the wrong
+	// file, so the counter must advance for EVERY attachment, font or not.
+	Index    int    `json:"index"`
+	Filename string `json:"filename"`
+	Mimetype string `json:"mimetype,omitempty"`
 }

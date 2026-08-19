@@ -34,6 +34,10 @@ type StreamProbe struct {
 	// SubtitleTracks lists every subtitle stream in source order. Index in
 	// this slice == ffmpeg `-map 0:s:N` index.
 	SubtitleTracks []ProbeSubtitleTrack
+	// Fonts lists font attachments muxed into the container, needed to render an
+	// .ass track the way its author typeset it. Empty for everything but fansub
+	// releases.
+	Fonts []mediainfo.FontAttachment
 }
 
 // ProbeAudioTrack is a slimmed AudioTrack view tied to ffmpeg stream index.
@@ -161,6 +165,7 @@ func ProbeFile(ctx context.Context, ffprobePath, filePath string) (*StreamProbe,
 			probe.SubtitleTracks = append(probe.SubtitleTracks, t)
 		}
 	}
+	probe.Fonts = mi.Fonts
 	storeProbeCache(filePath, probe)
 	return probe, nil
 }

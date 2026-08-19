@@ -58,6 +58,7 @@ type prewarmJob struct {
 	trick    bool    // trickplay sprite job
 	keyframe bool    // COPY-VOD keyframe index job
 	subIdx   []int   // subtitle stream indices to extract in ONE pass (subtitle job)
+	assIdx   []int   // ass/ssa stream indices whose RAW script is cached in the same pass
 	posSec   float64 // frame position in seconds (thumbnail job)
 	width    int     // frame/tile width (thumbnail + trickplay jobs)
 	duration float64 // runtime seconds (trickplay job)
@@ -231,14 +232,24 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 
 				// Extract only the indices not already fresh, and do them in ONE
 				// ffmpeg pass — a multi-GB remux is demuxed once for all its text
-				// tracks instead of once per track.
+				// tracks instead of once per track. ASS-codec tracks additionally
+				// get their RAW script cached in the same pass: it is what the
+				// /sub?f=ass endpoint serves, and prewarming it here is what
+				// keeps a first play of a giant remux from burning the handler's
+				// 60s ceiling on a full-file demux.
 				todo := make([]int, 0, len(j.subIdx))
 				for _, idx := range j.subIdx {
 					if _, ok := mediainfo.ReadCachedSubtitle(j.path, idx); !ok {
 						todo = append(todo, idx)
 					}
 				}
-				if len(todo) == 0 {
+				todoAss := make([]int, 0, len(j.assIdx))
+				for _, idx := range j.assIdx {
+					if _, ok := mediainfo.ReadCachedSubtitleASS(j.path, idx); !ok {
+						todoAss = append(todoAss, idx)
+					}
+				}
+				if len(todo) == 0 && len(todoAss) == 0 {
 					continue
 				}
 				// Generous per-file deadline. Subtitle packets are interleaved across
@@ -248,11 +259,11 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 				// ~200GB; bounded so one corrupt/stalled file can't wedge a worker.
 				// This is background + idempotent — it only runs until the cache fills.
 				jctx, cancel := context.WithTimeout(ctx, 45*time.Minute)
-				res, err := mediainfo.ExtractSubtitlesVTTMulti(jctx, opts.FFmpegPath, j.path, todo)
+				res, resAss, err := mediainfo.ExtractSubtitlesMulti(jctx, opts.FFmpegPath, j.path, todo, todoAss)
 				cancel()
 				if err != nil {
 					mu.Lock()
-					failed += len(todo)
+					failed += len(todo) + len(todoAss)
 					if sampleErr == "" {
 						sampleErr = err.Error()
 					}
@@ -262,6 +273,18 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 				for idx, vtt := range res {
 					if werr := mediainfo.WriteCachedSubtitle(j.path, idx, vtt); werr != nil {
 						log.Printf("[prewarm] sidecar write skipped (i=%d path=%q): %v", idx, j.path, werr)
+						mu.Lock()
+						failed++
+						mu.Unlock()
+						continue
+					}
+					mu.Lock()
+					subCached++
+					mu.Unlock()
+				}
+				for idx, ass := range resAss {
+					if werr := mediainfo.WriteCachedSubtitleASS(j.path, idx, ass); werr != nil {
+						log.Printf("[prewarm] ass sidecar write skipped (i=%d path=%q): %v", idx, j.path, werr)
 						mu.Lock()
 						failed++
 						mu.Unlock()
@@ -282,15 +305,18 @@ func PrewarmSidecars(ctx context.Context, cache *LibraryCache, opts PrewarmOptio
 				continue
 			}
 			if opts.CacheSubtitles {
-				var subIdx []int
+				var subIdx, assIdx []int
 				for idx, sub := range item.MediaInfo.Subtitles {
 					if mediainfo.IsTextSubtitleCodec(sub.Codec) {
 						subIdx = append(subIdx, idx) // bitmap → burned in, skipped
 					}
+					if mediainfo.IsASSSubtitleCodec(sub.Codec) {
+						assIdx = append(assIdx, idx) // raw script for /sub?f=ass
+					}
 				}
-				if len(subIdx) > 0 {
+				if len(subIdx) > 0 || len(assIdx) > 0 {
 					select {
-					case jobs <- prewarmJob{path: item.FilePath, subIdx: subIdx}:
+					case jobs <- prewarmJob{path: item.FilePath, subIdx: subIdx, assIdx: assIdx}:
 					case <-ctx.Done():
 						return
 					}
