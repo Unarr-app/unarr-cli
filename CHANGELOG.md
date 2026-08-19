@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-08-19
+
+
+### Added
+
+- **subs**: serve raw .ass + embedded fonts, and filter drawing cues from WebVTT
+
+### Fixed
+
+- **subs**: survive slow remuxes, aborted dumps and non-ass sources honestly
+- **subs**: harden the ASS/fonts endpoints and the drawing filter after review
 ## [1.10.4] - 2026-08-14
 
 
@@ -17,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **hls**: key the sealing guard on what this session encoded, not where it is
 - **hls**: finish the cache reuse that left playback stalled at the splice
 - **hls**: reportar las sesiones que morían en silencio
+
+### Other
+
+- **release**: v1.10.4
 ## [1.10.3] - 2026-08-12
 
 
@@ -1561,6 +1576,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.11.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.4...v1.11.0
 [1.10.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.3...v1.10.4
 [1.10.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.2...v1.10.3
 [1.10.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.1...v1.10.2
