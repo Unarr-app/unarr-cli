@@ -560,6 +560,14 @@ func (m *Manager) processTask(ctx context.Context, task *Task) {
 				return
 			}
 			if IsIntegrity(err) {
+				// A size conflict is deterministic — the same link answers the same
+				// way every time — and attemptDownload already tried the other
+				// methods. Retrying it as corruption would just burn two more
+				// identical attempts before saying the same thing.
+				if IsSizeConflict(err) {
+					m.failDamaged(ctx, task, err)
+					return
+				}
 				if attempt < maxIntegrityAttempts {
 					log.Printf("[%s] integrity check failed (attempt %d/%d), re-downloading clean: %v",
 						agent.ShortID(task.ID), attempt, maxIntegrityAttempts, err)
@@ -640,7 +648,13 @@ func (m *Manager) attemptDownload(ctx context.Context, task *Task) (*Result, err
 		// caller (same source, clean start); a storage failure means the target
 		// mount faulted (another method writes to the same dir) — don't burn the
 		// method fallback on any of them. Only a plain transport failure tries next.
-		if IsInsufficientDisk(err) || IsIntegrity(err) || IsStorage(err) {
+		//
+		// EXCEPT a size conflict: the link and the server disagree about WHICH
+		// file this is, deterministically. Re-fetching reproduces it exactly, and
+		// the wrong side may be our own metadata — so this one DOES fall through
+		// to the next method (torrent/usenet), which gets the release from a
+		// different source instead of reporting it damaged three attempts later.
+		if IsInsufficientDisk(err) || IsStorage(err) || (IsIntegrity(err) && !IsSizeConflict(err)) {
 			return nil, err
 		}
 		// ErrVPNTunnelDown: the tunnel died mid-download (torrent dropped, partial
@@ -693,9 +707,11 @@ func (m *Manager) runDownload(ctx context.Context, task *Task, method DownloadMe
 }
 
 // removeBrokenResult deletes a single-file result that failed the on-disk verify
-// so the retry's downloader starts clean (debrid resumes from a partial via HTTP
-// Range — appending to a truncated stub would compound the corruption). Multi-file
-// (directory) results are left for the downloader/anacrolix to re-verify in place.
+// so the retry's downloader starts clean (a debrid result is already finalized
+// under its real name at this point, so removing it forces a from-scratch
+// re-fetch; the torrent path re-hashes inherited pieces on the next attempt).
+// Multi-file (directory) results are left for the downloader/anacrolix to
+// re-verify in place.
 func removeBrokenResult(taskID string, result *Result) {
 	if result == nil || result.FilePath == "" {
 		return
@@ -954,46 +970,13 @@ func (m *Manager) reapStaleTmpHolders(srcDir string) {
 	}
 }
 
-// releaseDirLocks serializes post-processing per release directory. Entries are
-// reference-counted and dropped when the last holder releases, so the map does
-// not grow with every download the daemon ever ran.
-var (
-	releaseDirMu    sync.Mutex
-	releaseDirLocks = map[string]*releaseDirLock{}
-)
-
-type releaseDirLock struct {
-	mu   sync.Mutex
-	refs int
-}
+// releaseDirLocks serializes post-processing per release directory. See
+// pathLocker for the reference-counted semantics.
+var releaseDirLocks = newPathLocker()
 
 // lockReleaseDir takes the lock for dir and returns its release function.
 func (m *Manager) lockReleaseDir(dir string) func() {
-	key, err := filepath.Abs(dir)
-	if err != nil {
-		key = dir // best effort: an unresolvable path still gets a stable key
-	}
-
-	releaseDirMu.Lock()
-	l, ok := releaseDirLocks[key]
-	if !ok {
-		l = &releaseDirLock{}
-		releaseDirLocks[key] = l
-	}
-	l.refs++
-	releaseDirMu.Unlock()
-
-	l.mu.Lock()
-
-	return func() {
-		l.mu.Unlock()
-		releaseDirMu.Lock()
-		l.refs--
-		if l.refs == 0 {
-			delete(releaseDirLocks, key)
-		}
-		releaseDirMu.Unlock()
-	}
+	return releaseDirLocks.Lock(dir)
 }
 
 // unpackedSuffix marks a directory as our unpack of the sibling release.

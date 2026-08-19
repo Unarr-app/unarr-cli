@@ -179,6 +179,7 @@ type Task struct {
 	Mode            string `json:"mode,omitempty"`           // download | stream
 	DirectURL       string `json:"directUrl,omitempty"`      // HTTPS download URL (debrid, etc.)
 	DirectFileName  string `json:"directFileName,omitempty"` // Original filename from direct URL
+	DirectFileSize  int64  `json:"directFileSize,omitempty"` // Exact provider-listed byte size of that file (0 = unknown)
 	NzbID           string `json:"nzbId,omitempty"`          // Pre-resolved NZB ID from server
 	NzbPassword     string `json:"nzbPassword,omitempty"`    // Password for encrypted NZB archives
 	ReplacePath     string `json:"replacePath,omitempty"`    // File to replace after download (upgrade mode)

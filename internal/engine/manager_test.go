@@ -547,9 +547,9 @@ func TestLockReleaseDir_ReleasesEntry(t *testing.T) {
 	unlock := m.lockReleaseDir(dir)
 	unlock()
 
-	releaseDirMu.Lock()
-	n := len(releaseDirLocks)
-	releaseDirMu.Unlock()
+	releaseDirLocks.mu.Lock()
+	n := len(releaseDirLocks.locks)
+	releaseDirLocks.mu.Unlock()
 	if n != 0 {
 		t.Errorf("lock table retained %d entrie(s) after the last release", n)
 	}

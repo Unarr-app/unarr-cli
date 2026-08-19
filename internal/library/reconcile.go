@@ -26,10 +26,25 @@ var partialExts = map[string]bool{
 	".partial": true,
 }
 
-// IsPartialExt reports whether name has an in-progress download extension
-// (.part/.!qb/.aria2/.tmp/.partial). Exported so the daemon can identify live
-// partials (by mtime) to protect them from the auto-cleanup sweep.
+// PartialSuffix is the extension the debrid downloader writes in-progress bytes
+// under (engine.partialSuffix). Single source: engine derives its constant from
+// here, so renaming it can never leave this sweep blind to the new name.
+const PartialSuffix = ".part"
+
+// PartMetaSuffix is the provenance sidecar the debrid downloader keeps beside a
+// partial (engine.partMetaPath). Its extension is ".json", so it is NOT caught
+// by partialExts — it needs its own suffix match or an orphaned sidecar would
+// have no reaper at all.
+const PartMetaSuffix = PartialSuffix + ".meta.json"
+
+// IsPartialExt reports whether name is an in-progress download artifact:
+// a partial extension (.part/.!qb/.aria2/.tmp/.partial) or a partial's
+// provenance sidecar. Exported so the daemon can identify live partials (by
+// mtime) to protect them from the auto-cleanup sweep.
 func IsPartialExt(name string) bool {
+	if strings.HasSuffix(strings.ToLower(name), PartMetaSuffix) {
+		return true
+	}
 	return partialExts[strings.ToLower(filepath.Ext(name))]
 }
 
@@ -389,12 +404,24 @@ func classifyFile(path string, roots []string, activePartials map[string]bool, o
 		}
 		return nil // a real, playable video — never touch
 
-	case partialExts[ext]:
+	// IsPartialExt, not partialExts[ext]: the debrid provenance sidecar ends in
+	// ".part.meta.json", so matching on the extension alone ('.json') would
+	// leave orphaned sidecars with no reaper at all.
+	case IsPartialExt(path):
 		if !opts.RemoveOrphanPartials {
 			return nil
 		}
 		if activePartials[filepath.Clean(path)] {
 			return nil // an in-flight download owns it
+		}
+		// A sidecar whose .part is still on disk belongs to that partial — it is
+		// only dead weight once the partial itself is gone. (The .part's own
+		// active-download protection is the mtime check above; a paused download
+		// is protected by the caller disabling this category entirely.)
+		if strings.HasSuffix(strings.ToLower(path), PartMetaSuffix) {
+			if _, err := os.Stat(strings.TrimSuffix(path, ".meta.json")); err == nil {
+				return nil
+			}
 		}
 		return fileFinding(path, info, KindOrphanPartial,
 			"partial download marker with no active task")

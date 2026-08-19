@@ -67,6 +67,13 @@ func verify(result *Result) error {
 		return integrityErr("stub", "video file too small to be valid: %d bytes (%s)", actualSize, result.FilePath)
 	}
 
+	// Server-resolved ground truth (debrid provider listing): the finished file
+	// must be byte-exact. Checked HERE, not only in the transport, so the
+	// backstop layer sees it even if a downloader's own enforcement regresses.
+	if !fi.IsDir() && result.ExpectedBytes > 0 && actualSize != result.ExpectedBytes {
+		return integrityErr("size_mismatch", "size mismatch vs resolved file: expected %d, got %d", result.ExpectedBytes, actualSize)
+	}
+
 	// If we know the expected size, check within 2% tolerance (container/muxing
 	// overhead). A shortfall beyond that is a truncated/corrupt file — classify it
 	// as an IntegrityError so the manager re-downloads clean instead of completing
