@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.3] - 2026-08-25
+
+
+### Fixed
+
+- **funnel**: detect and restart a tunnel that died at the edge
 ## [1.11.2] - 2026-08-19
 
 
@@ -18,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **engine**: reap orphaned sidecars for real, and stop trusting a bare validator
 - **engine**: close the gaps the download-integrity review found
 - **engine**: make downloads corruption-proof (torrent stale-completion + debrid resume splicing)
+
+### Other
+
+- **release**: 1.11.2
 ## [1.11.1] - 2026-08-19
 
 
@@ -1604,6 +1614,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.11.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.2...v1.11.3
 [1.11.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.1...v1.11.2
 [1.11.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.10.4...v1.11.0
