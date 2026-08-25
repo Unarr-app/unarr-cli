@@ -219,6 +219,9 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	} else {
 		store = storage.NewMMap(cfg.DataDir)
 	}
+	// Wrap so a chunk write that lands after t.Drop() closes the storage is
+	// refused instead of panicking the process. See storage_closeguard.go.
+	store = newCloseGuard(store)
 	tcfg.DefaultStorage = store
 
 	// Fixed port for incoming peer connections (enables UPnP port mapping).
