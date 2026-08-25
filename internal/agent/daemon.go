@@ -111,6 +111,10 @@ type Daemon struct {
 
 	// CloudFlare Quick Tunnel public URL; folded into DaemonState + heartbeat
 	// so the web can prefer it over Tailscale/LAN for in-browser playback.
+	// funnelMu guards it the way vpnMu guards the VPN fields: the funnel
+	// supervisor writes it from its own goroutine (URL published / tunnel
+	// died) while the sync loop reads it for every heartbeat.
+	funnelMu  sync.Mutex
 	funnelURL string
 
 	// Local control plane endpoint (internal/control), kept HERE and not only in
@@ -167,9 +171,19 @@ func (d *Daemon) SetAgentID(id string) { d.cfg.AgentID = id }
 // in the daemon state file (read by `unarr funnel status`) and in heartbeat
 // requests (so the web prefers it over Tailscale/LAN). Pass "" to clear.
 func (d *Daemon) SetFunnelURL(url string) {
+	d.funnelMu.Lock()
 	d.funnelURL = url
 	d.State.FunnelURL = url
+	d.funnelMu.Unlock()
 	WriteState(&d.State)
+}
+
+// FunnelURL returns the current CloudFlare Quick Tunnel URL ("" when none),
+// for the register / heartbeat builders that read it off the sync goroutine.
+func (d *Daemon) FunnelURL() string {
+	d.funnelMu.Lock()
+	defer d.funnelMu.Unlock()
+	return d.funnelURL
 }
 
 // SetHTTPSWanMapped records whether the stream server's HTTPS port is currently
@@ -297,7 +311,7 @@ func (d *Daemon) register(ctx context.Context, park bool) error {
 		VPNActive:          vpnActive,
 		VPNMode:            vpnMode,
 		VPNServer:          vpnServer,
-		FunnelURL:          d.funnelURL,
+		FunnelURL:          d.FunnelURL(),
 		IsDocker:           RunningInDocker(),
 		InstallType:        DetectInstallType(),
 		PreferredMethods:   &methods,
@@ -390,7 +404,7 @@ func (d *Daemon) register(ctx context.Context, park bool) error {
 		VPNServer:   vpnServer,
 		VPNRequired: vpnRequired,
 		VPNBlocking: vpnRequired && !vpnActive,
-		FunnelURL:   d.funnelURL,
+		FunnelURL:   d.FunnelURL(),
 		// Carried over: the control server binds before (or in parallel with) a
 		// successful registration, and rebuilding State without these would hide
 		// the control plane from the CLI and the tray. See the field comments.
@@ -483,7 +497,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return active, mode, server
 	}
 	d.sync.GetFunnelURL = func() string {
-		return d.funnelURL
+		return d.FunnelURL()
 	}
 	d.sync.GetHTTPSWanMapped = func() bool {
 		return d.httpsWanMapped.Load()

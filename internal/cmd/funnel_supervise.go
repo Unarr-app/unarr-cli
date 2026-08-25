@@ -43,6 +43,16 @@ const (
 	// repeat itself once it has gone quiet. Long enough to be nearly free in the
 	// log, short enough that an operator reading it sees the state is current.
 	funnelQuietInterval = 6 * time.Hour
+	// funnelWatchdogInitialBackoff / funnelWatchdogMaxBackoff is the SEPARATE
+	// ladder for a tunnel the watchdog killed (funnel_health.go). Such a tunnel
+	// usually lived for hours, so the "healthy run" reset would put the next
+	// spawn 2 s away — and when the CF edge is what is broken, the next tunnel
+	// is born just as dead, gets killed a couple of minutes later, and the
+	// daemon churns a fresh quick tunnel against api.trycloudflare.com every
+	// few minutes for the whole incident. Own ladder, slower, reset only by a
+	// tunnel that ended some other way.
+	funnelWatchdogInitialBackoff = time.Minute
+	funnelWatchdogMaxBackoff     = 30 * time.Minute
 )
 
 // superviseFunnel keeps a CloudFlare Quick Tunnel up across cloudflared crashes
@@ -61,6 +71,7 @@ const (
 //     only its VOICE is rate-limited.
 func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
 	backoff := funnelInitialBackoff
+	watchdogBackoff := funnelWatchdogInitialBackoff
 	failures := 0
 	var lastQuietLog time.Time
 
@@ -88,10 +99,18 @@ func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
 		failures = 0
 		lastQuietLog = time.Time{}
 
-		healthy, alive := runTunnel(ctx, d, t)
+		healthy, alive, killed := runTunnel(ctx, d, t)
 		if !alive {
 			return
 		}
+		if killed {
+			if !funnelSleep(ctx, watchdogBackoff) {
+				return
+			}
+			watchdogBackoff = min(watchdogBackoff*2, funnelWatchdogMaxBackoff)
+			continue
+		}
+		watchdogBackoff = funnelWatchdogInitialBackoff
 		if healthy {
 			backoff = funnelInitialBackoff
 		}
@@ -102,13 +121,18 @@ func superviseFunnel(ctx context.Context, d *agent.Daemon, port int) {
 	}
 }
 
-// runTunnel owns one cloudflared process: publish its URL, wait for it to exit,
-// and report back. `healthy` means the run earned a backoff reset (it lived
-// long enough AND actually published a URL); `alive` is false when the daemon
-// itself is going away and supervision should stop.
-func runTunnel(ctx context.Context, d *agent.Daemon, t *funnel.Tunnel) (healthy, alive bool) {
+// runTunnel owns one cloudflared process: publish its URL, watch the tunnel's
+// liveness for as long as it runs, wait for the process to exit, and report
+// back. `healthy` means the run earned a backoff reset (it lived long enough
+// AND actually published a URL); `alive` is false when the daemon itself is
+// going away and supervision should stop; `killed` means the watchdog judged
+// the tunnel dead at the edge and stopped cloudflared itself.
+func runTunnel(ctx context.Context, d *agent.Daemon, t *funnel.Tunnel) (healthy, alive, killed bool) {
 	startedAt := time.Now()
-	var gotURL atomic.Bool
+	var gotURL, watchdogKill atomic.Bool
+	// The watcher lives exactly as long as this process does.
+	wctx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
 	log.Printf("[funnel] cloudflared started, waiting for public URL...")
 	go func() {
 		url, werr := t.WaitURL(45 * time.Second)
@@ -119,21 +143,35 @@ func runTunnel(ctx context.Context, d *agent.Daemon, t *funnel.Tunnel) (healthy,
 		log.Printf("[funnel] public URL: %s", url)
 		gotURL.Store(true)
 		d.SetFunnelURL(url)
+		// A dead tunnel with a live process never exits on its own; this is the
+		// only path that turns "hostname went NXDOMAIN / edge says 530" into a
+		// restart. Kill, not Close: the exit must still reach the Done read
+		// below.
+		if reason := newFunnelHealth(t).watch(wctx, url, startedAt); reason != "" && ctx.Err() == nil {
+			log.Printf("[funnel] tunnel unhealthy (%s) - restarting cloudflared", reason)
+			watchdogKill.Store(true)
+			t.Kill()
+		}
 	}()
 
-	// Block until cloudflared exits (CF rotation, crash, or shutdown).
+	// Block until cloudflared exits (CF rotation, crash, watchdog, or shutdown).
 	exitErr := <-t.Done()
 	_ = t.Close()
 	d.SetFunnelURL("")
 	if ctx.Err() != nil {
-		return false, false
+		return false, false, false
 	}
-	if exitErr != nil {
+	killed = watchdogKill.Load()
+	switch {
+	case killed:
+		// Already explained by the watchdog line; the wait below is the
+		// watchdog ladder, not the crash one.
+	case exitErr != nil:
 		log.Printf("[funnel] cloudflared exited: %v - restarting", exitErr)
-	} else {
+	default:
 		log.Printf("[funnel] cloudflared exited cleanly - restarting")
 	}
-	return gotURL.Load() && time.Since(startedAt) >= funnelHealthyRun, true
+	return gotURL.Load() && time.Since(startedAt) >= funnelHealthyRun, true, killed
 }
 
 // logFunnelFailure emits a start failure at a volume that matches how much new

@@ -22,9 +22,12 @@ package funnel
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
 	"os/exec"
 	"regexp"
 	"sync"
@@ -41,6 +44,13 @@ import (
 // `https://api.trycloudflare.com`, which appears earlier in the log stream — a
 // permissive `[a-z0-9-]+` matched `api` first and we advertised a dead URL.
 var urlPattern = regexp.MustCompile(`https://[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com`)
+
+// metricsPattern matches the line cloudflared logs when its metrics listener
+// binds — `Starting metrics server on 127.0.0.1:20241/metrics`. We launch it on
+// `127.0.0.1:0` (an ephemeral port, to never collide on a shared box), so this
+// line is the only way to learn the port and reach GET /ready, which reports
+// how many connections to the CF edge the connector currently holds.
+var metricsPattern = regexp.MustCompile(`Starting metrics server on (127\.0\.0\.1:\d+)/metrics`)
 
 // Config controls how the tunnel is launched.
 type Config struct {
@@ -59,6 +69,7 @@ type Tunnel struct {
 	exitCh  chan error
 	mu      sync.Mutex
 	url     string
+	metrics string // host:port of cloudflared's metrics listener, "" until seen
 	stopped bool
 }
 
@@ -162,7 +173,60 @@ func (t *Tunnel) Done() <-chan error {
 	return t.exitCh
 }
 
-// Close terminates the subprocess and waits for it to exit. Safe to call
+// MetricsAddr returns the host:port of cloudflared's metrics listener, or ""
+// if its bind line has not been seen (older/newer cloudflared wording, or the
+// process died first). Callers must degrade: the listener is a convenience,
+// not a contract.
+func (t *Tunnel) MetricsAddr() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.metrics
+}
+
+// ErrNoMetrics is returned by Ready when the metrics listener address is unknown.
+var ErrNoMetrics = errors.New("funnel: cloudflared metrics address not seen")
+
+// Ready asks cloudflared's own readiness endpoint how many connections to the
+// CF edge it holds. 0 means the connector is cut off from the edge (it keeps
+// retrying internally and never exits on its own). This is a LOCAL signal —
+// it says nothing about whether the public hostname still routes anywhere.
+func (t *Tunnel) Ready(ctx context.Context) (readyConnections int, err error) {
+	addr := t.MetricsAddr()
+	if addr == "" {
+		return 0, ErrNoMetrics
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/ready", nil)
+	if err != nil {
+		return 0, err
+	}
+	res, err := readyClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer res.Body.Close()
+	// 200 = connections > 0, 503 = none; the body carries the count either way.
+	var body struct {
+		ReadyConnections int `json:"readyConnections"`
+	}
+	if derr := json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body); derr != nil {
+		if res.StatusCode == http.StatusServiceUnavailable {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("funnel: /ready %d: %w", res.StatusCode, derr)
+	}
+	return body.ReadyConnections, nil
+}
+
+var readyClient = &http.Client{Timeout: 3 * time.Second}
+
+// Kill terminates the subprocess WITHOUT waiting or draining Done: the exit
+// still arrives on Done for whoever is blocked there (the supervisor), which
+// is exactly what a watchdog goroutine needs — Close from a second goroutine
+// would race the supervisor for the single exit value and strand it.
+func (t *Tunnel) Kill() { t.cancel() }
+
+// Close terminates the subprocess (exec.CommandContext kills it outright —
+// cloudflared has nothing to flush) and waits for it to exit. Safe to call
 // multiple times.
 func (t *Tunnel) Close() error {
 	t.mu.Lock()
@@ -187,19 +251,44 @@ func (t *Tunnel) scanStderr(r io.Reader) {
 	// prints connection diagnostics). Bump to 1MiB.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if t.URL() == "" {
-			if m := urlPattern.FindString(line); m != "" {
-				t.mu.Lock()
-				t.url = m
-				t.mu.Unlock()
-				// Non-blocking send: if no one is listening, just drop —
-				// the URL field carries the value for any later WaitURL call.
-				select {
-				case t.urlCh <- m:
-				default:
-				}
-			}
+		t.scanLine(scanner.Text())
+	}
+}
+
+// scanLine folds one stderr line into the tunnel's state. Every line is
+// checked for BOTH patterns: the metrics bind line comes before the URL
+// banner, and an early return on "URL already known" used to make the scanner
+// blind to everything after the URL.
+func (t *Tunnel) scanLine(line string) {
+	if m := metricsPattern.FindStringSubmatch(line); m != nil {
+		t.mu.Lock()
+		if t.metrics == "" {
+			t.metrics = m[1]
 		}
+		t.mu.Unlock()
+	}
+	m := urlPattern.FindString(line)
+	if m == "" {
+		return
+	}
+	t.mu.Lock()
+	if t.url != "" {
+		known := t.url
+		t.mu.Unlock()
+		// A quick tunnel registers its hostname once; cloudflared reconnects to
+		// the SAME tunnel and never mints a second name in-process. If that ever
+		// changes, say so — the supervisor's model is "new URL = new process".
+		if known != m {
+			log.Printf("[funnel] cloudflared printed a second hostname (%s) after %s - ignored", m, known)
+		}
+		return
+	}
+	t.url = m
+	t.mu.Unlock()
+	// Non-blocking send: if no one is listening, just drop —
+	// the URL field carries the value for any later WaitURL call.
+	select {
+	case t.urlCh <- m:
+	default:
 	}
 }
