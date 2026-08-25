@@ -3,6 +3,7 @@ package mediainfo
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -28,8 +29,8 @@ func TestInstallBinaryAtomically(t *testing.T) {
 	if err != nil || len(got) != len(payload) {
 		t.Fatalf("dest = %d bytes, err %v; want %d", len(got), err, len(payload))
 	}
-	st, _ := os.Stat(dest)
-	if st.Mode()&0o111 == 0 {
+	// Windows has no execute bit; there the OS runs .exe by extension.
+	if st, _ := os.Stat(dest); runtime.GOOS != "windows" && st.Mode()&0o111 == 0 {
 		t.Fatalf("dest is not executable: %v", st.Mode())
 	}
 	left, _ := filepath.Glob(filepath.Join(filepath.Dir(dest), "*.tmp-*"))
