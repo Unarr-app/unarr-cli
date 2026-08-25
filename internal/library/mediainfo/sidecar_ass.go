@@ -62,9 +62,7 @@ func ExtractSubtitleASS(ctx context.Context, ffmpegPath, mediaPath string, index
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		// ffmpeg 8: the ass muxer refuses to copy a non-ass stream. That is the
-		// NORMAL decline for a subrip/mov_text track, not an operational error.
-		if strings.Contains(stderr.String(), "ass muxer supports only codec") {
+		if isAssMuxerRefusal(stderr.String()) {
 			return nil, ErrNotStyledSubtitle
 		}
 		return nil, fmt.Errorf("ffmpeg ass extract: %w: %s", err, strings.TrimSpace(stderr.String()))
@@ -270,4 +268,15 @@ func FontContentType(filename string) string {
 	default:
 		return "font/ttf"
 	}
+}
+
+// isAssMuxerRefusal recognises ffmpeg's ass muxer declining to `-c:s copy` a
+// non-ass stream. That is the NORMAL decline for a subrip/mov_text track, not
+// an operational error — but the wording is not stable across ffmpeg builds:
+// 8.0 says "ass muxer supports only codec ass", newer static builds say
+// "Exactly one ASS/SSA stream is needed". Either way, the muxer is telling us
+// the stream is not ASS, which is exactly ErrNotStyledSubtitle.
+func isAssMuxerRefusal(stderr string) bool {
+	return strings.Contains(stderr, "ass muxer supports only codec") ||
+		strings.Contains(stderr, "Exactly one ASS/SSA stream is needed")
 }
