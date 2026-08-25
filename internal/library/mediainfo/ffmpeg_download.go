@@ -76,12 +76,8 @@ func DownloadFFmpeg() (string, error) {
 		return "", err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return "", fmt.Errorf("cannot create cache directory: %w", err)
-	}
-
-	if err := os.WriteFile(dest, binary, 0o755); err != nil {
-		return "", fmt.Errorf("cannot write ffmpeg binary: %w", err)
+	if err := installBinaryAtomically(dest, binary); err != nil {
+		return "", err
 	}
 
 	fmt.Fprintf(os.Stderr, "ffmpeg installed to %s\n", dest)
