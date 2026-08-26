@@ -1,6 +1,6 @@
 // Package sysinfo answers questions about the HOST the agent runs on, as
-// opposed to the agent's own state. Today that is one question: when did this
-// machine boot?
+// opposed to the agent's own state: when did this machine boot, and when did it
+// last shut down?
 //
 // It exists because "the daemon is gone and its state file still says running"
 // has two very different causes that look identical on disk:
@@ -10,7 +10,9 @@
 //     during the 02:00–05:00 maintenance window) — not a crash at all.
 //
 // A state file written BEFORE the current boot can only be the second case, so
-// the boot instant is what tells them apart. See agent.StateFromPreviousBoot.
+// the boot instant is what tells them apart — except where the boot instant
+// itself survives a power cycle (Windows Fast Startup), which is what
+// LastShutdown is for. See agent.StateFromPreviousBoot.
 package sysinfo
 
 import "time"

@@ -6,8 +6,11 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/sysinfo"
 )
 
-// bootTimeFn is overridable in tests.
-var bootTimeFn = sysinfo.BootTime
+// bootTimeFn / lastShutdownFn are overridable in tests.
+var (
+	bootTimeFn     = sysinfo.BootTime
+	lastShutdownFn = sysinfo.LastShutdown
+)
 
 // preBootSlack is how far a state file may predate the boot instant before it
 // is judged to belong to the previous boot.
@@ -37,6 +40,11 @@ const preBootSlack = 2 * time.Minute
 // A state file older than the boot is stale REGARDLESS of what its PID says,
 // which is why callers must consult this BEFORE the liveness check.
 //
+// TWO independent signals, either of which is enough (see the helpers below):
+// a state file older than the boot instant, or older than the last recorded
+// shutdown. Neither covers the other — Windows Fast Startup breaks the first,
+// a power cut breaks the second — and both err toward "no verdict".
+//
 // Unknown boot time (an unsupported platform, an unreadable /proc) returns
 // false: no verdict, keep the previous behaviour. Same for a state file with no
 // timestamps at all — being wrong here costs a lost crash report.
@@ -48,6 +56,15 @@ func StateFromPreviousBoot(st *DaemonState) bool {
 	if written.IsZero() {
 		return false
 	}
+	if writtenBeforeBoot(written) {
+		return true
+	}
+	return writtenBeforeLastShutdown(written)
+}
+
+// writtenBeforeBoot is the original verdict: the state file predates the
+// instant this host booted, so the machine came down under the daemon.
+func writtenBeforeBoot(written time.Time) bool {
 	boot, ok := bootTimeFn()
 	if !ok || boot.IsZero() {
 		return false
@@ -59,6 +76,35 @@ func StateFromPreviousBoot(st *DaemonState) bool {
 		return false
 	}
 	return written.Before(boot.Add(-preBootSlack))
+}
+
+// writtenBeforeLastShutdown is the second verdict, and the one that settles
+// Windows FAST STARTUP. A hybrid shutdown hibernates the kernel session instead
+// of tearing it down, so GetTickCount64 — and therefore writtenBeforeBoot —
+// carries over the power cycle and reports a boot from days ago, NEWER than
+// nothing and older than every state file. The shutdown record does not carry
+// over: anything written before it belongs to a session that has since ended.
+//
+// NO SLACK, in either direction, unlike the boot comparison:
+//
+//   - none needed the pre-shutdown way: both instants are absolute wall clock,
+//     with no uptime arithmetic between them to jitter;
+//   - none WANTED the post-shutdown way, because the daemon writes its state
+//     continuously up to the moment it is killed, so a real shutdown leaves
+//     `written` a hair BEFORE the record, and any positive slack would start
+//     swallowing genuine crashes that happen seconds into the next boot — the
+//     crash-at-startup case, which is exactly the one worth reporting.
+func writtenBeforeLastShutdown(written time.Time) bool {
+	down, ok := lastShutdownFn()
+	if !ok || down.IsZero() {
+		return false
+	}
+	// Same distrust as above: a shutdown recorded in the future means the clock
+	// moved, not that the machine went down after now.
+	if down.After(time.Now()) {
+		return false
+	}
+	return written.Before(down)
 }
 
 // stateWrittenAt is the most recent instant this state file can be shown to

@@ -5,12 +5,25 @@ import (
 	"time"
 )
 
-// fakeBoot pins the boot instant for one test.
+// fakeBoot pins the boot instant for one test, and silences the shutdown-record
+// signal so the case under test is judged on the boot instant alone. Without
+// that second stub these tests would read the host's REAL registry when they
+// run on Windows, and a machine that was shut down five minutes ago would flip
+// verdicts that have nothing to do with what the case is about.
 func fakeBoot(t *testing.T, at time.Time, ok bool) {
 	t.Helper()
 	restore := bootTimeFn
 	t.Cleanup(func() { bootTimeFn = restore })
 	bootTimeFn = func() (time.Time, bool) { return at, ok }
+	fakeLastShutdown(t, time.Time{}, false)
+}
+
+// fakeLastShutdown pins the recorded shutdown instant for one test.
+func fakeLastShutdown(t *testing.T, at time.Time, ok bool) {
+	t.Helper()
+	restore := lastShutdownFn
+	t.Cleanup(func() { lastShutdownFn = restore })
+	lastShutdownFn = func() (time.Time, bool) { return at, ok }
 }
 
 func TestStateFromPreviousBoot(t *testing.T) {

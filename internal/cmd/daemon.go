@@ -1387,6 +1387,15 @@ func runDaemonStart() error {
 	select {
 	case sig := <-sigCh:
 		fmt.Printf("\n  Received %s, shutting down...\n", sig)
+		// Mark the state file FIRST — before the telemetry post and before the
+		// drain below, either of which can outlive us. The drain takes up to 30s
+		// and EmitSync spends up to 5s on the network, while Windows grants a
+		// process ~5s at shutdown and some systemd units set TimeoutStopSec
+		// lower than the drain. A supervisor that kills us mid-shutdown must
+		// find an intentional-stop marker, not the state-file signature the tray
+		// reads as a crash (and mails home). One small local write, so it lands.
+		// See Daemon.MarkShuttingDown.
+		d.MarkShuttingDown()
 		// User-initiated stop (Ctrl+C, `unarr stop`, service stop). Emit BEFORE
 		// draining so the event lands even if drain takes the full 30s. Sync emit:
 		// the process is exiting, a backgrounded post would be killed first.
