@@ -5,14 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.5] - 2026-08-26
+
+
+### Fixed
+
+- **agent**: serialise every daemon-state write behind a mutex
+- **config**: reject malformed paths instead of filing them as permission errors
+- **crash-report**: stop reporting a Windows shutdown as an agent crash
 ## [1.11.4] - 2026-08-26
 
 
 ### Fixed
 
 - **desktop**: read logs off disk when the CLI cannot be exec'd
+- **mediainfo**: wait out a blocked rename on Windows instead of failing
 - **mediainfo**: install downloaded tools atomically; accept newer ass-muxer wording
 - **torrent**: refuse chunk writes after storage close instead of panicking
+
+### Other
+
+- **release**: 1.11.4
 ## [1.11.3] - 2026-08-25
 
 
@@ -1626,6 +1639,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.11.5]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.4...v1.11.5
 [1.11.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.3...v1.11.4
 [1.11.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.2...v1.11.3
 [1.11.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.1...v1.11.2
