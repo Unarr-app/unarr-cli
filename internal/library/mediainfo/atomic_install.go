@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // installBinaryAtomically places a freshly downloaded executable at dest so
@@ -44,9 +45,44 @@ func installBinaryAtomically(dest string, data []byte) error {
 		cleanup()
 		return fmt.Errorf("cannot close %s: %w", filepath.Base(dest), err)
 	}
-	if err := os.Rename(tmpName, dest); err != nil {
+	if err := renameWithRetry(tmpName, dest); err != nil {
 		cleanup()
 		return fmt.Errorf("cannot install %s: %w", filepath.Base(dest), err)
 	}
 	return nil
+}
+
+// renameRetryWindow / renameRetryStep bound the wait for a Windows rename that
+// somebody else is momentarily blocking. Short: the holders this waits out are
+// brief (another installer's rename, an AV scanning a file written a
+// millisecond ago), and a caller is a tool download that has already spent far
+// longer fetching the bytes.
+const (
+	renameRetryWindow = 2 * time.Second
+	renameRetryStep   = 50 * time.Millisecond
+)
+
+// renameWithRetry is os.Rename plus a bounded wait for the Windows case where
+// the destination is held open by someone else.
+//
+// Without it the doc comment above is a promise this function does not keep on
+// Windows: "a loser of the race simply replaces dest with identical bytes" is
+// POSIX behaviour, and MoveFileEx instead fails the loser outright with
+// ERROR_ACCESS_DENIED. Every caller propagates that, so a user whose antivirus
+// happened to be reading the file got a failed ffmpeg/ffprobe/fpcalc download.
+// It also made TestInstallBinaryAtomically flaky on windows-latest, which
+// gates the release workflow — a red CI run there blocked publishing v1.11.4
+// entirely.
+//
+// On POSIX isTransientRenameBlock is constant false, so this compiles down to a
+// single os.Rename with no retry and no sleep.
+func renameWithRetry(src, dst string) error {
+	deadline := time.Now().Add(renameRetryWindow)
+	for {
+		err := os.Rename(src, dst)
+		if err == nil || !isTransientRenameBlock(err) || !time.Now().Before(deadline) {
+			return err
+		}
+		time.Sleep(renameRetryStep)
+	}
 }
