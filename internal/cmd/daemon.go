@@ -163,7 +163,10 @@ func runDaemonStart() error {
 	// lock path and runs concurrently (this is how the dev agent coexists).
 	lockDir := config.Dir()
 	if err := os.MkdirAll(lockDir, 0o755); err != nil {
-		emitStartFailure(agent.EventPermissionDenied, "create config dir: "+err.Error())
+		// Same classification as the download dir below: a malformed
+		// UNARR_CONFIG_DIR is a config error, and it lands here — BEFORE
+		// ValidatePaths — so nothing else will catch it.
+		emitStartFailure(dirFailureEvent(err), "create config dir: "+err.Error())
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	instanceLock := flock.New(config.LockPath())
@@ -197,7 +200,7 @@ func runDaemonStart() error {
 
 	// Ensure download dir exists
 	if err := os.MkdirAll(cfg.Download.Dir, 0o755); err != nil {
-		emitStartFailure(agent.EventPermissionDenied, "create download dir: "+err.Error())
+		emitStartFailure(dirFailureEvent(err), "create download dir: "+err.Error())
 		return fmt.Errorf("create download dir: %w", err)
 	}
 
