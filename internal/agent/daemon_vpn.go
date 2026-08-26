@@ -16,13 +16,17 @@ func (d *Daemon) SetVPNState(active, required bool, mode, server string) {
 	d.vpnRequired = required
 	d.vpnMode = mode
 	d.vpnServer = server
-	d.State.VPNActive = active
-	d.State.VPNRequired = required
-	d.State.VPNMode = mode
-	d.State.VPNServer = server
-	d.State.VPNBlocking = required && !active
 	d.vpnMu.Unlock()
-	WriteState(&d.State)
+	// Mirrored into State under stateMu, AFTER vpnMu is released — the sync
+	// loop writes the same struct from its own goroutine, and the two locks
+	// must never nest. See the stateMu comment on Daemon.
+	d.mutateState(func(st *DaemonState) {
+		st.VPNActive = active
+		st.VPNRequired = required
+		st.VPNMode = mode
+		st.VPNServer = server
+		st.VPNBlocking = required && !active
+	})
 }
 
 // vpnSnapshot returns the current VPN state under the lock, for the register /

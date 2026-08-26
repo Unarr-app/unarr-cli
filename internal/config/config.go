@@ -967,6 +967,11 @@ func (c *Config) ValidatePaths() error {
 		if dir == "" {
 			return nil
 		}
+		// Shape first: a path the OS cannot even parse must be reported as the
+		// config error it is, not left to surface later as a mkdir failure.
+		if err := pathShapeError(label, dir, runtime.GOOS); err != nil {
+			return err
+		}
 		abs, err := filepath.Abs(dir)
 		if err != nil {
 			return fmt.Errorf("%s: invalid path %q: %w", label, dir, err)

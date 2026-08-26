@@ -65,9 +65,16 @@ var runUnarrOutput = func(args ...string) ([]byte, error) {
 type agentStatus struct {
 	running bool
 	// crashed: the state file is still on disk claiming "running" but the PID
-	// is gone. A clean shutdown removes the state file, and upgrade/shutdown
-	// transitions write status "upgrading"/"shutting_down" first — so this
-	// combination only happens when the daemon died without cleaning up.
+	// is gone. A clean shutdown removes the state file, an auto-upgrade writes
+	// status "updating" (Daemon.applyUpgrade) and the shutdown path writes
+	// "shutting_down" as its FIRST act (Daemon.MarkShuttingDown) — before the
+	// up-to-30s drain, so it lands even when the supervisor kills the drain.
+	// This combination is therefore the daemon dying without cleaning up.
+	//
+	// It is still not enough on its own: a Windows daemon gets no shutdown
+	// signal at all (no console — see cmd.detachedSysProcAttr), so a machine
+	// going down leaves a bare "running". StateFromPreviousBoot is what filters
+	// those, and readStatus consults it BEFORE this field is set.
 	crashed bool
 	pid     int
 	version string

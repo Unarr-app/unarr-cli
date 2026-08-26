@@ -116,6 +116,13 @@ func TestReadStatusStillReportsARealCrash(t *testing.T) {
 		PID:           deadPID,
 		StartedAt:     now.Add(-20 * time.Minute),
 		LastHeartbeat: now.Add(-1 * time.Minute),
+		// LastAlive is what dates the file (agent.LastAliveAt takes the newest
+		// stamp), and it is `now` on purpose. A fixture whose newest stamp is
+		// minutes old is a state file that could predate the host's OWN last
+		// shutdown — which agent.StateFromPreviousBoot now reads — and on a box
+		// booted moments ago this case would flip to "reboot leftover" and stop
+		// testing anything. A daemon that just died leaves a stamp from just now.
+		LastAlive: now,
 	})
 
 	s := readStatus()
@@ -144,6 +151,7 @@ func TestReadStatusOfflineDaemonStaysRunning(t *testing.T) {
 		PID:           os.Getpid(),
 		StartedAt:     time.Now().Add(-30 * time.Second), // this boot
 		LastHeartbeat: beforeAnyBoot,                     // sync has never succeeded
+		LastAlive:     time.Now(),                        // ...but it is trying, right now
 	})
 
 	s := readStatus()

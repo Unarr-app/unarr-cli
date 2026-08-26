@@ -10,6 +10,14 @@
 #      (readStatus reaping a pre-boot state file) run against the real
 #      LOCALAPPDATA layout and the real process-liveness syscall
 #      (OpenProcess/GetExitCodeProcess), not the unix stand-ins.
+#   3. sysinfo.LastShutdown() reads a FILETIME out of the real registry
+#      (HKLM\SYSTEM\CurrentControlSet\Control\Windows\ShutdownTime) and parses it
+#      to the instant Windows itself logged the shutdown (System event 6006).
+#      That value is the ONLY signal that can see a Fast Startup power cycle:
+#      a hybrid shutdown hibernates the kernel session, so GetTickCount64 - and
+#      with it BootTime() - carries straight over it, and a state file the
+#      shutdown killed looks NEWER than the boot. Section 6 also reports whether
+#      this machine is in that state right now.
 #
 # ASCII ONLY, deliberately: Windows PowerShell 5.1 reads a BOM-less file through
 # the system ANSI code page, so a UTF-8 em dash inside a STRING literal decodes
@@ -171,6 +179,90 @@ if ($bootOut -match [regex]::Escape($marker)) {
     Say "FAIL: --boot did not return the marker written to $bootLog"
     Say $bootOut
     $fail++
+}
+
+# --- 6. the shutdown record, and the Fast Startup blind spot ---------------
+# The crash report that prompted this: a Windows box shut down at 00:02 mailed a
+# crash report for its own shutdown. BootTime() cannot catch that when Fast
+# Startup is on, so the verdict leans on the shutdown record instead. Two things
+# only real Windows can prove: that the registry value is written at all, and
+# that the Go side parses it to the right instant.
+$fsOn = $null
+try {
+    $fsOn = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -ErrorAction Stop).HiberbootEnabled
+} catch { }
+Say "fast startup (HiberbootEnabled): $fsOn   [1 = hybrid shutdown, the case BootTime cannot see]"
+
+$rawShutdown = $null
+try {
+    $bytes = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Windows' -Name ShutdownTime -ErrorAction Stop).ShutdownTime
+    $rawShutdown = [datetime]::FromFileTimeUtc([BitConverter]::ToInt64($bytes, 0))
+    Say "registry ShutdownTime:  $($rawShutdown.ToString('o'))"
+} catch {
+    Say "SKIP: no ShutdownTime value in the registry (this machine has never shut down cleanly)"
+}
+
+# What Windows logged for the same event, as an independent witness.
+$evt = $null
+try {
+    $evt = (Get-WinEvent -FilterHashtable @{LogName='System'; Id=6006} -MaxEvents 1 -ErrorAction Stop).TimeCreated.ToUniversalTime()
+    Say "System event 6006:      $($evt.ToString('o'))"
+} catch { Say "note: no 6006 event available to cross-check against" }
+
+# And what the shipped Go code makes of it.
+$goShutdown = $null
+$m2 = [regex]::Match($sysOut, 'lastShutdown=(\S+)')
+if ($m2.Success) {
+    $goShutdown = [datetime]::Parse($m2.Groups[1].Value).ToUniversalTime()
+    Say "sysinfo.LastShutdown(): $($goShutdown.ToString('o'))"
+} elseif ($sysOut -match 'no shutdown-record source') {
+    # Only a FAIL when the value is actually THERE and Go could not read it.
+    # A guest that has never been shut down cleanly has no ShutdownTime at all -
+    # PowerShell skips that case a few lines up, and it must not be a failure
+    # here either.
+    if ($rawShutdown) {
+        Say "FAIL: LastShutdown() found no source, but the registry HAS a ShutdownTime - the read did not work"
+        $fail++
+    } else {
+        Say "SKIP: no ShutdownTime on this machine, so nothing for LastShutdown() to read"
+    }
+} else {
+    Say "FAIL: sysinfo_test.exe did not report a shutdown instant"
+    $fail++
+}
+
+if ($goShutdown -and $rawShutdown) {
+    $d2 = [math]::Abs(($goShutdown - $rawShutdown).TotalSeconds)
+    if ($d2 -gt 2) {
+        Say "FAIL: LastShutdown() is ${d2}s from the raw registry FILETIME - the parse is wrong"
+        $fail++
+    } else {
+        Say "PASS: LastShutdown() parses the registry FILETIME exactly"
+    }
+}
+if ($goShutdown -and $evt) {
+    $d3 = [math]::Abs(($goShutdown - $evt).TotalSeconds)
+    # Minutes of slack: the log entry and the registry stamp are written at
+    # different points of the same shutdown sequence.
+    if ($d3 -gt 300) {
+        Say "FAIL: LastShutdown() is ${d3}s from the shutdown Windows logged"
+        $fail++
+    } else {
+        Say "PASS: LastShutdown() agrees with the shutdown Windows logged (delta ${d3}s)"
+    }
+}
+
+# The blind spot itself, reported rather than asserted: it only shows up on a
+# machine that has actually hybrid-shutdown since its last cold boot.
+if ($goShutdown -and $osBoot) {
+    if ($osBoot -lt $goShutdown) {
+        Say "OBSERVED: the boot instant PREDATES the last shutdown - Fast Startup carried the"
+        Say "          uptime over a power cycle, so BootTime alone would call that shutdown a crash."
+        Say "          This is the exact false-crash-report case the shutdown record now catches."
+    } else {
+        Say "note: boot is after the last shutdown on this box (cold boot, or Fast Startup off),"
+        Say "      so the boot-time verdict would have sufficed here."
+    }
 }
 
 Say ""

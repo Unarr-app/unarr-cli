@@ -163,7 +163,7 @@ done
 powershell -ExecutionPolicy Bypass \\host.lan\Data\smoke-boottime.ps1
 ```
 
-Five checks, each covering something a Linux lab structurally cannot:
+Six checks, each covering something a Linux lab structurally cannot:
 
 1. **`sysinfo.BootTime()` agrees with the OS.** It reads `GetTickCount64`
    through a lazy `kernel32` binding — cross-compiling proves neither that the
@@ -188,6 +188,15 @@ Five checks, each covering something a Linux lab structurally cannot:
    is no Go toolchain.
 5. **`--boot` really returns the boot log**, checked directly: write a panic
    marker into `unarr.boot.log`, ask the shipped `unarr.exe` for it.
+6. **`sysinfo.LastShutdown()` reads and parses the shutdown record.** It pulls a
+   FILETIME out of `HKLM\SYSTEM\CurrentControlSet\Control\Windows\ShutdownTime`
+   and is diffed against both the raw registry bytes and the shutdown Windows
+   itself logged (System event 6006) — a wrong endianness or offset lands
+   centuries away, and only a real registry can show that. It also *reports*
+   whether the boot instant currently predates the last shutdown, which is the
+   Fast Startup blind spot in check 1: a hybrid shutdown hibernates the kernel
+   session, so `GetTickCount64` carries over the power cycle and the state file
+   of a daemon that shutdown killed looks NEWER than the boot.
 
 The bugs it guards: a Windows box that reboots for updates in its 02:00–05:00
 maintenance window kills the daemon before its 30s drain can remove the state
@@ -196,8 +205,42 @@ the tray mailed a crash report for a restart nobody would call a crash. And the
 report it mailed could not have contained a panic anyway, because panics go to
 stderr → `unarr.boot.log`, which nothing collected.
 
+Then the same bug's second half, from a crash report filed 2026-08-26: a box
+shut down at 00:02 with **Fast Startup** on. The boot-time filter above cannot
+see that power cycle at all (hibernated kernel session ⇒ the tick counter
+carries over), so the shutdown record became the second, independent signal —
+and the daemon now stamps `shutting_down` **before** its drain, so any stop that
+outruns the drain stops looking like a death in the first place. Note the daemon
+gets no shutdown signal on Windows regardless (`DETACHED_PROCESS |
+CREATE_NO_WINDOW` ⇒ no console ⇒ no `CTRL_SHUTDOWN_EVENT`), which is exactly why
+the after-the-fact verdict has to carry that case.
+
 Re-run after any change to `internal/sysinfo`, `agent.StateFromPreviousBoot`,
 `readStatus`, or `cmd/unarr-desktop/logsources.go`.
+
+To exercise check 6 against a REAL power cycle rather than whatever the box last
+did: note the reported `lastShutdown`, then `Stop-Computer` in the guest, boot it
+again (`docker compose up -d`) and re-run — the value must move forward to the
+shutdown you just performed. **Measured 2026-08-26:** it does, and
+`sysinfo.LastShutdown()` parsed it to within 0.4s of event 6006.
+
+**Known non-finding — `desktop_test.exe` roll-up (check 2) fails in this guest.**
+`TestReportLogsWithoutABootLog` and `TestReportLogsPlaceholderSurvives` assert
+what the tray shows when there is NO log to collect, and this guest always has
+one: check 5 writes a panic marker into `%LOCALAPPDATA%\unarr\unarr.boot.log`,
+so from the second run onward those fixtures cannot hold. Verified 2026-08-26 to
+fail identically with a `desktop_test.exe` built from `main`, i.e. it is the
+harness contaminating itself, not a regression. The checks that matter are the
+per-name ones (check 3), which must stay all-green. Delete that boot log if you
+want the roll-up green.
+
+**What this harness cannot show you:** the Fast Startup carry-over itself. The
+guest reports `HiberbootEnabled=1`, but its firmware has no hibernation
+(`powercfg /a` → "Fast Startup — Hibernation is not available"), so every
+`Stop-Computer` here is a FULL shutdown and the tick counter always restarts —
+check 6 will keep printing "boot is after the last shutdown". Reproducing the
+blind spot needs real hardware (or a VM with hibernation), which is why the
+shutdown record is written to be a no-op when it has nothing to say.
 
 ### Doctor / support-bundle package tests — `smoke-doctorwin.ps1`
 
