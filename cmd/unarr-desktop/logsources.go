@@ -81,7 +81,14 @@ func logSections() []logSection {
 
 	out, err := runUnarrOutput("daemon", "logs")
 	if len(out) == 0 {
-		out = []byte(noLogsExplanation(err))
+		// The CLI could not answer. Before giving up on the daemon log, read the
+		// file off disk: the one failure that lost a whole field report was a
+		// binary that would not exec while its log files sat there readable.
+		if body, ok := fallbackDaemonLog(); ok {
+			out = fallbackNote(err, body)
+		} else {
+			out = []byte(noLogsExplanation(err))
+		}
 	}
 	sections := []logSection{{
 		title:  "daemon log (unarr logs)",
@@ -138,7 +145,15 @@ func noLogsExplanation(err error) string {
 func bootLogSection() (logSection, bool) {
 	out, err := runUnarrOutput("daemon", "logs", "--boot")
 	if err != nil || len(bytes.TrimSpace(out)) == 0 {
-		return logSection{}, false
+		// Same fallback as the daemon log, and it matters MORE here: this is the
+		// file panic dumps land in, and it is lost to the identical exec failure
+		// because both reads run the same binary. A missing file still yields no
+		// section — only a real, non-empty boot log turns into one.
+		body, ok := fallbackBootLog()
+		if !ok {
+			return logSection{}, false
+		}
+		out = fallbackNote(err, body)
 	}
 	return logSection{
 		title:  "startup log (unarr logs --boot): panics and start failures land here",
