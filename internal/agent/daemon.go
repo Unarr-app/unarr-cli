@@ -91,9 +91,18 @@ type Daemon struct {
 	OnCredentialRejected func()
 
 	// State
-	User                UserInfo
-	Features            FeatureFlags
-	Info                AgentInfo
+	User     UserInfo
+	Features FeatureFlags
+	Info     AgentInfo
+	// State is written from SEVERAL goroutines — the sync loop (heartbeat and
+	// liveness stamps), the funnel supervisor (SetFunnelURL), the control
+	// server (SetControlPlane) and the signal handler (MarkShuttingDown) — and
+	// marshalled whole on every write. stateMu guards the struct itself; the
+	// stateWriteMu inside WriteState only serialises the FILE write, which is a
+	// different question. Mutate it through mutateState, never in place, and
+	// compute anything that needs another lock (FunnelURL, GetActiveCount)
+	// BEFORE entering it so the two never nest.
+	stateMu             sync.Mutex
 	State               DaemonState
 	lastNotifiedVersion string
 	// upgradeDeferring guards a single defer-until-idle waiter for auto-upgrade.
@@ -173,9 +182,11 @@ func (d *Daemon) SetAgentID(id string) { d.cfg.AgentID = id }
 func (d *Daemon) SetFunnelURL(url string) {
 	d.funnelMu.Lock()
 	d.funnelURL = url
-	d.State.FunnelURL = url
 	d.funnelMu.Unlock()
-	WriteState(&d.State)
+	// Mirrored into State under ITS lock, after funnelMu is released: this runs
+	// on the funnel supervisor's goroutine while the sync loop is writing the
+	// same struct.
+	d.mutateState(func(st *DaemonState) { st.FunnelURL = url })
 }
 
 // FunnelURL returns the current CloudFlare Quick Tunnel URL ("" when none),
@@ -184,6 +195,25 @@ func (d *Daemon) FunnelURL() string {
 	d.funnelMu.Lock()
 	defer d.funnelMu.Unlock()
 	return d.funnelURL
+}
+
+// mutateState applies fn to State under stateMu and persists the result. Every
+// mutation of State goes through here: it is the only thing that makes the
+// concurrent writers above safe, and the only place a write can be given a
+// consistent view of the struct it is marshalling.
+func (d *Daemon) mutateState(fn func(*DaemonState)) {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	fn(&d.State)
+	WriteState(&d.State)
+}
+
+// stateStatus reads State.Status under the same lock. The sync loop asks for it
+// on every heartbeat while the shutdown path is writing it.
+func (d *Daemon) stateStatus() string {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.State.Status
 }
 
 // SetHTTPSWanMapped records whether the stream server's HTTPS port is currently
@@ -392,7 +422,7 @@ func (d *Daemon) register(ctx context.Context, park bool) error {
 		Features:  resp.Features,
 		StartedAt: now,
 	}
-	d.State = DaemonState{
+	fresh := DaemonState{
 		AgentID:     d.cfg.AgentID,
 		Status:      "running",
 		Version:     d.cfg.Version,
@@ -411,7 +441,8 @@ func (d *Daemon) register(ctx context.Context, park bool) error {
 		ControlPort:  d.controlPort,
 		ControlToken: d.controlToken,
 	}
-	WriteState(&d.State)
+	// Built outside the lock (FunnelURL takes funnelMu) and swapped in under it.
+	d.mutateState(func(st *DaemonState) { *st = fresh })
 
 	return nil
 }
@@ -503,22 +534,29 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return d.httpsWanMapped.Load()
 	}
 	d.sync.GetAgentStatus = func() string {
-		return d.State.Status
+		return d.stateStatus()
 	}
 	d.sync.OnSyncSuccess = func() {
-		d.State.LastHeartbeat = time.Now()
+		// Counted BEFORE stateMu: GetActiveCount reaches into the download
+		// manager's own locks, and taking the two in this order anywhere would
+		// be the start of a lock cycle.
+		active, counted := 0, false
 		if d.GetActiveCount != nil {
-			d.State.ActiveTasks = d.GetActiveCount()
+			active, counted = d.GetActiveCount(), true
 		}
-		WriteState(&d.State)
+		d.mutateState(func(st *DaemonState) {
+			st.LastHeartbeat = time.Now()
+			if counted {
+				st.ActiveTasks = active
+			}
+		})
 	}
 	// Liveness, separate from connectivity: this runs whether or not the server
 	// answered, so a daemon with no network still keeps its state file fresh.
 	// Without it, `unarr status` called an alive-and-downloading agent "not
 	// running" as soon as its last successful sync aged past two minutes.
 	d.sync.OnSyncAttempt = func() {
-		d.State.LastAlive = time.Now()
-		WriteState(&d.State)
+		d.mutateState(func(st *DaemonState) { st.LastAlive = time.Now() })
 	}
 
 	// Start sync loop (blocks)
@@ -538,9 +576,30 @@ func (d *Daemon) TriggerSync() {
 func (d *Daemon) SetControlPlane(port int, token string) {
 	d.controlPort = port
 	d.controlToken = token
-	d.State.ControlPort = port
-	d.State.ControlToken = token
-	WriteState(&d.State)
+	d.mutateState(func(st *DaemonState) {
+		st.ControlPort = port
+		st.ControlToken = token
+	})
+}
+
+// MarkShuttingDown stamps the state file "shutting_down" at the TOP of the
+// shutdown path — before the up-to-30s download drain, not after it.
+//
+// The tray's crash rule is "state file says running + PID is gone" (see
+// cmd/unarr-desktop.readStatus). Every stop that outruns the drain therefore
+// used to leave a perfect crash signature behind: Windows gives a process ~5s
+// at shutdown, systemd's TimeoutStopSec can be shorter than the drain, and a
+// `taskkill /T` is instant. The mark is a single small write, so it lands even
+// when the drain never finishes, and it turns all of those into "the user asked
+// for this" instead of a mailed crash report.
+//
+// It is deliberately NOT the whole answer on Windows: the daemon runs
+// DETACHED_PROCESS | CREATE_NO_WINDOW (see cmd.detachedSysProcAttr), so it has
+// no console and a system shutdown delivers no CTRL_SHUTDOWN_EVENT for the Go
+// runtime to turn into a signal — nothing calls this. That case is settled
+// after the fact by agent.StateFromPreviousBoot.
+func (d *Daemon) MarkShuttingDown() {
+	d.mutateState(func(st *DaemonState) { st.Status = "shutting_down" })
 }
 
 // Deregister notifies the server of graceful shutdown.
@@ -620,8 +679,7 @@ func (d *Daemon) applyAutoUpgrade(targetVersion string) {
 	// Tell the web we're updating so a NEW playback attempt during the brief
 	// restart sees "agent updating" instead of a hard session error. One
 	// heartbeat carries this before the (blocking) download + os.Exit below.
-	d.State.Status = "updating"
-	WriteState(&d.State)
+	d.mutateState(func(st *DaemonState) { st.Status = "updating" })
 	d.TriggerSync()
 
 	upgrader := &upgrade.Upgrader{

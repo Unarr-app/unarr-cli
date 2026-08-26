@@ -143,14 +143,15 @@ const StatusBlocked = "blocked"
 // not pretend to be a heartbeat — there is nothing to report until the block
 // clears.
 func (d *Daemon) publishBlockedState() {
-	d.State.AgentID = d.cfg.AgentID
-	d.State.Status = StatusBlocked
-	d.State.Version = d.cfg.Version
-	d.State.PID = os.Getpid()
-	if d.State.StartedAt.IsZero() {
-		d.State.StartedAt = time.Now()
-	}
-	WriteState(&d.State)
+	d.mutateState(func(st *DaemonState) {
+		st.AgentID = d.cfg.AgentID
+		st.Status = StatusBlocked
+		st.Version = d.cfg.Version
+		st.PID = os.Getpid()
+		if st.StartedAt.IsZero() {
+			st.StartedAt = time.Now()
+		}
+	})
 }
 
 // ambiguousRetries is how many ordinary retries an ambiguous rejection gets
