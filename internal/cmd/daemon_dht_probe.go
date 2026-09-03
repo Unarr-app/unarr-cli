@@ -5,48 +5,51 @@ import (
 	"runtime"
 )
 
-// logDHTReachability records, once per daemon start, whether this machine can
-// complete a DHT round trip.
+// logInboundPeerReachability records, once per daemon start, whether inbound
+// peer connections can actually reach this agent on Windows.
 //
-// Why it earns a line in the boot log: a magnet link carries no file list, so
-// the client must fetch its metadata from the swarm, and the DHT is how it finds
-// the swarm. Block inbound UDP and every magnet download ends as
-// "metadata timeout: no peers found" — a message that describes the torrent,
-// not the network, so the user concludes the release is dead and moves on.
+// Why it earns a line in the boot log: a magnet carries no file list, so the
+// client must fetch metadata from the swarm, and a firewalled agent has far
+// fewer sources to fetch it from. The failure surfaces as
+// "metadata timeout: no peers found" — a message about the torrent, not the
+// network — so the user concludes the release is dead and moves on.
 //
-// Measured on prod 2026-09-03, holding the content constant at 10+ seeders:
+// Measured on prod 2026-09-03, holding content constant at 10+ seeders:
 //
 //	windows   16 ok /  60 no-peers = 58.3%
 //	linux    104 ok /  16 no-peers = 10.7%
 //	darwin    14 ok /   1 no-peers =  4.5%
 //
-// Same 1.11.5 build everywhere. `unarr doctor` could already diagnose this on
-// demand, but it is a command a user runs only once they suspect the network —
-// and this failure never points there. Logging it at startup is what turns a
-// silent misconfiguration into something support can read off a log.
-func logDHTReachability() {
-	nodes, err := probeDHT()
+// This deliberately does NOT probe the DHT. An earlier version did, and it was
+// wrong twice over:
+//
+//   - The probe was outbound-initiated. Windows Firewall statefully admits the
+//     solicited reply, so it logged "reachable" on precisely the boxes whose
+//     inbound port was blocked — it could never observe the condition it was
+//     written to detect.
+//   - It opened a clear-net UDP socket and pinged the global DHT. For a user
+//     with the VPN tunnel active that re-introduces the real-IP leak
+//     engine/vpn_wire.go closes on purpose (NoDHT = true, DialForPeerConns =
+//     false, AcceptPeerConnections = false), including in the fail-closed state
+//     where P2P is supposed to be off entirely.
+//
+// Reading the firewall rule table instead costs no network traffic, is correct
+// with the tunnel up, and answers the question that actually matters.
+func logInboundPeerReachability() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	ok, err := windowsFirewallRuleExists()
 	if err != nil {
-		log.Printf("[dht] bootstrap unreachable (%v) - magnet downloads may fail with "+
-			"\"no peers found\" even on well-seeded torrents%s", err, dhtHintForOS())
+		log.Printf("[firewall] could not read the firewall rules (%v) - "+
+			"run `unarr doctor` if downloads fail with \"no peers found\"", err)
 		return
 	}
-	if nodes == 0 {
-		log.Printf("[dht] no bootstrap node answered - magnet downloads may fail with "+
-			"\"no peers found\" even on well-seeded torrents%s", dhtHintForOS())
+	if !ok {
+		log.Printf("[firewall] no inbound rule for the agent - fewer peers can reach you, " +
+			"and downloads may fail with \"no peers found\" even on well-seeded torrents. " +
+			"Fix: re-run `unarr daemon install` from an Administrator prompt")
 		return
 	}
-	log.Printf("[dht] reachable (%d bootstrap node(s) answered)", nodes)
-}
-
-// dhtHintForOS names the most likely culprit per platform. On Windows that is
-// overwhelmingly the built-in firewall, which is why `daemon install` now adds
-// the rule itself — this hint covers agents installed before that, and installs
-// that ran without elevation.
-func dhtHintForOS() string {
-	if runtime.GOOS == "windows" {
-		return "; on Windows this is usually Windows Defender Firewall - run `unarr daemon install` " +
-			"from an Administrator prompt to add the inbound rule, then `unarr doctor` to confirm"
-	}
-	return "; check that outbound UDP is allowed and that any VPN is not blocking it - `unarr doctor` has the detail"
+	log.Printf("[firewall] inbound peer rule present")
 }

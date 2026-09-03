@@ -566,11 +566,11 @@ func installWindowsTask(data serviceData, green *color.Color) error {
 		return err
 	}
 
-	// Inbound peer traffic. Without this the DHT cannot complete a round trip and
-	// magnet downloads fail as "no peers found" on perfectly healthy swarms — the
-	// 58% Windows failure rate measured on 2026-09-03. Never fatal: see
-	// daemon_install_winfirewall.go.
-	addWindowsFirewallRules(loadConfig().Download.ListenPort, green)
+	// Inbound peer traffic. Without it far fewer peers reach us and magnet
+	// downloads fail as "no peers found" on healthy swarms — the 58% Windows
+	// failure rate measured on 2026-09-03. Scoped to the binary, not to a port:
+	// see daemon_install_winfirewall.go for why. Never fatal.
+	addWindowsFirewallRules(data.BinPath, green)
 
 	// Run it now. "Installed, will start at next login" is a dead end for
 	// someone who just finished the wizard and expects a working agent.
