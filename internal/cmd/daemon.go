@@ -440,6 +440,18 @@ func runDaemonStart() error {
 		return fmt.Errorf("create torrent downloader: %w", err)
 	}
 
+	// Is the DHT actually reachable from here? A magnet has no other way to fetch
+	// its metadata, so when the answer is no every magnet download dies as
+	// "metadata timeout: no peers found" — which reads like a dead torrent and
+	// sends the user to blame the catalogue. Measured on prod 2026-09-03 over
+	// torrents with 10+ seeders: 58.3% of Windows downloads failed that way
+	// against 10.7% on Linux, same agent build.
+	//
+	// One 6s UDP round trip at startup, in its own goroutine so a firewalled box
+	// does not delay the daemon. It only ever LOGS: peer discovery can still
+	// limp along on trackers and PEX, so this is a diagnosis, not a gate.
+	go logDHTReachability()
+
 	if maxDl > 0 || maxUl > 0 {
 		dlStr, ulStr := "unlimited", "unlimited"
 		if maxDl > 0 {

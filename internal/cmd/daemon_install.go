@@ -465,6 +465,9 @@ func runDaemonUninstall() error {
 		// code.
 		os.Remove(filepath.Join(config.DataDir(), launcherVBSName))
 		os.Remove(agent.StopIntentPath())
+		// Leave nothing of ours behind in the firewall. Best-effort by design:
+		// the rules may never have been created (non-elevated install).
+		removeWindowsFirewallRules()
 		green.Println("  ✓ Scheduled task removed")
 
 	default:
@@ -562,6 +565,12 @@ func installWindowsTask(data serviceData, green *color.Color) error {
 	if err := writeAndCreateWindowsTask(data, logDir); err != nil {
 		return err
 	}
+
+	// Inbound peer traffic. Without this the DHT cannot complete a round trip and
+	// magnet downloads fail as "no peers found" on perfectly healthy swarms — the
+	// 58% Windows failure rate measured on 2026-09-03. Never fatal: see
+	// daemon_install_winfirewall.go.
+	addWindowsFirewallRules(loadConfig().Download.ListenPort, green)
 
 	// Run it now. "Installed, will start at next login" is a dead end for
 	// someone who just finished the wizard and expects a working agent.
