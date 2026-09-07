@@ -20,6 +20,7 @@ import (
 	"log"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,12 +43,11 @@ var debridHTTPClient = &http.Client{
 }
 
 // NewDebridFileProvider builds a FileProvider backed by a debrid HTTPS URL.
-// It performs a single HEAD up front to learn the exact file size (the torrent
-// size the web knows can differ from the resolved file's size). If the HEAD
-// fails or omits Content-Length, fallbackSize (from the StreamSession) is used.
-// Returns an error only when neither a HEAD size nor a fallback is available —
-// http.ServeContent needs a real size to range-serve, and serving size 0 would
-// hand the browser an empty file.
+// It learns the exact file size up front (the torrent size the web knows can
+// differ from the resolved file's size) via resolveDebridSize.
+// Returns an error only when NO source of a size answered — http.ServeContent
+// needs a real size to range-serve, and serving size 0 would hand the browser
+// an empty file.
 // refresh, when non-nil, re-resolves a fresh debrid URL for the same content
 // (hueco #2 / 2c) — called when the current link expires mid-stream. nil keeps
 // 2a behaviour (an expired link is a hard error, no recovery).
@@ -55,12 +55,9 @@ func NewDebridFileProvider(ctx context.Context, directURL, fileName string, fall
 	if directURL == "" {
 		return nil, errors.New("debrid provider: empty direct URL")
 	}
-	size := fallbackSize
-	if headSize, ok := debridHeadSize(ctx, directURL); ok {
-		size = headSize
-	}
+	size := resolveDebridSize(ctx, directURL, fallbackSize)
 	if size <= 0 {
-		return nil, fmt.Errorf("debrid provider: unknown file size (HEAD gave nothing, no fallback)")
+		return nil, fmt.Errorf("debrid provider: unknown file size (HEAD, range probe and fallback all gave nothing)")
 	}
 	// The name drives the served Content-Type (mimeTypeFromExt on FileName).
 	// The web may pass a torrent title with no extension (its file-name
@@ -297,6 +294,87 @@ func (r *debridRangeReader) reopen() error {
 		}
 	}
 	return fmt.Errorf("debrid reader: link still failing after %d refresh attempts", maxAttempts)
+}
+
+// resolveDebridSize determines the byte length http.ServeContent will
+// range-serve against. Most authoritative source first:
+//
+//  1. HEAD Content-Length — the resource itself, one cheap request.
+//  2. A 1-byte ranged GET, reading the total out of Content-Range. Some debrid
+//     CDNs answer HEAD with nothing usable yet serve ranged GETs perfectly —
+//     TorBox's beam-*.torrin.app, the CDN behind EVERY "unknown file size"
+//     failure in prod, is exactly that shape. Costs one request and is only
+//     ever reached when HEAD already failed, so it adds no latency to the
+//     healthy path.
+//  3. fallbackSize — the size the PROVIDER listed for this file (task
+//     DirectFileSize / StreamSession FileSize). Second-hand, but in prod it
+//     matched the served file byte for byte on every failed task.
+//
+// Returns 0 when nothing answered; the caller turns that into an error.
+func resolveDebridSize(ctx context.Context, url string, fallbackSize int64) int64 {
+	if headSize, ok := debridHeadSize(ctx, url); ok {
+		return headSize
+	}
+	if rangeSize, ok := debridRangeSize(ctx, url); ok {
+		return rangeSize
+	}
+	if fallbackSize > 0 {
+		log.Printf("[stream] debrid size unknown from the link (HEAD and range probe both failed) - using the provider-listed size %d", fallbackSize)
+		return fallbackSize
+	}
+	return 0
+}
+
+// debridRangeSize asks for a single byte and reads the file's total length out
+// of the Content-Range header ("bytes 0-0/1234"). Best-effort: any failure
+// returns (0, false).
+func debridRangeSize(ctx context.Context, url string) (int64, bool) {
+	rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, false
+	}
+	req.Header.Set("Range", "bytes=0-0")
+	resp, err := debridHTTPClient.Do(req)
+	if err != nil {
+		log.Printf("[stream] debrid range probe failed: %v", err)
+		return 0, false
+	}
+	// At most one byte, but it still has to be drained and closed or the
+	// connection never returns to the idle pool.
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode == http.StatusOK {
+		// Range ignored: the server is streaming the whole file, so
+		// Content-Length IS the total — just as good an answer.
+		if resp.ContentLength > 0 {
+			return resp.ContentLength, true
+		}
+		return 0, false
+	}
+	if resp.StatusCode != http.StatusPartialContent {
+		log.Printf("[stream] debrid range probe: unexpected status %d", resp.StatusCode)
+		return 0, false
+	}
+	return totalFromContentRange(resp.Header.Get("Content-Range"))
+}
+
+// totalFromContentRange pulls the total length out of a "bytes 0-0/1234"
+// header. A "*" total (server doesn't know the length) yields ok=false.
+func totalFromContentRange(v string) (int64, bool) {
+	i := strings.LastIndex(v, "/")
+	if i < 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(v[i+1:]), 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // debridHeadSize issues a HEAD and returns the Content-Length when present.
