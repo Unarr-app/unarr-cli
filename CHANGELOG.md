@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.8] - 2026-09-07
+
+
+### Documentation
+
+- **windows**: record the final piece-completion harness run
+
+### Fixed
+
+- **torrent**: harden the piece-completion pre-flight after review
+- **torrent**: check, salvage or quarantine the piece-completion db before opening it
+- **torrent**: own bolt piece-completion backend, synced and freelist-less
 ## [1.11.7] - 2026-09-07
 
 
@@ -14,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **stream**: stop aborting a debrid stream when HEAD reveals no size
 - **torrent**: put the completion test on the same scale as the guard
 - **torrent**: measure the completion guard against the selected files
+
+### Other
+
+- **release**: 1.11.7
 ## [1.11.6] - 2026-09-03
 
 
@@ -1663,6 +1679,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.11.8]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.7...v1.11.8
 [1.11.7]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.6...v1.11.7
 [1.11.6]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.5...v1.11.6
 [1.11.5]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.4...v1.11.5
