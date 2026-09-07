@@ -505,7 +505,8 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 	}
 
 	// 2. Select files to download (prefer largest video + matching subs)
-	totalBytes, fileName := d.selectFiles(t, task.ID)
+	sel := d.selectFiles(t, task.ID)
+	totalBytes, fileName := sel.totalBytes, sel.fileName
 
 	log.Printf("[%s] downloading %s (%s)", task.ShortID(), fileName, formatBytes(totalBytes))
 
@@ -523,6 +524,23 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 	if err != nil {
 		cleanup()
 		return nil, err
+	}
+
+	// 3.5 Integrity: the poll loop stops at "downloaded >= totalBytes", which is
+	// a byte COUNT. Assert that nothing we actually asked for is still missing
+	// (a piece that failed its last hash) before calling this a finished
+	// download. A non-zero remainder is an integrity failure → the manager
+	// re-downloads (anacrolix re-checks pieces).
+	//
+	// Measured against the SELECTION, never the whole torrent: selectFiles
+	// deliberately skips everything but the video + its subs, and the
+	// torrent-wide t.BytesMissing() reports those skipped files as damage. See
+	// selection.missingBytes. Deciding this here rather than inside the poll
+	// loop keeps the loop about progress and the verdict in the one place that
+	// knows what was selected.
+	if missing := sel.missingBytes(t); missing > 0 {
+		cleanup()
+		return nil, integrityErr("truncated", "torrent reported complete but %s of verified pieces are still missing", formatBytes(missing))
 	}
 
 	// 4. Determine file path
@@ -810,16 +828,12 @@ func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent
 			}
 
 			// Check completion. BytesCompleted counts only SHA1-VERIFIED pieces, so
-			// torrent content can't be silently truncated — but assert nothing is
-			// still missing (selective-file accounting, a piece that failed its last
-			// hash) before declaring done. A non-zero remainder is an integrity
-			// failure → the manager re-downloads (anacrolix re-checks pieces).
+			// torrent content can't be silently truncated. Whether everything we
+			// SELECTED is really present is asserted by the caller (step 3.5),
+			// which is the layer that knows what was selected.
 			if downloaded >= totalBytes {
 				if isTTY {
 					fmt.Fprintln(os.Stderr) // newline after \r progress
-				}
-				if missing := t.BytesMissing(); missing > 0 {
-					return nil, integrityErr("truncated", "torrent reported complete but %s of verified pieces are still missing", formatBytes(missing))
 				}
 				log.Printf("[%s] download complete: %s", task.ShortID(), fileName)
 				return &Result{}, nil
@@ -1135,13 +1149,16 @@ var subExts = map[string]bool{
 
 // selectFiles picks the largest video file + matching subtitles.
 // Falls back to downloading everything if no video file is found.
-// Returns the total bytes to download and the primary file name.
-func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) (totalBytes int64, fileName string) {
+// Returns what was selected: total bytes, primary file name, and the files
+// themselves (nil = everything). The file list is what lets the completion
+// guard measure against the SELECTION rather than the whole torrent — see
+// selection.missingBytes.
+func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) selection {
 	files := t.Files()
 
 	if len(files) <= 1 {
 		t.DownloadAll()
-		return t.Length(), t.Name()
+		return selection{totalBytes: t.Length(), fileName: t.Name()}
 	}
 
 	// Find largest video file
@@ -1156,13 +1173,14 @@ func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) (tota
 	if video == nil {
 		// No video (music, software, etc.) — download everything
 		t.DownloadAll()
-		return t.Length(), t.Name()
+		return selection{totalBytes: t.Length(), fileName: t.Name()}
 	}
 
 	// Download only the video
 	video.Download()
-	totalBytes = video.Length()
-	fileName = video.DisplayPath()
+	totalBytes := video.Length()
+	fileName := video.DisplayPath()
+	selected := []*torrent.File{video}
 
 	// Also download matching subtitles
 	videoBase := strings.TrimSuffix(video.DisplayPath(), filepath.Ext(video.DisplayPath()))
@@ -1175,6 +1193,7 @@ func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) (tota
 			if strings.HasPrefix(fBase, videoBase) || filepath.Dir(f.DisplayPath()) == filepath.Dir(video.DisplayPath()) {
 				f.Download()
 				totalBytes += f.Length()
+				selected = append(selected, f)
 				subCount++
 			}
 		}
@@ -1186,7 +1205,7 @@ func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) (tota
 			agent.ShortID(taskID), filepath.Base(fileName), formatBytes(video.Length()), subCount, skipped)
 	}
 
-	return totalBytes, fileName
+	return selection{totalBytes: totalBytes, fileName: fileName, files: selected}
 }
 
 // buildMagnet composes a magnet URI for the info hash with the static
