@@ -192,35 +192,11 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 
 	// --- Performance optimizations ---
 
-	// Storage: mmap instead of default file backend.
-	// The library author notes file storage has "very high system overhead".
-	// mmap improves I/O throughput and piece verification speed significantly.
-	//
-	// When PieceCompletionDir is set (daemon always passes the agent state dir),
-	// keep the piece-completion SQLite DB off the download dir so it never lands
-	// on NFS/SMB where SQLite's file locking times out and emits a warning.
-	//
-	// The storage impl is kept so Shutdown can close it: torrent.Client.Close()
-	// closes torrents and peers but NOT DefaultStorage, so the piece-completion DB
-	// handle would leak for the process's life — on Windows that keeps `.torrent.db`
-	// locked and the directory undeletable.
-	var store storage.ClientImplCloser
-	if cfg.PieceCompletionDir != "" {
-		if mkErr := os.MkdirAll(cfg.PieceCompletionDir, 0o755); mkErr != nil {
-			log.Printf("[torrent] piece-completion dir create failed (%v), DB stays in download dir", mkErr)
-			store = storage.NewMMap(cfg.DataDir)
-		} else if pc, pcErr := storage.NewDefaultPieceCompletionForDir(cfg.PieceCompletionDir); pcErr != nil {
-			log.Printf("[torrent] piece-completion db in %q failed (%v), falling back to download dir", cfg.PieceCompletionDir, pcErr)
-			store = storage.NewMMap(cfg.DataDir)
-		} else {
-			store = storage.NewMMapWithCompletion(cfg.DataDir, pc)
-		}
-	} else {
-		store = storage.NewMMap(cfg.DataDir)
-	}
+	// Storage backend (mmap + piece-completion DB placement + corruption
+	// pre-flight): see torrent_storage.go. Kept so Shutdown can close it.
 	// Wrap so a chunk write that lands after t.Drop() closes the storage is
 	// refused instead of panicking the process. See storage_closeguard.go.
-	store = newCloseGuard(store)
+	store := newCloseGuard(newTorrentStore(cfg))
 	tcfg.DefaultStorage = store
 
 	// Fixed port for incoming peer connections (enables UPnP port mapping).
