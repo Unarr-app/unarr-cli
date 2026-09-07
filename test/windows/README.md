@@ -278,7 +278,8 @@ check step aside, never move the file), the child-exit mapping and the
 replace-on-rename are Windows semantics a Linux run cannot stand in for.
 The salvage path (`ReachableFreedPageIsSalvaged`: `bbolt.Compact` in the child,
 two renames in the parent) is also exercised here on NTFS. Measured 2026-09-07
-(Win11 26200): 16/16 targeted (1 POSIX-only skip), whole package green.
+(Win11 26200): 19/19 targeted (1 POSIX-only skip), whole package green, plus
+`cmd_test.exe -test.run Clean` for the `unarr clean` targets.
 
 ### Doctor / support-bundle package tests — `smoke-doctorwin.ps1`
 
