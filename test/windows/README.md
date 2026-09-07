@@ -257,7 +257,9 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o test/windows/shared/engine
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File \\host.lan\Data\smoke-piece-completion.ps1
-$env:UNARR_ENGINE_RUN = '.'   # optional: the whole engine package instead of the quarantine tests
+$env:UNARR_ENGINE_RUN = '.'              # optional: the whole engine package instead of the quarantine tests
+$env:UNARR_TEST_BIN = 'cmd_test.exe'     # optional: another package's test binary from the share
+$env:UNARR_ENGINE_RUN = 'Clean'          #   (e.g. the `unarr clean` targets) — result in cmd-result.txt
 ```
 
 Result lands in `shared/engine-result.txt` (`EXIT=0` + one `--- PASS` per test;

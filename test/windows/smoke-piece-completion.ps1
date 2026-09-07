@@ -3,9 +3,13 @@
 # Linux run cannot prove). Copy the binary to a LOCAL dir first: a process
 # started from the UNC share inherits a UNC cwd and every child fails (README).
 $ErrorActionPreference = 'Continue'
-$out = '\\host.lan\Data\engine-result.txt'
+# $env:UNARR_TEST_BIN picks another package test binary from the share (e.g.
+# cmd_test.exe); the result file follows its name.
+$bin = $env:UNARR_TEST_BIN
+if (-not $bin) { $bin = 'engine_test.exe' }
+$out = '\\host.lan\Data\' + ($bin -replace '_test\.exe$', '') + '-result.txt'
 $local = 'C:\unarrtest'
-$exe = Join-Path $local 'engine_test.exe'
+$exe = Join-Path $local $bin
 $lines = @()   # ALWAYS an array: a scalar here turns '+=' into string concatenation or a throw
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 
@@ -15,9 +19,9 @@ if (Test-Path $out) { Remove-Item -Force $out }
 # and 'no tests to run' + EXIT=0 looks like a pass.
 if (Test-Path $local) { Remove-Item -Recurse -Force $local }
 New-Item -ItemType Directory -Force -Path $local | Out-Null
-Copy-Item -Force \\host.lan\Data\engine_test.exe $exe
+Copy-Item -Force (Join-Path '\\host.lan\Data' $bin) $exe
 if (-not (Test-Path $exe)) {
-    $lines += 'FAIL: engine_test.exe not copied from the share (rebuild it on the host, see README)'
+    $lines += "FAIL: $bin not copied from the share (rebuild it on the host, see README)"
     $lines += 'EXIT=99'
     [System.IO.File]::WriteAllLines($out, $lines, $utf8)
     exit 99
