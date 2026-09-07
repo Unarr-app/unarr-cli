@@ -6,7 +6,20 @@ import (
 	"path/filepath"
 
 	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/engine"
 )
+
+// pieceCompletionCleanTargets lists the artefacts the torrent engine's
+// piece-completion pre-flight leaves in the state dir: the quarantined copy of
+// a DB found corrupt at boot (kept for forensics, one fixed name so it never
+// accumulates) and a rebuilt copy orphaned by a crash mid-swap. Both are safe
+// to remove at any time — the live DB is never touched here.
+func pieceCompletionCleanTargets(dataDir string) []cleanTarget {
+	return []cleanTarget{
+		{filepath.Join(dataDir, engine.PieceCompletionQuarantineName), "quarantined piece-completion db", false, false},
+		{filepath.Join(dataDir, engine.PieceCompletionDBName+engine.PieceCompletionRebuiltSuffix), "orphaned rebuilt piece-completion db", false, false},
+	}
+}
 
 // What `unarr clean` considers removable, and how much of it is on disk.
 // Split from clean.go so the command keeps to driving the flow (confirm,
@@ -79,6 +92,7 @@ func cleanTargetsFor(o cleanOpts, dataDir string) []cleanTarget {
 			cleanTarget{filepath.Join(dataDir, "daemon.state.json"), "daemon state", false, false},
 			cleanTarget{filepath.Join(dataDir, "daemon.state.json.tmp"), "daemon state temp", false, false},
 		)
+		targets = append(targets, pieceCompletionCleanTargets(dataDir)...)
 	}
 
 	// Temp targets apply regardless of --all

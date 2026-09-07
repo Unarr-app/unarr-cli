@@ -242,6 +242,42 @@ check 6 will keep printing "boot is after the last shutdown". Reproducing the
 blind spot needs real hardware (or a VM with hibernation), which is why the
 shutdown record is written to be a no-op when it has nothing to say.
 
+### Piece-completion DB quarantine — `smoke-piece-completion.ps1`
+
+Runs the `internal/engine` tests for the bolt piece-completion backend and its
+pre-flight (`piece_completion_bolt.go`, `piece_completion_check.go`,
+`torrent_storage.go`) on real Windows. Deploy the package test binary first.
+Build it `CGO_ENABLED=0` like the release (the backend itself is ours and no
+longer depends on cgo, but the `InjectedDamage` fixture still goes through the
+library's legacy backend, and the release is what you want to match anyway):
+
+```bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o test/windows/shared/engine_test.exe ./internal/engine
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File \\host.lan\Data\smoke-piece-completion.ps1
+$env:UNARR_ENGINE_RUN = '.'   # optional: the whole engine package instead of the quarantine tests
+```
+
+Result lands in `shared/engine-result.txt` (`EXIT=0` + one `--- PASS` per test;
+the script deletes the previous result and the previous binary first, so a stale
+pass cannot survive a failed copy). `$env:` values persist for the whole
+PowerShell session — after a `'.'` run, `Remove-Item Env:UNARR_ENGINE_RUN` or the
+next "targeted" run is silently the whole package again.
+
+**What only this can prove:** bbolt locks with `LockFileEx` here, the check runs
+in a re-exec'd CHILD of the test binary (`UNARR_BOLT_CHECK` env, the way
+`cmd/unarr/main.go` does it — `CheckerCrashCountsAsCorrupt` kills that child on
+purpose and needs Windows process exit codes to come back right), and the
+quarantine renames a DB it has just closed over an existing `.corrupt` file —
+the `LockedIsLeftAlone` case (a second daemon holding the file must make the
+check step aside, never move the file), the child-exit mapping and the
+replace-on-rename are Windows semantics a Linux run cannot stand in for.
+The salvage path (`ReachableFreedPageIsSalvaged`: `bbolt.Compact` in the child,
+two renames in the parent) is also exercised here on NTFS. Measured 2026-09-07
+(Win11 26200): 16/16 targeted (1 POSIX-only skip), whole package green.
+
 ### Doctor / support-bundle package tests — `smoke-doctorwin.ps1`
 
 Deploy the package test binaries first:
@@ -293,6 +329,10 @@ letting them show red trains the reader to ignore red.
   wrong, and the parse error surfaces on the LAST line of the file, pointing
   nowhere near the cause. Keep non-ASCII out of quoted strings too.
   `{ printf '\xef\xbb\xbf'; sed 's/$/\r/' x.ps1; } > shared/x.ps1`
+- **Quote every `-test.*` flag when running a `go test -c` binary from PowerShell.**
+  PS 5.1 tokenises a bare `-test.v` as `-test` + `.v`, and the binary answers
+  `flag provided but not defined: -test` followed by its whole usage text. Write
+  `& $exe '-test.v' '-test.run' $pattern` (see `smoke-piece-completion.ps1`).
 - **No here-strings.** PS 5.1 fails to find the `"@` terminator in an LF file and
   swallows the rest of the script. Build multi-line text as an array and join it.
 - **Write config files without a BOM.** `Set-Content -Encoding UTF8` on 5.1 adds

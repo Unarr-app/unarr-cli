@@ -1,20 +1,40 @@
 package engine
 
 import (
+	"context"
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
+	"go.etcd.io/bbolt"
 )
+
+// boltCheckTestCrashEnv makes the checker child panic instead of checking, to
+// prove the parent survives a checker the file takes down.
+const boltCheckTestCrashEnv = "UNARR_BOLT_CHECK_TEST_CRASH"
 
 // pgidNoFreelist mirrors bbolt's internal/common.PgidNoFreelist: the meta
 // value that says "no persisted freelist, rebuild from reachability on open".
 const pgidNoFreelist = 0xffffffffffffffff
 
 const fixtureRecords = 4000
+
+// TestMain doubles as the checker child, the way cmd/unarr/main.go does: the
+// quarantine re-execs os.Executable(), which under `go test` is this binary.
+func TestMain(m *testing.M) {
+	if path := os.Getenv(BoltCheckChildEnv); path != "" {
+		if os.Getenv(boltCheckTestCrashEnv) != "" {
+			panic("simulated torn page: checker died")
+		}
+		os.Exit(BoltCheckMain(path))
+	}
+	os.Exit(m.Run())
+}
 
 func fixtureInfoHash() metainfo.Hash {
 	var ih metainfo.Hash
@@ -43,13 +63,48 @@ func writeLegacyPieceCompletionDB(t *testing.T, dir string) string {
 	return filepath.Join(dir, PieceCompletionDBName)
 }
 
-// winningMeta returns the meta bbolt will use: the one with the higher txid.
+// injectReachableFreed reproduces the damage class behind the field crash
+// (`panic: page N already freed` on the first MarkComplete after an unclean
+// shutdown): a page that is still part of the B+tree also listed in the
+// persisted freelist. bbolt.Open does NOT notice — the meta pages are intact —
+// so only the consistency check can. It appends the root bucket page id to the
+// freelist page of the winning meta.
 //
 // Layouts (bbolt internal/common, little-endian on every target we ship):
 //
 //	page header: id u64 @0 · flags u16 @8 · count u16 @10 · overflow u32 @12 · data @16
 //	meta (@16 in pages 0 and 1): magic u32 · version u32 · pageSize u32 · flags u32 ·
 //	  root.pgid u64 @16 · root.seq u64 @24 · freelist pgid u64 @32 · pgid u64 @40 · txid u64 @48
+//	freelist page data: ids u64[count]
+func injectReachableFreed(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read db: %v", err)
+	}
+	le := binary.LittleEndian
+	pageSize := int(le.Uint32(raw[16+8:]))
+	m := winningMeta(raw, pageSize)
+	rootPg := le.Uint64(m[16:])
+	freelistPg := int(le.Uint64(m[32:]))
+	if uint64(freelistPg) == pgidNoFreelist {
+		t.Fatal("fixture has no persisted freelist; the legacy backend must have written it")
+	}
+
+	fl := raw[freelistPg*pageSize:]
+	count := int(le.Uint16(fl[10:]))
+	if count >= 0xFFFF {
+		t.Fatal("freelist uses the overflow-count layout; test assumes the compact one")
+	}
+	le.PutUint64(fl[16+8*count:], rootPg)
+	le.PutUint16(fl[10:], uint16(count+1))
+
+	if err := os.WriteFile(path, raw, 0o660); err != nil {
+		t.Fatalf("write db: %v", err)
+	}
+}
+
+// winningMeta returns the meta bbolt will use: the one with the higher txid.
 func winningMeta(raw []byte, pageSize int) []byte {
 	le := binary.LittleEndian
 	m0, m1 := raw[16:], raw[pageSize+16:]
@@ -70,8 +125,54 @@ func persistedFreelistPgid(t *testing.T, path string) uint64 {
 	return binary.LittleEndian.Uint64(winningMeta(raw, pageSize)[32:])
 }
 
+// writeGarbageDB: a file both meta pages of which are junk. Large enough that
+// bbolt finds BOTH metas inside the file whatever the OS page size (it falls
+// back to the OS page size when meta0 is unreadable — 16 KiB on Apple Silicon,
+// up to 64 KiB elsewhere): a shorter file makes the meta1 read fail with an I/O
+// error, which is an environment failure, not damage.
+func writeGarbageDB(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, PieceCompletionDBName)
+	garbage := make([]byte, 128<<10)
+	for i := range garbage {
+		garbage[i] = 0xAB
+	}
+	if err := os.WriteFile(path, garbage, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func mustExist(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+}
+
+func mustNotExist(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("%s should be gone, stat err=%v", path, err)
+	}
+}
+
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
 // assertFixtureRecords opens dir with OUR backend and checks every record the
-// legacy fixture wrote is still there, then writes one more and closes.
+// legacy fixture wrote is still there, then writes one more (the MarkComplete
+// that used to panic) and closes.
 func assertFixtureRecords(t *testing.T, dir string) {
 	t.Helper()
 	pc, err := openBoltPieceCompletion(dir)
@@ -87,9 +188,11 @@ func assertFixtureRecords(t *testing.T, dir string) {
 		}
 	}
 	if err := pc.Set(metainfo.PieceKey{InfoHash: ih, Index: fixtureRecords}, true); err != nil {
-		t.Fatalf("MarkComplete: %v", err)
+		t.Fatalf("MarkComplete after repair: %v", err)
 	}
 }
+
+// --- own backend ---------------------------------------------------------------
 
 // The root-cause fix: a file our backend has written carries NO persisted
 // freelist (meta.freelist == PgidNoFreelist), so bbolt rebuilds it from
@@ -165,5 +268,262 @@ func TestBoltPieceCompletion_LibraryBackendReadsOurFile(t *testing.T) {
 	cn, err := lib.Get(metainfo.PieceKey{InfoHash: ih, Index: 7})
 	if err != nil || !cn.Ok || !cn.Complete {
 		t.Fatalf("library backend: ok=%v complete=%v err=%v", cn.Ok, cn.Complete, err)
+	}
+}
+
+// --- pre-flight: repair / quarantine ---------------------------------------------
+
+func TestRepairPieceCompletionDB_AbsentIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	r, err := repairPieceCompletionDB(dir)
+	if err != nil || r.Quarantined != "" || r.Salvaged {
+		t.Fatalf("absent db: %+v err=%v, want nothing", r, err)
+	}
+}
+
+func TestRepairPieceCompletionDB_HealthyIsKept(t *testing.T) {
+	dir := t.TempDir()
+	path := writeLegacyPieceCompletionDB(t, dir)
+
+	r, err := repairPieceCompletionDB(dir)
+	if err != nil || r.Quarantined != "" || r.Salvaged {
+		t.Fatalf("healthy db: %+v err=%v, want nothing", r, err)
+	}
+	mustExist(t, path)
+	mustNotExist(t, filepath.Join(dir, PieceCompletionQuarantineName))
+}
+
+func TestRepairPieceCompletionDB_UnopenableIsMovedAside(t *testing.T) {
+	dir := t.TempDir()
+	path := writeGarbageDB(t, dir)
+
+	r, err := repairPieceCompletionDB(dir)
+	if err != nil {
+		t.Fatalf("garbage db: %v", err)
+	}
+	if r.Quarantined != filepath.Join(dir, PieceCompletionQuarantineName) || r.Salvaged {
+		t.Fatalf("garbage db: %+v", r)
+	}
+	mustNotExist(t, path)
+	mustExist(t, r.Quarantined)
+	// The backend must now be able to start from scratch in that dir.
+	pc, err := openBoltPieceCompletion(dir)
+	if err != nil {
+		t.Fatalf("fresh db after quarantine: %v", err)
+	}
+	pc.Close()
+}
+
+// The field case: metas fine, tree fine, freelist lies. Open succeeds, Check
+// does not — and because the records are intact, the file is REBUILT, not
+// discarded: every record survives and the MarkComplete that used to panic
+// succeeds. The damaged original is kept aside.
+func TestRepairPieceCompletionDB_ReachableFreedPageIsSalvaged(t *testing.T) {
+	dir := t.TempDir()
+	path := writeLegacyPieceCompletionDB(t, dir)
+	injectReachableFreed(t, path)
+
+	// Sanity: this damage is invisible to a plain open, which is the whole point.
+	db, err := bbolt.Open(path, 0o660, &bbolt.Options{Timeout: time.Second, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("damaged db must still open (bbolt only validates metas): %v", err)
+	}
+	db.Close()
+
+	r, err := repairPieceCompletionDB(dir)
+	if err != nil {
+		t.Fatalf("damaged db: %v", err)
+	}
+	if !r.Salvaged || r.Quarantined == "" {
+		t.Fatalf("freelist-only damage must be salvaged: %+v", r)
+	}
+	mustExist(t, r.Quarantined)
+	mustExist(t, path)
+	mustNotExist(t, path+PieceCompletionRebuiltSuffix)
+	if v := inspectBoltFile(path); v.kind != boltHealthy {
+		t.Fatalf("rebuilt db is not healthy: %s", v.reason)
+	}
+	if got := persistedFreelistPgid(t, path); got != pgidNoFreelist {
+		t.Fatalf("rebuilt db still persists a freelist (%#x)", got)
+	}
+	assertFixtureRecords(t, dir)
+	t.Logf("damage: %s", r.Damage)
+}
+
+// A second incident overwrites the previous quarantine file instead of adding
+// one: the fixed name is what keeps the state dir from filling up.
+func TestRepairPieceCompletionDB_SecondIncidentReplacesTheFirst(t *testing.T) {
+	dir := t.TempDir()
+	writeGarbageDB(t, dir)
+	if _, err := repairPieceCompletionDB(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := writeLegacyPieceCompletionDB(t, dir)
+	injectReachableFreed(t, path)
+	r, err := repairPieceCompletionDB(dir)
+	if err != nil || !r.Salvaged {
+		t.Fatalf("second incident: %+v err=%v", r, err)
+	}
+	got := dirNames(t, dir)
+	if len(got) != 2 {
+		t.Fatalf("want the live db + one quarantine file, got %v", got)
+	}
+}
+
+// Proves the injected damage IS the field crash and not a bogus fixture: the
+// LIBRARY's MarkComplete path (Set on a new piece, as 1.11.x does) dies inside
+// bbolt with a panic, not an error. Which panic depends on where the
+// doubly-owned page lands in the next write: `page N already freed`
+// (freelist.Free while spilling the old root, the report's message) or
+// `misplaced bucket header` (the "free" root page got reused and overwritten).
+// Both are the process dying on pieceHasher.
+func TestInjectedDamageReproducesFieldPanic(t *testing.T) {
+	dir := t.TempDir()
+	path := writeLegacyPieceCompletionDB(t, dir)
+	injectReachableFreed(t, path)
+
+	pc, err := storage.NewBoltPieceCompletion(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer pc.Close()
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = pc.Set(metainfo.PieceKey{InfoHash: fixtureInfoHash(), Index: fixtureRecords}, true)
+	}()
+	msg, _ := recovered.(string)
+	if !strings.Contains(msg, "already freed") && !strings.Contains(msg, "misplaced bucket header") {
+		t.Fatalf("want a bbolt integrity panic on MarkComplete, got %v", recovered)
+	}
+	t.Logf("MarkComplete on the damaged db panics with: %s", msg)
+}
+
+// The reason the check runs out of process: a file that takes the checker down
+// (torn page ⇒ runtime fault or assert panic on bbolt's own goroutine) must read
+// as "corrupt" in the daemon, not kill it. The child is told to panic.
+func TestCheckPieceCompletionDB_CheckerCrashCountsAsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	path := writeLegacyPieceCompletionDB(t, dir)
+	t.Setenv(boltCheckTestCrashEnv, "1")
+
+	v := checkPieceCompletionDB(path)
+	if v.kind != boltCorrupt {
+		t.Fatalf("crashing checker: kind=%v reason=%q, want corrupt", v.kind, v.reason)
+	}
+	if !strings.Contains(v.reason, "checker died") || !strings.Contains(v.reason, "simulated torn page") {
+		t.Fatalf("reason should carry the child's first stderr lines, got %q", v.reason)
+	}
+
+	r, err := repairPieceCompletionDB(dir)
+	if err != nil || r.Quarantined == "" || r.Salvaged {
+		t.Fatalf("crashing checker must quarantine, never salvage: %+v err=%v", r, err)
+	}
+}
+
+// Damage to the tree itself must never be "salvaged": a garbage file is the
+// simplest such case (open fails outright).
+func TestFreelistOnlyDamage_Classification(t *testing.T) {
+	for reason, want := range map[string]bool{
+		"":                              false,
+		"open: invalid database":        false,
+		"check: page 66: already freed": true,
+		"check: page 3: reachable freed; page 66: already freed":                     true,
+		"check: page 3: reachable freed; page 9: multiple references (stack: [3 9])": false,
+		"check: page 4: invalid type: unknown<00>":                                   false,
+		"checker died (exit status 2): panic: x":                                     false,
+	} {
+		if got := freelistOnlyDamage(reason); got != want {
+			t.Errorf("%q: got %v want %v", reason, got, want)
+		}
+	}
+}
+
+// Two daemons racing at boot: the check must step aside, never move a DB the
+// other process is writing to.
+func TestRepairPieceCompletionDB_LockedIsLeftAlone(t *testing.T) {
+	dir := t.TempDir()
+	path := writeLegacyPieceCompletionDB(t, dir)
+	holder, err := bbolt.Open(path, 0o660, &bbolt.Options{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("holder open: %v", err)
+	}
+	defer holder.Close()
+
+	r, err := repairPieceCompletionDB(dir)
+	if err == nil {
+		t.Fatalf("locked db: want an error, got %+v", r)
+	}
+	if !strings.Contains(err.Error(), "locked") {
+		t.Fatalf("want a 'locked' reason, got %v", err)
+	}
+	if r.Quarantined != "" {
+		t.Fatalf("locked db must not be moved, got %+v", r)
+	}
+	mustExist(t, path)
+}
+
+// Environment failures are not damage: an unreadable file must be left alone,
+// not quarantined (that would force a full re-hash and blame a shutdown that
+// never happened). Root and Windows can read anything, so skip there.
+func TestRepairPieceCompletionDB_UnreadableIsSkippedNotQuarantined(t *testing.T) {
+	if os.Getuid() == 0 || filepath.Separator == '\\' {
+		t.Skip("needs a non-root POSIX user for a 0000-mode file to be unreadable")
+	}
+	dir := t.TempDir()
+	path := writeLegacyPieceCompletionDB(t, dir)
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o660) })
+
+	r, err := repairPieceCompletionDB(dir)
+	if err == nil || r.Quarantined != "" {
+		t.Fatalf("unreadable db: %+v err=%v, want skipped with an error", r, err)
+	}
+	mustExist(t, path)
+	mustNotExist(t, filepath.Join(dir, PieceCompletionQuarantineName))
+}
+
+// --- end to end through the constructor the daemon uses ---------------------------
+
+// A damaged DB must not stop NewTorrentDownloader; freelist-only damage is
+// repaired with the records kept, and the downloader comes up on OUR backend
+// (no cgo dependence any more: the same file on every build) and closes cleanly.
+func TestNewTorrentDownloader_RepairsDamagedPieceCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		separateDB bool // PieceCompletionDir set (daemon) vs. DB in DataDir (`unarr download`)
+	}{
+		{"state dir", true},
+		{"download dir", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			cfg := TorrentConfig{DataDir: dataDir, ListenPort: 0}
+			dbDir := dataDir
+			if tc.separateDB {
+				dbDir = t.TempDir()
+				cfg.PieceCompletionDir = dbDir
+			}
+			path := writeLegacyPieceCompletionDB(t, dbDir)
+			injectReachableFreed(t, path)
+
+			dl, err := NewTorrentDownloader(cfg)
+			if err != nil {
+				t.Fatalf("downloader over damaged db: %v", err)
+			}
+			if err := dl.Shutdown(context.Background()); err != nil {
+				t.Fatalf("shutdown: %v", err)
+			}
+			mustExist(t, filepath.Join(dbDir, PieceCompletionQuarantineName))
+			mustNotExist(t, path+PieceCompletionRebuiltSuffix)
+			// Shutdown closed the store, so the live file can be inspected here.
+			if v := inspectBoltFile(path); v.kind != boltHealthy {
+				t.Fatalf("live db after repair is not healthy: %s", v.reason)
+			}
+			assertFixtureRecords(t, dbDir)
+		})
 	}
 }

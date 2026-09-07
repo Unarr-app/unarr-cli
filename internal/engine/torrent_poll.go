@@ -26,6 +26,18 @@ type pollState struct {
 	isTTY          bool
 }
 
+// piecesStillHashing reports whether the library is still verifying pieces
+// against the data on disk (queued for or in the initial hash). One client-lock
+// acquisition via PieceStateRuns, same reason as waitPieceMarkingSettled.
+func piecesStillHashing(t *torrent.Torrent) bool {
+	for _, run := range t.PieceStateRuns() {
+		if run.Checking || run.QueuedForHash {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent, task *Task, sel selection, progressCh chan<- Progress) (*Result, error) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -98,6 +110,13 @@ func (d *TorrentDownloader) progressTick(
 	if downloaded > st.lastBytes {
 		st.lastBytesAt = now
 		st.lastBytes = downloaded
+	} else if d.cfg.StallTimeout > 0 && now.Sub(st.lastBytesAt) > d.cfg.StallTimeout && piecesStillHashing(t) {
+		// No bytes moved because the library is still verifying pieces already
+		// on disk (a lost or quarantined piece-completion DB queues EVERY piece
+		// for the initial hash, index-ordered, and queued pieces are not
+		// requested from peers): that is progress, not a stall. Big packs on a
+		// slow disk verify for longer than the stall timeout.
+		st.lastBytesAt = now
 	} else if d.cfg.StallTimeout > 0 && now.Sub(st.lastBytesAt) > d.cfg.StallTimeout {
 		stats := t.Stats()
 		st.endProgressLine()
