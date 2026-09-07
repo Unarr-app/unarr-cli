@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/fsx"
 )
 
 // installBinaryAtomically places a freshly downloaded executable at dest so
@@ -74,15 +76,13 @@ const (
 // gates the release workflow — a red CI run there blocked publishing v1.11.4
 // entirely.
 //
-// On POSIX isTransientRenameBlock is constant false, so this compiles down to a
-// single os.Rename with no retry and no sleep.
+// On POSIX the transient-block test is constant false, so this compiles down
+// to a single os.Rename with no retry and no sleep. The mechanics live in
+// fsx.RenameWithRetry, shared with the self-updater and the torrent engine.
 func renameWithRetry(src, dst string) error {
-	deadline := time.Now().Add(renameRetryWindow)
-	for {
-		err := os.Rename(src, dst)
-		if err == nil || !isTransientRenameBlock(err) || !time.Now().Before(deadline) {
-			return err
-		}
-		time.Sleep(renameRetryStep)
-	}
+	return fsx.RenameWithRetry(src, dst, renameRetryWindow, renameRetryStep)
 }
+
+// isTransientRenameBlock is fsx.IsTransientRenameBlock under the name the
+// tests of this package know it by.
+func isTransientRenameBlock(err error) bool { return fsx.IsTransientRenameBlock(err) }

@@ -341,6 +341,15 @@ func CleanableBytes() int64 {
 		}
 		total += fileSize(t.path)
 	}
+	// Piece-completion quarantine artefacts: a full-size bolt file each, safe
+	// to remove at any time, so they count toward what `clean` would free.
+	for _, t := range pieceCompletionCleanTargets(dataDir) {
+		if t.isGlob {
+			total += globSize(t.path)
+			continue
+		}
+		total += fileSize(t.path)
+	}
 
 	// Stale resume files only (>7 days)
 	resumeFound, _ := scanResumeFiles(filepath.Join(dataDir, "resume"), false)

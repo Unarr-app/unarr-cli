@@ -82,10 +82,11 @@ var defaultTrackers = []string{
 // TorrentConfig holds settings for the BitTorrent downloader.
 type TorrentConfig struct {
 	DataDir string
-	// PieceCompletionDir, when non-empty, stores the piece-completion SQLite DB
-	// in this directory instead of DataDir. Use the agent's local state dir
-	// (not the download dir) so the DB never lands on NFS/SMB volumes where
-	// SQLite locking times out.
+	// PieceCompletionDir, when non-empty, stores the piece-completion bolt DB
+	// (.torrent.bolt.db, see piece_completion_bolt.go) in this directory instead
+	// of DataDir. Use the agent's local state dir (not the download dir) so the
+	// DB — fsynced per completed piece, integrity-checked at open — never lands
+	// on NFS/SMB volumes where file locking times out.
 	PieceCompletionDir string
 	MetadataTimeout    time.Duration // how long to wait for torrent metadata (default 15m, 0 = unlimited)
 	StallTimeout       time.Duration // no progress during download for this long = stall (default 10m)
@@ -192,35 +193,11 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 
 	// --- Performance optimizations ---
 
-	// Storage: mmap instead of default file backend.
-	// The library author notes file storage has "very high system overhead".
-	// mmap improves I/O throughput and piece verification speed significantly.
-	//
-	// When PieceCompletionDir is set (daemon always passes the agent state dir),
-	// keep the piece-completion SQLite DB off the download dir so it never lands
-	// on NFS/SMB where SQLite's file locking times out and emits a warning.
-	//
-	// The storage impl is kept so Shutdown can close it: torrent.Client.Close()
-	// closes torrents and peers but NOT DefaultStorage, so the piece-completion DB
-	// handle would leak for the process's life — on Windows that keeps `.torrent.db`
-	// locked and the directory undeletable.
-	var store storage.ClientImplCloser
-	if cfg.PieceCompletionDir != "" {
-		if mkErr := os.MkdirAll(cfg.PieceCompletionDir, 0o755); mkErr != nil {
-			log.Printf("[torrent] piece-completion dir create failed (%v), DB stays in download dir", mkErr)
-			store = storage.NewMMap(cfg.DataDir)
-		} else if pc, pcErr := storage.NewDefaultPieceCompletionForDir(cfg.PieceCompletionDir); pcErr != nil {
-			log.Printf("[torrent] piece-completion db in %q failed (%v), falling back to download dir", cfg.PieceCompletionDir, pcErr)
-			store = storage.NewMMap(cfg.DataDir)
-		} else {
-			store = storage.NewMMapWithCompletion(cfg.DataDir, pc)
-		}
-	} else {
-		store = storage.NewMMap(cfg.DataDir)
-	}
+	// Storage backend (mmap + piece-completion DB placement + corruption
+	// pre-flight): see torrent_storage.go. Kept so Shutdown can close it.
 	// Wrap so a chunk write that lands after t.Drop() closes the storage is
 	// refused instead of panicking the process. See storage_closeguard.go.
-	store = newCloseGuard(store)
+	store := newCloseGuard(newTorrentStore(cfg))
 	tcfg.DefaultStorage = store
 
 	// Fixed port for incoming peer connections (enables UPnP port mapping).
@@ -322,7 +299,7 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	// From here to the successful return, every failure has to close the storage.
 	// It owns the piece-completion DB handle and torrent.Client.Close() does not
 	// touch DefaultStorage, so an early return leaks it for the life of the
-	// process — on Windows that is an open `.torrent.db` and a data dir that
+	// process — on Windows that is an open `.torrent.bolt.db` and a data dir that
 	// cannot be deleted. Seen in CI as a TempDir cleanup failure ("the process
 	// cannot access the file because it is being used by another process")
 	// immediately after a client creation that had failed.

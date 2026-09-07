@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/fsx"
 	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
@@ -274,22 +275,10 @@ const renameRetryWindow = 2 * time.Second
 const renameRetryStep = 10 * time.Millisecond
 
 // renameWithRetry is os.Rename plus a bounded wait for the Windows case where
-// another process momentarily holds the destination. See isTransientRenameBlock
-// for what that looks like and why it is not an error worth surfacing on the
-// first attempt; on every other platform this is exactly os.Rename, because
-// POSIX rename(2) cannot fail that way.
-//
-// The error returned is the LAST one, so a genuine permission problem still
-// reports itself as a permission problem rather than as a timeout.
+// another process momentarily holds the destination — fsx.RenameWithRetry with
+// this package's window, kept as a name so the install flow reads as before.
 func renameWithRetry(src, dst string) error {
-	deadline := time.Now().Add(renameRetryWindow)
-	for {
-		err := os.Rename(src, dst)
-		if err == nil || !isTransientRenameBlock(err) || !time.Now().Before(deadline) {
-			return err
-		}
-		time.Sleep(renameRetryStep)
-	}
+	return fsx.RenameWithRetry(src, dst, renameRetryWindow, renameRetryStep)
 }
 
 // smokeTest runs the new binary with "version" and checks the output contains the expected version.
