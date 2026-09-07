@@ -12,12 +12,16 @@ import (
 // pieceCompletionCleanTargets lists the artefacts the torrent engine's
 // piece-completion pre-flight leaves in the state dir: the quarantined copy of
 // a DB found corrupt at boot (kept for forensics, one fixed name so it never
-// accumulates) and a rebuilt copy orphaned by a crash mid-swap. Both are safe
-// to remove at any time — the live DB is never touched here.
+// accumulates), rebuilt copies orphaned by a crash mid-swap (one per pid, hence
+// the glob), and the SQLite cache the library's default backend wrote on cgo
+// builds before the backend became ours. All safe to remove at any time — the
+// live DB is never touched here.
 func pieceCompletionCleanTargets(dataDir string) []cleanTarget {
 	return []cleanTarget{
 		{filepath.Join(dataDir, engine.PieceCompletionQuarantineName), "quarantined piece-completion db", false, false},
-		{filepath.Join(dataDir, engine.PieceCompletionDBName+engine.PieceCompletionRebuiltSuffix), "orphaned rebuilt piece-completion db", false, false},
+		{filepath.Join(dataDir, engine.PieceCompletionDBName+engine.PieceCompletionRebuiltSuffix+".*"), "orphaned rebuilt piece-completion db", false, true},
+		{filepath.Join(dataDir, engine.PieceCompletionLegacySQLiteName), "legacy sqlite piece-completion db", false, false},
+		{filepath.Join(dataDir, engine.PieceCompletionLegacySQLiteName+"-*"), "legacy sqlite piece-completion journal", false, true},
 	}
 }
 

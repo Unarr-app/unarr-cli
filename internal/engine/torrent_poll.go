@@ -24,18 +24,42 @@ type pollState struct {
 	lastBytes      int64
 	lastVPNCheckAt time.Time
 	isTTY          bool
+	// hashPending is the pending-hash count seen at the previous stall
+	// deadline; see hashingIsProgressing.
+	hashPending int
 }
 
-// piecesStillHashing reports whether the library is still verifying pieces
-// against the data on disk (queued for or in the initial hash). One client-lock
+// piecesPendingHash counts the pieces the library still has to verify against
+// the data on disk (queued for or in the initial hash). One client-lock
 // acquisition via PieceStateRuns, same reason as waitPieceMarkingSettled.
-func piecesStillHashing(t *torrent.Torrent) bool {
+func piecesPendingHash(t *torrent.Torrent) int {
+	pending := 0
 	for _, run := range t.PieceStateRuns() {
 		if run.Checking || run.QueuedForHash {
-			return true
+			pending += run.Length
 		}
 	}
-	return false
+	return pending
+}
+
+// hashingIsProgressing decides, at a stall deadline with no bytes moved,
+// whether the silence is the initial hash still working through the pieces.
+//
+// A lost or repaired piece-completion DB queues EVERY piece for the initial
+// hash, index-ordered, and queued pieces are not requested from peers, so the
+// selected file's bytes stay flat for as long as the verify takes — longer
+// than the stall timeout for a big pack on a slow disk. That is progress, not
+// a stall. But a hash that is itself wedged (a pieceHasher blocked in a page
+// fault on an NFS mount that dropped) must not hold a manager slot forever:
+// with MaxTimeout=0 in every caller this is the only bound on a task. So the
+// exemption is granted only while the pending count is FALLING between
+// consecutive deadlines; a count that stands still for a whole StallTimeout is
+// a stall.
+func (st *pollState) hashingIsProgressing(t *torrent.Torrent) bool {
+	pending := piecesPendingHash(t)
+	progressing := pending > 0 && (st.hashPending == 0 || pending < st.hashPending)
+	st.hashPending = pending
+	return progressing
 }
 
 func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent, task *Task, sel selection, progressCh chan<- Progress) (*Result, error) {
@@ -110,18 +134,15 @@ func (d *TorrentDownloader) progressTick(
 	if downloaded > st.lastBytes {
 		st.lastBytesAt = now
 		st.lastBytes = downloaded
-	} else if d.cfg.StallTimeout > 0 && now.Sub(st.lastBytesAt) > d.cfg.StallTimeout && piecesStillHashing(t) {
-		// No bytes moved because the library is still verifying pieces already
-		// on disk (a lost or quarantined piece-completion DB queues EVERY piece
-		// for the initial hash, index-ordered, and queued pieces are not
-		// requested from peers): that is progress, not a stall. Big packs on a
-		// slow disk verify for longer than the stall timeout.
-		st.lastBytesAt = now
 	} else if d.cfg.StallTimeout > 0 && now.Sub(st.lastBytesAt) > d.cfg.StallTimeout {
-		stats := t.Stats()
-		st.endProgressLine()
-		return false, fmt.Errorf("stalled: no progress for %s (peers: %d, seeds: %d)",
-			d.cfg.StallTimeout, stats.ActivePeers, stats.ConnectedSeeders)
+		if st.hashingIsProgressing(t) {
+			st.lastBytesAt = now
+		} else {
+			stats := t.Stats()
+			st.endProgressLine()
+			return false, fmt.Errorf("stalled: no progress for %s (peers: %d, seeds: %d)",
+				d.cfg.StallTimeout, stats.ActivePeers, stats.ConnectedSeeders)
+		}
 	}
 
 	var eta int

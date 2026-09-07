@@ -82,10 +82,11 @@ var defaultTrackers = []string{
 // TorrentConfig holds settings for the BitTorrent downloader.
 type TorrentConfig struct {
 	DataDir string
-	// PieceCompletionDir, when non-empty, stores the piece-completion SQLite DB
-	// in this directory instead of DataDir. Use the agent's local state dir
-	// (not the download dir) so the DB never lands on NFS/SMB volumes where
-	// SQLite locking times out.
+	// PieceCompletionDir, when non-empty, stores the piece-completion bolt DB
+	// (.torrent.bolt.db, see piece_completion_bolt.go) in this directory instead
+	// of DataDir. Use the agent's local state dir (not the download dir) so the
+	// DB — fsynced per completed piece, integrity-checked at open — never lands
+	// on NFS/SMB volumes where file locking times out.
 	PieceCompletionDir string
 	MetadataTimeout    time.Duration // how long to wait for torrent metadata (default 15m, 0 = unlimited)
 	StallTimeout       time.Duration // no progress during download for this long = stall (default 10m)
@@ -298,7 +299,7 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 	// From here to the successful return, every failure has to close the storage.
 	// It owns the piece-completion DB handle and torrent.Client.Close() does not
 	// touch DefaultStorage, so an early return leaks it for the life of the
-	// process — on Windows that is an open `.torrent.db` and a data dir that
+	// process — on Windows that is an open `.torrent.bolt.db` and a data dir that
 	// cannot be deleted. Seen in CI as a TempDir cleanup failure ("the process
 	// cannot access the file because it is being used by another process")
 	// immediately after a client creation that had failed.

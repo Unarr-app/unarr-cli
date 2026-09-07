@@ -3,8 +3,11 @@ package engine
 import (
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +20,11 @@ import (
 // boltCheckTestCrashEnv makes the checker child panic instead of checking, to
 // prove the parent survives a checker the file takes down.
 const boltCheckTestCrashEnv = "UNARR_BOLT_CHECK_TEST_CRASH"
+
+// boltCheckTestExitEnv makes the checker child exit with that status and no
+// output — an external kill (antivirus, OOM killer) or a binary that never
+// ran a checker at all.
+const boltCheckTestExitEnv = "UNARR_BOLT_CHECK_TEST_EXIT"
 
 // pgidNoFreelist mirrors bbolt's internal/common.PgidNoFreelist: the meta
 // value that says "no persisted freelist, rebuild from reachability on open".
@@ -31,9 +39,21 @@ func TestMain(m *testing.M) {
 		if os.Getenv(boltCheckTestCrashEnv) != "" {
 			panic("simulated torn page: checker died")
 		}
+		if code := os.Getenv(boltCheckTestExitEnv); code != "" {
+			n, _ := strconv.Atoi(code)
+			os.Exit(n)
+		}
 		os.Exit(BoltCheckMain(path))
 	}
 	os.Exit(m.Run())
+}
+
+func mustNoRebuiltLeftover(t *testing.T, dir string) {
+	t.Helper()
+	leftovers, _ := filepath.Glob(filepath.Join(dir, PieceCompletionDBName+PieceCompletionRebuiltSuffix+".*"))
+	if len(leftovers) != 0 {
+		t.Fatalf("rebuilt copies left behind: %v", leftovers)
+	}
 }
 
 func fixtureInfoHash() metainfo.Hash {
@@ -339,8 +359,8 @@ func TestRepairPieceCompletionDB_ReachableFreedPageIsSalvaged(t *testing.T) {
 	}
 	mustExist(t, r.Quarantined)
 	mustExist(t, path)
-	mustNotExist(t, path+PieceCompletionRebuiltSuffix)
-	if v := inspectBoltFile(path); v.kind != boltHealthy {
+	mustNoRebuiltLeftover(t, dir)
+	if v, _ := inspectBoltFile(path); v.kind != boltHealthy {
 		t.Fatalf("rebuilt db is not healthy: %s", v.reason)
 	}
 	if got := persistedFreelistPgid(t, path); got != pgidNoFreelist {
@@ -422,21 +442,104 @@ func TestCheckPieceCompletionDB_CheckerCrashCountsAsCorrupt(t *testing.T) {
 	}
 }
 
-// Damage to the tree itself must never be "salvaged": a garbage file is the
-// simplest such case (open fails outright).
-func TestFreelistOnlyDamage_Classification(t *testing.T) {
-	for reason, want := range map[string]bool{
-		"":                              false,
-		"open: invalid database":        false,
-		"check: page 66: already freed": true,
-		"check: page 3: reachable freed; page 66: already freed":                     true,
-		"check: page 3: reachable freed; page 9: multiple references (stack: [3 9])": false,
-		"check: page 4: invalid type: unknown<00>":                                   false,
-		"checker died (exit status 2): panic: x":                                     false,
-	} {
-		if got := freelistOnlyDamage(reason); got != want {
-			t.Errorf("%q: got %v want %v", reason, got, want)
+// The salvage decision reads the WHOLE Check stream: a tree finding after more
+// freelist findings than the text cap keeps must still condemn the file (a
+// legacy DB after a NoSync power loss routinely carries dozens of stale
+// freelist ids, and Compact would copy a damaged tree into a clean-looking
+// file). Only the text is capped.
+func TestClassifyCheckFindings_TreeDamageAfterTheTextCapStillCounts(t *testing.T) {
+	feed := func(msgs ...string) <-chan error {
+		ch := make(chan error)
+		go func() {
+			defer close(ch)
+			for _, m := range msgs {
+				ch <- errors.New(m)
+			}
+		}()
+		return ch
+	}
+	var many []string
+	for i := 0; i < boltCheckMaxFindings+8; i++ {
+		many = append(many, fmt.Sprintf("page %d: already freed", 100+i))
+	}
+
+	findings, tree := classifyCheckFindings(feed(many...))
+	if tree || len(findings) != boltCheckMaxFindings {
+		t.Fatalf("freelist-only stream: tree=%v kept=%d, want false/%d", tree, len(findings), boltCheckMaxFindings)
+	}
+	findings, tree = classifyCheckFindings(feed(append(many, "page 9: multiple references (stack: [3 9])")...))
+	if !tree || len(findings) != boltCheckMaxFindings {
+		t.Fatalf("tree finding past the cap: tree=%v kept=%d, want true/%d", tree, len(findings), boltCheckMaxFindings)
+	}
+	if _, tree = classifyCheckFindings(feed("page 3: reachable freed", "page 7: unreachable unfreed")); tree {
+		t.Fatal("reachable freed / unreachable unfreed are freelist findings")
+	}
+	if _, tree = classifyCheckFindings(feed("page 4: invalid type: unknown<00>")); !tree {
+		t.Fatal("invalid type is tree damage")
+	}
+	if findings, tree = classifyCheckFindings(feed()); tree || len(findings) != 0 {
+		t.Fatal("empty stream is healthy")
+	}
+}
+
+// The check is a one-shot migration: a file our backend has committed carries
+// no persisted freelist and is NOT handed to the child — proven by arming the
+// child to crash and seeing nothing happen. A legacy file and a garbage file
+// are.
+func TestPieceCompletionNeedsCheck_OnlyLegacyOrUnparseableFiles(t *testing.T) {
+	legacy := t.TempDir()
+	path := writeLegacyPieceCompletionDB(t, legacy)
+	if needs, why := pieceCompletionNeedsCheck(path); !needs {
+		t.Fatalf("legacy file must be checked (%s)", why)
+	}
+
+	ours := t.TempDir()
+	pc, err := openBoltPieceCompletion(ours)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ { // >1 commit so BOTH metas carry the sentinel
+		if err := pc.Set(metainfo.PieceKey{InfoHash: fixtureInfoHash(), Index: i}, true); err != nil {
+			t.Fatal(err)
 		}
+	}
+	pc.Close()
+	ourPath := filepath.Join(ours, PieceCompletionDBName)
+	if needs, why := pieceCompletionNeedsCheck(ourPath); needs {
+		t.Fatalf("our own file must not be re-checked every boot (%s)", why)
+	}
+	t.Setenv(boltCheckTestCrashEnv, "1")
+	if r, err := repairPieceCompletionDB(ours); err != nil || r.Quarantined != "" {
+		t.Fatalf("no child must run for our own file: %+v err=%v", r, err)
+	}
+	mustExist(t, ourPath)
+
+	garbage := t.TempDir()
+	if needs, _ := pieceCompletionNeedsCheck(writeGarbageDB(t, garbage)); !needs {
+		t.Fatal("garbage must be checked")
+	}
+	if needs, _ := boltHeaderNeedsCheck(nil); !needs {
+		t.Fatal("empty header must be checked")
+	}
+}
+
+// Only a Go panic (exit 2) means the file broke the checker. An external kill
+// or a binary that never ran a checker says nothing about the file and must
+// leave it alone — quarantining a healthy DB over an antivirus kill forces a
+// full re-hash and blames a shutdown that never happened.
+func TestCheckPieceCompletionDB_ExternalKillOrNoCheckerIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	path := writeLegacyPieceCompletionDB(t, dir)
+	for _, code := range []string{"1", "0"} {
+		t.Setenv(boltCheckTestExitEnv, code)
+		if v := checkPieceCompletionDB(path); v.kind != boltSkipped {
+			t.Fatalf("child exit %s: kind=%v reason=%q, want skipped", code, v.kind, v.reason)
+		}
+		r, err := repairPieceCompletionDB(dir)
+		if err == nil || r.Quarantined != "" {
+			t.Fatalf("child exit %s: %+v err=%v, want left alone with an error", code, r, err)
+		}
+		mustExist(t, path)
 	}
 }
 
@@ -518,9 +621,9 @@ func TestNewTorrentDownloader_RepairsDamagedPieceCompletion(t *testing.T) {
 				t.Fatalf("shutdown: %v", err)
 			}
 			mustExist(t, filepath.Join(dbDir, PieceCompletionQuarantineName))
-			mustNotExist(t, path+PieceCompletionRebuiltSuffix)
+			mustNoRebuiltLeftover(t, dbDir)
 			// Shutdown closed the store, so the live file can be inspected here.
-			if v := inspectBoltFile(path); v.kind != boltHealthy {
+			if v, _ := inspectBoltFile(path); v.kind != boltHealthy {
 				t.Fatalf("live db after repair is not healthy: %s", v.reason)
 			}
 			assertFixtureRecords(t, dbDir)

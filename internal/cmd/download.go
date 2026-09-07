@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/Unarr-app/unarr-cli/internal/engine"
 	"github.com/Unarr-app/unarr-cli/internal/parser"
 	"github.com/fatih/color"
@@ -121,10 +122,15 @@ func runDownloadWithDeps(input, method string, deps downloadDeps) error {
 
 	// Create torrent downloader
 	torrentDl, err := deps.newTorrentDl(engine.TorrentConfig{
-		DataDir:         outputDir,
-		MetadataTimeout: 15 * time.Minute,
-		StallTimeout:    10 * time.Minute,
-		MaxTimeout:      0, // unlimited
+		DataDir: outputDir,
+		// Same as the daemon: the piece-completion DB (fsynced on every completed
+		// piece, integrity-checked at open, quarantined when damaged) belongs on
+		// local disk in the state dir, never on the possibly NFS/SMB media share
+		// the download itself goes to.
+		PieceCompletionDir: config.DataDir(),
+		MetadataTimeout:    15 * time.Minute,
+		StallTimeout:       10 * time.Minute,
+		MaxTimeout:         0, // unlimited
 		// One-shot foreground download: leech then exit. Seeding only makes sense
 		// for the always-on daemon (see DownloadConfig.SeedEnabled).
 		SeedEnabled: false,

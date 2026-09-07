@@ -1,4 +1,4 @@
-package upgrade
+package fsx
 
 import (
 	"errors"
@@ -6,7 +6,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// isTransientRenameBlock reports whether err is Windows refusing a rename
+// IsTransientRenameBlock reports whether err is Windows refusing a rename
 // because somebody else momentarily holds one of the two paths.
 //
 // os.Rename onto an existing destination is MoveFileEx(MOVEFILE_REPLACE_EXISTING),
@@ -19,7 +19,7 @@ import (
 // The holders in the field are the same shape and just as brief: an antivirus
 // scanning the executable that was written a millisecond ago, Explorer building
 // a thumbnail, or unarr-desktop stat-ing the binary it polls on a timer.
-func isTransientRenameBlock(err error) bool {
+func IsTransientRenameBlock(err error) bool {
 	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
 		errors.Is(err, windows.ERROR_ACCESS_DENIED)
 }

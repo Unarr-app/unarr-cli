@@ -6,14 +6,16 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/fsx"
 	"github.com/anacrolix/torrent/storage"
 )
 
 // PieceCompletionDBName is the bolt piece-completion DB inside the agent state
-// dir (or the download dir for the one-shot `unarr download`). The name is the
-// one anacrolix/torrent's own bolt backend used through 1.11.x, kept so those
-// files carry over — see piece_completion_bolt.go for why the backend is ours.
+// dir. The name is the one anacrolix/torrent's own bolt backend used through
+// 1.11.x, kept so those files carry over — see piece_completion_bolt.go for
+// why the backend is ours.
 const PieceCompletionDBName = ".torrent.bolt.db"
 
 // PieceCompletionQuarantineName is where a corrupt DB is moved. A FIXED name on
@@ -23,14 +25,32 @@ const PieceCompletionDBName = ".torrent.bolt.db"
 // knows it by this name.
 const PieceCompletionQuarantineName = PieceCompletionDBName + ".corrupt"
 
-// PieceCompletionRebuiltSuffix names the consistent copy the checker child
-// writes next to a DB whose only damage is a lying freelist; the parent swaps
-// it into place. A leftover means a crash mid-swap; `unarr clean` removes it.
+// PieceCompletionRebuiltSuffix names (with a ".<pid>" after it) the consistent
+// copy the checker child writes next to a DB whose only damage is a lying
+// freelist; the parent swaps it into place. A leftover means a crash mid-swap;
+// `unarr clean` removes them by glob.
 const PieceCompletionRebuiltSuffix = ".rebuilt"
 
+// PieceCompletionLegacySQLiteName is the SQLite piece-completion DB the
+// library's default backend wrote on cgo builds (a `go install` from source;
+// every shipped release is CGO_ENABLED=0 and never had one). It is not read:
+// migrating would drag the sqlite driver back in for a cache that rebuilds
+// itself in one verify pass. Its presence is logged once and `unarr clean`
+// reaps it with its -wal/-shm companions.
+const PieceCompletionLegacySQLiteName = ".torrent.db"
+
+// pieceCompletionRenameWindow / Step bound the wait for a Windows rename that
+// an antivirus or the search indexer momentarily blocks — the errCorruptNotMoved
+// case, which without the retry repeats the child check, the failed rename and a
+// full re-hash on EVERY boot for as long as the indexer keeps winning the race.
+const (
+	pieceCompletionRenameWindow = 2 * time.Second
+	pieceCompletionRenameStep   = 10 * time.Millisecond
+)
+
 // errCorruptNotMoved: the DB is proven corrupt but could not be moved aside
-// (sharing violation from an indexer on Windows, a read-only state dir). The
-// caller must NOT hand that file to the backend — that is the crash loop.
+// even after the retry window (a read-only state dir). The caller must NOT hand
+// that file to the backend — that is the crash loop.
 var errCorruptNotMoved = errors.New("piece-completion db is corrupt and could not be moved aside")
 
 // newTorrentStore picks the anacrolix storage backend for the downloader.
@@ -39,11 +59,12 @@ var errCorruptNotMoved = errors.New("piece-completion db is corrupt and could no
 // storage has "very high system overhead"; mmap improves I/O throughput and
 // piece verification speed significantly.
 //
-// The piece-completion DB lives in PieceCompletionDir when set (the daemon
-// passes the agent state dir, keeping it off NFS/SMB where file locking times
-// out) and in DataDir otherwise (the one-shot `unarr download`). Either way it
-// is integrity-checked and, if damaged, rebuilt or moved aside BEFORE the
-// backend opens it — see repairPieceCompletionDB. Every failure to get a
+// The piece-completion DB lives in PieceCompletionDir when set — both the
+// daemon and the one-shot `unarr download` pass the agent state dir, keeping
+// it off NFS/SMB where file locking times out and every fsync crosses the
+// network — and in DataDir only for callers that set nothing (tests). Either
+// way it is integrity-checked and, if damaged, rebuilt or moved aside BEFORE
+// the backend opens it — see repairPieceCompletionDB. Every failure to get a
 // persistent, trustworthy DB degrades to an in-memory completion map (pieces
 // re-verify from disk each run) rather than to an unchecked file somewhere else.
 //
@@ -65,6 +86,9 @@ func openPieceCompletion(dir string) storage.PieceCompletion {
 	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
 		log.Printf("[torrent] piece-completion dir %q create failed (%v) - using in-memory completion, pieces re-verify each run", dir, mkErr)
 		return storage.NewMapPieceCompletion()
+	}
+	if _, err := os.Stat(filepath.Join(dir, PieceCompletionLegacySQLiteName)); err == nil {
+		log.Printf("[torrent] legacy sqlite piece-completion cache found (%s, from a cgo build) - not migrated, resumed torrents re-verify once; `unarr clean` removes it", PieceCompletionLegacySQLiteName)
 	}
 	repair, repErr := repairPieceCompletionDB(dir)
 	switch {
@@ -110,22 +134,32 @@ type pieceCompletionRepair struct {
 // Check names exactly that inconsistency, which is why it runs here, before the
 // backend gets the file — in a child process, see checkPieceCompletionDB.
 //
-// Our own backend no longer persists a freelist, so a file it has written once
-// cannot carry this damage; the check stays because bbolt trusts a freelist it
-// finds in an older file, and because the checker also covers torn pages.
+// It is a one-shot migration in practice: the check only runs while the file
+// still carries a persisted freelist (pieceCompletionNeedsCheck), i.e. until
+// our backend's first commit; after that bbolt rebuilds the freelist from
+// reachability at every open and the damage class cannot exist.
+//
+// Two daemons over one state dir (a dev agent next to the prod one, the
+// supported UNARR_CONFIG_DIR setup) can both reach this. The rebuilt copies
+// carry the pid, so they never touch each other's; the SameFile guard makes
+// the loser of the quarantine rename leave the winner's fresh DB alone in all
+// but a microsecond window (an exclusive lock across the rename is not
+// available on Windows, where a locked file cannot be renamed).
 //
 // Errors: errCorruptNotMoved when the damage is proven but the rename failed;
 // any other error means the check could NOT run (file locked by a live daemon,
 // unreadable, checker unavailable) and the file was left alone.
 func repairPieceCompletionDB(dir string) (pieceCompletionRepair, error) {
 	path := filepath.Join(dir, PieceCompletionDBName)
-	rebuilt := path + PieceCompletionRebuiltSuffix
 	before, statErr := os.Stat(path)
 	if statErr != nil {
 		if errors.Is(statErr, os.ErrNotExist) {
 			return pieceCompletionRepair{}, nil
 		}
 		return pieceCompletionRepair{}, fmt.Errorf("stat piece-completion db: %w", statErr)
+	}
+	if needs, _ := pieceCompletionNeedsCheck(path); !needs {
+		return pieceCompletionRepair{}, nil
 	}
 
 	v := checkPieceCompletionDB(path)
@@ -138,17 +172,14 @@ func repairPieceCompletionDB(dir string) (pieceCompletionRepair, error) {
 		// fall through to the swap below
 	}
 
-	// Two daemons over one state dir (a dev agent next to the prod one) can both
-	// see the damage; the first to rename wins and its backend then creates a
-	// fresh, healthy DB under the same name. Only move the file we checked.
 	after, statErr := os.Stat(path)
 	if statErr != nil || !os.SameFile(before, after) {
-		_ = os.Remove(rebuilt)
+		discardRebuilt(v)
 		return pieceCompletionRepair{}, errors.New("piece-completion db was replaced while being checked (another daemon?) - left alone")
 	}
 	quarantine := filepath.Join(dir, PieceCompletionQuarantineName)
-	if renameErr := os.Rename(path, quarantine); renameErr != nil {
-		_ = os.Remove(rebuilt)
+	if renameErr := fsx.RenameWithRetry(path, quarantine, pieceCompletionRenameWindow, pieceCompletionRenameStep); renameErr != nil {
+		discardRebuilt(v)
 		return pieceCompletionRepair{}, fmt.Errorf("%w: %v (damage: %s)", errCorruptNotMoved, renameErr, v.reason)
 	}
 	repair := pieceCompletionRepair{Quarantined: quarantine, Damage: v.reason}
@@ -156,13 +187,19 @@ func repairPieceCompletionDB(dir string) (pieceCompletionRepair, error) {
 		return repair, nil
 	}
 	// The damaged original is safely aside. A crash between the two renames
-	// leaves no DB and an orphaned .rebuilt: the next boot starts a fresh DB
+	// leaves no DB and an orphaned rebuilt copy: the next boot starts a fresh DB
 	// (a full re-verify, never a crash) and `unarr clean` reaps the orphan.
-	if renameErr := os.Rename(rebuilt, path); renameErr != nil {
-		_ = os.Remove(rebuilt)
+	if renameErr := fsx.RenameWithRetry(v.rebuilt, path, pieceCompletionRenameWindow, pieceCompletionRenameStep); renameErr != nil {
+		discardRebuilt(v)
 		repair.Damage += fmt.Sprintf("; rebuilt copy could not be moved into place (%v), starting fresh", renameErr)
 		return repair, nil
 	}
 	repair.Salvaged = true
 	return repair, nil
+}
+
+func discardRebuilt(v boltVerdict) {
+	if v.rebuilt != "" {
+		_ = os.Remove(v.rebuilt)
+	}
 }
