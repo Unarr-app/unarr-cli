@@ -22,7 +22,6 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/term"
 	"golang.org/x/time/rate"
 )
 
@@ -520,7 +519,7 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 	}
 
 	// 3. Poll progress with stall detection
-	result, err := d.pollDownload(ctx, t, task, totalBytes, fileName, progressCh)
+	result, err := d.pollDownload(ctx, t, task, sel, progressCh)
 	if err != nil {
 		cleanup()
 		return nil, err
@@ -538,6 +537,13 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 	// selection.missingBytes. Deciding this here rather than inside the poll
 	// loop keeps the loop about progress and the verdict in the one place that
 	// knows what was selected.
+	// Settle first: a piece that just FAILED its hash can still be mid-"Marking",
+	// and reading its state in that window reports it Complete — the guard would
+	// then wave a corrupt download through. The poll loop's own completion read
+	// has the same hazard; this is the last look before the verdict, so it is the
+	// one that must be honest. (The tests for this needed the very same settle:
+	// without it the damaged case passed 2 runs in 3.)
+	waitPieceMarkingSettled(ctx, t)
 	if missing := sel.missingBytes(t); missing > 0 {
 		cleanup()
 		return nil, integrityErr("truncated", "torrent reported complete but %s of verified pieces are still missing", formatBytes(missing))
@@ -722,124 +728,6 @@ func waitPieceMarkingSettled(ctx context.Context, t *torrent.Torrent) {
 	// the caller would log "intact" for data it has not confirmed. Say so.
 	log.Printf("[torrent] WARNING: piece completion writes still settling after 5s (%s) - the re-verify counts below may be optimistic",
 		t.Name())
-}
-
-func (d *TorrentDownloader) pollDownload(ctx context.Context, t *torrent.Torrent, task *Task, totalBytes int64, fileName string, progressCh chan<- Progress) (*Result, error) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	// MaxTimeout = 0 means unlimited (like qBittorrent)
-	var deadline <-chan time.Time
-	if d.cfg.MaxTimeout > 0 {
-		deadline = time.After(d.cfg.MaxTimeout)
-	}
-	lastBytesAt := time.Now()
-	lastBytes := int64(0)
-	lastVPNCheckAt := time.Now()
-	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
-
-	for {
-		select {
-		case <-ctx.Done():
-			if isTTY {
-				fmt.Fprintln(os.Stderr)
-			}
-			return nil, fmt.Errorf("cancelled")
-
-		case <-deadline:
-			if isTTY {
-				fmt.Fprintln(os.Stderr)
-			}
-			return nil, fmt.Errorf("max timeout %s exceeded", d.cfg.MaxTimeout)
-
-		case <-ticker.C:
-			downloaded := t.BytesCompleted()
-			now := time.Now()
-
-			// Kill-switch: if the VPN went down mid-download, stop now and return
-			// ErrVPNTunnelDown. The caller drops the torrent (partial files kept =
-			// paused), so no peer/tracker traffic continues without the tunnel.
-			if !d.vpnStillHealthy(&lastVPNCheckAt, now) {
-				if isTTY {
-					fmt.Fprintln(os.Stderr)
-				}
-				log.Printf("[%s] VPN tunnel went down - pausing torrent (files kept, P2P disabled)", task.ShortID())
-				return nil, ErrVPNTunnelDown
-			}
-
-			// Speed calculation
-			speed := downloaded - lastBytes
-			if speed < 0 {
-				speed = 0
-			}
-
-			// Stall detection (0 = disabled, like qBittorrent)
-			if downloaded > lastBytes {
-				lastBytesAt = now
-				lastBytes = downloaded
-			} else if d.cfg.StallTimeout > 0 && now.Sub(lastBytesAt) > d.cfg.StallTimeout {
-				stats := t.Stats()
-				return nil, fmt.Errorf("stalled: no progress for %s (peers: %d, seeds: %d)",
-					d.cfg.StallTimeout, stats.ActivePeers, stats.ConnectedSeeders)
-			}
-
-			// ETA
-			var eta int
-			if speed > 0 {
-				remaining := totalBytes - downloaded
-				eta = int(remaining / speed)
-			}
-
-			// Peer stats
-			stats := t.Stats()
-
-			// Terminal progress
-			pct := int(float64(downloaded) / float64(totalBytes) * 100)
-			// ASCII only: this line goes to log.Print below, i.e. into unarr.log,
-			// which a Windows console (code page 437/850) and a CP1252 reader both
-			// decode byte-wise. The em dash that used to be here reached users' logs
-			// and the crash reports as the bytes C7 F6; a field report shows the run
-			// of them. See internal/logging.TestLogLinesAreASCII.
-			line := fmt.Sprintf("[%s] %d%% - %s/%s @ %s/s  peers:%d seeds:%d",
-				task.ShortID(), pct,
-				formatBytes(downloaded), formatBytes(totalBytes), formatBytes(speed),
-				stats.ActivePeers, stats.ConnectedSeeders)
-			if isTTY {
-				fmt.Fprintf(os.Stderr, "\r\033[K%s", line)
-			} else {
-				log.Print(line)
-			}
-
-			// Report progress
-			p := Progress{
-				DownloadedBytes: downloaded,
-				TotalBytes:      totalBytes,
-				SpeedBps:        speed,
-				ETA:             eta,
-				Peers:           stats.ActivePeers,
-				Seeds:           stats.ConnectedSeeders,
-				FileName:        fileName,
-			}
-			task.UpdateProgress(p)
-
-			select {
-			case progressCh <- p:
-			default: // don't block if channel full
-			}
-
-			// Check completion. BytesCompleted counts only SHA1-VERIFIED pieces, so
-			// torrent content can't be silently truncated. Whether everything we
-			// SELECTED is really present is asserted by the caller (step 3.5),
-			// which is the layer that knows what was selected.
-			if downloaded >= totalBytes {
-				if isTTY {
-					fmt.Fprintln(os.Stderr) // newline after \r progress
-				}
-				log.Printf("[%s] download complete: %s", task.ShortID(), fileName)
-				return &Result{}, nil
-			}
-		}
-	}
 }
 
 // dropTracked stops tracking taskID and drops the torrent handle. The delete is
