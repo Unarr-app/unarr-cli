@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.7] - 2026-09-07
+
+
+### Fixed
+
+- **stream**: probe only accepts 206, and HEAD no longer eats the budget
+- **stream**: stop aborting a debrid stream when HEAD reveals no size
+- **torrent**: put the completion test on the same scale as the guard
+- **torrent**: measure the completion guard against the selected files
 ## [1.11.6] - 2026-09-03
 
 
@@ -12,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **windows**: scope the firewall rule to the program, drop the DHT probe
 - **windows**: open the peer port and report DHT reachability at startup
+
+### Other
+
+- **release**: 1.11.6
 ## [1.11.5] - 2026-08-26
 
 
@@ -1650,6 +1663,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.11.7]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.6...v1.11.7
 [1.11.6]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.5...v1.11.6
 [1.11.5]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.4...v1.11.5
 [1.11.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.3...v1.11.4
