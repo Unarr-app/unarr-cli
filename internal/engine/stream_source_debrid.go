@@ -312,7 +312,13 @@ func (r *debridRangeReader) reopen() error {
 //
 // Returns 0 when nothing answered; the caller turns that into an error.
 func resolveDebridSize(ctx context.Context, url string, fallbackSize int64) int64 {
-	if headSize, ok := debridHeadSize(ctx, url); ok {
+	// HEAD gets HALF the budget, not all of it. Both rungs share whatever the
+	// caller allowed (15s from stream_handler), so a CDN that HANGS on HEAD
+	// rather than refusing it fast would otherwise consume the whole budget and
+	// the probe would never issue a request — leaving exactly the case this was
+	// written for unserved, and (via daemon.go, where the session size can be 0)
+	// still a hard failure.
+	if headSize, ok := debridHeadSize(ctx, url, halfBudget(ctx)); ok {
 		return headSize
 	}
 	if rangeSize, ok := debridRangeSize(ctx, url); ok {
@@ -325,11 +331,39 @@ func resolveDebridSize(ctx context.Context, url string, fallbackSize int64) int6
 	return 0
 }
 
+// halfBudget is half of ctx's remaining time, so a first attempt cannot starve
+// the second. Falls back to the standalone probe timeout when ctx has no
+// deadline.
+func halfBudget(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return debridProbeTimeout
+	}
+	half := time.Until(deadline) / 2
+	if half <= 0 {
+		return time.Millisecond // let it fail fast rather than not at all
+	}
+	return half
+}
+
+// debridProbeTimeout bounds a single size probe. 15s (not 10s): the transport's
+// TLS handshake budget alone is 15s, so a slow debrid CDN could trip a shorter
+// timeout before headers arrived.
+const debridProbeTimeout = 15 * time.Second
+
 // debridRangeSize asks for a single byte and reads the file's total length out
 // of the Content-Range header ("bytes 0-0/1234"). Best-effort: any failure
 // returns (0, false).
+//
+// ONLY a 206 counts. A 200 to "bytes=0-0" means the server ignored Range, and
+// then two bad things are true at once: the body is the WHOLE file (draining it
+// to reuse the connection would burn the caller's entire timeout on metered
+// debrid bandwidth — measured at 64 MiB on a test server), and its
+// Content-Length is unverifiable — a soft-200 "link expired" HTML page would
+// become the advertised file size and get served to the player as video. The
+// provider-listed size is the right answer in that case, so fall through.
 func debridRangeSize(ctx context.Context, url string) (int64, bool) {
-	rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	rctx, cancel := context.WithTimeout(ctx, debridProbeTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -341,25 +375,20 @@ func debridRangeSize(ctx context.Context, url string) (int64, bool) {
 		log.Printf("[stream] debrid range probe failed: %v", err)
 		return 0, false
 	}
-	// At most one byte, but it still has to be drained and closed or the
-	// connection never returns to the idle pool.
+
+	if resp.StatusCode != http.StatusPartialContent {
+		// Close WITHOUT draining: on a 200 the body is the entire file.
+		// Sacrificing this connection is far cheaper than downloading it.
+		_ = resp.Body.Close()
+		log.Printf("[stream] debrid range probe: status %d (want 206), falling back", resp.StatusCode)
+		return 0, false
+	}
+	// A 206 body is the single byte we asked for; drain it so the connection
+	// goes back to the idle pool.
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()
-
-	if resp.StatusCode == http.StatusOK {
-		// Range ignored: the server is streaming the whole file, so
-		// Content-Length IS the total — just as good an answer.
-		if resp.ContentLength > 0 {
-			return resp.ContentLength, true
-		}
-		return 0, false
-	}
-	if resp.StatusCode != http.StatusPartialContent {
-		log.Printf("[stream] debrid range probe: unexpected status %d", resp.StatusCode)
-		return 0, false
-	}
 	return totalFromContentRange(resp.Header.Get("Content-Range"))
 }
 
@@ -381,11 +410,8 @@ func totalFromContentRange(v string) (int64, bool) {
 // Best-effort: any failure returns (0, false) so the caller falls back to the
 // size the web reported. A short timeout keeps a slow/HEAD-hostile CDN from
 // stalling session setup — the fallback size is good enough to start.
-func debridHeadSize(ctx context.Context, url string) (int64, bool) {
-	// 15s (not 10s): the transport's TLS handshake budget alone is 15s, so a
-	// slow debrid CDN could trip the old 10s timeout before headers arrived,
-	// needlessly falling back to a guessed size.
-	hctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+func debridHeadSize(ctx context.Context, url string, budget time.Duration) (int64, bool) {
+	hctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	req, err := http.NewRequestWithContext(hctx, http.MethodHead, url, nil)
 	if err != nil {

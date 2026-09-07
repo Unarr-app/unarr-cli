@@ -1147,8 +1147,9 @@ func runDaemonStart() error {
 		// Runs BEFORE the filePath checks (there is no local path) and needs no
 		// ffmpeg. PlayMethod != "hls" distinguishes this from the debrid
 		// HLS-from-URL branch below (a non-native container the web wants
-		// transcoded). Provider setup does a HEAD, so hand it off to a goroutine
-		// to keep the sync loop from blocking other pending actions; register the
+		// transcoded). Provider setup probes the link for its size, so hand it
+		// off to a goroutine to keep the sync loop from blocking other pending
+		// actions; register the
 		// session up front so a duplicate sync within the setup window is a
 		// no-op (matches the HLS branch's handoff rationale).
 		if sess.DirectURL != "" && sess.PlayMethod != "hls" {
@@ -1165,9 +1166,11 @@ func runDaemonStart() error {
 				provider, perr := engine.NewDebridFileProvider(bctx, sess.DirectURL, sess.FileName, sess.FileSize, refresh)
 				if perr != nil {
 					playerSessionRegistry.remove(sess.SessionID)
-					// Provider setup does a HEAD against the debrid link — a
-					// failure here means the remote source is unreachable (expired
-					// link / dead CDN node), not a local agent fault.
+					// Provider setup probes the debrid link for its size (HEAD,
+					// then a ranged GET, then the size the session carries) — a
+					// failure here means all of those came up empty: the remote
+					// source is unreachable (expired link / dead CDN node), not a
+					// local agent fault.
 					failSession(sess.SessionID, sessErrSourceUnreachable, fmt.Sprintf("debrid provider: %v", perr))
 					return
 				}

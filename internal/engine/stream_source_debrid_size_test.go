@@ -127,24 +127,92 @@ func TestDebridSizePrefersTheLinkOverTheListedSize(t *testing.T) {
 	}
 }
 
-func TestDebridRangeProbeAcceptsAServerThatIgnoresRange(t *testing.T) {
-	data := makeData(2048)
-	// HEAD refused; GET ignores Range and returns the whole body with a
-	// Content-Length. That length IS the total, so it must be accepted.
+// A 200 to "bytes=0-0" means Range was ignored. The probe must refuse it
+// WITHOUT reading the body: that body is the whole file, and draining it to
+// recycle the connection would burn the caller's entire budget downloading
+// metered debrid bytes only to discard them.
+func TestDebridRangeProbeRefusesA200WithoutDownloadingTheFile(t *testing.T) {
+	const size = 64 << 20 // 64 MiB, big enough that a full read is unmistakable
+	var served int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		w.Header().Set("Content-Length", fmt.Sprint(len(data)))
+		w.Header().Set("Content-Length", fmt.Sprint(size))
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(data)
+		chunk := make([]byte, 32<<10)
+		for sent := 0; sent < size; sent += len(chunk) {
+			n, err := w.Write(chunk)
+			atomic.AddInt64(&served, int64(n))
+			if err != nil {
+				return // client hung up — the expected outcome
+			}
+		}
 	}))
 	defer srv.Close()
 
-	size, ok := debridRangeSize(context.Background(), srv.URL)
-	if !ok || size != int64(len(data)) {
-		t.Fatalf("debridRangeSize = (%d, %v), want (%d, true)", size, ok, len(data))
+	if gotSize, ok := debridRangeSize(context.Background(), srv.URL); ok {
+		t.Fatalf("debridRangeSize accepted a 200 (size %d); an unverifiable length must not become the file size", gotSize)
+	}
+	// Some bytes are in flight before the close lands; the point is that the
+	// whole file did NOT come across.
+	if got := atomic.LoadInt64(&served); got > size/2 {
+		t.Fatalf("probe pulled %d of %d bytes — the body was drained instead of dropped", got, size)
+	}
+}
+
+// A soft-200 error page is the reason the rule above is not merely about
+// bandwidth: its Content-Length is a real number, and trusting it would serve a
+// 1.8 KB HTML body to the player as video with the task marked completed.
+func TestDebridProviderRejectsASoft200ErrorPage(t *testing.T) {
+	page := []byte(`<html><body>link expired</body></html>`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Content-Length", fmt.Sprint(len(page)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(page)
+	}))
+	defer srv.Close()
+
+	if _, err := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0, nil); err == nil {
+		t.Fatal("want a refusal: an error page's length must never become the advertised file size")
+	}
+}
+
+// HEAD and the probe share the caller's budget. A CDN that HANGS on HEAD (as
+// opposed to refusing it quickly) must not consume all of it, or the probe —
+// the rung that exists for exactly these CDNs — never issues a request.
+func TestDebridSizeProbeStillRunsWhenHeadHangs(t *testing.T) {
+	data := makeData(4096)
+	var gets int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			<-r.Context().Done() // hang until the client gives up
+			return
+		}
+		atomic.AddInt32(&gets, 1)
+		http.ServeContent(w, r, "movie.mp4", time.Time{}, bytes.NewReader(data))
+	}))
+	defer srv.Close()
+
+	// The budget the stream path actually grants the whole setup.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	p, err := NewDebridFileProvider(ctx, srv.URL, "movie.mp4", 0, nil)
+	if err != nil {
+		t.Fatalf("NewDebridFileProvider: %v (the probe never got a turn)", err)
+	}
+	if atomic.LoadInt32(&gets) == 0 {
+		t.Fatal("no ranged GET was issued — HEAD ate the whole budget")
+	}
+	if got := p.FileSize(); got != int64(len(data)) {
+		t.Fatalf("FileSize = %d, want %d", got, len(data))
 	}
 }
 
