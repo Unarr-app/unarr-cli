@@ -205,11 +205,16 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 		task.SetResolvedMethod(engine.MethodDebrid)
 		task.Transition(engine.StatusResolving)
 		bctx, bcancel := context.WithTimeout(ctx, 15*time.Second)
-		// fallbackSize 0 → provider derives size from a HEAD; refresh nil → no
-		// task-level link-refresh endpoint exists (the web re-resolves stale
-		// debrid URLs at the next claim). A mid-stream expiry just ends the
-		// stream and the user re-opens it.
-		provider, perr := engine.NewDebridFileProvider(bctx, at.DirectURL, at.DirectFileName, 0, nil)
+		// at.DirectFileSize is the size the PROVIDER listed for this exact file,
+		// and it is the last line of defence for a CDN that answers neither HEAD
+		// nor a range probe. Passing 0 here (as this did) threw that away and
+		// turned a mute CDN into a hard failure: every prod "unknown file size"
+		// task had direct_file_size populated, exact to the byte, while the
+		// agent refused to start the stream.
+		// refresh nil → no task-level link-refresh endpoint exists (the web
+		// re-resolves stale debrid URLs at the next claim). A mid-stream expiry
+		// just ends the stream and the user re-opens it.
+		provider, perr := engine.NewDebridFileProvider(bctx, at.DirectURL, at.DirectFileName, at.DirectFileSize, nil)
 		bcancel()
 		if perr != nil {
 			task.SetError("debrid stream provider: " + perr.Error())
