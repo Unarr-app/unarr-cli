@@ -320,6 +320,18 @@ func TestSelectionMissingBytesCatchesATruncatedSelectedFile(t *testing.T) {
 // reading state in that window reports it complete — without this the damaged
 // cases passed 2 runs in 3. Production settles at the same point for the same
 // reason (see waitPieceMarkingSettled).
+//
+// The client opens NO sockets at all. These tests only re-hash data already on
+// disk — no peer ever connects — so a listener is dead weight, and it was the
+// source of Windows CI flakes: with ListenPort 0 anacrolix binds tcp4 on a
+// random port and then binds udp4 (uTP) on the SAME number (listenAllRetry in
+// anacrolix/torrent socket.go). On Windows that number can sit inside a
+// Hyper-V/WinNAT excluded UDP range, the bind fails with WSAEACCES ("subsequent
+// listen: ... forbidden by its access permissions"), and anacrolix retries only
+// on addr-in-use. With TCP and uTP disabled and NoDHT set, listenNetworks() is
+// empty, listenAll returns no sockets and NewClient accepts that — nothing left
+// to collide. The assertions are unaffected: storage, piece hashing and the
+// completion bitmap never touch the network.
 func openVerifiedTorrent(t *testing.T, dataDir string, mi *metainfo.MetaInfo) (*torrent.Torrent, func()) {
 	t.Helper()
 	cfg := torrent.NewDefaultClientConfig()
@@ -327,10 +339,16 @@ func openVerifiedTorrent(t *testing.T, dataDir string, mi *metainfo.MetaInfo) (*
 	cfg.NoDHT = true
 	cfg.DisableTrackers = true
 	cfg.Seed = false
-	cfg.ListenPort = 0
+	cfg.DisableTCP = true
+	cfg.DisableUTP = true
+	cfg.NoDefaultPortForwarding = true
 	client, err := torrent.NewClient(cfg)
 	if err != nil {
 		t.Fatalf("client: %v", err)
+	}
+	if addrs := client.ListenAddrs(); len(addrs) != 0 {
+		client.Close()
+		t.Fatalf("networkless client still listens on %v — the Windows port-range flake is back", addrs)
 	}
 	tor, err := client.AddTorrent(mi)
 	if err != nil {
