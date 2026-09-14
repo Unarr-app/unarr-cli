@@ -1,6 +1,6 @@
 module github.com/Unarr-app/unarr-cli
 
-go 1.25.0
+go 1.26.0
 
 require (
 	fyne.io/systray v1.12.2
@@ -27,7 +27,7 @@ require (
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/net v0.58.0
 	golang.org/x/sync v0.22.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.45.0
 	golang.org/x/text v0.41.0
 	golang.org/x/time v0.15.0
