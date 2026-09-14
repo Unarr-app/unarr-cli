@@ -104,7 +104,9 @@ if [ -z "$CHANGELOG_PREVIEW" ]; then
 fi
 
 echo -e "${BOLD}  Changes in ${NEXT_TAG}:${NC}"
-echo "$CHANGELOG_PREVIEW" | sed 's/^/  /'
+# Indent every line (blank ones included) by two spaces — what `sed 's/^/  /'`
+# did, without the subshell (SC2001). $(...) already stripped trailing newlines.
+echo "  ${CHANGELOG_PREVIEW//$'\n'/$'\n'  }"
 echo ""
 
 # ── Dry run stops here ─────────────────────────────────────────────
