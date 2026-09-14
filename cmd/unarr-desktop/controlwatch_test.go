@@ -57,6 +57,26 @@ func TestFailureReason(t *testing.T) {
 			want:   "the real cause",
 		},
 		{
+			// Measured on the Windows harness: Resume against a disabled task.
+			// schtasks's upper-case ERROR: line is the cause; cobra's wrapper
+			// after it only reports the exit code and must not replace it.
+			name: "schtasks ERROR line survives a bare exit-status wrapper",
+			output: "INFO: scheduled task \"unarr\" is currently running.\n" +
+				"ERROR: The scheduled task \"unarr\" could not run because it is disabled.\n" +
+				"Error: start task: exit status 1\n",
+			want: "The scheduled task \"unarr\" could not run because it is disabled.",
+		},
+		{
+			name:   "a later informative error still wins",
+			output: "Error: start task: exit status 1\nError: open log file: access denied\n",
+			want:   "open log file: access denied",
+		},
+		{
+			name:   "a lone bare exit status is still reported",
+			output: "Error: start task: exit status 1\n",
+			want:   "start task: exit status 1",
+		},
+		{
 			name:   "no output at all",
 			output: "",
 			want:   "",
