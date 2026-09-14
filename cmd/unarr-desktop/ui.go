@@ -381,15 +381,7 @@ func (ui *trayUI) renderDaemonStatus() {
 		ui.mRestart.Enable()
 	case stateCrashed:
 		now := time.Now()
-		if s.pid != ui.reportedCrashPID && now.After(ui.suppressCrashUntil) {
-			ui.reportedCrashPID = s.pid
-			ui.crashes.observe(now)
-			// A restart loop re-reports one failure: the developers need it
-			// once, not once per restart.
-			if ui.crashes.shouldReport(now) {
-				go handleCrash(s)
-			}
-		}
+		ui.noteCrash(s, now)
 		flapping := ui.crashes.flapping(now)
 		ui.mStatus.SetTitle(crashStatusTitle(flapping))
 		ui.mStatus.SetTooltip(crashStatusTooltip(flapping))

@@ -48,9 +48,16 @@ func PlistPath(home string) string {
 //
 // Detection is by the artifact on disk — the same file install writes and
 // uninstall removes — so it costs no subprocess and is still correct while the
-// service is stopped. Windows is deliberately false: the Task Scheduler task
-// runs at logon and never respawns on exit, so stopping by PID is a real stop
-// there.
+// service is stopped.
+//
+// Windows is deliberately false — but NOT because nothing respawns there. The
+// launcher shim the scheduled task runs does relaunch a daemon that died (see
+// cmd.buildLauncherVBS). A PID-level stop is still a real stop because
+// cmd.stopDaemonByPID records the stop intent the shim checks and ends the task
+// before it kills anything, so `unarr stop` needs no service-manager detour.
+// Starting is another matter: a bare `unarr start` is a foreground daemon with
+// no log file, which is why the desktop tray's daemonCtl routes Windows through
+// `unarr daemon` regardless of this answer.
 func Respawns() bool {
 	var path string
 	switch runtime.GOOS {

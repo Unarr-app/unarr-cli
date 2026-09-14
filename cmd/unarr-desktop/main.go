@@ -194,6 +194,16 @@ func main() {
 		// Every other mode returns/exits above, so this is the only path that
 		// reaches sentry.Init + systray.Run.
 	}
+	// One tray per user and config dir. A second one (a manual launch on top of
+	// the login autostart) is not harmless: it watches the same daemon, so every
+	// crash is mailed twice and every notification shown twice.
+	release, ok := acquireTrayLock()
+	if !ok {
+		fmt.Fprintln(os.Stderr, "unarr-desktop: already running (lock held: "+trayLockPath()+")")
+		notify.Send("unarr is already running", "Look for the unarr icon in the system tray.")
+		return
+	}
+	defer release()
 	sentry.Init(version)
 	defer sentry.Close()
 	defer sentry.RecoverPanic()
@@ -259,6 +269,7 @@ func handleCrash(s agentStatus) {
 	notify.Send("unarr agent stopped unexpectedly", "Collecting a crash report…")
 	msg := fmt.Sprintf("Agent process (PID %d, v%s) died without a clean shutdown; detected by unarr-desktop.", s.pid, s.version)
 	if err := sendReport("crash", msg, s); err != nil {
+		forgetCrashReport(s)
 		fmt.Fprintln(os.Stderr, "unarr-desktop: crash report:", err)
 		sentry.CaptureError(err, "desktop:crash-report")
 		notify.Send("Crash report not sent",

@@ -65,10 +65,13 @@ func sendReport(kind, message string, about agentStatus) error {
 		}
 	}
 
+	// The context goes FIRST and is never trimmed: it is what tells a developer
+	// whether the log sections after it describe this daemon at all.
+	head := renderReportContext(contextFor(about))
 	report := agent.SupportReport{
 		Kind:           kind,
 		Message:        message,
-		Logs:           string(tailBytes(collectReportLogs(), maxReportLogBytes)),
+		Logs:           head + string(tailBytes(collectReportLogs(), maxReportLogBytes-len(head))),
 		AgentVersion:   agentVersion,
 		DesktopVersion: version,
 		AgentID:        agentID,

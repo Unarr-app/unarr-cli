@@ -10,3 +10,7 @@ package fsx
 // does return (EXDEV, ENOENT, EACCES on the directory) would only delay a
 // diagnosis that is not going to change.
 func IsTransientRenameBlock(error) bool { return false }
+
+// IsSharingViolation is always false outside Windows: POSIX has no share modes,
+// so one open handle never refuses another.
+func IsSharingViolation(error) bool { return false }

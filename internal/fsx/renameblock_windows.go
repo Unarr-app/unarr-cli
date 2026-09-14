@@ -23,3 +23,11 @@ func IsTransientRenameBlock(err error) bool {
 	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
 		errors.Is(err, windows.ERROR_ACCESS_DENIED)
 }
+
+// IsSharingViolation reports whether err is Windows refusing an open because
+// another handle holds the file without sharing the requested access — and
+// ONLY that: unlike IsTransientRenameBlock it does not accept
+// ERROR_ACCESS_DENIED, which is also what a plain permissions problem reports.
+func IsSharingViolation(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION)
+}

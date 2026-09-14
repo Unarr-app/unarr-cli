@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/fsx"
 	"github.com/Unarr-app/unarr-cli/internal/logging"
 	"github.com/Unarr-app/unarr-cli/internal/service"
 	"github.com/Unarr-app/unarr-cli/internal/winproc"
@@ -21,11 +22,12 @@ func newDaemonStartCmd() *cobra.Command {
 		Use:   "start",
 		Short: "Start the installed daemon service",
 		Long: `Start the unarr daemon using the system service manager.
-Requires 'unarr daemon install' to have been run first.
+Requires 'unarr daemon install' to have been run first, except on Windows.
 
   Linux:   systemctl --user start unarr
   macOS:   launchctl load ~/Library/LaunchAgents/com.torrentclaw.unarr.plist
-  Windows: schtasks /run /tn unarr`,
+  Windows: schtasks /run /tn unarr, or - with no task installed - a detached
+           daemon that still writes unarr.log and unarr.boot.log`,
 		Example: `  unarr daemon start`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemonSvcStart()
@@ -160,9 +162,8 @@ func runDaemonSvcStart() error {
 			return fmt.Errorf("load service: %w", err)
 		}
 	case "windows":
-		if err := svcExec("schtasks", "/run", "/tn", "unarr"); err != nil {
-			fmt.Fprintln(os.Stderr, "\n  Is the daemon installed? Run 'unarr daemon install' first.")
-			return fmt.Errorf("start task: %w", err)
+		if err := startWindowsDaemon(); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("service control not supported on %s", runtime.GOOS)
@@ -170,6 +171,44 @@ func runDaemonSvcStart() error {
 
 	color.New(color.FgGreen).Println("  ✓ Started")
 	fmt.Println()
+	return nil
+}
+
+// startWindowsDaemon starts the daemon the way that keeps its logs and its
+// supervision: through the scheduled task's launcher shim when the task exists,
+// and otherwise as a detached daemon that owns unarr.log and hands its stderr to
+// unarr.boot.log.
+//
+// The second branch used to be an error ("Is the daemon installed?"), which left
+// the desktop tray with nothing but a bare foreground `unarr start` for Resume —
+// a daemon parented to the tray, with no log file and its output in an 8 KiB
+// buffer in the tray's memory. Its logs froze while the state file stayed fresh,
+// and a crash report arrived with log files eight days older than the daemon
+// that died. Every start now leaves both logs behind.
+func startWindowsDaemon() error {
+	if !windowsTaskInstalled() {
+		return startDaemonDetached()
+	}
+	if err := svcExec("schtasks", "/run", "/tn", "unarr"); err != nil {
+		// A task that exists but will not run — disabled by the user or a
+		// startup-apps cleaner, or a broken registration — must not leave the
+		// tray's Resume dead where a bare `unarr start` used to work. A detached
+		// daemon still keeps both logs, and if the shim's daemon is up after all,
+		// the new one loses the instance lock and exits.
+		fmt.Fprintf(os.Stderr, "  scheduled task did not start (%v) - starting a detached daemon\n", err)
+		err = startDaemonDetached()
+		// Disabling a task does not end it. While its shim still runs, the shim's
+		// `cmd /c ... >> unarr.boot.log` holds the boot log without write sharing,
+		// so the detached start cannot even open it (measured on the harness:
+		// "being used by another process"). That shim owns a daemon, or is about
+		// to relaunch one: there is nothing to start. A detached daemon's own
+		// boot-log handle is opened with sharing, so it never trips this.
+		if fsx.IsSharingViolation(err) {
+			fmt.Println("  the scheduled task's launcher is still running and owns the daemon - nothing to start")
+			return nil
+		}
+		return err
+	}
 	return nil
 }
 
