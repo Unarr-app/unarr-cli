@@ -2,7 +2,10 @@
 # Pin the builder to the host's native arch and cross-compile (CGO is off, so
 # Go cross-compiles trivially). During multi-arch buildx this keeps `go build`
 # at native speed instead of compiling under QEMU emulation for the foreign arch.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+# Must match the go directive in go.mod: the image runs GOTOOLCHAIN=local, so an
+# older builder fails `go mod download` (v1.11.10 shipped without an image for
+# exactly this). CI's "Dockerfile Go matches go.mod" step enforces it.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 

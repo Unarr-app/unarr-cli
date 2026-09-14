@@ -179,6 +179,16 @@ jobs:
       - name: Harness .ps1 files are ASCII
         run: |
           python3 -c "import sys; bad=[f for f in sys.argv[1:] if not open(f,'rb').read().removeprefix(b'\xef\xbb\xbf').isascii()]; bad and print('::error::non-ASCII bytes in', *bad); sys.exit(1 if bad else 0)" test/windows/*.ps1
+      # Nothing in CI builds the Docker image - release.yml does, after the
+      # binaries are already published. The builder image runs GOTOOLCHAIN=local,
+      # so a go.mod bump past its Go version only surfaced as a failed docker
+      # job on v1.11.10. Compare major.minor here instead.
+      - name: Dockerfile Go matches go.mod
+        run: |
+          mod=$(awk '/^go /{split($2,v,"."); print v[1]"."v[2]; exit}' go.mod)
+          img=$(sed -nE 's/^FROM .*golang:([0-9]+\.[0-9]+).*/\1/p' Dockerfile | head -n1)
+          echo "go.mod: $mod  Dockerfile builder: $img"
+          [ "$mod" = "$img" ] || { echo "::error::Dockerfile builder is golang:$img but go.mod needs go $mod"; exit 1; }
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
