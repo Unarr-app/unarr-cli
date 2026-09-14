@@ -133,6 +133,14 @@ died — and arrived twice, 3.7 s apart, because two trays were watching it.
 - [1] task installed: `daemon stop` → down and stays down; `daemon start` →
   back as `unarr.exe ← cmd.exe ← wscript.exe`, `logFile` claimed, its start line
   in `unarr.log`, and a `taskkill /f` afterwards is respawned by the shim.
+- [1b] task installed but DISABLED: `schtasks /query` still succeeds, `/run`
+  refuses ("could not run because it is disabled"), and Pause → Resume falls
+  back to a detached daemon that claims `unarr.log`.
+- [1c] disabled while its shim is STILL running (disabling does not end a task):
+  the detached fallback cannot even open `unarr.boot.log` — the shim's
+  `cmd /c ... >>` holds it without write sharing ("being used by another
+  process"; the first run of [1b] exited 1 on exactly this). That sharing
+  violation now means "the shim owns the daemon": exit 0, still one daemon.
 - [2] no task: `daemon start` returns (≈1.5 s probe) and leaves a detached daemon
   that claims `unarr.log` and has `unarr.boot.log`, parented to nothing of ours.
 - [3] a second `unarr-desktop.exe` exits on its own, exactly one survives, and a

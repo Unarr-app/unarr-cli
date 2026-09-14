@@ -207,6 +207,57 @@ if ($back) {
 } else { Evidence 'resume' }
 StopEverything
 
+# -- 1b. Task installed but DISABLED: Resume must not be dead ----------------
+# schtasks /query succeeds for a disabled task, so 'daemon start' takes the task
+# path, and /run then refuses. It used to stop there with an error - where the old
+# bare 'unarr start' Resume did at least start something.
+function DaemonStartCli($tag) {
+    $p = Start-Process -FilePath $Unarr -ArgumentList 'daemon', 'start' -WorkingDirectory $WorkDir -PassThru `
+        -WindowStyle Hidden -RedirectStandardOutput "$WorkDir\$tag-out.txt" -RedirectStandardError "$WorkDir\$tag-err.txt"
+    $null = $p.Handle
+    $done = $p.WaitForExit(30000)
+    Get-Content "$WorkDir\$tag-out.txt", "$WorkDir\$tag-err.txt" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Trim() } | Select-Object -First 6 | ForEach-Object { Say "  out| $_" }
+    return @{ Done = $done; Code = $p.ExitCode }
+}
+Say "[1b] task disabled: Pause then Resume falls back to a detached daemon"
+& $Unarr daemon install 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+schtasks /change /tn unarr /disable 2>&1 | Out-Null
+# Pause first, exactly as the tray does: that ends the task, so its shim is gone.
+& $Unarr daemon stop 2>&1 | Out-Null
+$null = WaitFor { (DaemonPids).Count -eq 0 } 20 "Pause to take the daemon down"
+$r = DaemonStartCli 'dis'
+Check $r.Done "Resume with a disabled task returned"
+Check ($r.Code -eq 0) "Resume with a disabled task exited 0 (exit $($r.Code))"
+$disUp = WaitFor { DaemonUpNot 0 } 60 "the fallback daemon"
+Check $disUp "a daemon is up although the task is disabled"
+if ($disUp) {
+    $d = @(DaemonPids)[0]
+    $st = ReadState
+    Check ($st.logFile -like '*\unarr.log') "fallback daemon CLAIMS its log file (logFile='$($st.logFile)')"
+    $pName = ProcName (ParentId $d)
+    Check ($pName -ne 'cmd.exe') "fallback daemon is detached, not a shim child (parent: $pName)"
+} else { Evidence 'disabled task' }
+StopEverything
+
+# A disabled task whose shim is STILL running (disabling does not end it) owns a
+# daemon already: 'daemon start' has nothing to do and must say so, not fail on
+# the boot log the shim's cmd.exe holds open (first run of [1b]: exit 1, "being
+# used by another process").
+Say "[1c] task disabled while its shim still runs: 'daemon start' is a no-op, exit 0"
+schtasks /change /tn unarr /enable 2>&1 | Out-Null
+schtasks /run /tn unarr 2>&1 | Out-Null
+$null = WaitFor { DaemonUpNot 0 } 120 "the daemon under the task"
+$shimPid = @(DaemonPids)[0]
+schtasks /change /tn unarr /disable 2>&1 | Out-Null
+$r = DaemonStartCli 'run'
+Check ($r.Code -eq 0) "'daemon start' against a running disabled task exited 0 (exit $($r.Code))"
+$pids = @(DaemonPids)
+Check ($pids.Count -eq 1 -and $pids[0] -eq $shimPid) "still exactly the shim's daemon ($($pids -join ','), want $shimPid)"
+schtasks /change /tn unarr /enable 2>&1 | Out-Null
+StopEverything
+
 # -- 2. No task: Resume must still leave both logs --------------------------
 Say "[2] no task installed: 'daemon start' starts a detached daemon that owns its logs"
 & $Unarr daemon uninstall 2>&1 | Out-Null
@@ -265,7 +316,7 @@ Remove-Item Env:UNARR_NO_TELEMETRY -ErrorAction SilentlyContinue
 if (Test-Path "$Shared\desktop_test.exe") {
     Say "[4] desktop package tests for the new code, on Windows"
     Copy-Item "$Shared\desktop_test.exe" $WorkDir -Force
-    $pattern = 'TestTrayLock|TestCrashIsClaimedOncePerRun|TestNoteCrashSkipsARunAlreadyReported|TestReportContext|TestCrashReportSaysItsDaemonLogIsStale|TestCrashReport|TestSendReport'
+    $pattern = 'TestTrayLock|TestCrashIsReportedOncePerRun|TestNoteCrashSkipsARunAlreadyReported|TestThrottledCrashLeavesNoMark|TestFailedCrashReportIsForgotten|TestReportContext|TestCrashReport|TestSendReport'
     Push-Location $WorkDir
     $res = & "$WorkDir\desktop_test.exe" '-test.v' '-test.run' $pattern 2>&1 | Out-String
     $code = $LASTEXITCODE
