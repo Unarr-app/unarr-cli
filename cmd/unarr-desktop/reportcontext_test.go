@@ -71,6 +71,27 @@ func TestReportContextTrustsAFreshDaemonLog(t *testing.T) {
 	}
 }
 
+// TestReportContextTrustsAnIdleDaemonLog: a daemon that has logged nothing for
+// hours — idle, with the VPN kill-switch leaving not even DHT bookkeeping to
+// write — while LastAlive keeps ticking. Its log was written during this run, so
+// it is this run's log, however quiet.
+func TestReportContextTrustsAnIdleDaemonLog(t *testing.T) {
+	isolatePaths(t)
+	now := time.Now()
+	writeDataLog(t, fallbackDaemonLogName, now.Add(-5*time.Hour))
+
+	got := renderReportContext(reportContext{
+		pid:       7788,
+		startedAt: now.Add(-6 * time.Hour),
+		lastAlive: now.Add(-10 * time.Second),
+		logFile:   filepath.Join(config.DataDir(), fallbackDaemonLogName),
+	})
+
+	if strings.Contains(got, "STALE") {
+		t.Errorf("an idle daemon's own log was called stale:\n%s", got)
+	}
+}
+
 // TestReportContextSeesAppendsThroughAnOpenHandle is the live-daemon case: the
 // writer keeps unarr.log open, exactly as the daemon does for its whole run.
 // NTFS can lag the directory entry's LastWriteTime behind such a writer (seen

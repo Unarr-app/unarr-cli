@@ -29,9 +29,16 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/sysinfo"
 )
 
-// staleLogThreshold is how much older than the daemon's last sign of life the
-// daemon log may be before it is called someone else's log. The daemon writes
-// DHT bookkeeping every five minutes, so ten is past any quiet stretch.
+// staleLogThreshold is how much older than the daemon's START the daemon log may
+// be before it is called someone else's log.
+//
+// Measured against the start, never against the last sign of life: an idle
+// daemon can stay silent for hours while LastAlive ticks every few seconds (with
+// the VPN kill-switch on there is not even DHT bookkeeping to log), so "older
+// than last alive" would accuse a healthy log. A run that writes the file at all
+// writes its startup banner, so a file last touched well BEFORE the run began
+// cannot describe it. The margin covers the gap between the banner and the
+// StartedAt stamp.
 const staleLogThreshold = 10 * time.Minute
 
 type reportContext struct {
@@ -65,14 +72,6 @@ func contextFor(about agentStatus) reportContext {
 	}
 }
 
-// aliveAt is the latest instant the run is known to have been up.
-func (c reportContext) aliveAt() time.Time {
-	if c.startedAt.After(c.lastAlive) {
-		return c.startedAt
-	}
-	return c.lastAlive
-}
-
 func renderReportContext(c reportContext) string {
 	var b strings.Builder
 	b.WriteString("===== report context =====\n")
@@ -84,7 +83,7 @@ func renderReportContext(c reportContext) string {
 		b.WriteString(logClaimLine(c.logFile))
 	}
 	dir := config.DataDir()
-	b.WriteString(daemonLogLine(filepath.Join(dir, fallbackDaemonLogName), c.aliveAt()))
+	b.WriteString(daemonLogLine(filepath.Join(dir, fallbackDaemonLogName), c.startedAt))
 	b.WriteString(bootLogLine(filepath.Join(dir, fallbackBootLogName)))
 	boot, bootOK := sysinfo.BootTime()
 	down, downOK := sysinfo.LastShutdown()
@@ -103,15 +102,15 @@ func logClaimLine(logFile string) string {
 		" timestamps below, not the section headers\n"
 }
 
-func daemonLogLine(path string, aliveAt time.Time) string {
+func daemonLogLine(path string, startedAt time.Time) string {
 	line, mod, ok := statLine(path)
 	if !ok {
 		return line
 	}
-	if !aliveAt.IsZero() && aliveAt.Sub(mod) > staleLogThreshold {
-		line += fmt.Sprintf(" - STALE: last written %s before this daemon was last alive;"+
-			" its output went elsewhere and the daemon log below does NOT describe it",
-			aliveAt.Sub(mod).Round(time.Minute))
+	if !startedAt.IsZero() && startedAt.Sub(mod) > staleLogThreshold {
+		line += fmt.Sprintf(" - STALE: last written %s before this daemon started;"+
+			" this file does NOT describe this run",
+			startedAt.Sub(mod).Round(time.Minute))
 	}
 	return line + "\n"
 }

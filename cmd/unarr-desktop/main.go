@@ -269,6 +269,7 @@ func handleCrash(s agentStatus) {
 	notify.Send("unarr agent stopped unexpectedly", "Collecting a crash report…")
 	msg := fmt.Sprintf("Agent process (PID %d, v%s) died without a clean shutdown; detected by unarr-desktop.", s.pid, s.version)
 	if err := sendReport("crash", msg, s); err != nil {
+		forgetCrashReport(s)
 		fmt.Fprintln(os.Stderr, "unarr-desktop: crash report:", err)
 		sentry.CaptureError(err, "desktop:crash-report")
 		notify.Send("Crash report not sent",
