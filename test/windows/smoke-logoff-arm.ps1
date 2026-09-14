@@ -61,6 +61,8 @@ Say "=== logoff probe, mode=$Mode ==="
 Get-Process unarr -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Unarr } | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 Remove-Item $State, "$DataDir\daemon.stopped", "$WorkDir\logoff-probe-$Mode.txt" -ErrorAction SilentlyContinue
+# The probe runs the tray's own verdict on the evidence (TestHarnessSignOutIsNotACrash).
+foreach ($b in 'unarr.exe', 'desktop_test.exe') { Copy-Item "$Shared\$b" $WorkDir -Force -ErrorAction SilentlyContinue }
 
 if (-not (Get-Process fakeapi -ErrorAction SilentlyContinue)) {
     $env:ADDR = '127.0.0.1:18080'
@@ -91,6 +93,8 @@ $probe = @(
     '"probe ran at logon: $(Get-Date -Format o)" | Out-File $o -Encoding ascii',
     'if (Test-Path $s) { "STATE FILE PRESENT:" | Out-File $o -Append -Encoding ascii; Get-Content $s -Raw | Out-File $o -Append -Encoding ascii } else { "STATE FILE ABSENT" | Out-File $o -Append -Encoding ascii }',
     'if (Test-Path "$env:LOCALAPPDATA\unarr\daemon.stopped") { "stop-intent marker present" | Out-File $o -Append -Encoding ascii }',
+    # The verdict itself: the tray's readStatus on the file this sign-out left.
+    'if (Test-Path $s) { Copy-Item $s "C:\unarr\signout-state.json" -Force; $env:UNARR_HARNESS_SIGNOUT_STATE = "C:\unarr\signout-state.json"; "--- TestHarnessSignOutIsNotACrash ---" | Out-File $o -Append -Encoding ascii; & "C:\unarr\desktop_test.exe" "-test.v" "-test.run" "TestHarnessSignOutIsNotACrash" 2>&1 | Out-File $o -Append -Encoding ascii; "go test exit: $LASTEXITCODE" | Out-File $o -Append -Encoding ascii }',
     '"--- unarr.log tail ---" | Out-File $o -Append -Encoding ascii',
     'Get-Content "$env:LOCALAPPDATA\unarr\unarr.log" -Tail 25 -ErrorAction SilentlyContinue | Out-File $o -Append -Encoding ascii'
 )
