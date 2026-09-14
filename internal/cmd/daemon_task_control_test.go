@@ -47,6 +47,13 @@ func newTestController(t *testing.T) (*taskController, context.CancelFunc) {
 	mgr.SetTaskStore(store)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	// Stop and WAIT for the download goroutines before the test returns. The
+	// deferred cancel alone only asks them to stop: one still unwinding writes
+	// its resume store through config.DataDir(), which by then resolves from the
+	// NEXT test's env - and macOS CI failed that test on "TempDir RemoveAll
+	// cleanup: directory not empty". Registered after withDataDir, so it runs
+	// before the temp dirs are removed.
+	t.Cleanup(func() { cancel(); mgr.Wait() })
 	var mu sync.Mutex
 	stopped := map[string]bool{}
 
