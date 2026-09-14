@@ -54,6 +54,10 @@ func TestStalePieceCompletionSmoke(t *testing.T) {
 	scfg.NoDHT = true
 	scfg.DisableTrackers = true
 	scfg.ListenPort = 0
+	// One tcp4 listener only — see TestSeedLifecycleSmoke: re-binding the random
+	// port for udp4/tcp6 can hit a Windows excluded port range (WSAEACCES).
+	scfg.DisableUTP = true
+	scfg.DisableIPv6 = true
 	seeder, err := torrent.NewClient(scfg)
 	if err != nil {
 		t.Fatalf("seeder client: %v", err)

@@ -162,8 +162,13 @@ func runDaemonSvcStart() error {
 			return fmt.Errorf("load service: %w", err)
 		}
 	case "windows":
-		if err := startWindowsDaemon(); err != nil {
+		started, err := startWindowsDaemon()
+		if err != nil {
 			return err
+		}
+		if !started {
+			fmt.Println()
+			return nil
 		}
 	default:
 		return fmt.Errorf("service control not supported on %s", runtime.GOOS)
@@ -185,10 +190,18 @@ func runDaemonSvcStart() error {
 // buffer in the tray's memory. Its logs froze while the state file stayed fresh,
 // and a crash report arrived with log files eight days older than the daemon
 // that died. Every start now leaves both logs behind.
-func startWindowsDaemon() error {
+//
+// started is false when there was nothing to start because the task's running
+// shim already owns the daemon, so the caller does not print "Started" over it.
+func startWindowsDaemon() (started bool, err error) {
 	if !windowsTaskInstalled() {
-		return startDaemonDetached()
+		return true, startDaemonDetached()
 	}
+	// A shim in its relaunch backoff keeps the task Running, and /run against a
+	// Running task starts nothing — so ask the shim to cut the backoff short
+	// (see writeBackoffWait). A shim that is not waiting never sees it; the
+	// daemon clears it once it holds the instance lock.
+	agent.WriteStartRequest()
 	if err := svcExec("schtasks", "/run", "/tn", "unarr"); err != nil {
 		// A task that exists but will not run — disabled by the user or a
 		// startup-apps cleaner, or a broken registration — must not leave the
@@ -205,11 +218,11 @@ func startWindowsDaemon() error {
 		// boot-log handle is opened with sharing, so it never trips this.
 		if fsx.IsSharingViolation(err) {
 			fmt.Println("  the scheduled task's launcher is still running and owns the daemon - nothing to start")
-			return nil
+			return false, nil
 		}
-		return err
+		return true, err
 	}
-	return nil
+	return true, nil
 }
 
 func runDaemonSvcStop() error {

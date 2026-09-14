@@ -6,11 +6,39 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/sysinfo"
 )
 
-// bootTimeFn / lastShutdownFn are overridable in tests.
+// bootTimeFn / lastShutdownFn / logonTimeFn are overridable in tests.
 var (
 	bootTimeFn     = sysinfo.BootTime
 	lastShutdownFn = sysinfo.LastShutdown
+	logonTimeFn    = sysinfo.SessionLogonTime
 )
+
+// StateFromPreviousLogon reports whether this state file was last written before
+// the current sign-in session began — a daemon the previous session's SIGN-OUT
+// took down, which StateFromPreviousBoot cannot see because nothing rebooted.
+//
+// For a DEAD daemon only; callers must have established that its PID is gone.
+// Unlike the boot verdict this one does not survive being asked about a live
+// daemon: `unarr status` run over SSH is a different, later session, and would
+// call the console session's healthy daemon stale.
+//
+// No slack: the daemon rewrites its state until it is killed, so a sign-out
+// leaves it a hair BEFORE the next logon, while a daemon that crashes seconds
+// into the new session has written after it — the crash worth reporting.
+func StateFromPreviousLogon(st *DaemonState) bool {
+	if st == nil {
+		return false
+	}
+	written := stateWrittenAt(st)
+	if written.IsZero() {
+		return false
+	}
+	logon, ok := logonTimeFn()
+	if !ok || logon.IsZero() || logon.After(time.Now()) {
+		return false
+	}
+	return written.Before(logon)
+}
 
 // preBootSlack is how far a state file may predate the boot instant before it
 // is judged to belong to the previous boot.

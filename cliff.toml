@@ -61,7 +61,21 @@ trim = true
 conventional_commits = true
 filter_unconventional = true
 split_commits = false
+# Git merge commits ("Merge branch ...", "Merge pull request ...", "Merge
+# feat/x into main") and GitHub's web-UI "Create CNAME" / "Delete CNAME" are not
+# conventional, so filter_unconventional already dropped them — but as PARSE
+# ERRORS, which printed "69 commit(s) were skipped due to parse error(s)" on
+# every release and buried any real malformed commit in that count.
+# Preprocessors run before conventional parsing, so rewrite them to a type the
+# first parser below skips: same changelog, no warning. The patterns are
+# case-sensitive on purpose: lowercase "merge: ..." commits ARE conventional and
+# render under "### Merge", so they must not be caught here.
+commit_preprocessors = [
+  { pattern = '^Merge ', replace = "unconventional: Merge " },
+  { pattern = '^(Create|Delete) CNAME', replace = "unconventional: $1 CNAME" },
+]
 commit_parsers = [
+  { message = "^unconventional: ", skip = true },
   { message = "^feat", group = "Added" },
   { message = "^fix", group = "Fixed" },
   { message = "^perf", group = "Performance" },

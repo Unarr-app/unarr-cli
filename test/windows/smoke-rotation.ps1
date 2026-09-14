@@ -55,7 +55,7 @@ $Boot  = "$DataDir\unarr.boot.log"
 $Boot1 = "$DataDir\unarr.boot.log.1"
 
 # The budgets under test. LogBudget mirrors the config written below;
-# BootBudget is FIXED in the binary (bootLogMaxSizeMB) and not configurable —
+# BootBudget is FIXED in the binary (bootLogMaxSizeMB) and not configurable -
 # but it is GATED on log_max_size_mb being non-zero, and the shim's copy of it
 # is baked in at `daemon install` time. That is why the config below is written
 # BEFORE the install: rotation is opt-in and off by default, so an install done
@@ -139,7 +139,7 @@ function SeedFile($path, $bytes) {
 # Passing the compound line as an argument does not work: Start-Process
 # re-quotes an argument containing spaces, and this one already contains its own
 # double quotes, so cmd.exe receives a mangled line and never opens the redirect
-# at all. The tell is unarr.boot.log MISSING rather than empty — `>>` creates the
+# at all. The tell is unarr.boot.log MISSING rather than empty - `>>` creates the
 # file the moment cmd starts, even when the program it launches fails, so an
 # absent boot log means cmd never parsed the command. That is what made [2] and
 # [6] report "the daemon never started" while the product was fine; [4] passed
@@ -158,7 +158,7 @@ function StartLikeShim {
     # the product. Say so here rather than letting it surface as a product
     # failure six assertions later.
     if (-not (WaitFor { Test-Path $Boot } 10 "cmd.exe to open the boot-log redirect")) {
-        Say "  HARNESS WARNING: $Boot was not created — cmd.exe never opened the redirect"
+        Say "  HARNESS WARNING: $Boot was not created - cmd.exe never opened the redirect"
     }
     return $p
 }

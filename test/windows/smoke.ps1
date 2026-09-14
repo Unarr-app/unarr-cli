@@ -1,11 +1,11 @@
-# Automated Windows smoke checks for unarr — run INSIDE the Windows test VM.
+# Automated Windows smoke checks for unarr - run INSIDE the Windows test VM.
 #   powershell -ExecutionPolicy Bypass \\host.lan\Data\smoke.ps1
 #
 # Verifies the things cross-compilation cannot: console-window suppression on
 # spawned children, and that the scheduled-task autostart registers with the
 # reliability settings. Prints PASS/FAIL per check; exits non-zero on any FAIL.
 #
-# NOTE: no global $ErrorActionPreference='Stop' — each check is isolated in
+# NOTE: no global $ErrorActionPreference='Stop' - each check is isolated in
 # Check{} so one failing probe never aborts the rest of the run.
 $data = '\\host.lan\Data'
 $fail = 0
@@ -26,9 +26,9 @@ $desktop = "$dst\unarr-desktop.exe"
 Write-Host "`n== unarr Windows smoke ==`n"
 
 # 1. Binaries run.
-# unarr.exe is a console binary → --version prints to stdout, capture it.
+# unarr.exe is a console binary -> --version prints to stdout, capture it.
 Check "unarr --version prints a version" { (& $unarr --version 2>&1) -match '\d+\.\d+' }
-# unarr-desktop.exe is -H=windowsgui → NO console, so --version cannot write to
+# unarr-desktop.exe is -H=windowsgui -> NO console, so --version cannot write to
 # a captured stdout. It's still expected to exit 0 (that's the self-updater's
 # own smoke test). Assert the EXIT CODE, not the output.
 Check "unarr-desktop --version exits 0 (GUI binary, no stdout)" {
@@ -62,7 +62,7 @@ public class W {
 }
 "@
 
-# 2. CONSOLE-WINDOW SUPPRESSION — the reported bug.
+# 2. CONSOLE-WINDOW SUPPRESSION - the reported bug.
 # The daemon (unarr.exe, a console binary) is what the tray spawns and what
 # flashed a window. `unarr start` forks the daemon via detachedSysProcAttr()
 # (DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP|CREATE_NO_WINDOW). With the fix, the
@@ -89,8 +89,8 @@ Check "task does NOT use Start-Transcript -NoClobber"   { $taskXml -notmatch '-N
 
 # --- The reported bug: the boot flash. ---
 # The task action must launch the daemon through a GUI-subsystem host (wscript)
-# so no console window is drawn at logon. Assert the action shape AND — the real
-# test — actually run the task and confirm no console window pops.
+# so no console window is drawn at logon. Assert the action shape AND - the real
+# test - actually run the task and confirm no console window pops.
 Check "task action launches wscript.exe (GUI-subsystem, no console)" { $taskXml -match '<Command>wscript.exe</Command>' }
 Check "task action does NOT launch powershell (would flash a console)" { $taskXml -notmatch 'powershell' }
 $vbs = Join-Path $env:LOCALAPPDATA 'unarr\unarr-launch.vbs'
@@ -110,7 +110,7 @@ $afterTask = [W]::ConsoleWindows()
 Check "running the boot task pops NO console window (the reported bug)" { $afterTask -le $beforeTask }
 
 # Confirm the boot action actually FIRED (the shim ran), independent of whether
-# the daemon then stayed up — in this bare test VM there's no API key, so the
+# the daemon then stayed up - in this bare test VM there's no API key, so the
 # daemon exits immediately and the task returns to Ready. "Did it run" is the
 # honest signal here: a non-empty Last Run Time (not the "never ran" sentinel).
 Check "boot task fired (shim executed at least once)" {
@@ -122,7 +122,7 @@ Check "boot task fired (shim executed at least once)" {
 & $unarr stop *> $null 2>&1
 Start-Sleep -Seconds 1
 
-# Also drive the shim directly through wscript — isolates the VBS launcher from
+# Also drive the shim directly through wscript - isolates the VBS launcher from
 # Task Scheduler, catching a VBScript syntax error a task run might mask. wscript
 # returns immediately (the shim's blocking Run is on a child), so this can't hang
 # the smoke; still, stop any daemon it spun up afterwards.

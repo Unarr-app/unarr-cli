@@ -19,9 +19,14 @@ const e2eMKV = "/mnt/nas/peliculas/TV Shows/The Exiled Heavy Knight Knows How to
 
 func newE2EServer(t *testing.T) *StreamServer {
 	t.Helper()
-	if _, err := os.Stat(e2eMKV); err != nil {
-		t.Skip("corpus MKV not available")
+	// Opened, not stat'ed: the corpus lives on a network mount that has been seen
+	// to list the file with mode 000 — present for Stat, unreadable for ffmpeg —
+	// which failed these tests with "Permission denied" instead of skipping them.
+	f, err := os.Open(e2eMKV)
+	if err != nil {
+		t.Skipf("corpus MKV not readable: %v", err)
 	}
+	_ = f.Close()
 	ff, ok := mediainfo.LocateFFmpeg("")
 	if !ok {
 		t.Skip("ffmpeg unavailable")

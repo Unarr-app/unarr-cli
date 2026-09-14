@@ -3,19 +3,19 @@
 #
 # Context: prod 2026-09-03, restricted to torrents with 10+ seeders, Windows
 # agents failed 58.3% of downloads with "no peers found" against 10.7% on Linux
-# — same build. The agent had no firewall handling at all. This asserts the fix
+# - same build. The agent had no firewall handling at all. This asserts the fix
 # actually lands on a real Windows box, because cross-compiling only proves it
 # builds.
 #
 # Every check is in its own try/catch: no global $ErrorActionPreference, so one
-# failure cannot abort the run (learned the hard way — see the harness README).
+# failure cannot abort the run (learned the hard way - see the harness README).
 
 $ErrorActionPreference = 'Continue'
 $out  = "\\host.lan\Data\firewall-result.txt"
 # Run from LOCAL disk, not the UNC share. Windows treats \\host.lan\... as the
 # Internet zone and the daemon does not come up from there (verified: the agent
 # started fine from C:\ on 2026-08-10, and not at all from the share today). It
-# is also the realistic case — the rule we assert is scoped to a local path.
+# is also the realistic case - the rule we assert is scoped to a local path.
 $binSrc = "\\host.lan\Data\unarr.exe"
 $binDir = "C:\unarr-test"
 $bin    = "$binDir\unarr.exe"

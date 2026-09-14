@@ -28,8 +28,13 @@ test-e2e:
 	go test -tags e2e -race -count=1 ./test/e2e/...
 
 ## Run linter (requires golangci-lint)
+##
+## --allow-parallel-runners here and in `arch`: `make -j all`, or `make lint` in one
+## terminal while a commit runs the lefthook gate, starts two golangci processes at once,
+## and without the flag the later one aborts on golangci's global lock ("parallel
+## golangci-lint is running", exit 3) — a red that says nothing about the code.
 lint:
-	golangci-lint run ./...
+	golangci-lint run --allow-parallel-runners ./...
 
 ## Architectural / SOLID gate — file size (<500), func length, cyclomatic + cognitive
 ## complexity (15), nesting, dup, max-params (5). Scoped to NEW/CHANGED code vs the base
@@ -66,7 +71,7 @@ arch:
 	@bash scripts/check-arch.sh $(ARCH_BASE)
 	@for goos in $(ARCH_GOOS); do \
 		echo "── arch gate: GOOS=$$goos"; \
-		GOOS=$$goos golangci-lint run -c .golangci.arch.yml $(if $(ARCH_BASE),--new-from-rev=$(ARCH_BASE),) ./... || exit 1; \
+		GOOS=$$goos golangci-lint run --allow-parallel-runners -c .golangci.arch.yml $(if $(ARCH_BASE),--new-from-rev=$(ARCH_BASE),) ./... || exit 1; \
 	done
 
 ## Run tests with coverage report (excludes CLI layer — cmd/ is glue code)

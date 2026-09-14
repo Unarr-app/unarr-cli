@@ -168,9 +168,17 @@ jobs:
       # docker-entrypoint.sh is PID 1 of the published image and does the
       # privilege drop — a quoting slip there is a container that runs as root
       # or cannot start at all, and nothing else in CI executes it.
-      # scripts/release.sh is deliberately not covered yet (pre-existing
-      # findings); add it once cleaned up.
-      - run: shellcheck docker-entrypoint.sh scripts/check-arch.sh scripts/download-ffmpeg-static.sh
+      # scripts/release.sh bumps the version, rewrites CHANGELOG.md and tags;
+      # its last finding (SC2001) is fixed, so it is gated like the rest.
+      # Keep this list in sync with the shellcheck command in lefthook.yml.
+      - run: shellcheck docker-entrypoint.sh scripts/check-arch.sh scripts/download-ffmpeg-static.sh scripts/release.sh
+      # The Windows harness scripts run under PowerShell 5.1, which mangles
+      # non-ASCII outside a BOM'd UTF-8 file; the pre-commit hook enforces the
+      # same rule (test/windows/README.md, "Deploy .ps1 as UTF-8 WITH a BOM").
+      # A leading UTF-8 BOM is allowed (the README asks for one).
+      - name: Harness .ps1 files are ASCII
+        run: |
+          python3 -c "import sys; bad=[f for f in sys.argv[1:] if not open(f,'rb').read().removeprefix(b'\xef\xbb\xbf').isascii()]; bad and print('::error::non-ASCII bytes in', *bad); sys.exit(1 if bad else 0)" test/windows/*.ps1
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}

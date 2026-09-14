@@ -310,7 +310,8 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 		}
 	}()
 
-	// Try to create client; if the port is in use, try the next few ports.
+	// Try to create client; walk to another port when this one is taken, or when
+	// Windows reserves it (see nextListenPort).
 	var client *torrent.Client
 	var err error
 	for attempt := 0; attempt < 10; attempt++ {
@@ -318,17 +319,18 @@ func NewTorrentDownloader(cfg TorrentConfig) (*TorrentDownloader, error) {
 		if err == nil {
 			break
 		}
-		if !isAddrInUse(err) {
+		next, retry := nextListenPort(tcfg.ListenPort, err)
+		if !retry {
 			return nil, fmt.Errorf("create torrent client: %w", err)
 		}
-		tcfg.ListenPort++
-		log.Printf("[torrent] port %d in use, trying %d", tcfg.ListenPort-1, tcfg.ListenPort)
+		log.Printf("[torrent] port %d unusable (%v), trying %d", tcfg.ListenPort, err, next)
+		tcfg.ListenPort = next
 	}
 	if err != nil {
-		return nil, fmt.Errorf("create torrent client (all ports busy): %w", err)
+		return nil, fmt.Errorf("create torrent client (no usable port): %w", err)
 	}
 	if tcfg.ListenPort != listenPort {
-		log.Printf("[torrent] listening on port %d (configured: %d was busy)", tcfg.ListenPort, listenPort)
+		log.Printf("[torrent] listening on port %d (configured: %d was unusable)", tcfg.ListenPort, listenPort)
 	}
 
 	// Route outgoing peer dials through the VPN tunnel (TCP). Added after client

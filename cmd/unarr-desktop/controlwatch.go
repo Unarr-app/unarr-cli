@@ -179,8 +179,14 @@ func failureReason(output string) string {
 		if line == "" {
 			continue
 		}
-		if after, found := strings.CutPrefix(line, "Error:"); found {
-			errLine = strings.TrimSpace(after)
+		if after, found := cutErrorPrefix(line); found {
+			// A later error line replaces an earlier one, EXCEPT a wrapper that
+			// only says a child exited: "Error: start task: exit status 1" after
+			// schtasks's own "ERROR: The scheduled task ... is disabled." would
+			// otherwise hide the one line that explains the failure.
+			if reason := strings.TrimSpace(after); errLine == "" || !endsInBareExitStatus(reason) {
+				errLine = reason
+			}
 		}
 		lastLine = line
 	}
@@ -188,6 +194,23 @@ func failureReason(output string) string {
 		return dedupeScopes(errLine)
 	}
 	return dedupeScopes(lastLine)
+}
+
+// cutErrorPrefix matches "Error:" in any case: cobra prints "Error:", but the
+// Windows tools the CLI shells out to (schtasks, taskkill) print "ERROR:".
+func cutErrorPrefix(line string) (string, bool) {
+	const prefix = "error:"
+	if len(line) < len(prefix) || !strings.EqualFold(line[:len(prefix)], prefix) {
+		return "", false
+	}
+	return line[len(prefix):], true
+}
+
+// endsInBareExitStatus reports whether an error message carries no cause of its
+// own beyond a child process's exit code ("start task: exit status 1").
+func endsInBareExitStatus(reason string) bool {
+	digits := strings.TrimRight(reason, "0123456789")
+	return len(digits) < len(reason) && strings.HasSuffix(strings.TrimSuffix(digits, "-"), "exit status ")
 }
 
 // stripANSI removes escape sequences from command output. Progress rendering

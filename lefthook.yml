@@ -17,6 +17,16 @@ pre-commit:
           echo "Sacalas con: git restore --staged <ruta>"
           exit 1
         fi
+    # Windows PowerShell 5.1 reads a script through the ANSI code page unless it
+    # has a BOM, and the harness deploys them with one — but a curly quote or a
+    # mojibake example in a COMMENT is still enough to break a string literal
+    # on a machine whose code page differs (test/windows/README.md). ASCII only;
+    # a leading UTF-8 BOM is allowed, it is what the README asks for. Python, not
+    # grep -P: whether PCRE flags the BOM's bytes depends on the grep build.
+    ps1-ascii:
+      glob: "test/windows/*.ps1"
+      run: |
+        python3 -c "import sys; bad=[f for f in sys.argv[1:] if not open(f,'rb').read().removeprefix(b'\xef\xbb\xbf').isascii()]; bad and print('Non-ASCII bytes in harness scripts (keep test/windows/*.ps1 ASCII):', *bad, sep='\n'); sys.exit(1 if bad else 0)" {staged_files}
     gofmt-check:
       glob: "*.go"
       run: test -z "$(gofmt -l .)" || { echo "Files not formatted:"; gofmt -l .; exit 1; }
@@ -26,11 +36,16 @@ pre-commit:
     go-build:
       glob: "*.go"
       run: go build ./...
+    # --allow-parallel-runners on EVERY golangci invocation in this hook:
+    # `parallel: true` starts this command and arch-gate at the same moment, and
+    # without the flag the second one to start dies on golangci's global flock
+    # ("parallel golangci-lint is running", exit 3) and fails the commit. It
+    # reproduced 3/3 with cold caches; warm caches only hid it by finishing first.
     golangci-lint:
       glob: "*.go"
       run: |
         if command -v golangci-lint &> /dev/null; then
-          golangci-lint run ./...
+          golangci-lint run --allow-parallel-runners ./...
         else
           echo "golangci-lint not installed, skipping (install: https://golangci-lint.run/welcome/install/)"
         fi
@@ -41,7 +56,7 @@ pre-commit:
       glob: "*.sh"
       run: |
         if command -v shellcheck &> /dev/null; then
-          shellcheck docker-entrypoint.sh scripts/check-arch.sh scripts/download-ffmpeg-static.sh
+          shellcheck docker-entrypoint.sh scripts/check-arch.sh scripts/download-ffmpeg-static.sh scripts/release.sh
         else
           echo "shellcheck not installed, skipping (install: https://www.shellcheck.net/)"
         fi
@@ -59,7 +74,7 @@ pre-commit:
           # "0 issues". Skipping the loop here is the half-fix that lets a
           # commit through and fails `make arch` afterwards.
           for goos in linux windows darwin; do
-            GOOS=$goos golangci-lint run -c .golangci.arch.yml ./... || exit 1
+            GOOS=$goos golangci-lint run --allow-parallel-runners -c .golangci.arch.yml ./... || exit 1
           done
         else
           echo "golangci-lint not installed, skipping arch lint (file-length gate still ran)"

@@ -196,7 +196,7 @@ func buildLauncherVBS(binPath, logDir string, bootMaxBytes int64) string {
 	// is not a spin loop.
 	b.WriteString("  waitMs = 15000 * (2 ^ (tries - 1))\n")
 	b.WriteString("  If waitMs > 120000 Then waitMs = 120000\n")
-	b.WriteString("  WScript.Sleep waitMs\n")
+	writeBackoffWait(&b, strings.TrimRight(logDir, `\`)+`\`+agent.StartRequestFileName)
 	// Re-check before relaunching: the user may have asked for a stop DURING the
 	// backoff, and relaunching then would undo it.
 	b.WriteString("  Err.Clear\n")
@@ -205,6 +205,38 @@ func buildLauncherVBS(binPath, logDir string, bootMaxBytes int64) string {
 	b.WriteString("  End If\n")
 	b.WriteString("Loop\n")
 	return b.String()
+}
+
+// writeBackoffWait emits the relaunch backoff as a one-second poll for the
+// start-now marker (agent.StartRequestFileName) instead of one blind Sleep.
+//
+// The task stays Running while the shim waits, and `schtasks /run` against a
+// Running task with IgnoreNew starts nothing and still exits 0 — so a Resume
+// clicked right after a crash did nothing for up to two minutes. `unarr daemon
+// start` drops the marker before /run; the shim deletes it, resets the failure
+// budget (a person asked for this start, it is not the loop's own retry) and
+// relaunches at once.
+//
+// Under On Error Resume Next a failed FileExists must read as "no request", so
+// the result is discarded whenever Err is set, and Err is cleared after the
+// delete so a marker that could not be removed does not look like a failed
+// launch to the check that follows sh.Run.
+func writeBackoffWait(b *strings.Builder, startMarker string) {
+	b.WriteString("  waited = 0\n")
+	b.WriteString("  Do While waited < waitMs\n")
+	b.WriteString("    Err.Clear\n")
+	b.WriteString("    wake = False\n")
+	b.WriteString("    If Not fso Is Nothing Then wake = fso.FileExists(" + vbsQuote(startMarker) + ")\n")
+	b.WriteString("    If Err.Number <> 0 Then wake = False\n")
+	b.WriteString("    If wake Then\n")
+	b.WriteString("      fso.DeleteFile " + vbsQuote(startMarker) + ", True\n")
+	b.WriteString("      Err.Clear\n")
+	b.WriteString("      tries = 0\n")
+	b.WriteString("      Exit Do\n")
+	b.WriteString("    End If\n")
+	b.WriteString("    WScript.Sleep 1000\n")
+	b.WriteString("    waited = waited + 1000\n")
+	b.WriteString("  Loop\n")
 }
 
 // writeBootLogTrim emits the boot log's rotation, which lives HERE because it

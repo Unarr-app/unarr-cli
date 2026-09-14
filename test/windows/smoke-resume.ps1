@@ -94,7 +94,7 @@ function StopEverything {
     Get-Process unarr -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Unarr } |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
-    Remove-Item $State, "$DataDir\daemon.stopped" -ErrorAction SilentlyContinue
+    Remove-Item $State, "$DataDir\daemon.stopped", "$DataDir\daemon.start-now" -ErrorAction SilentlyContinue
 }
 
 Remove-Item $Out -ErrorAction SilentlyContinue
@@ -216,7 +216,9 @@ function DaemonStartCli($tag) {
         -WindowStyle Hidden -RedirectStandardOutput "$WorkDir\$tag-out.txt" -RedirectStandardError "$WorkDir\$tag-err.txt"
     $null = $p.Handle
     $done = $p.WaitForExit(30000)
-    Get-Content "$WorkDir\$tag-out.txt", "$WorkDir\$tag-err.txt" -ErrorAction SilentlyContinue |
+    # -Encoding UTF8: the CLI writes UTF-8, and 5.1 would read it as CP1252 (a
+    # check mark came out as three mojibake characters in the first run).
+    Get-Content "$WorkDir\$tag-out.txt", "$WorkDir\$tag-err.txt" -Encoding UTF8 -ErrorAction SilentlyContinue |
         Where-Object { $_.Trim() } | Select-Object -First 6 | ForEach-Object { Say "  out| $_" }
     return @{ Done = $done; Code = $p.ExitCode }
 }
@@ -256,6 +258,33 @@ Check ($r.Code -eq 0) "'daemon start' against a running disabled task exited 0 (
 $pids = @(DaemonPids)
 Check ($pids.Count -eq 1 -and $pids[0] -eq $shimPid) "still exactly the shim's daemon ($($pids -join ','), want $shimPid)"
 schtasks /change /tn unarr /enable 2>&1 | Out-Null
+StopEverything
+
+# -- 1d. Resume while the shim waits out its relaunch backoff ----------------
+# The task stays Running during the backoff, and /run against a Running task
+# (IgnoreNew) starts nothing - so a Resume clicked right after a crash used to do
+# nothing for up to two minutes. 'daemon start' now drops a start-now marker the
+# shim polls every second. Timing is the proof: without it the relaunch lands
+# ~15 s after the kill plus registration, well past the 12 s allowed here.
+Say "[1d] Resume during the shim's relaunch backoff brings the daemon back at once"
+schtasks /run /tn unarr 2>&1 | Out-Null
+$null = WaitFor { DaemonUpNot 0 } 120 "the daemon under the task"
+$victim = @(DaemonPids)[0]
+taskkill /pid $victim /f 2>&1 | Out-Null
+$null = WaitFor { (DaemonPids).Count -eq 0 } 10 "the killed daemon to go"
+Start-Sleep -Seconds 2
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$r = DaemonStartCli 'bk'
+Check ($r.Code -eq 0) "Resume during the backoff exited 0 (exit $($r.Code))"
+$fast = WaitFor { DaemonUpNot $victim } 12 "the shim to answer the start request"
+$secs = [int]$sw.Elapsed.TotalSeconds
+Check $fast "daemon back within 12 s of Resume, inside the 15 s backoff (took ${secs}s)"
+if ($fast) {
+    $d = @(DaemonPids)[0]
+    Check ((ProcName (ParentId $d)) -eq 'cmd.exe') "the quick relaunch came from the shim (still supervised)"
+    $gone = WaitFor { -not (Test-Path "$DataDir\daemon.start-now") } 15 "the start request to be consumed"
+    Check $gone "the start request was consumed"
+} else { Evidence 'backoff resume' }
 StopEverything
 
 # -- 2. No task: Resume must still leave both logs --------------------------
@@ -316,7 +345,7 @@ Remove-Item Env:UNARR_NO_TELEMETRY -ErrorAction SilentlyContinue
 if (Test-Path "$Shared\desktop_test.exe") {
     Say "[4] desktop package tests for the new code, on Windows"
     Copy-Item "$Shared\desktop_test.exe" $WorkDir -Force
-    $pattern = 'TestTrayLock|TestCrashIsReportedOncePerRun|TestNoteCrashSkipsARunAlreadyReported|TestThrottledCrashLeavesNoMark|TestFailedCrashReportIsForgotten|TestReportContext|TestCrashReport|TestSendReport'
+    $pattern = 'TestTrayLock|TestCrashIsReportedOncePerRun|TestNoteCrashSkipsARunAlreadyReported|TestThrottledCrashLeavesNoMark|TestFailedCrashReportIsForgotten|TestReportContext|TestCrashReport|TestSendReport|TestKeepEvents|TestFailureReason'
     Push-Location $WorkDir
     $res = & "$WorkDir\desktop_test.exe" '-test.v' '-test.run' $pattern 2>&1 | Out-String
     $code = $LASTEXITCODE

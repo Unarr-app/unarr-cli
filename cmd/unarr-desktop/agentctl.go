@@ -121,6 +121,15 @@ func readStatus() agentStatus {
 		return agentStatus{}
 	}
 	if !agent.IsProcessAlive(st.PID) {
+		// A sign-out killed it: the state file predates this session. Nothing
+		// rebooted, so the boot verdict above cannot see it, and without this the
+		// tray that starts at the next sign-in mails a crash report for a logoff
+		// (measured on the Windows harness). Only here, with the PID known dead —
+		// see StateFromPreviousLogon for why it must not judge a live daemon.
+		if agent.StateFromPreviousLogon(st) {
+			agent.RemoveState()
+			return agentStatus{}
+		}
 		return agentStatus{
 			crashed:   st.Status == "running",
 			pid:       st.PID,

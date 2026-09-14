@@ -331,6 +331,29 @@ func TestDebridDownloadCancel(t *testing.T) {
 	}
 }
 
+// waitPartialHasBytes polls until the .part file at path holds at least one
+// byte. The test servers close `started` right after flushing, but that only
+// proves the bytes left the server: the client still has to receive the
+// headers, create the .part (openPartial runs after the response arrives) and
+// Write the first chunk. A fixed sleep lost that race on slow Windows runners
+// ("partial file should have some bytes"), so a Pause/Cancel issued too early
+// was being graded on scheduler timing instead of its own semantics. The
+// deadline is generous because it only bounds a genuine hang.
+func waitPartialHasBytes(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fi, err := os.Stat(path)
+		if err == nil && fi.Size() > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("partial %s never received bytes within 5s (last stat err = %v)", path, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestDebridDownloadPause(t *testing.T) {
 	// Server that sends a chunk then waits
 	started := make(chan struct{})
@@ -364,16 +387,17 @@ func TestDebridDownloadPause(t *testing.T) {
 		errCh <- err
 	}()
 
-	// Wait for server to confirm data was sent, then pause
+	// Wait until the client has actually written bytes, then pause. The server's
+	// `started` only proves the bytes left the server; see waitPartialHasBytes.
+	partial := partialPath(filepath.Join(outputDir, "pauseable.mkv"))
 	<-started
-	time.Sleep(50 * time.Millisecond) // small delay for file write
+	waitPartialHasBytes(t, partial)
 	d.Pause("pause-001")
 
 	<-errCh
 
 	// Verify partial file exists on disk (pause keeps files). During the download
 	// bytes live ONLY under the .part name; the final name appears on completion.
-	partial := partialPath(filepath.Join(outputDir, "pauseable.mkv"))
 	fi, err := os.Stat(partial)
 	if err != nil {
 		t.Fatalf("partial file should exist after pause: %v", err)
@@ -428,11 +452,9 @@ func TestDebridCancelDeletesPartial(t *testing.T) {
 		}()
 
 		<-started
-		time.Sleep(50 * time.Millisecond) // let the first chunk hit disk
-		// Sanity: the partial exists before we cancel.
-		if _, err := os.Stat(partial); err != nil {
-			t.Fatalf("partial should exist before cancel: %v", err)
-		}
+		// Sanity: the partial exists (with bytes) before we cancel — otherwise the
+		// not-exist assertion below would pass without Cancel deleting anything.
+		waitPartialHasBytes(t, partial)
 
 		d.Cancel("rc2-cancel-001")
 		<-errCh
@@ -465,7 +487,7 @@ func TestDebridCancelDeletesPartial(t *testing.T) {
 		}()
 
 		<-started
-		time.Sleep(50 * time.Millisecond)
+		waitPartialHasBytes(t, partial)
 		d.Pause("rc2-pause-001")
 		<-errCh
 

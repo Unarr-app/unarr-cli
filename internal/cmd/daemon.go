@@ -119,12 +119,6 @@ func runDaemonStart() error {
 	cfg := loadConfig()
 	bold := color.New(color.Bold)
 
-	// Consume any previous stop request: the agent is running again, so it has
-	// been served. Done FIRST, before anything that can fail, because a marker
-	// left behind would tell the Windows launcher shim to treat the NEXT death —
-	// including a crash seconds from now — as deliberate and leave the agent down.
-	agent.ClearStopIntent()
-
 	// Surface keys the config decoder ignored (typo, or right key under the
 	// wrong section). One line each, warning only: refusing to start would turn
 	// any future key rename into a fleet-wide outage.
@@ -185,6 +179,26 @@ func runDaemonStart() error {
 			log.Printf("[lock] release %s: %v", config.LockPath(), err)
 		}
 	}()
+
+	// Consume any previous stop request: THIS daemon is the agent now, so the
+	// request has been served, and a marker left behind would tell the Windows
+	// launcher shim to treat the next death — a crash seconds from now included
+	// — as deliberate and leave the agent down.
+	//
+	// Only once the lock is HELD, never before. A daemon that loses the lock is
+	// not the agent, and clearing the marker from there un-stops the one that
+	// is: Pause writes the marker for a daemon the state file does not name yet
+	// (a shim relaunch the file still attributes to the dead PID), a Resume
+	// within the stop watcher's 2 s poll starts a second daemon that loses the
+	// lock — and if that loser has already cleared the marker, the survivor
+	// never sees its stop and runs on with no shim behind it. The failures that
+	// can happen before this point (no key, no download dir) exit the same way
+	// on every relaunch, so a marker that outlives them costs nothing.
+	//
+	// The start-now request is consumed here for the same reason: it has been
+	// served, and it must not cut short the backoff after some LATER crash.
+	agent.ClearStopIntent()
+	agent.ClearStartRequest()
 
 	// Take ownership of the log file the launcher named — AFTER the flock, so a
 	// daemon that lost the race cannot rename the live log of the one already

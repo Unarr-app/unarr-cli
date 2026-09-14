@@ -48,6 +48,12 @@ func TestSeedLifecycleSmoke(t *testing.T) {
 	scfg.NoDHT = true
 	scfg.DisableTrackers = true
 	scfg.ListenPort = 0 // random — never collides with the leecher's 42069
+	// One tcp4 listener only. With uTP/IPv6 on, anacrolix re-binds the random
+	// TCP port number for udp4/tcp6 ("subsequent listen"), which Windows can
+	// refuse with WSAEACCES when it falls in an excluded port range. The
+	// loopback swarm only needs TCP: the leecher dials ListenAddrs() over tcp4.
+	scfg.DisableUTP = true
+	scfg.DisableIPv6 = true
 	seeder, err := torrent.NewClient(scfg)
 	if err != nil {
 		t.Fatalf("seeder client: %v", err)
