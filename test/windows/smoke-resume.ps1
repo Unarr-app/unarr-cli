@@ -344,7 +344,7 @@ Remove-Item Env:UNARR_NO_TELEMETRY -ErrorAction SilentlyContinue
 if (Test-Path "$Shared\desktop_test.exe") {
     Say "[4] desktop package tests for the new code, on Windows"
     Copy-Item "$Shared\desktop_test.exe" $WorkDir -Force
-    $pattern = 'TestTrayLock|TestCrashIsReportedOncePerRun|TestNoteCrashSkipsARunAlreadyReported|TestThrottledCrashLeavesNoMark|TestFailedCrashReportIsForgotten|TestReportContext|TestCrashReport|TestSendReport'
+    $pattern = 'TestTrayLock|TestCrashIsReportedOncePerRun|TestNoteCrashSkipsARunAlreadyReported|TestThrottledCrashLeavesNoMark|TestFailedCrashReportIsForgotten|TestReportContext|TestCrashReport|TestSendReport|TestKeepEvents|TestFailureReason'
     Push-Location $WorkDir
     $res = & "$WorkDir\desktop_test.exe" '-test.v' '-test.run' $pattern 2>&1 | Out-String
     $code = $LASTEXITCODE

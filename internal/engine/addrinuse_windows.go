@@ -13,3 +13,7 @@ import "golang.org/x/sys/windows"
 // among them (`undefined: syscall.WSAEADDRINUSE`). x/sys is already a
 // dependency, and taking the number from it beats writing 10048 here.
 var errAddrInUse error = windows.WSAEADDRINUSE
+
+// errPortForbidden is Winsock's refusal to bind inside an excluded port range
+// (WSAEACCES, 10013). See isPortForbidden.
+var errPortForbidden error = windows.WSAEACCES
