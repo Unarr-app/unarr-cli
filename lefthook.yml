@@ -46,7 +46,7 @@ pre-commit:
       glob: "*.sh"
       run: |
         if command -v shellcheck &> /dev/null; then
-          shellcheck docker-entrypoint.sh scripts/check-arch.sh scripts/download-ffmpeg-static.sh
+          shellcheck docker-entrypoint.sh scripts/check-arch.sh scripts/download-ffmpeg-static.sh scripts/release.sh
         else
           echo "shellcheck not installed, skipping (install: https://www.shellcheck.net/)"
         fi
