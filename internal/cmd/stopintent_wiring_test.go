@@ -124,10 +124,18 @@ func TestDaemonConsumesAndRecordsIntent(t *testing.T) {
 	if clear < 0 {
 		t.Fatal("the daemon no longer clears the stop intent at startup")
 	}
-	// It has to be cleared early — before anything that can fail — or a marker
-	// left over from a previous stop outlives its purpose.
-	if lock := strings.Index(src, "instanceLock.TryLock()"); lock >= 0 && clear > lock {
-		t.Error("clear the stop intent before the startup work that can fail, not after")
+	// Cleared only once the instance lock is HELD. A daemon that loses the lock
+	// is not the agent; clearing from there un-stops the one that is, which then
+	// never sees its Pause and runs on with no shim behind it.
+	lock := strings.Index(src, "instanceLock.TryLock()")
+	if lock < 0 {
+		t.Fatal("cannot find the instance lock in daemon.go")
+	}
+	if clear < lock {
+		t.Error("the stop intent is cleared before the instance lock is held: a daemon that loses the lock would un-stop the running one")
+	}
+	if c := strings.Index(src, "agent.ClearStartRequest()"); c < lock {
+		t.Error("the start-now request must be consumed by the daemon that holds the lock (missing, or before TryLock)")
 	}
 	if !strings.Contains(src, "agent.WriteStopIntent()") {
 		t.Error("no deliberate-exit path records the stop intent (revoked credential)")
