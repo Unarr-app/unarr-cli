@@ -141,6 +141,12 @@ died — and arrived twice, 3.7 s apart, because two trays were watching it.
   `cmd /c ... >>` holds it without write sharing ("being used by another
   process"; the first run of [1b] exited 1 on exactly this). That sharing
   violation now means "the shim owns the daemon": exit 0, still one daemon.
+- [1d] Resume during the shim's relaunch backoff: kill the shim's daemon, wait
+  2 s (the shim is now inside its 15 s backoff and the task is still Running, so
+  `/run` starts nothing), then `daemon start`. It drops `daemon.start-now`; the
+  shim polls for it every second, deletes it and relaunches — the daemon was
+  back **1 s** after Resume, still `cmd.exe ← wscript.exe`, instead of ~15 s
+  (up to 2 min on later retries).
 - [2] no task: `daemon start` returns (≈1.5 s probe) and leaves a detached daemon
   that claims `unarr.log` and has `unarr.boot.log`, parented to nothing of ours.
 - [3] a second `unarr-desktop.exe` exits on its own, exactly one survives, and a
@@ -174,6 +180,46 @@ too. Because nothing rebooted, neither `StateFromPreviousBoot` signal (boot
 instant, `ShutdownTime`) can tell this state from a crash: the tray started at the
 next logon reads it as one. `-Mode detached` was not run (no console at all, so
 the same outcome is expected, not measured).
+
+**The fix, verified the same day (`-Mode shim`).** The tray now also asks
+`WTSQuerySessionInformationW` for the current session's logon time
+(`sysinfo.SessionLogonTime`) and, for a dead PID only, treats a state file last
+written before this logon as left over from the previous session
+(`agent.StateFromPreviousLogon`). The probe now runs the tray's own verdict on
+the file the sign-out left (`TestHarnessSignOutIsNotACrash`, from
+`desktop_test.exe`) and copies its result to the share itself: state last alive
+20:48:43Z, session logon 20:50:43Z, `readStatus` reports no crash — PASS.
+`-Mode detached` measured right after: same bare `"running"` for a gone PID
+(last alive 20:52:33Z), logon 20:53:33Z, no crash — PASS. Both launch paths a
+user can have leave the identical footprint, and both are now filtered.
+
+### Refused torrent listen port — `smoke-portrange.ps1` (elevated)
+
+Needs `engine_test.exe` on the share:
+
+```bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o test/windows/shared/engine_test.exe ./internal/engine
+```
+
+**The bug it guards.** anacrolix binds TCP and then UDP on the same port and
+wraps the error; the engine's port walk only recognised "address in use", so a
+UDP bind refused with WSAEACCES (10013, "forbidden by its access permissions")
+stopped the torrent engine from starting at all. The walk now steps +1 on "in
+use" and +100 on WSAEACCES (a refused port is usually one of a reserved block).
+
+**What it established (2026-09-14, Win11 26200):**
+
+- `netsh int ipv4 add excludedportrange` — udp active store, udp persistent
+  store and tcp persistent store — does **not** refuse an explicit bind in this
+  guest (code 0 in all three). A netsh reservation cannot stand in for WSAEACCES
+  here; the first version of this script asserted it did and failed 2/4.
+- A socket holding the udp port with `SO_EXCLUSIVEADDRUSE` makes a plain bind
+  fail with 10048 (WSAEADDRINUSE), not 10013. The engine, started against it,
+  logs `port 42069 unusable (subsequent listen: ...)` and listens on 42070 — 5/0.
+- The WSAEACCES branch (+100) is therefore proven by
+  `internal/engine/listenport_windows_test.go` with the real
+  `windows.WSAEACCES` errno wrapped exactly as anacrolix wraps it, on the
+  Windows CI leg — not by this guest.
 
 ### Log rotation + ownership — `smoke-rotation.ps1`
 

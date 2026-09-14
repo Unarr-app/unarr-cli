@@ -96,7 +96,9 @@ $probe = @(
     # The verdict itself: the tray's readStatus on the file this sign-out left.
     'if (Test-Path $s) { Copy-Item $s "C:\unarr\signout-state.json" -Force; $env:UNARR_HARNESS_SIGNOUT_STATE = "C:\unarr\signout-state.json"; "--- TestHarnessSignOutIsNotACrash ---" | Out-File $o -Append -Encoding ascii; & "C:\unarr\desktop_test.exe" "-test.v" "-test.run" "TestHarnessSignOutIsNotACrash" 2>&1 | Out-File $o -Append -Encoding ascii; "go test exit: $LASTEXITCODE" | Out-File $o -Append -Encoding ascii }',
     '"--- unarr.log tail ---" | Out-File $o -Append -Encoding ascii',
-    'Get-Content "$env:LOCALAPPDATA\unarr\unarr.log" -Tail 25 -ErrorAction SilentlyContinue | Out-File $o -Append -Encoding ascii'
+    'Get-Content "$env:LOCALAPPDATA\unarr\unarr.log" -Tail 25 -ErrorAction SilentlyContinue | Out-File $o -Append -Encoding ascii',
+    # Hand the result to the host too, so phase 2 needs no console in the guest.
+    'Copy-Item $o "\\host.lan\Data\" -Force -ErrorAction SilentlyContinue'
 )
 [System.IO.File]::WriteAllText("$WorkDir\logoff-probe.ps1", (($probe -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
 $cmd = "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\unarr\logoff-probe.ps1"
