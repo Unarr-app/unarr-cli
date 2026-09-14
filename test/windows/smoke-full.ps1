@@ -1,10 +1,10 @@
-# Expanded end-to-end Windows checks for unarr — run INSIDE the Windows test VM.
+# Expanded end-to-end Windows checks for unarr - run INSIDE the Windows test VM.
 #   powershell -ExecutionPolicy Bypass \\host.lan\Data\smoke-full.ps1
 #
 # Exercises real functionality on real Windows: every subcommand's --help, the
 # local commands (config/doctor/probe-hwaccel/completion), authenticated network
 # calls against the backend (search/popular/recent), a real one-shot download,
-# and — throughout — that NO console window ever pops (the reported bug), even
+# and - throughout - that NO console window ever pops (the reported bug), even
 # while ffmpeg/ffprobe children run.
 #
 # Network checks use a test API key passed in via env (set by the launcher):
@@ -77,7 +77,7 @@ $url = $env:UNARR_SMOKE_URL
 if ([string]::IsNullOrEmpty($key)) {
   Skip "network checks" "no UNARR_SMOKE_KEY set"
 } else {
-  # --api-key is a global flag; the API URL is NOT a flag on these subcommands —
+  # --api-key is a global flag; the API URL is NOT a flag on these subcommands -
   # it comes from $env:UNARR_API_URL (config.go reads it). Set it if provided.
   $api = @('--api-key', $key)
   if ($url) { $env:UNARR_API_URL = $url }

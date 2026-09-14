@@ -17,6 +17,16 @@ pre-commit:
           echo "Sacalas con: git restore --staged <ruta>"
           exit 1
         fi
+    # Windows PowerShell 5.1 reads a script through the ANSI code page unless it
+    # has a BOM, and the harness deploys them with one — but a curly quote or a
+    # mojibake example in a COMMENT is still enough to break a string literal
+    # on a machine whose code page differs (test/windows/README.md). ASCII only;
+    # a leading UTF-8 BOM is allowed, it is what the README asks for. Python, not
+    # grep -P: whether PCRE flags the BOM's bytes depends on the grep build.
+    ps1-ascii:
+      glob: "test/windows/*.ps1"
+      run: |
+        python3 -c "import sys; bad=[f for f in sys.argv[1:] if not open(f,'rb').read().removeprefix(b'\xef\xbb\xbf').isascii()]; bad and print('Non-ASCII bytes in harness scripts (keep test/windows/*.ps1 ASCII):', *bad, sep='\n'); sys.exit(1 if bad else 0)" {staged_files}
     gofmt-check:
       glob: "*.go"
       run: test -z "$(gofmt -l .)" || { echo "Files not formatted:"; gofmt -l .; exit 1; }

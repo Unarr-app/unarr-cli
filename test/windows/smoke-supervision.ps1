@@ -1,9 +1,9 @@
-# Daemon supervision checks — REAL Windows only.
+# Daemon supervision checks - REAL Windows only.
 #
 # These verify the one thing neither cross-compilation nor a Linux lab can: that
 # Task Scheduler actually brings the daemon back after it dies, and leaves it
-# down after the user stops it. The mechanism spans three processes — the task,
-# wscript.exe running the VBScript shim, and unarr.exe — and the signal between
+# down after the user stops it. The mechanism spans three processes - the task,
+# wscript.exe running the VBScript shim, and unarr.exe - and the signal between
 # them is the shim's EXIT CODE. A shim that falls off the end exits 0, Task
 # Scheduler reads "succeeded", RestartOnFailure never fires, and a daemon that
 # died seconds after logon stays dead until the next logon.
@@ -77,7 +77,7 @@ function Evidence($tag) {
 Remove-Item $Out -ErrorAction SilentlyContinue
 Say "=== unarr daemon supervision checks on $(([System.Environment]::OSVersion).VersionString) ==="
 
-# ── Setup ───────────────────────────────────────────────────────────────────
+# -- Setup -------------------------------------------------------------------
 Say "[setup] staging binaries + config"
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 Copy-Item "$Shared\unarr.exe"   $WorkDir -Force
@@ -154,7 +154,7 @@ Start-Sleep -Seconds 3
 Remove-Item "$DataDir\daemon.state.json", "$DataDir\daemon.stopped" -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path "$WorkDir\downloads" | Out-Null
 
-# ── 1. The shim must carry an exit code ─────────────────────────────────────
+# -- 1. The shim must carry an exit code -------------------------------------
 Say "[1] daemon install writes a launcher that reports failure to Task Scheduler"
 & "$WorkDir\unarr.exe" daemon install 2>&1 | Out-Null
 Start-Sleep -Seconds 5
@@ -162,7 +162,7 @@ Start-Sleep -Seconds 5
 $vbsPath = "$DataDir\unarr-launch.vbs"
 Check (Test-Path $vbsPath) "launcher shim written to $vbsPath"
 if (Test-Path $vbsPath) {
-    # The shim is UTF-16LE+BOM on disk — that is what Windows Script Host needs.
+    # The shim is UTF-16LE+BOM on disk - that is what Windows Script Host needs.
     $bytes = [System.IO.File]::ReadAllBytes($vbsPath)
     Check ($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) "shim is UTF-16LE with a BOM (WSH decodes it correctly)"
     $vbs = [System.IO.File]::ReadAllText($vbsPath, [System.Text.Encoding]::Unicode)
@@ -175,7 +175,7 @@ $xml = schtasks /query /tn unarr /xml 2>&1 | Out-String
 Check ($xml -match 'RestartOnFailure')      "task carries RestartOnFailure"
 Check ($xml -match 'wscript')               "task action launches the shim via wscript"
 
-# ── 2. A crash must bring the daemon back ───────────────────────────────────
+# -- 2. A crash must bring the daemon back -----------------------------------
 Say "[2] a killed daemon is respawned by the scheduled task"
 schtasks /run /tn unarr 2>&1 | Out-Null
 $up = WaitFor { (DaemonPids).Count -gt 0 } 120 "the daemon to come up"
@@ -186,7 +186,7 @@ if (-not $up) { Evidence 'daemon never came up under the task' }
 if ($up) {
     $before = DaemonPids
     Say "  daemon PID(s): $($before -join ',')"
-    # The state file is written during register(), several seconds into startup —
+    # The state file is written during register(), several seconds into startup -
     # asserting the instant the process appears is a race, not a check.
     $hasState = WaitFor { Test-Path "$DataDir\daemon.state.json" } 60 "the daemon to register"
     Check $hasState "state file present while running"
@@ -207,7 +207,7 @@ if ($up) {
     else       { Evidence 'no respawn' }
 }
 
-# ── 3. A requested stop must stay stopped ───────────────────────────────────
+# -- 3. A requested stop must stay stopped -----------------------------------
 Say "[3] a deliberate stop is honoured (no resurrection)"
 & "$WorkDir\unarr.exe" stop 2>&1 | Out-Null
 Start-Sleep -Seconds 5
@@ -220,7 +220,7 @@ Check ((DaemonPids).Count -eq 0)                   "daemon is down after stop"
 $resurrected = WaitFor { (DaemonPids).Count -gt 0 } 150 "a (wrong) resurrection"
 Check (-not $resurrected) "daemon STAYED down - the pause was not undone by the supervisor"
 
-# ── Teardown ────────────────────────────────────────────────────────────────
+# -- Teardown ----------------------------------------------------------------
 Say "[teardown]"
 & "$WorkDir\unarr.exe" daemon uninstall 2>&1 | Out-Null
 Get-Process fakeapi -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
