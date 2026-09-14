@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 const (
@@ -111,5 +113,38 @@ func TestLauncherVBSKeepsSupervising(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Errorf("the supervision loop lost %q — RestartOnFailure will not cover for it:\n%s", want, script)
 		}
+	}
+}
+
+// TestLauncherVBSBackoffAnswersAStartRequest: the relaunch backoff polls for the
+// start-now marker instead of sleeping blind. While the shim waits the task is
+// Running, and `schtasks /run` against it starts nothing — so without the poll a
+// Resume clicked after a crash did nothing for up to two minutes.
+func TestLauncherVBSBackoffAnswersAStartRequest(t *testing.T) {
+	script := buildLauncherVBS(vbsTestBin, vbsTestDir, bootLogMaxBytes)
+	marker := vbsQuote(strings.TrimRight(vbsTestDir, `\`) + `\` + agent.StartRequestFileName)
+
+	if strings.Contains(script, "WScript.Sleep waitMs") {
+		t.Error("the backoff is one blind Sleep again: a start request cannot cut it short")
+	}
+	for _, want := range []string{
+		"Do While waited < waitMs",
+		"fso.FileExists(" + marker + ")",
+		"fso.DeleteFile " + marker + ", True", // consumed, or it would skip every later backoff
+		// A person asked: a fresh failure budget, then out of the wait. Matched as
+		// a sequence — "tries = 0" alone also matches the loop's initialisation.
+		"      tries = 0\n      Exit Do\n",
+		"WScript.Sleep 1000",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the backoff lost %q:\n%s", want, script)
+		}
+	}
+	// The stop re-check must still follow the wait: a Pause during the backoff
+	// has to win over the relaunch.
+	wait := strings.Index(script, "Do While waited < waitMs")
+	stop := strings.LastIndex(script, "If fso.FileExists("+vbsQuote(strings.TrimRight(vbsTestDir, `\`)+`\`+agent.StopIntentFileName)+") Then WScript.Quit 0")
+	if wait < 0 || stop < wait {
+		t.Error("the stop-intent check no longer follows the backoff wait")
 	}
 }
