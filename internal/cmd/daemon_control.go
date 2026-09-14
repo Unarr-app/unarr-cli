@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/fsx"
 	"github.com/Unarr-app/unarr-cli/internal/logging"
 	"github.com/Unarr-app/unarr-cli/internal/service"
 	"github.com/Unarr-app/unarr-cli/internal/winproc"
@@ -195,7 +196,18 @@ func startWindowsDaemon() error {
 		// daemon still keeps both logs, and if the shim's daemon is up after all,
 		// the new one loses the instance lock and exits.
 		fmt.Fprintf(os.Stderr, "  scheduled task did not start (%v) - starting a detached daemon\n", err)
-		return startDaemonDetached()
+		err = startDaemonDetached()
+		// Disabling a task does not end it. While its shim still runs, the shim's
+		// `cmd /c ... >> unarr.boot.log` holds the boot log without write sharing,
+		// so the detached start cannot even open it (measured on the harness:
+		// "being used by another process"). That shim owns a daemon, or is about
+		// to relaunch one: there is nothing to start. A detached daemon's own
+		// boot-log handle is opened with sharing, so it never trips this.
+		if fsx.IsSharingViolation(err) {
+			fmt.Println("  the scheduled task's launcher is still running and owns the daemon - nothing to start")
+			return nil
+		}
+		return err
 	}
 	return nil
 }
