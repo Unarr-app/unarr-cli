@@ -80,6 +80,14 @@ type agentStatus struct {
 	version string
 	agentID string
 	tasks   int
+	// startedAt, lastAlive and logFile describe the daemon RUN, captured with the
+	// rest of this struct at detection time (see sendReport for why nothing may
+	// re-read the state file later). startedAt is what tells two runs that
+	// happened to get the same PID apart; lastAlive and logFile are what let a
+	// crash report say whether the log files it carries belong to this run.
+	startedAt time.Time
+	lastAlive time.Time
+	logFile   string
 	// vpnBlocking: the fail-closed VPN kill-switch is on and no healthy tunnel
 	// is up, so torrent downloads are DISABLED. Safe, deliberate — and a total
 	// functional outage that the tray used to render as a healthy green agent.
@@ -114,10 +122,13 @@ func readStatus() agentStatus {
 	}
 	if !agent.IsProcessAlive(st.PID) {
 		return agentStatus{
-			crashed: st.Status == "running",
-			pid:     st.PID,
-			version: st.Version,
-			agentID: st.AgentID,
+			crashed:   st.Status == "running",
+			pid:       st.PID,
+			version:   st.Version,
+			agentID:   st.AgentID,
+			startedAt: st.StartedAt,
+			lastAlive: agent.LastAliveAt(st),
+			logFile:   st.LogFile,
 		}
 	}
 	return agentStatus{
@@ -201,8 +212,20 @@ func reapStaleState(pid int) {
 // later (Restart=always) — the "I pause it and it turns itself back on" bug —
 // and `unarr start` would spawn a daemon outside the unit that dies with the
 // tray and fights the one systemd owns.
+//
+// Windows goes through `unarr daemon` too, although service.Respawns says no
+// there. A bare `unarr start` is a FOREGROUND daemon: spawned by the tray it
+// becomes the tray's child, with no --log-file and its stdout/stderr in an 8 KiB
+// buffer in the tray's memory (startUnarr). unarr.log and unarr.boot.log then
+// stop moving while the state file stays fresh, a panic lands nowhere, and
+// nothing relaunches it after an auto-upgrade exits. A field crash report
+// (2026-09-14, windows, v1.11.6) arrived with logs eight days older than the
+// daemon that died. `unarr daemon start` runs the scheduled task's launcher
+// shim — log file, boot log, supervision — or, with no task, a detached daemon
+// with both logs. `daemon stop` is the same stopDaemonByPID `unarr stop` runs
+// there, so the pair stays symmetric.
 func daemonCtl(action string) []string {
-	if service.Respawns() {
+	if service.Respawns() || runtime.GOOS == "windows" {
 		return []string{"daemon", action}
 	}
 	return []string{action}
