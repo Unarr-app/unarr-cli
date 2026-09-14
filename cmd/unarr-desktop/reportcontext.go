@@ -89,6 +89,7 @@ func renderReportContext(c reportContext) string {
 	down, downOK := sysinfo.LastShutdown()
 	fmt.Fprintf(&b, "host: booted %s, last recorded shutdown %s\n",
 		stampIf(boot, bootOK), stampIf(down, downOK))
+	b.WriteString(hostEventsSection(c.startedAt))
 	b.WriteString("\n")
 	return b.String()
 }
