@@ -1,6 +1,6 @@
 module github.com/Unarr-app/unarr-cli
 
-go 1.25.0
+go 1.26.0
 
 require (
 	fyne.io/systray v1.12.2
@@ -14,11 +14,11 @@ require (
 	github.com/charmbracelet/huh v1.0.0
 	github.com/dustin/go-humanize v1.0.1
 	github.com/fatih/color v1.19.0
-	github.com/getsentry/sentry-go v0.48.0
-	github.com/gofrs/flock v0.13.0
+	github.com/getsentry/sentry-go v0.49.0
+	github.com/gofrs/flock v0.13.1
 	github.com/google/uuid v1.6.0
 	github.com/huin/goupnp v1.3.0
-	github.com/nwaples/rardecode/v2 v2.3.0
+	github.com/nwaples/rardecode/v2 v2.4.1
 	github.com/olekukonko/tablewriter v1.1.4
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/spf13/cobra v1.10.2
@@ -26,10 +26,10 @@ require (
 	github.com/torrentclaw/go-client v0.2.0
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/net v0.58.0
-	golang.org/x/sync v0.22.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sync v0.23.0
+	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.45.0
-	golang.org/x/text v0.41.0
+	golang.org/x/text v0.42.0
 	golang.org/x/time v0.15.0
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 )
