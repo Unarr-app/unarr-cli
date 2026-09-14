@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.10] - 2026-09-14
+
+
+### Added
+
+- **desktop**: add the Windows event log's side of a daemon death to reports
+
+### CI/CD
+
+- keep the Windows harness scripts ASCII, and enforce it
+- shellcheck scripts/release.sh in CI and pre-commit
+
+### Fixed
+
+- **daemon**: answer a Resume while the Windows shim waits to relaunch
+- **daemon**: consume the stop intent only once the instance lock is held
+- **desktop**: show the schtasks error instead of a bare exit status
+- **desktop**: do not report a Windows sign-out as a daemon crash
+- **torrent**: walk past a listen port Windows has reserved instead of failing
+
+### Build
+
+- silence git-cliff parse-error warning for merge commits
+- allow parallel golangci-lint runners in hook and make
 ## [1.11.9] - 2026-09-14
 
 
@@ -19,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **desktop**: judge log staleness from the run start, mark crashes only when sent
 - **desktop**: run one tray at a time and report each crash once
 - **desktop**: start the supervised daemon on Windows Resume
+
+### Other
+
+- **release**: 1.11.9
 ## [1.11.8] - 2026-09-07
 
 
@@ -1697,6 +1725,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.11.10]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.9...v1.11.10
 [1.11.9]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.8...v1.11.9
 [1.11.8]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.7...v1.11.8
 [1.11.7]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.6...v1.11.7
