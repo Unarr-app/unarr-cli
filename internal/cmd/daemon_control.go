@@ -189,7 +189,13 @@ func startWindowsDaemon() error {
 		return startDaemonDetached()
 	}
 	if err := svcExec("schtasks", "/run", "/tn", "unarr"); err != nil {
-		return fmt.Errorf("start task: %w", err)
+		// A task that exists but will not run — disabled by the user or a
+		// startup-apps cleaner, or a broken registration — must not leave the
+		// tray's Resume dead where a bare `unarr start` used to work. A detached
+		// daemon still keeps both logs, and if the shim's daemon is up after all,
+		// the new one loses the instance lock and exits.
+		fmt.Fprintf(os.Stderr, "  scheduled task did not start (%v) - starting a detached daemon\n", err)
+		return startDaemonDetached()
 	}
 	return nil
 }
