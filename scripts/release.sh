@@ -147,5 +147,10 @@ echo ""
 echo -e "  ${BOLD}Next steps:${NC}"
 echo -e "  Push to trigger CI release pipeline:"
 echo ""
-echo -e "    ${CYAN}git push origin main --follow-tags${NC}"
+# Name the remote main really tracks: clones call it `origin` or `github` (the
+# Makefile's ARCH_BASE tries both), and a hard-coded `origin` hint fails with
+# "make sure you have the correct access rights" on a clone that has none.
+PUSH_REMOTE=$(git config --get branch.main.remote 2>/dev/null || true)
+[ -n "$PUSH_REMOTE" ] || PUSH_REMOTE=$(git remote | head -n1)
+echo -e "    ${CYAN}git push ${PUSH_REMOTE:-origin} main --follow-tags${NC}"
 echo ""
