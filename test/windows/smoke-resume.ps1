@@ -216,7 +216,8 @@ function DaemonStartCli($tag) {
         -WindowStyle Hidden -RedirectStandardOutput "$WorkDir\$tag-out.txt" -RedirectStandardError "$WorkDir\$tag-err.txt"
     $null = $p.Handle
     $done = $p.WaitForExit(30000)
-    # -Encoding UTF8: the CLI writes UTF-8, and 5.1 would read it as CP1252 ("âœ“").
+    # -Encoding UTF8: the CLI writes UTF-8, and 5.1 would read it as CP1252 (a
+    # check mark came out as three mojibake characters in the first run).
     Get-Content "$WorkDir\$tag-out.txt", "$WorkDir\$tag-err.txt" -Encoding UTF8 -ErrorAction SilentlyContinue |
         Where-Object { $_.Trim() } | Select-Object -First 6 | ForEach-Object { Say "  out| $_" }
     return @{ Done = $done; Code = $p.ExitCode }
