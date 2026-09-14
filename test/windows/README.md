@@ -105,6 +105,68 @@ and nothing restarts it — measured with a real logon trigger, not just
 (`daemon_launch_vbs.go`) as a relaunch loop, and why the exit code alone was not
 enough. Do not "simplify" that loop back into a bare `WScript.Quit`.
 
+### Tray Pause/Resume + one tray at a time — `smoke-resume.ps1`
+
+Needs `unarr.exe`, `unarr-desktop.exe`, `fakeapi.exe` and (for check [4])
+`desktop_test.exe` on the share:
+
+```bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o test/windows/shared/desktop_test.exe ./cmd/unarr-desktop
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File \\host.lan\Data\smoke-resume.ps1
+```
+
+**The bug it guards (field crash report 2026-09-14, v1.11.6).** The tray's
+Resume ran a bare `unarr start`: a FOREGROUND daemon, the tray's own child, with
+no `--log-file` and its output in an 8 KiB buffer in the tray's memory.
+`unarr.log` and `unarr.boot.log` stopped moving while the state file stayed
+fresh, a panic had nowhere to land, and nothing relaunched it after an
+auto-upgrade. The report arrived with logs eight days older than the daemon that
+died — and arrived twice, 3.7 s apart, because two trays were watching it.
+
+**What it established (2026-09-14, Win11 26200):**
+
+- [0] baseline: a bare `unarr start` registers with an EMPTY `logFile` — the
+  failure mode, reproduced.
+- [1] task installed: `daemon stop` → down and stays down; `daemon start` →
+  back as `unarr.exe ← cmd.exe ← wscript.exe`, `logFile` claimed, its start line
+  in `unarr.log`, and a `taskkill /f` afterwards is respawned by the shim.
+- [2] no task: `daemon start` returns (≈1.5 s probe) and leaves a detached daemon
+  that claims `unarr.log` and has `unarr.boot.log`, parented to nothing of ours.
+- [3] a second `unarr-desktop.exe` exits on its own, exactly one survives, and a
+  tray starts again after the previous one was killed (the OS releases the lock).
+- [4] the desktop package tests pass on Windows, including the open-handle
+  mtime test the crash-report context relies on.
+
+Harness traps this script hit (fixed in it, worth knowing for the next one):
+`Start-Process -Wait` waits for DESCENDANTS, so it hangs forever on a command
+that leaves a detached daemon — use `-PassThru` + `WaitForExit`; a `-PassThru`
+process whose `.Handle` was never touched reports an EMPTY `ExitCode` on 5.1;
+and an `$env:` set in one check leaks into the Go tests of a later one
+(`UNARR_NO_TELEMETRY=1` made five crash-report tests fail for want of a report).
+
+### What a LOGOFF leaves behind — `smoke-logoff-arm.ps1`
+
+Two phases, because the measurement has to survive the sign-out it measures:
+the script starts the daemon (`-Mode shim` or `-Mode detached`), arms a one-shot
+`HKCU\...\RunOnce` probe that copies `daemon.state.json` at the next logon (well
+inside the task's 20 s logon delay), and signs out. Log back in by hand —
+`AutoAdminLogon=1` fires only at boot, not after a logoff, so type the password —
+then `Copy-Item C:\unarr\logoff-probe-*.txt \\host.lan\Data\`.
+
+**What it established (2026-09-14, Win11 26200, `-Mode shim`):** the state file
+survives the logoff saying `"status": "running"` for a PID that is gone, and
+`unarr.log` ends on an ordinary line two seconds before the sign-out — no
+shutdown, no `shutting_down`. The shim's daemon does **not** get a usable
+`CTRL_LOGOFF_EVENT` despite `cmd /c` giving it a hidden console; the comment in
+`daemon.go` ("no console… nothing calls this") holds in practice for the shim
+too. Because nothing rebooted, neither `StateFromPreviousBoot` signal (boot
+instant, `ShutdownTime`) can tell this state from a crash: the tray started at the
+next logon reads it as one. `-Mode detached` was not run (no console at all, so
+the same outcome is expected, not measured).
+
 ### Log rotation + ownership — `smoke-rotation.ps1`
 
 Verifies the one thing a Linux lab structurally cannot: that the daemon's log
