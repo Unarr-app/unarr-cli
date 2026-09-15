@@ -53,6 +53,10 @@ type FakeServer struct {
 	// connection cap (inject.go): 0 = unlimited
 	maxLive int
 	live    int // connections greeted and not yet closed by the server
+
+	// simulated link (link.go): 0 = unlimited / immediate
+	linkRate int64
+	linkRTT  time.Duration
 }
 
 // NewFakeServer starts a FakeServer on a loopback port and registers cleanup
@@ -209,7 +213,7 @@ func (s *FakeServer) handleConn(conn net.Conn) {
 		conn.Close()
 	}()
 	r := bufio.NewReader(conn)
-	w := bufio.NewWriter(conn)
+	w := bufio.NewWriter(s.pace(conn))
 
 	greeting, admitted := s.admit()
 	if admitted {
@@ -299,6 +303,9 @@ func (s *FakeServer) handleBody(w *bufio.Writer, st *connState, line string) boo
 
 	if proceed, keep := s.applyInjection(w, inj); !proceed {
 		return keep
+	}
+	if _, rtt := s.link(); rtt > 0 {
+		time.Sleep(rtt)
 	}
 	if !ok {
 		fmt.Fprint(w, "430 no such article\r\n")

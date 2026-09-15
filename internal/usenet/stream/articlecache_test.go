@@ -55,6 +55,38 @@ func TestArticleCacheStaysWithinByteBound(t *testing.T) {
 	}
 }
 
+// TestArticleCacheBoostGrowsAndShrinks: readers' boosts grow the byte bound up to
+// the ceiling between them, and returning one shrinks the bound and evicts.
+func TestArticleCacheBoostGrowsAndShrinks(t *testing.T) {
+	const size = 1 << 10
+	c := NewArticleCache(4 * size)
+	c.boostCeiling = 8 * size
+	s := c.NewScope()
+	a := c.resizeBoost(0, 6*size)
+	b := c.resizeBoost(0, 6*size)
+	if a != 6*size || b != 2*size {
+		t.Fatalf("boosts granted %d and %d, want %d and %d", a, b, 6*size, 2*size)
+	}
+	for i := 0; i < 20; i++ {
+		id := string(rune('A' + i))
+		if _, err := s.load(context.Background(), id, func() (*yenc.Part, error) { return fixedPart(size), nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := c.Bytes(); got != 12*size {
+		t.Fatalf("boosted cache holds %d bytes, want %d", got, 12*size)
+	}
+	if got := c.resizeBoost(a, 0); got != 0 {
+		t.Fatalf("returned boost left %d", got)
+	}
+	if got := c.Bytes(); got != 6*size {
+		t.Fatalf("after returning a boost the cache holds %d bytes, want %d", got, 6*size)
+	}
+	if got := c.resizeBoost(b, 8*size); got != 8*size {
+		t.Fatalf("freed ceiling granted %d, want %d", got, 8*size)
+	}
+}
+
 // TestArticleCacheReleaseFreesScope: releasing a scope drops exactly its own
 // articles, and a released scope serves loads without caching them again.
 func TestArticleCacheReleaseFreesScope(t *testing.T) {
@@ -243,8 +275,9 @@ func TestReleasedSourceKeepsCachingForOpenReaders(t *testing.T) {
 	fetched := s.BodyCalls() - before
 	t.Logf("%d articles streamed after release: %d BODY (read-ahead included)", articles, fetched)
 	// The head article is already cached by the plan; the rest cost one BODY each
-	// plus at most one read-ahead window past the cursor.
-	if limit := articles + defaultReadaheadK; fetched > limit {
+	// plus at most the widest read-ahead window past the cursor. Losing the cache
+	// would cost several BODY per article, far above this.
+	if limit := articles + min(rd.rampCeiling(), ReadaheadMaxArticles); fetched > limit {
 		t.Fatalf("released-but-open reader issued %d BODY for %d articles, want <= %d", fetched, articles, limit)
 	}
 	if plan.CachedBytes() <= 0 {

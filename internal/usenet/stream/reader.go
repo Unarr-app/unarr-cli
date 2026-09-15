@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"sync"
 	"time"
 
@@ -13,10 +12,14 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/usenet/yenc"
 )
 
+// ReadaheadArticles is the base read-ahead window, in articles, still bounded by
+// ReadaheadBytes and ReadaheadMaxArticles. It widens while a consumer outruns it
+// (readahead.go).
+var ReadaheadArticles = 4
+
 // Tuning defaults. All are overridable by white-box tests (unexported fields on
 // Reader) so the retry/backoff path can be exercised without real latency.
 const (
-	defaultReadaheadK   = 4 // articles prefetched ahead of the read cursor
 	defaultMaxAttempts  = 3 // per-article fetch attempts before giving up
 	defaultRetryBackoff = 500 * time.Millisecond
 )
@@ -52,15 +55,18 @@ const maxLocateFetches = 16
 var (
 	// ReadaheadBytes caps the cushion prefetched ahead of the read cursor. It is a
 	// CEILING, not the operating point: at the ~750 KB articles a typical posting
-	// uses, defaultReadaheadK (4 articles ≈ 3 MB) is what actually sizes the
-	// cushion and this never binds. It binds only on postings with unusually large
-	// articles, where a fixed article count would silently mean tens of MB
-	// prefetched ahead of a player that may stop watching — bytes we would be
-	// billed for and throw away.
-	ReadaheadBytes int64 = 8 << 20
-	// ReadaheadMaxArticles caps the prefetch fan-out regardless of ReadaheadBytes,
-	// so a posting with tiny articles cannot spawn hundreds of goroutines.
-	ReadaheadMaxArticles = 8
+	// uses, the article window (4, widening up to the pool size for a consumer
+	// that outruns it) is what sizes the cushion. It binds on postings with
+	// unusually large articles, where a fixed article count would silently mean
+	// tens of MB prefetched ahead of a player that may stop watching — bytes we
+	// would be billed for and throw away. Half the article cache bounds it too. A
+	// window widened for a consumer that outruns it may go past both by borrowing
+	// the cache's boost (ReadaheadBoostBytes).
+	ReadaheadBytes int64 = 16 << 20
+	// ReadaheadMaxArticles caps the article window regardless of the byte budget,
+	// so a posting with tiny articles cannot queue hundreds of them. It stays above
+	// twice a 16-connection pool, the widest window worth keeping busy.
+	ReadaheadMaxArticles = 32
 	// ReadaheadIdleWindow is how long after the last Read a queued prefetch stays
 	// worth issuing. A prefetch goroutine parked on the NNTP connection pool while
 	// the consumer disconnects would otherwise still pull (and bill) its article;
@@ -118,9 +124,24 @@ type Reader struct {
 
 	readaheadK     int
 	readaheadBytes int64
-	idleWindow     time.Duration
-	maxAttempts    int
-	retryBackoff   time.Duration
+	// Adaptive read-ahead (readahead.go), touched only by Read/Seek: the window is
+	// readaheadK × raScale, lastSeg the article last served and waited whether the
+	// consumer had to wait for it.
+	raScale   int
+	lastSeg   int
+	waited    bool
+	seqRun    int  // articles read in order since the last seek
+	calmRun   int  // articles read in order without a wait since the last one
+	raCounted bool // counted among the cache's read-ahead readers (countReadahead)
+	// raBoost is the cache boost held for the widened window (boostedBudget);
+	// boostTimer returns it if the reader goes idle. Both guarded by boostMu.
+	boostMu      sync.Mutex
+	raBoost      int64
+	boostTimer   *time.Timer
+	pq           prefetchQueue
+	idleWindow   time.Duration
+	maxAttempts  int
+	retryBackoff time.Duration
 	// stallTimeout bounds each BODY's wait for its status line (ArticleStallTimeout).
 	stallTimeout time.Duration
 
@@ -168,7 +189,7 @@ func openReader(ctx context.Context, src readerSource) *Reader {
 	// Held until Close: a source released while this reader is still streaming
 	// keeps its cache (and in-flight de-duplication) until the reader is done.
 	cache.retain()
-	cctx, cancel := context.WithCancel(ctx)
+	cctx, cancel := context.WithCancel(ctx) //nolint:gosec // G118: cancel stored on the Reader, called by Close
 	return &Reader{
 		ctx:            cctx,
 		cancel:         cancel,
@@ -176,7 +197,9 @@ func openReader(ctx context.Context, src readerSource) *Reader {
 		ix:             src.ix,
 		cache:          cache,
 		lastRead:       time.Now(),
-		readaheadK:     defaultReadaheadK,
+		readaheadK:     ReadaheadArticles,
+		raScale:        1,
+		lastSeg:        -1,
 		readaheadBytes: ReadaheadBytes,
 		idleWindow:     ReadaheadIdleWindow,
 		maxAttempts:    defaultMaxAttempts,
@@ -203,9 +226,13 @@ func (r *Reader) Read(p []byte) (int, error) {
 	if r.ix.SizeExact() && r.pos >= r.ix.FileSize() {
 		return 0, io.EOF
 	}
+	resumed := r.readerIdle()
 	part, segIdx, err := r.articleForOffset(r.pos)
 	if err != nil {
 		return 0, err
+	}
+	if resumed {
+		r.waited = false // waiting after a pause is not outrunning the read-ahead
 	}
 	dataStart := part.Begin - 1 // yEnc begin is 1-based inclusive
 	off := r.pos - dataStart
@@ -242,6 +269,9 @@ func (r *Reader) Seek(offset int64, whence int) (int64, error) {
 	if abs < 0 {
 		return 0, errors.New("usenet reader: negative position")
 	}
+	if abs != r.pos {
+		r.dropReadahead()
+	}
 	r.pos = abs
 	return abs, nil
 }
@@ -254,7 +284,13 @@ func (r *Reader) Seek(offset int64, whence int) (int64, error) {
 func (r *Reader) Close() error {
 	r.cancel()
 	r.wg.Wait()
-	r.closeOnce.Do(r.cache.unretain)
+	r.closeOnce.Do(func() {
+		r.releaseBoost()
+		if r.raCounted {
+			r.cache.c.countReadahead(-1)
+		}
+		r.cache.unretain()
+	})
 	return nil
 }
 
@@ -380,95 +416,15 @@ func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
 	if r.cur != nil && r.curID == seg.MessageID {
 		return r.cur, nil
 	}
+	start := time.Now()
 	part, err := r.cache.load(r.ctx, seg.MessageID, func() (*yenc.Part, error) {
 		// Segment.Bytes is the ENCODED size — what will actually cross the wire, and
 		// what the budget must be asked for before the fetch starts.
 		return r.fetchDecodeRetry(seg.MessageID, seg.Bytes)
 	})
+	r.waited = time.Since(start) > readaheadMissLatency
 	if err == nil {
 		r.cur, r.curID = part, seg.MessageID
 	}
 	return part, err
-}
-
-// triggerReadahead prefetches the articles following fromSeg so the next
-// sequential reads hit the cache. The window is a BYTE budget (readaheadBytes)
-// converted to an article count using the size of the article just served, then
-// clamped by readaheadK/ReadaheadMaxArticles — so the cushion carried ahead of the
-// cursor stays bounded in the unit we are billed in, whatever the poster's article
-// size. Message-ids AND size estimates are resolved here on the read goroutine;
-// the spawned goroutines never touch the index.
-func (r *Reader) triggerReadahead(fromSeg, articleBytes int) {
-	k := r.readaheadWindow(articleBytes)
-	if k <= 0 {
-		return
-	}
-	n := r.ix.SegmentCount()
-	for j := fromSeg + 1; j <= fromSeg+k && j < n; j++ {
-		seg := r.ix.Segment(j)
-		r.prefetch(j, seg.MessageID, seg.Bytes)
-	}
-}
-
-// readaheadWindow returns how many articles may be prefetched: the byte budget
-// divided by the observed article size, capped by the reader's article-count
-// limit. A zero/unknown article size falls back to the count limit alone.
-func (r *Reader) readaheadWindow(articleBytes int) int {
-	k := r.readaheadK
-	if k <= 0 {
-		return 0
-	}
-	if k > ReadaheadMaxArticles {
-		k = ReadaheadMaxArticles
-	}
-	if r.readaheadBytes > 0 && articleBytes > 0 {
-		byBytes := int(r.readaheadBytes / int64(articleBytes))
-		if byBytes < k {
-			k = byBytes
-		}
-	}
-	return k
-}
-
-// prefetch fetches segment segIdx in the background unless it is already cached
-// or already being fetched — by this reader or by any other reader sharing the
-// cache. The claim is taken synchronously, so the many Reads over one article do
-// not each spawn a goroutine for the same segments.
-func (r *Reader) prefetch(segIdx int, messageID string, estBytes int64) {
-	fl, ok := r.cache.claim(messageID)
-	if !ok {
-		return
-	}
-
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
-		// A prefetch parked behind a busy NNTP pool can start long after the
-		// consumer went away (player paused, closed, or the HTTP connection was
-		// cut). Issuing it anyway pulls an article nobody will read and we get
-		// BILLED for it, so drop it once the reader has been quiet: fetching must
-		// cease within seconds of the last Read, not at connection teardown.
-		if r.readerIdle() {
-			r.cache.finish(messageID, fl, nil, errPrefetchDropped)
-			return
-		}
-		part, err := r.fetchDecodeRetry(messageID, estBytes)
-		r.cache.finish(messageID, fl, part, err)
-		if err != nil {
-			log.Printf("[usenet-stream] read-ahead segment %d abandoned: %v", segIdx, err)
-		}
-	}()
-}
-
-// readerIdle reports whether the consumer has stopped reading for longer than the
-// idle window, in which case a queued prefetch is no longer worth its billed
-// bytes. A non-positive window disables the check.
-func (r *Reader) readerIdle() bool {
-	if r.idleWindow <= 0 {
-		return false
-	}
-	r.mu.Lock()
-	last := r.lastRead
-	r.mu.Unlock()
-	return time.Since(last) > r.idleWindow
 }

@@ -33,17 +33,21 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/usenet/nntp"
 	"github.com/Unarr-app/unarr-cli/internal/usenet/nntptest"
 	"github.com/Unarr-app/unarr-cli/internal/usenet/nzb"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/stream"
 	"github.com/Unarr-app/unarr-cli/internal/usenet/yenc"
 )
 
 const (
 	memProfileEnv       = "UNARR_USENET_MEMPROFILE"
 	memProfileServerEnv = "UNARR_USENET_MEMPROFILE_SERVER"
-	memPartSize         = 716 << 10
-	memParts            = 720
-	memConnections      = 10
-	memChunk            = 256 << 10
-	memName             = "profile.mkv"
+	memProfileLinkEnv   = "UNARR_USENET_PROFILE_LINK"
+	// UNARR_USENET_PROFILE_READAHEAD="<articles>,<MiB>,<max articles>"
+	memProfileReadaheadEnv = "UNARR_USENET_PROFILE_READAHEAD"
+	memPartSize            = 716 << 10
+	memParts               = 720
+	memConnections         = 10
+	memChunk               = 256 << 10
+	memName                = "profile.mkv"
 )
 
 func memFileSize() int64 { return int64(memPartSize) * memParts }
@@ -90,6 +94,15 @@ func TestUsenetMemoryProfileServer(t *testing.T) {
 		t.Skip("child process of TestUsenetMemoryProfile")
 	}
 	s := nntptest.NewFakeServer(t)
+	// UNARR_USENET_PROFILE_LINK="<KiB/s per connection>,<RTT ms>" simulates a
+	// provider link, so throughput is bound by parallelism as it is for real.
+	if link := os.Getenv(memProfileLinkEnv); link != "" {
+		var kib, rttMS int64
+		if _, err := fmt.Sscanf(link, "%d,%d", &kib, &rttMS); err != nil {
+			t.Fatalf("%s=%q: %v", memProfileLinkEnv, link, err)
+		}
+		s.SimulateLink(kib<<10, time.Duration(rttMS)*time.Millisecond)
+	}
 	s.GenerateArticles(func(id string) ([]byte, bool) {
 		n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(id, "profile-p"), "@fake.local"))
 		if err != nil || n < 1 || n > memParts {
@@ -216,6 +229,8 @@ func (p *profileFetcher) BodyInto(ctx context.Context, id string, buf []byte) ([
 	p.calls.Add(1)
 	return p.inner.BodyInto(ctx, id, buf)
 }
+
+func (p *profileFetcher) MaxConcurrency() int { return p.inner.MaxConcurrency() }
 
 // settle waits until no BODY has been issued for 300 ms.
 func (p *profileFetcher) settle() int64 {
@@ -353,6 +368,13 @@ func openMemStream(t *testing.T, pf *profileFetcher, info memServerInfo, id stri
 func TestUsenetMemoryProfile(t *testing.T) {
 	if os.Getenv(memProfileEnv) == "" {
 		t.Skip("opt-in: set " + memProfileEnv + "=1")
+	}
+	if ra := os.Getenv(memProfileReadaheadEnv); ra != "" {
+		var articles, mib, maxArticles int
+		if _, err := fmt.Sscanf(ra, "%d,%d,%d", &articles, &mib, &maxArticles); err != nil {
+			t.Fatalf("%s=%q: %v", memProfileReadaheadEnv, ra, err)
+		}
+		stream.ReadaheadArticles, stream.ReadaheadBytes, stream.ReadaheadMaxArticles = articles, int64(mib)<<20, maxArticles
 	}
 	info := startMemProfileServer(t)
 	client := nntp.NewClient(nntp.Config{Host: info.Host, Port: info.Port, Username: "user", Password: "pass", MaxConnections: memConnections})

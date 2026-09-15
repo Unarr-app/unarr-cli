@@ -21,6 +21,11 @@ import (
 // UNARR_USENET_CACHE_MB (see cachesize.go).
 var ArticleCacheBytes = defaultArticleCacheBytes()
 
+// ReadaheadBoostBytes is how far past ArticleCacheBytes the shared cache may grow
+// while readers widened for a consumer that outruns them hold boosts (see
+// readaheadBoostForMemory). Read with ArticleCacheBytes.
+var ReadaheadBoostBytes = defaultReadaheadBoostBytes()
+
 // readerCacheBytes bounds the private cache of a standalone Reader (one opened
 // with NewReader rather than through a plan): the old 16-article cap, in bytes.
 const readerCacheBytes = 16 << 20
@@ -36,7 +41,9 @@ func sharedArticleCache() *ArticleCache {
 	sharedCacheOnce.Do(func() {
 		sharedCache = NewArticleCache(ArticleCacheBytes)
 		sharedCache.onEmpty = returnMemoryToOS
-		log.Printf("[usenet-stream] decoded article cache: %d MiB (%s overrides)", ArticleCacheBytes>>20, ArticleCacheSizeEnv)
+		sharedCache.boostCeiling = ReadaheadBoostBytes
+		log.Printf("[usenet-stream] decoded article cache: %d MiB, +%d MiB for fast consumers (%s overrides)",
+			ArticleCacheBytes>>20, ReadaheadBoostBytes>>20, ArticleCacheSizeEnv)
 	})
 	return sharedCache
 }
@@ -53,12 +60,18 @@ func sharedArticleCache() *ArticleCache {
 // had decoded seconds earlier. Usenet is billed by volume.
 type ArticleCache struct {
 	mu       sync.Mutex
-	maxBytes int64
+	maxBytes int64 // baseBytes plus the boosts readers hold
 	used     int64
 	lru      *list.List // of *cacheEntry, most recently used at the front
 	entries  map[cacheKey]*list.Element
 	flights  map[cacheKey]*flight
 	dead     map[cacheKey]deadMark // dead-article memo (deadmemo.go)
+	readers  int                   // readers with read-ahead on, across every scope
+
+	// baseBytes is the bound the cache was built with. boostCeiling is how far
+	// readers may grow it past that (resizeBoost), boosted how far they have.
+	baseBytes, boostCeiling, boosted int64
+
 	// onEmpty, when set, runs (without c.mu) after a released source's articles
 	// were dropped and nothing else is cached.
 	onEmpty func()
@@ -110,11 +123,12 @@ var errPrefetchDropped = errors.New("usenet reader: read-ahead dropped (reader i
 // article data. A part larger than the whole bound is served but never stored.
 func NewArticleCache(maxBytes int64) *ArticleCache {
 	return &ArticleCache{
-		maxBytes: maxBytes,
-		lru:      list.New(),
-		entries:  make(map[cacheKey]*list.Element),
-		flights:  make(map[cacheKey]*flight),
-		dead:     make(map[cacheKey]deadMark),
+		maxBytes:  maxBytes,
+		baseBytes: maxBytes,
+		lru:       list.New(),
+		entries:   make(map[cacheKey]*list.Element),
+		flights:   make(map[cacheKey]*flight),
+		dead:      make(map[cacheKey]deadMark),
 	}
 }
 
@@ -165,6 +179,41 @@ func (s *CacheScope) retain() {
 	s.c.mu.Lock()
 	s.refs++
 	s.c.mu.Unlock()
+}
+
+// readaheadShare is the read-ahead budget one open reader may take: half the
+// cache's base bound divided among the readers holding it, so concurrent windows
+// fit together instead of evicting each other's unread articles. A reader's boost
+// comes on top (resizeBoost).
+func (c *ArticleCache) readaheadShare() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.baseBytes / int64(2*max(1, c.readers))
+}
+
+// countReadahead adds delta to the readers sharing the read-ahead half. Only
+// readers that actually read ahead count: a RAR header probe reads with it off
+// and must not shrink a live stream's window while it runs.
+func (c *ArticleCache) countReadahead(delta int) {
+	c.mu.Lock()
+	c.readers += delta
+	c.mu.Unlock()
+}
+
+// resizeBoost moves one reader's boost from held to want bytes, as far as the
+// boost ceiling left by the other readers allows, and returns what the reader
+// now holds. The byte bound grows by the boosts held, and shrinks back —
+// evicting the coldest articles — as they are returned.
+func (c *ArticleCache) resizeBoost(held, want int64) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	grant := max(0, min(want, c.boostCeiling-(c.boosted-held)))
+	c.boosted += grant - held
+	c.maxBytes = c.baseBytes + c.boosted
+	for c.used > c.maxBytes && c.lru.Len() > 0 {
+		c.removeLocked(c.lru.Back())
+	}
+	return grant
 }
 
 // unretain drops an open reader, freeing a released scope's articles once it was

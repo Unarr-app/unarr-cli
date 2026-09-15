@@ -53,6 +53,45 @@ func parseArticleCacheMB(v string) (int64, bool) {
 	return mb << 20, true
 }
 
+// Bounds of the read-ahead boost (see readaheadBoostForMemory).
+const (
+	// readaheadBoostMemoryShare: the boost ceiling is 1/64 of usable memory — 16
+	// MiB at 1 GiB of RAM, 64 MiB at 4 GiB — up to maxReadaheadBoost.
+	readaheadBoostMemoryShare       = 64
+	maxReadaheadBoost         int64 = 96 << 20
+)
+
+// defaultReadaheadBoostBytes is the boost ceiling sized from usable memory, or
+// none when ArticleCacheSizeEnv sets the cache: a size chosen by hand is a hard
+// bound.
+func defaultReadaheadBoostBytes() int64 {
+	if v, set := os.LookupEnv(ArticleCacheSizeEnv); set {
+		if _, ok := parseArticleCacheMB(v); ok {
+			return 0
+		}
+	}
+	total, ok := sysinfo.TotalMemory()
+	return readaheadBoostForMemory(total, ok)
+}
+
+// readaheadBoostForMemory sizes how far the cache may grow past its bound for
+// consumers that outrun the read-ahead (ArticleCache.resizeBoost).
+//
+// The cache bound fits the read-ahead of a player: a few articles ahead of one
+// reading at the video's bitrate. A copy, ffmpeg or a player filling its buffer
+// reads as fast as the pool delivers, and keeping every connection busy takes a
+// window as wide as the pool — at the 4 MiB articles some posters use, 40+ MiB
+// ahead of the cursor, which a 32 MiB cache cannot hold. The boost is borrowed
+// only while such a consumer keeps waiting for articles and is handed back when
+// it stops, so a player at its bitrate never pays for it. An unknown size gets
+// none.
+func readaheadBoostForMemory(total uint64, known bool) int64 {
+	if !known {
+		return 0
+	}
+	return min(int64(total/readaheadBoostMemoryShare), maxReadaheadBoost)
+}
+
 // articleCacheForMemory sizes the cache from usable memory.
 //
 // The cache is what makes a re-read of a range served seconds ago free: a
