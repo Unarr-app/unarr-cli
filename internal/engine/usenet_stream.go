@@ -46,7 +46,8 @@ type UsenetStreamHandle struct {
 	LoopbackURL string
 	SourceID    string
 
-	srv *StreamServer
+	srv  *StreamServer
+	plan *stream.StreamPlan // owns the source's shared article cache (released on unregister)
 }
 
 // Close unregisters the /usenet source from the StreamServer. Idempotent and
@@ -87,11 +88,14 @@ func BuildUsenetStream(ctx context.Context, fetcher stream.ArticleFetcher, n *nz
 		return nil, fmt.Errorf("usenet stream: %w (%s)", stream.ErrNotStreamable, plan.Reason)
 	}
 
-	provider := NewUsenetFileProvider(plan.VideoName, plan.VideoSize, plan.Open)
+	// plan.Close runs when the source is unregistered (handle.Close), freeing the
+	// decoded articles every request against this source shared.
+	provider := newReleasableUsenetProvider(plan.VideoName, plan.VideoSize, plan.Open, plan.Close)
 	if provider == nil {
 		// Defensive: a streamable plan always yields an opener. Treat a nil
 		// provider as non-streamable rather than register a dead source that would
 		// 500 the endpoint on first read.
+		plan.Close()
 		log.Printf("[usenet-stream] streamable plan for %q produced a nil provider - falling back to batch", plan.VideoName)
 		return nil, fmt.Errorf("usenet stream: %w (nil provider for %q)", stream.ErrNotStreamable, plan.VideoName)
 	}
@@ -105,6 +109,7 @@ func BuildUsenetStream(ctx context.Context, fetcher stream.ArticleFetcher, n *nz
 		LoopbackURL: srv.UsenetLoopbackURL(sourceID),
 		SourceID:    sourceID,
 		srv:         srv,
+		plan:        plan,
 	}
 	log.Printf("[usenet-stream] %s ready: %s (%d bytes) source=%s", plan.Kind, plan.VideoName, plan.VideoSize, sourceID)
 	return handle, nil

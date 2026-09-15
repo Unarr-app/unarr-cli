@@ -16,9 +16,8 @@ import (
 // Tuning defaults. All are overridable by white-box tests (unexported fields on
 // Reader) so the retry/backoff path can be exercised without real latency.
 const (
-	defaultCacheCap     = 16 // decoded articles kept resident (~750 KB each)
-	defaultReadaheadK   = 4  // articles prefetched ahead of the read cursor
-	defaultMaxAttempts  = 3  // per-article fetch attempts before giving up
+	defaultReadaheadK   = 4 // articles prefetched ahead of the read cursor
+	defaultMaxAttempts  = 3 // per-article fetch attempts before giving up
 	defaultRetryBackoff = 500 * time.Millisecond
 )
 
@@ -92,20 +91,23 @@ type ArticleFetcher interface {
 //
 // A Reader is single-consumer: Read/Seek/Close must be called from one goroutine
 // (as http.ServeContent does). Only the internal read-ahead goroutines run
-// concurrently, and they touch just the mutex-guarded cache — never the index.
+// concurrently, and they touch just the (internally synchronised) article cache.
+// The index and the cache may be SHARED with the other readers of the same source
+// (see readerSource), which is what lets a later request skip what an earlier one
+// already fetched.
 type Reader struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	fetcher ArticleFetcher
 	ix      *OffsetIndex
+	cache   *CacheScope // decoded articles by message-id, with in-flight de-duplication
 
 	pos int64 // logical read position (moved by Seek, advanced by Read)
 
-	mu       sync.Mutex     // guards cache + inflight + lastRead
-	cache    *articleCache  // decoded articles by segment index
-	inflight map[int]bool   // segments a read-ahead goroutine is currently fetching
-	wg       sync.WaitGroup // tracks read-ahead goroutines (drained by Close)
-	lastRead time.Time      // when the consumer last called Read (gates prefetch)
+	mu        sync.Mutex     // guards lastRead
+	wg        sync.WaitGroup // tracks read-ahead goroutines (drained by Close)
+	closeOnce sync.Once      // drops the cache reference exactly once
+	lastRead  time.Time      // when the consumer last called Read (gates prefetch)
 
 	readaheadK     int
 	readaheadBytes int64
@@ -130,19 +132,40 @@ func (r *Reader) SetFetchBudget(b *FetchBudget) { r.budget = b }
 // NewReader builds a Reader over f's articles. ix must be the index for f (built
 // with NewOffsetIndex(f)); if nil, one is constructed so callers that only have
 // the file still get a working reader. The returned Reader owns a child context
-// cancelled by Close, which stops any in-flight read-ahead.
+// cancelled by Close, which stops any in-flight read-ahead. Its article cache is
+// private; readers of a streamable plan share one instead (openReader).
 func NewReader(ctx context.Context, fetcher ArticleFetcher, f nzb.File, ix *OffsetIndex) *Reader {
 	if ix == nil {
 		ix = NewOffsetIndex(f)
 	}
+	return openReader(ctx, readerSource{fetcher: fetcher, ix: ix})
+}
+
+// readerSource is what every reader over one logical file can share across
+// requests: the article fetcher, the offset index and the decoded-article cache.
+// A nil cache gets a private one.
+type readerSource struct {
+	fetcher ArticleFetcher
+	ix      *OffsetIndex
+	cache   *CacheScope
+}
+
+// openReader builds a Reader over src. src.ix must be non-nil.
+func openReader(ctx context.Context, src readerSource) *Reader {
+	cache := src.cache
+	if cache == nil {
+		cache = NewArticleCache(readerCacheBytes).NewScope()
+	}
+	// Held until Close: a source released while this reader is still streaming
+	// keeps its cache (and in-flight de-duplication) until the reader is done.
+	cache.retain()
 	cctx, cancel := context.WithCancel(ctx)
 	return &Reader{
 		ctx:            cctx,
 		cancel:         cancel,
-		fetcher:        fetcher,
-		ix:             ix,
-		cache:          newArticleCache(defaultCacheCap),
-		inflight:       make(map[int]bool),
+		fetcher:        src.fetcher,
+		ix:             src.ix,
+		cache:          cache,
 		lastRead:       time.Now(),
 		readaheadK:     defaultReadaheadK,
 		readaheadBytes: ReadaheadBytes,
@@ -215,10 +238,13 @@ func (r *Reader) Seek(offset int64, whence int) (int64, error) {
 
 // Close cancels any in-flight read-ahead and waits for those goroutines to exit,
 // so no fetch outlives the reader. It never closes the underlying fetcher (the
-// NNTP client pool is shared and owned elsewhere).
+// NNTP client pool is shared and owned elsewhere). The cache reference is dropped
+// only after the read-ahead has drained, so a late prefetch cannot store into a
+// scope that was already freed. Idempotent.
 func (r *Reader) Close() error {
 	r.cancel()
 	r.wg.Wait()
+	r.closeOnce.Do(r.cache.unretain)
 	return nil
 }
 
@@ -336,26 +362,16 @@ func (r *Reader) ensureSizeExact() error {
 // --- internal: fetch, cache, retry, read-ahead ---
 
 // fetchArticle returns the decoded part for segment segIdx, serving it from the
-// cache when present and otherwise fetching (with retry) and caching it.
+// cache when present, joining a fetch of it already in flight (another request's
+// reader, or this reader's own read-ahead), and otherwise fetching (with retry)
+// and caching it.
 func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
-	r.mu.Lock()
-	if part, ok := r.cache.get(segIdx); ok {
-		r.mu.Unlock()
-		return part, nil
-	}
-	r.mu.Unlock()
-
 	seg := r.ix.Segment(segIdx)
-	// Segment.Bytes is the ENCODED size — what will actually cross the wire, and
-	// what the budget must be asked for before the fetch starts.
-	part, err := r.fetchDecodeRetry(seg.MessageID, seg.Bytes)
-	if err != nil {
-		return nil, err
-	}
-	r.mu.Lock()
-	r.cache.put(segIdx, part)
-	r.mu.Unlock()
-	return part, nil
+	return r.cache.load(r.ctx, seg.MessageID, func() (*yenc.Part, error) {
+		// Segment.Bytes is the ENCODED size — what will actually cross the wire, and
+		// what the budget must be asked for before the fetch starts.
+		return r.fetchDecodeRetry(seg.MessageID, seg.Bytes)
+	})
 }
 
 // fetchDecodeRetry fetches and yEnc-decodes one article, retrying transient
@@ -440,15 +456,14 @@ func (r *Reader) readaheadWindow(articleBytes int) int {
 }
 
 // prefetch fetches segment segIdx in the background unless it is already cached
-// or already being fetched. Dedup + cache writes happen under r.mu.
+// or already being fetched — by this reader or by any other reader sharing the
+// cache. The claim is taken synchronously, so the many Reads over one article do
+// not each spawn a goroutine for the same segments.
 func (r *Reader) prefetch(segIdx int, messageID string, estBytes int64) {
-	r.mu.Lock()
-	if r.cache.has(segIdx) || r.inflight[segIdx] {
-		r.mu.Unlock()
+	fl, ok := r.cache.claim(messageID)
+	if !ok {
 		return
 	}
-	r.inflight[segIdx] = true
-	r.mu.Unlock()
 
 	r.wg.Add(1)
 	go func() {
@@ -459,18 +474,11 @@ func (r *Reader) prefetch(segIdx int, messageID string, estBytes int64) {
 		// BILLED for it, so drop it once the reader has been quiet: fetching must
 		// cease within seconds of the last Read, not at connection teardown.
 		if r.readerIdle() {
-			r.mu.Lock()
-			delete(r.inflight, segIdx)
-			r.mu.Unlock()
+			r.cache.finish(messageID, fl, nil, errPrefetchDropped)
 			return
 		}
 		part, err := r.fetchDecodeRetry(messageID, estBytes)
-		r.mu.Lock()
-		delete(r.inflight, segIdx)
-		if err == nil {
-			r.cache.put(segIdx, part)
-		}
-		r.mu.Unlock()
+		r.cache.finish(messageID, fl, part, err)
 		if err != nil {
 			log.Printf("[usenet-stream] read-ahead segment %d abandoned: %v", segIdx, err)
 		}

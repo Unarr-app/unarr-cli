@@ -49,15 +49,32 @@ func (reg *usenetSourceRegistry) register(id string, provider FileProvider) {
 		return
 	}
 	reg.mu.Lock()
+	old := reg.sources[id]
 	reg.sources[id] = provider
 	reg.mu.Unlock()
+	if old != nil && old != provider {
+		releaseUsenetSource(old)
+	}
 }
 
-// unregister drops id from the registry. Safe to call for an unknown id (no-op).
+// unregister drops id from the registry and frees the source's per-source state
+// (its decoded-article cache). Safe to call for an unknown id (no-op).
 func (reg *usenetSourceRegistry) unregister(id string) {
 	reg.mu.Lock()
+	old := reg.sources[id]
 	delete(reg.sources, id)
 	reg.mu.Unlock()
+	if old != nil {
+		releaseUsenetSource(old)
+	}
+}
+
+// releaseUsenetSource frees a displaced or unregistered provider's state, when it
+// holds any.
+func releaseUsenetSource(p FileProvider) {
+	if r, ok := p.(releasableSource); ok {
+		r.Release()
+	}
 }
 
 // get returns the provider for id, or nil when none is registered.

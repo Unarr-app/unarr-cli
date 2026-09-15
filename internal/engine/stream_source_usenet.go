@@ -16,6 +16,7 @@ package engine
 import (
 	"context"
 	"io"
+	"sync"
 )
 
 // UsenetOpener builds a fresh single-consumer io.ReadSeekCloser over a
@@ -32,7 +33,16 @@ type usenetFileProvider struct {
 	name string
 	size int64
 	open UsenetOpener
+
+	// release frees the per-source state behind open (the plan's shared decoded
+	// article cache). nil when there is none. Run at most once.
+	release     func()
+	releaseOnce sync.Once
 }
+
+// releasableSource is a FileProvider holding per-source state that must be freed
+// when the source is unregistered.
+type releasableSource interface{ Release() }
 
 // NewUsenetFileProvider builds a FileProvider backed by a Usenet stream opener.
 // name is the video's file name (with extension, so mimeTypeFromExt yields the
@@ -41,10 +51,24 @@ type usenetFileProvider struct {
 // no way to produce bytes is never useful, and a nil provider makes the caller's
 // SetFile/Register a clear no-op rather than a handler that panics on first read.
 func NewUsenetFileProvider(name string, size int64, open UsenetOpener) FileProvider {
+	return newReleasableUsenetProvider(name, size, open, nil)
+}
+
+// newReleasableUsenetProvider is NewUsenetFileProvider plus a release hook run
+// (once) when the source is unregistered from the StreamServer.
+func newReleasableUsenetProvider(name string, size int64, open UsenetOpener, release func()) FileProvider {
 	if open == nil {
 		return nil
 	}
-	return &usenetFileProvider{name: name, size: size, open: open}
+	return &usenetFileProvider{name: name, size: size, open: open, release: release}
+}
+
+// Release frees the provider's per-source state. Idempotent. Readers already
+// open keep serving correct bytes.
+func (p *usenetFileProvider) Release() {
+	if p.release != nil {
+		p.releaseOnce.Do(p.release)
+	}
 }
 
 func (p *usenetFileProvider) NewFileReader(ctx context.Context) io.ReadSeekCloser {

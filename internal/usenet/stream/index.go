@@ -13,6 +13,7 @@ package stream
 import (
 	"log"
 	"sort"
+	"sync"
 
 	"github.com/Unarr-app/unarr-cli/internal/usenet/nzb"
 	"github.com/Unarr-app/unarr-cli/internal/usenet/yenc"
@@ -21,8 +22,18 @@ import (
 // OffsetIndex resolves a file-byte offset to the segment (yEnc article) holding
 // it. It is a pure, in-memory structure: no network, no goroutines. Construct
 // with NewOffsetIndex, refine with Observe as parts are decoded, query with
-// Locate. It is NOT safe for concurrent use; the owning Reader serialises access.
+// Locate.
+//
+// It is safe for concurrent use. A streamable source shares ONE index across the
+// readers of every request it serves, so what one request learned (the exact size,
+// the real article boundaries) is never re-learned by the next — re-learning the
+// size alone cost an article fetch per HTTP request. Each method is atomic; a
+// reader interleaving Locate with another reader's Observe only ever sees a
+// sharper map, and Reader.articleForOffset verifies every candidate against the
+// fetched part's real range anyway.
 type OffsetIndex struct {
+	mu sync.Mutex // guards every field below except segs (immutable after construction)
+
 	segs []nzb.Segment // sorted ascending by part Number
 
 	estLen     []int64 // per-segment ESTIMATE from Segment.Bytes (encoded size)
@@ -103,6 +114,12 @@ func (ix *OffsetIndex) Segment(i int) nzb.Segment { return ix.segs[i] }
 // article's yEnc header (size=) has been Observed, otherwise the accumulated
 // Segment.Bytes estimate (which runs ~3% high because those are encoded sizes).
 func (ix *OffsetIndex) FileSize() int64 {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	return ix.fileSizeLocked()
+}
+
+func (ix *OffsetIndex) fileSizeLocked() int64 {
 	if ix.sizeExact {
 		return ix.fileSize
 	}
@@ -112,7 +129,11 @@ func (ix *OffsetIndex) FileSize() int64 {
 // SizeExact reports whether FileSize is byte-exact (an article header has been
 // observed). The Reader uses this to decide whether a Seek to the end can be
 // answered from the current map or needs one article fetched first.
-func (ix *OffsetIndex) SizeExact() bool { return ix.sizeExact }
+func (ix *OffsetIndex) SizeExact() bool {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	return ix.sizeExact
+}
 
 // Locate resolves a file offset to the segment carrying it and that segment's
 // current best-known byte range [start, end). ok is false for a negative offset,
@@ -120,8 +141,10 @@ func (ix *OffsetIndex) SizeExact() bool { return ix.sizeExact }
 // is exact once the segment has been Observed (and, for uniform postings, once
 // any single segment has been observed).
 func (ix *OffsetIndex) Locate(offset int64) (segIdx int, start, end int64, ok bool) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
 	n := len(ix.segs)
-	if n == 0 || offset < 0 || offset >= ix.FileSize() {
+	if n == 0 || offset < 0 || offset >= ix.fileSizeLocked() {
 		return 0, 0, 0, false
 	}
 	// Largest i with starts[i] <= offset. starts is monotonic non-decreasing.
@@ -151,6 +174,8 @@ func (ix *OffsetIndex) Observe(segIdx int, part *yenc.Part) {
 			segIdx, part.Begin, part.End)
 		return
 	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
 
 	// Observe runs on every Read, cache hit included, so a segment is re-observed
 	// many times over a session — only its FIRST observation may feed the running
@@ -243,7 +268,7 @@ func (ix *OffsetIndex) endOf(i int) int64 {
 	if i < len(ix.segs)-1 {
 		return ix.starts[i+1]
 	}
-	return ix.FileSize()
+	return ix.fileSizeLocked()
 }
 
 // estimatedSize returns the running size estimate: the last segment's start plus

@@ -52,6 +52,27 @@ type StreamPlan struct {
 	Reason    string // human-readable cause, set only when KindUnsupported
 
 	open func(ctx context.Context) io.ReadSeekCloser
+
+	// cache holds the decoded articles every reader this plan opens shares, scoped
+	// to this plan inside the process-wide ArticleCache. nil for an unsupported plan.
+	cache *CacheScope
+}
+
+// Close releases the plan's decoded-article cache. Call it when the source the
+// plan backs is torn down. Readers still open keep serving correct bytes, just
+// uncached. Idempotent and safe on a nil or unsupported plan.
+func (p *StreamPlan) Close() {
+	if p != nil && p.cache != nil {
+		p.cache.Release()
+	}
+}
+
+// CachedBytes reports the decoded article bytes currently held for this plan.
+func (p *StreamPlan) CachedBytes() int64 {
+	if p == nil || p.cache == nil {
+		return 0
+	}
+	return p.cache.Bytes()
 }
 
 // Streamable reports whether the plan yields a playable stream. Callers gate on
@@ -93,8 +114,10 @@ func StreamPlanFromNZB(ctx context.Context, fetcher ArticleFetcher, n *nzb.NZB) 
 // unsupported plan carrying the probe's reason (compressed, encrypted, no/ambiguous
 // video, unreadable header).
 func planRarStore(ctx context.Context, fetcher ArticleFetcher, n *nzb.NZB) *StreamPlan {
-	rs, err := Probe(ctx, fetcher, n.RarFiles())
+	cache := sharedArticleCache().NewScope()
+	rs, err := probe(ctx, volumeShare{fetcher: fetcher, cache: cache}, n.RarFiles())
 	if err != nil {
+		cache.Release()
 		return unsupportedPlan(streamableReason(err))
 	}
 	log.Printf("[usenet-stream] plan rar-store: %s (%d bytes)", rs.VideoName(), rs.VideoSize())
@@ -103,6 +126,7 @@ func planRarStore(ctx context.Context, fetcher ArticleFetcher, n *nzb.NZB) *Stre
 		VideoName: rs.VideoName(),
 		VideoSize: rs.VideoSize(),
 		open:      rs.OpenVideo,
+		cache:     cache,
 	}
 }
 
@@ -111,22 +135,29 @@ func planRarStore(ctx context.Context, fetcher ArticleFetcher, n *nzb.NZB) *Stre
 // http.ServeContent an accurate length and validates that the first article is
 // actually fetchable/decodable — if not, it degrades to unsupported so the batch
 // path takes over.
+//
+// The index that establishing the size sharpened, and the cache holding that first
+// article, are shared by every reader the plan opens: a request's
+// Seek(0, io.SeekEnd) is then answered from the exact index instead of fetching
+// article 0 again, and a read of the file's head costs nothing.
 func planDirect(ctx context.Context, fetcher ArticleFetcher, n *nzb.NZB) *StreamPlan {
 	video, err := selectDirectVideo(n)
 	if err != nil {
 		return unsupportedPlan(streamableReason(err))
 	}
-	size, err := establishSize(ctx, fetcher, *video)
+	f := *video
+	src := readerSource{fetcher: fetcher, ix: NewOffsetIndex(f), cache: sharedArticleCache().NewScope()}
+	size, err := establishSize(ctx, src)
 	if err != nil {
+		src.cache.Release()
 		return unsupportedPlan("establish size " + video.Filename() + ": " + err.Error())
 	}
-	f := *video
 	name := f.Filename()
 	open := func(c context.Context) io.ReadSeekCloser {
-		return NewReader(c, fetcher, f, NewOffsetIndex(f))
+		return openReader(c, src)
 	}
 	log.Printf("[usenet-stream] plan direct: %s (%d bytes)", name, size)
-	return &StreamPlan{Kind: KindDirect, VideoName: name, VideoSize: size, open: open}
+	return &StreamPlan{Kind: KindDirect, VideoName: name, VideoSize: size, open: open, cache: src.cache}
 }
 
 // selectDirectVideo returns the one streamable video file among the NZB's content
@@ -149,11 +180,12 @@ func selectDirectVideo(n *nzb.NZB) (*nzb.File, error) {
 	return &v, nil
 }
 
-// establishSize opens a throwaway Reader over f and Seeks to the end, which
+// establishSize opens a throwaway Reader over src and Seeks to the end, which
 // fetches and observes exactly one article to pin the byte-exact file size. The
-// reader is closed immediately; production streams open their own fresh readers.
-func establishSize(ctx context.Context, fetcher ArticleFetcher, f nzb.File) (int64, error) {
-	r := NewReader(ctx, fetcher, f, NewOffsetIndex(f))
+// reader is closed immediately; what it learned stays in src's shared index and
+// cache for the readers production streams open later.
+func establishSize(ctx context.Context, src readerSource) (int64, error) {
+	r := openReader(ctx, src)
 	defer func() { _ = r.Close() }()
 	return r.Seek(0, io.SeekEnd)
 }

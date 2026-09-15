@@ -74,10 +74,18 @@ type extent struct {
 // file, offsets already translated, ready for http.ServeContent / ffmpeg.
 type RarStore struct {
 	fetcher   ArticleFetcher
-	volumes   []nzb.File // rar volumes in assembly order
-	extents   []extent   // video runs, sorted by videoStart
+	volumes   []nzb.File     // rar volumes in assembly order
+	indexes   []*OffsetIndex // per-volume index learned by the probe, shared by playback readers
+	cache     *CacheScope    // decoded articles shared by every reader over the release
+	extents   []extent       // video runs, sorted by videoStart
 	videoName string
 	videoSize int64
+}
+
+// volumeShare is what every reader over a release's volumes shares.
+type volumeShare struct {
+	fetcher ArticleFetcher
+	cache   *CacheScope
 }
 
 // VideoName is the file name of the video inside the archive.
@@ -86,19 +94,36 @@ func (rs *RarStore) VideoName() string { return rs.videoName }
 // VideoSize is the exact byte length of the video inside the archive.
 func (rs *RarStore) VideoSize() int64 { return rs.videoSize }
 
+// volumeIndex returns the shared index for volume i, or nil (build a fresh one)
+// when the store carries none for it.
+func (rs *RarStore) volumeIndex(i int) *OffsetIndex {
+	if i < 0 || i >= len(rs.indexes) {
+		return nil
+	}
+	return rs.indexes[i]
+}
+
 // Probe classifies a RAR release by reading only its headers (never the file
 // bodies) and returns a RarStore when it is a plain STORE archive with exactly
 // one streamable video file. Any other shape — compressed, encrypted, no video,
 // or multiple videos — returns a NotStreamableError so the caller downloads it
 // via the batch path instead. rarFiles is the NZB's RarFiles(); an empty set is
-// itself not streamable.
+// itself not streamable. The returned store owns a private article cache; a
+// streamable plan probes with a scope of the process-wide cache instead.
 func Probe(ctx context.Context, fetcher ArticleFetcher, rarFiles []nzb.File) (*RarStore, error) {
+	return probe(ctx, volumeShare{fetcher: fetcher, cache: NewArticleCache(ArticleCacheBytes).NewScope()}, rarFiles)
+}
+
+// probe is Probe over an explicit share: the header articles it fetches land in
+// share.cache and the per-volume indexes it sharpens are kept on the store, so
+// playback starts from what classification already paid for.
+func probe(ctx context.Context, share volumeShare, rarFiles []nzb.File) (*RarStore, error) {
 	if len(rarFiles) == 0 {
 		return nil, notStreamable("no rar volumes")
 	}
 	volumes := sortRarVolumes(rarFiles)
 
-	chunks, err := probeVolumes(ctx, fetcher, volumes)
+	chunks, indexes, err := probeVolumes(ctx, share, volumes)
 	if err != nil {
 		return nil, err
 	}
@@ -113,8 +138,10 @@ func Probe(ctx context.Context, fetcher ArticleFetcher, rarFiles []nzb.File) (*R
 	log.Printf("[usenet-stream] rar-store streamable: %s (%d bytes, %d volume(s))",
 		video[0].name, total, len(volumes))
 	return &RarStore{
-		fetcher:   fetcher,
+		fetcher:   share.fetcher,
 		volumes:   volumes,
+		indexes:   indexes,
+		cache:     share.cache,
 		extents:   extents,
 		videoName: video[0].name,
 		videoSize: total,
@@ -177,15 +204,17 @@ func probeError(f nzb.File, err error) error {
 // preserved by writing each volume's chunks into its own index slot and flattening
 // in order (never an append race), so buildExtents stitches the video by volume
 // index exactly as the sequential version did. First error wins and cancels the
-// rest — a not-streamable / faulty volume still fails fast.
-func probeVolumes(ctx context.Context, fetcher ArticleFetcher, volumes []nzb.File) ([]rarChunk, error) {
-	limit := probeConcurrency(fetcher, len(volumes))
+// rest — a not-streamable / faulty volume still fails fast. Each volume's index is
+// returned alongside, in volume order.
+func probeVolumes(ctx context.Context, share volumeShare, volumes []nzb.File) ([]rarChunk, []*OffsetIndex, error) {
+	limit := probeConcurrency(share.fetcher, len(volumes))
 	budget := probeBudget(volumes)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	perVol := make([][]rarChunk, len(volumes))
+	indexes := make([]*OffsetIndex, len(volumes))
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
 	var errMu sync.Mutex
@@ -216,7 +245,7 @@ func probeVolumes(ctx context.Context, fetcher ArticleFetcher, volumes []nzb.Fil
 		go func(i int, f nzb.File) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			vs, err := newProbeVolume(ctx, fetcher, f, budget)
+			vs, err := newProbeVolume(ctx, volumeOpen{fetcher: share.fetcher, file: f, cache: share.cache, budget: budget})
 			if err != nil {
 				setErr(probeError(f, err))
 				return
@@ -227,13 +256,13 @@ func probeVolumes(ctx context.Context, fetcher ArticleFetcher, volumes []nzb.Fil
 				setErr(probeError(f, perr))
 				return
 			}
-			perVol[i] = chunks
+			perVol[i], indexes[i] = chunks, vs.r.ix
 		}(i, f)
 	}
 	wg.Wait()
 
 	if firstErr != nil {
-		return nil, firstErr
+		return nil, nil, firstErr
 	}
 
 	var all []rarChunk
@@ -242,7 +271,7 @@ func probeVolumes(ctx context.Context, fetcher ArticleFetcher, volumes []nzb.Fil
 	}
 	log.Printf("[usenet-stream] probed %d volume header(s) in %s (concurrency %d)",
 		len(volumes), time.Since(start).Round(time.Millisecond), limit)
-	return all, nil
+	return all, indexes, nil
 }
 
 // selectVideo picks the single streamable video file from the parsed chunks. It
