@@ -73,6 +73,8 @@ type ArticleCache struct {
 	baseBytes, boostCeiling, boosted int64
 	// gate bounds read-ahead fetches across every reader (prefetchGate).
 	gate chan struct{}
+	// refs counts the holders of each part whose buffer is recycled (bufpool.go).
+	refs map[*yenc.Part]int
 
 	// onEmpty, when set, runs (without c.mu) after a released source's articles
 	// were dropped and nothing else is cached.
@@ -115,6 +117,11 @@ type flight struct {
 	part  *yenc.Part
 	err   error
 	retry bool // the error belonged to the fetching reader, not to the article
+
+	// waiters is how many load calls wait for the part, each taking a reference
+	// to it when the flight finishes; finished says it has. Both guarded by c.mu.
+	waiters  int
+	finished bool
 }
 
 // errPrefetchDropped completes the flight of a read-ahead that was never issued
@@ -131,6 +138,7 @@ func NewArticleCache(maxBytes int64) *ArticleCache {
 		entries:   make(map[cacheKey]*list.Element),
 		flights:   make(map[cacheKey]*flight),
 		dead:      make(map[cacheKey]deadMark),
+		refs:      make(map[*yenc.Part]int),
 	}
 }
 
@@ -291,6 +299,7 @@ func returnMemoryToOS() {
 	}
 	go func() {
 		defer returningMemory.Store(false)
+		articleBuffers.drain()
 		debug.FreeOSMemory()
 	}()
 }
@@ -299,9 +308,10 @@ func returnMemoryToOS() {
 // in flight, or by running fetch itself and publishing the result to everyone
 // waiting. A waiter whose leader failed for a reason of its own (cancelled,
 // budget spent, dropped as idle) fetches for itself instead of inheriting it.
+// A returned part is held for the caller, who must releasePart it once done.
 func (s *CacheScope) load(ctx context.Context, id string, fetch func() (*yenc.Part, error)) (*yenc.Part, error) {
 	for {
-		part, fl, leader := s.begin(id)
+		part, fl, leader := s.begin(id, true)
 		if part != nil {
 			return part, nil
 		}
@@ -313,6 +323,7 @@ func (s *CacheScope) load(ctx context.Context, id string, fetch func() (*yenc.Pa
 		select {
 		case <-fl.done:
 		case <-ctx.Done():
+			s.abandon(fl)
 			return nil, ctx.Err()
 		}
 		if fl.err == nil || !fl.retry {
@@ -325,14 +336,15 @@ func (s *CacheScope) load(ctx context.Context, id string, fetch func() (*yenc.Pa
 // already in flight — the read-ahead entry point, which must decide synchronously
 // whether to spawn a goroutine at all. A true return MUST be paired with finish.
 func (s *CacheScope) claim(id string) (*flight, bool) {
-	part, fl, leader := s.begin(id)
+	part, fl, leader := s.begin(id, false)
 	return fl, part == nil && leader
 }
 
 // begin resolves id to a cached part, an existing flight to wait on (possibly an
 // already-settled one carrying a memoised dead-article verdict), or a new flight
-// the caller now leads.
-func (s *CacheScope) begin(id string) (*yenc.Part, *flight, bool) {
+// the caller now leads. With hold, a cached part is retained for the caller and a
+// joined flight counts it as a waiter.
+func (s *CacheScope) begin(id string, hold bool) (*yenc.Part, *flight, bool) {
 	c := s.c
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -346,9 +358,16 @@ func (s *CacheScope) begin(id string) (*yenc.Part, *flight, bool) {
 	}
 	if el, ok := c.entries[key]; ok {
 		c.lru.MoveToFront(el)
-		return el.Value.(*cacheEntry).part, nil, false
+		part := el.Value.(*cacheEntry).part
+		if hold {
+			c.retainLocked(part, 1)
+		}
+		return part, nil, false
 	}
 	if existing, ok := c.flights[key]; ok {
+		if hold {
+			existing.waiters++
+		}
 		return nil, existing, false
 	}
 	c.flights[key] = fl
@@ -371,7 +390,10 @@ func (s *CacheScope) finish(id string, fl *flight, part *yenc.Part, err error) {
 			c.markDeadLocked(key, err, time.Now())
 		}
 	}
-	fl.part, fl.err = part, err
+	if err == nil && part != nil {
+		c.retainLocked(part, fl.waiters)
+	}
+	fl.part, fl.err, fl.finished = part, err, true
 	fl.retry = err != nil && leaderSpecific(err)
 	c.mu.Unlock()
 	close(fl.done)
@@ -398,6 +420,7 @@ func (c *ArticleCache) storeLocked(key cacheKey, part *yenc.Part) {
 		c.removeLocked(el)
 	}
 	c.entries[key] = c.lru.PushFront(&cacheEntry{key: key, part: part, size: size})
+	c.retainLocked(part, 1)
 	c.used += size
 	for c.used > c.maxBytes {
 		c.removeLocked(c.lru.Back())
@@ -408,4 +431,5 @@ func (c *ArticleCache) removeLocked(el *list.Element) {
 	e := c.lru.Remove(el).(*cacheEntry)
 	delete(c.entries, e.key)
 	c.used -= e.size
+	articleBuffers.put(c.releaseLocked(e.part))
 }

@@ -353,6 +353,7 @@ func (r *Reader) prefetchNext() bool {
 	}
 	part, err := r.fetchDecodeRetry(a.id, a.bytes)
 	r.cache.finish(a.id, fl, part, err)
+	r.cache.c.releasePart(part) // the cache and waiters hold their own references
 	if err != nil {
 		log.Printf("[usenet-stream] read-ahead segment %d abandoned: %v", segIdx, err)
 	}

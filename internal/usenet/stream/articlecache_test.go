@@ -36,10 +36,10 @@ func TestArticleCacheStaysWithinByteBound(t *testing.T) {
 	if c.Len() != bound/size {
 		t.Fatalf("cache holds %d articles, want %d", c.Len(), bound/size)
 	}
-	if _, _, leader := s.begin(string(rune('A' + 49))); leader {
+	if _, _, leader := s.begin(string(rune('A'+49)), false); leader {
 		t.Fatal("most recent article was evicted")
 	}
-	if _, fl, leader := s.begin("A"); !leader {
+	if _, fl, leader := s.begin("A", false); !leader {
 		t.Fatal("oldest article survived eviction")
 	} else {
 		s.finish("A", fl, nil, errors.New("test: abandon"))
@@ -147,7 +147,7 @@ func TestArticleCacheConcurrentLoadsFetchOnce(t *testing.T) {
 // of its own (its request went away) must not fail the reader waiting on it.
 func TestArticleCacheWaiterRetriesAfterLeaderCancel(t *testing.T) {
 	s := NewArticleCache(1 << 20).NewScope()
-	_, fl, leader := s.begin("id")
+	_, fl, leader := s.begin("id", false)
 	if !leader {
 		t.Fatal("first begin did not lead")
 	}
@@ -163,7 +163,7 @@ func TestArticleCacheWaiterRetriesAfterLeaderCancel(t *testing.T) {
 	}
 
 	// An article-level failure IS shared: waiters must not re-issue a doomed fetch.
-	_, fl, _ = s.begin("gone")
+	_, fl, _ = s.begin("gone", false)
 	go func() {
 		_, err := s.load(context.Background(), "gone", func() (*yenc.Part, error) { return fixedPart(10), nil })
 		done <- err

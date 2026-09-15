@@ -297,6 +297,8 @@ func (r *Reader) Close() error {
 	r.cancel()
 	r.wg.Wait()
 	r.closeOnce.Do(func() {
+		r.cache.c.releasePart(r.cur)
+		r.cur, r.curID = nil, ""
 		r.releaseBoost()
 		if r.raCounted {
 			r.cache.c.countReadahead(-1)
@@ -428,6 +430,9 @@ func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
 	if r.cur != nil && r.curID == seg.MessageID {
 		return r.cur, nil
 	}
+	if err := r.ctx.Err(); err != nil {
+		return nil, err // closed: a part taken now would never be released
+	}
 	start := time.Now()
 	part, err := r.cache.load(r.ctx, seg.MessageID, func() (*yenc.Part, error) {
 		// Segment.Bytes is the ENCODED size — what will actually cross the wire, and
@@ -436,6 +441,7 @@ func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
 	})
 	r.waited = time.Since(start) > readaheadMissLatency
 	if err == nil {
+		r.cache.c.releasePart(r.cur)
 		r.cur, r.curID = part, seg.MessageID
 	}
 	return part, err

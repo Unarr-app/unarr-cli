@@ -83,7 +83,7 @@ func (c *ArticleCache) purgeDeadLocked(s *CacheScope) {
 // settledFlight is an already-completed flight carrying a memoised failure, so a
 // dead article flows through the same wait path as a live fetch.
 func settledFlight(err error) *flight {
-	fl := &flight{done: make(chan struct{}), err: err}
+	fl := &flight{done: make(chan struct{}), err: err, finished: true}
 	close(fl.done)
 	return fl
 }
