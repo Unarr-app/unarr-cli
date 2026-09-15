@@ -3,6 +3,7 @@ package nntp_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,5 +46,46 @@ func TestCancelledCallerReconnectKeepsPoolSlot(t *testing.T) {
 	}
 	if _, err := c.Body(context.Background(), "a@test"); err != nil {
 		t.Fatalf("Body after cancelled reconnect: %v", err)
+	}
+}
+
+type countingProgress struct {
+	lines, restarts, linesAtRestart int
+	last                            []byte
+}
+
+func (p *countingProgress) Line(body []byte) { p.lines++; p.last = body }
+func (p *countingProgress) Restart()         { p.restarts++; p.linesAtRestart = p.lines }
+
+// A body cut mid-transfer is read again on a new connection into the same
+// buffer: the lines reported before must be declared void first, or whoever
+// used them would see them overwritten.
+func TestBodyProgressRestartsWithTheRetry(t *testing.T) {
+	s := nntptest.NewFakeServer(t)
+	var body []byte
+	for i := 0; i < 400; i++ {
+		body = append(body, "0123456789abcdefghijklmnopqrstuvwxyz0123456789\r\n"...)
+	}
+	s.AddArticle("cut@test", body)
+	c := nntp.NewClient(s.Config())
+	cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.Connect(cctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	s.ResetMidBodyNext(1)
+	p := &countingProgress{}
+	got, err := c.BodyInto(nntp.WithBodyProgress(cctx, p), "cut@test", make([]byte, 0, 64<<10))
+	if err != nil {
+		t.Fatalf("BodyInto: %v", err)
+	}
+	if p.restarts != 1 || p.linesAtRestart == 0 {
+		t.Fatalf("restarts = %d after %d lines, want 1 after some lines of the cut body", p.restarts, p.linesAtRestart)
+	}
+	if lines := strings.Count(string(got), "\n"); p.lines-p.linesAtRestart != lines || string(p.last) != string(got) {
+		t.Fatalf("retry reported %d lines ending in %d bytes, want %d ending in the %d-byte body",
+			p.lines-p.linesAtRestart, len(p.last), lines, len(got))
 	}
 }

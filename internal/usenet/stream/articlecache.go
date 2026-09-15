@@ -124,6 +124,9 @@ type flight struct {
 	// to it when the flight finishes; finished says it has. Both guarded by c.mu.
 	waiters  int
 	finished bool
+
+	// arrival is the article's decoded front while it downloads (arriving.go).
+	arrival arrival
 }
 
 // errPrefetchDropped completes the flight of a read-ahead that was never issued

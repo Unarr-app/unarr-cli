@@ -169,6 +169,9 @@ func (c *Client) BodyInto(ctx context.Context, messageID string, buf []byte) ([]
 		c.release(cn2)
 		return nil, fmt.Errorf("nntp: body cancelled: %w (original: %v)", ctxErr, err)
 	}
+	if p := bodyProgressFrom(ctx); p != nil {
+		p.Restart() // before the retry overwrites the lines already reported
+	}
 	data, err = c.bodyOnConn(ctx, cn2, messageID, buf)
 	c.release(cn2)
 	return data, err
@@ -343,7 +346,7 @@ func (c *Client) bodyExchange(ctx context.Context, cn *conn, messageID string, b
 	cn.raw.SetDeadline(deadline)
 
 	// Read dot-terminated body
-	body, err := readDotBody(cn.tp.R, buf)
+	body, err := readDotBody(cn.tp.R, buf, bodyProgressFrom(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
@@ -355,8 +358,8 @@ func (c *Client) bodyExchange(ctx context.Context, cn *conn, messageID string, b
 // it to buf[:0]. Lines beginning with a dot have the dot removed (dot-stuffing),
 // each line is stored with a bare '\n', and the final ".\r\n" line signals the
 // end. Lines are read in place (ReadSlice), so the body costs no allocation
-// beyond growing buf.
-func readDotBody(r *bufio.Reader, buf []byte) ([]byte, error) {
+// beyond growing buf. progress, when not nil, sees each line as it is added.
+func readDotBody(r *bufio.Reader, buf []byte, progress BodyProgress) ([]byte, error) {
 	out := buf[:0]
 	for {
 		start := len(out)
@@ -376,6 +379,9 @@ func readDotBody(r *bufio.Reader, buf []byte) ([]byte, error) {
 			line = line[1:] // dot-unstuffing
 		}
 		out = append(append(out[:start], line...), '\n')
+		if progress != nil {
+			progress.Line(out)
+		}
 	}
 }
 

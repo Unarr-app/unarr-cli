@@ -106,13 +106,19 @@ type fetchResult struct {
 
 // fetchHedged is fetchDecodeRetry for an article the consumer is waiting on: past
 // hedgeDelay a second fetch races the first, and the first success is served.
-func (r *Reader) fetchHedged(messageID string, estBytes int64) (*yenc.Part, error) {
+// When fetching for fl, the fetches publish to its arrival, and none is raced
+// once no reader waits on fl any more (it was served and moved on).
+func (r *Reader) fetchHedged(messageID string, estBytes int64, fl *flight) (*yenc.Part, error) {
+	var to *arrival
+	if fl != nil {
+		to = &fl.arrival
+	}
 	delay, ok := r.hedgeDelay()
 	if !ok {
-		return r.fetchDecodeRetry(messageID, estBytes)
+		return r.fetchDecodeRetry(messageID, estBytes, to)
 	}
 	results := make(chan fetchResult, 2)
-	r.raceFetch(messageID, estBytes, results)
+	r.raceFetch(messageID, estBytes, to, results)
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
@@ -123,8 +129,12 @@ func (r *Reader) fetchHedged(messageID string, estBytes int64) (*yenc.Part, erro
 		return nil, r.ctx.Err()
 	case <-timer.C:
 	}
+	if fl != nil && !r.cache.waited(fl) {
+		res := <-results
+		return res.part, res.err
+	}
 	log.Printf("[usenet-stream] article %s still fetching after %v, racing a second fetch", messageID, delay)
-	r.raceFetch(messageID, estBytes, results)
+	r.raceFetch(messageID, estBytes, to, results)
 	return r.firstServable(results)
 }
 
@@ -153,11 +163,11 @@ func articleGone(err error) bool {
 }
 
 // raceFetch runs one fetch of the article in the background, delivering to out.
-func (r *Reader) raceFetch(messageID string, estBytes int64, out chan<- fetchResult) {
+func (r *Reader) raceFetch(messageID string, estBytes int64, to *arrival, out chan<- fetchResult) {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		part, err := r.fetchDecodeRetry(messageID, estBytes)
+		part, err := r.fetchDecodeRetry(messageID, estBytes, to)
 		out <- fetchResult{part: part, err: err}
 	}()
 }

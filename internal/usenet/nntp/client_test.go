@@ -108,7 +108,7 @@ func TestReadDotBody(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := bufio.NewReader(bytes.NewBufferString(tt.input))
-			got, err := readDotBody(r, nil)
+			got, err := readDotBody(r, nil, nil)
 			if err != nil {
 				t.Fatalf("readDotBody: %v", err)
 			}
@@ -122,7 +122,7 @@ func TestReadDotBody(t *testing.T) {
 func TestReadDotBodyEOF(t *testing.T) {
 	// No dot terminator — should read until EOF
 	r := bufio.NewReader(bytes.NewBufferString("partial data\r\n"))
-	got, err := readDotBody(r, nil)
+	got, err := readDotBody(r, nil, nil)
 	if err != nil {
 		t.Fatalf("readDotBody EOF: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestReadDotBodyLongLinesIntoBuffer(t *testing.T) {
 
 	buf := make([]byte, 0, 64<<10)
 	r := bufio.NewReaderSize(strings.NewReader(input), 16)
-	got, err := readDotBody(r, buf)
+	got, err := readDotBody(r, buf, nil)
 	if err != nil {
 		t.Fatalf("readDotBody: %v", err)
 	}
@@ -153,7 +153,42 @@ func TestReadDotBodyLongLinesIntoBuffer(t *testing.T) {
 	}
 
 	partial := bufio.NewReaderSize(strings.NewReader("whole\r\n"+long), 16)
-	if got, err := readDotBody(partial, nil); err != nil || string(got) != "whole\n" {
+	if got, err := readDotBody(partial, nil, nil); err != nil || string(got) != "whole\n" {
 		t.Fatalf("partial last line: %q, %v; want the complete lines only", got, err)
+	}
+}
+
+// progressRecorder checks each reported body and rewrites it, as an in-place
+// decoder does, to prove the reader never looks at reported lines again.
+type progressRecorder struct {
+	t        *testing.T
+	want     string
+	lines    int
+	restarts int
+}
+
+func (p *progressRecorder) Line(body []byte) {
+	if len(body) == 0 || body[len(body)-1] != '\n' || !strings.HasPrefix(p.want, string(bytes.ToUpper(body[:len(body)-1]))+"\n") {
+		p.t.Fatalf("reported body %q is not a whole-line prefix of %q", body, p.want)
+	}
+	p.lines++
+	copy(body, bytes.ToUpper(body))
+}
+
+func (p *progressRecorder) Restart() { p.restarts++ }
+
+// Every line is reported with the body so far, and rewriting reported bytes does
+// not disturb the lines still to come, dot-unstuffing included.
+func TestReadDotBodyReportsEachLine(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	input := "line one\r\n..dotted\r\n" + long + "\r\n\r\nlast\r\n.\r\n"
+	p := &progressRecorder{t: t, want: strings.ToUpper("line one\n.dotted\n" + long + "\n\nlast\n")}
+	r := bufio.NewReaderSize(strings.NewReader(input), 16)
+	got, err := readDotBody(r, make([]byte, 0, 8), p)
+	if err != nil {
+		t.Fatalf("readDotBody: %v", err)
+	}
+	if string(got) != p.want || p.lines != 5 {
+		t.Fatalf("body %q after %d lines, want %q after 5", got, p.lines, p.want)
 	}
 }

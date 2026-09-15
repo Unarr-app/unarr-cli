@@ -71,7 +71,8 @@ func asUnavailable(messageID string, err error) *ArticleUnavailableError {
 // the retries were what turned one dead article into seconds and a dozen BODY
 // commands per request. Every failure is logged; the final error is wrapped so
 // the caller can degrade cleanly rather than hang.
-func (r *Reader) fetchDecodeRetry(messageID string, estBytes int64) (*yenc.Part, error) {
+// Each attempt publishes its decoded front to `to`, when set (arriving.go).
+func (r *Reader) fetchDecodeRetry(messageID string, estBytes int64, to *arrival) (*yenc.Part, error) {
 	var lastErr error
 	for attempt := 0; attempt < r.maxAttempts; attempt++ {
 		if attempt > 0 {
@@ -90,18 +91,20 @@ func (r *Reader) fetchDecodeRetry(messageID string, estBytes int64) (*yenc.Part,
 			return nil, ErrFetchBudgetExhausted
 		}
 		start := time.Now()
-		raw, pooled, owned, err := r.fetchBody(messageID, estBytes)
+		raw, pooled, feed, err := r.fetchBody(messageID, estBytes, to)
 		// Reconcile against what came off the wire, whether or not it decodes — a
 		// corrupt body was still transferred and still billed. A failed Body
 		// transferred nothing we can account for and refunds the reservation.
 		r.budget.settle(estBytes, int64(len(raw)))
 		if err == nil {
 			var part *yenc.Part
-			if part, err = r.keepDecoded(raw, pooled, owned); err == nil {
+			if part, err = r.keepDecoded(raw, pooled, feed.decoder()); err == nil {
 				r.cache.c.latency.note(time.Since(start))
 				return part, nil
 			}
-		} else if u := asUnavailable(messageID, err); u != nil {
+		}
+		feed.fail() // whatever was served from this attempt was never verified
+		if u := asUnavailable(messageID, err); u != nil {
 			log.Printf("[usenet-stream] %v - not retrying", u)
 			return nil, u
 		}
@@ -125,31 +128,35 @@ const maxBodyBuffer = 16 << 20
 
 // fetchBody issues one BODY. A fetcher that supports it reads into a pooled
 // buffer sized from the segment's encoded size, which is then this reader's own
-// (owned) to decode in place and keep as the decoded part; pooled is that buffer
-// when raw still lives in it, for the caller to track or put back. Any other
-// fetcher's result may be shared, so it is decoded into a copy.
-func (r *Reader) fetchBody(messageID string, estBytes int64) (raw, pooled []byte, owned bool, err error) {
+// to decode in place and keep as the decoded part: each line is decoded as it
+// arrives, the front published to `to`, and feed's decoder finishes the rest.
+// pooled is that buffer when raw still lives in it, for the caller to track or
+// put back. Any other fetcher's result may be shared, so it is decoded into a
+// copy (feed nil).
+func (r *Reader) fetchBody(messageID string, estBytes int64, to *arrival) (raw, pooled []byte, feed *bodyFeed, err error) {
 	ctx := nntp.WithStallTimeout(r.ctx, r.stallTimeout)
 	if f, ok := r.fetcher.(bufferedFetcher); ok {
 		buf := articleBuffers.get(int(max(0, min(estBytes, maxBodyBuffer))))
-		raw, err = f.BodyInto(ctx, messageID, buf)
+		feed = newBodyFeed(to)
+		raw, err = f.BodyInto(nntp.WithBodyProgress(ctx, feed), messageID, buf)
+		feed.stop() // before buf can go back to the pool
 		if err != nil || !sameBacking(raw, buf) {
 			// Failed, or the body outgrew buf into a heap array: buf holds nothing.
 			// A failed raw is only measured, never decoded.
 			articleBuffers.put(buf)
-			return raw, nil, true, err
+			return raw, nil, feed, err
 		}
-		return raw, buf, true, nil
+		return raw, buf, feed, nil
 	}
 	raw, err = r.fetcher.Body(ctx, messageID)
-	return raw, nil, false, err
+	return raw, nil, nil, err
 }
 
 // keepDecoded decodes a fetched body and settles its pooled buffer: tracked when
 // the part lives in it, back to the pool when decoding failed or the part kept a
 // trimmed copy.
-func (r *Reader) keepDecoded(raw, pooled []byte, owned bool) (*yenc.Part, error) {
-	part, err := decodeArticle(raw, owned)
+func (r *Reader) keepDecoded(raw, pooled []byte, dec *yenc.InPlaceDecoder) (*yenc.Part, error) {
+	part, err := decodeArticle(raw, dec)
 	if err == nil && sameBacking(part.Data, pooled) {
 		r.cache.c.trackPart(part)
 		return part, nil
@@ -161,14 +168,15 @@ func (r *Reader) keepDecoded(raw, pooled []byte, owned bool) (*yenc.Part, error)
 	return part, nil
 }
 
-// decodeArticle decodes a fetched body, in place when the buffer is the reader's
-// own. The part keeps the buffer, so the cache accounts cap(Data), which is what
+// decodeArticle decodes a fetched body, in place with dec (which may have decoded
+// its front already) when the buffer is the reader's own, into a copy when dec is
+// nil. The part keeps the buffer, so the cache accounts cap(Data), which is what
 // stays alive.
-func decodeArticle(raw []byte, owned bool) (*yenc.Part, error) {
-	if !owned {
+func decodeArticle(raw []byte, dec *yenc.InPlaceDecoder) (*yenc.Part, error) {
+	if dec == nil {
 		return yenc.DecodeBytes(raw)
 	}
-	part, err := yenc.DecodeInPlace(raw)
+	part, err := dec.Finish(raw)
 	if err == nil && cap(part.Data) > len(part.Data)+len(part.Data)/4 {
 		// The buffer was sized from an NZB that overstated the article. Keeping it
 		// would charge the cache for bytes the part does not use — enough, on a

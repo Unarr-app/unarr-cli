@@ -49,6 +49,7 @@ type FakeServer struct {
 	delayNext int
 	delayFor  time.Duration
 	resetNext int
+	held      map[string]chan struct{} // HoldBody: message-id -> release
 
 	// connection cap (inject.go): 0 = unlimited
 	maxLive int
@@ -296,6 +297,11 @@ func (s *FakeServer) handleBody(w *bufio.Writer, st *connState, line string) boo
 	inj := s.takeInjectionLocked(id)
 	body, ok := s.articles[id]
 	generate := s.generate
+	var hold chan struct{}
+	if inj.kind != injReset { // a cut body is read again: the hold waits for that read
+		hold = s.held[id]
+		delete(s.held, id)
+	}
 	s.mu.Unlock()
 	if !ok && generate != nil {
 		body, ok = generate(id)
@@ -314,6 +320,9 @@ func (s *FakeServer) handleBody(w *bufio.Writer, st *connState, line string) boo
 	fmt.Fprintf(w, "222 0 <%s> body follows\r\n", id)
 	if inj.kind == injReset {
 		return s.resetMidBody(w, st, body)
+	}
+	if hold != nil {
+		return s.holdMidBody(w, body, hold)
 	}
 	writeDotBody(w, body)
 	return true
@@ -339,7 +348,14 @@ func trimAngle(id string) string {
 // CRLF-terminated, lines starting with '.' are dot-stuffed, and a final ".\r\n"
 // marks the end — the exact framing nntp.Client.readDotBody expects.
 func writeDotBody(w *bufio.Writer, body []byte) {
-	for _, raw := range strings.Split(string(body), "\n") {
+	writeDotLines(w, strings.Split(string(body), "\n"))
+	w.WriteString(".\r\n")
+}
+
+// writeDotLines transmits body lines with writeDotBody's framing, without the
+// terminator.
+func writeDotLines(w *bufio.Writer, lines []string) {
+	for _, raw := range lines {
 		l := strings.TrimRight(raw, "\r")
 		if strings.HasPrefix(l, ".") {
 			w.WriteByte('.')
@@ -347,5 +363,4 @@ func writeDotBody(w *bufio.Writer, body []byte) {
 		w.WriteString(l)
 		w.WriteString("\r\n")
 	}
-	w.WriteString(".\r\n")
 }

@@ -8,9 +8,8 @@ import (
 	"testing"
 )
 
-// DecodeInPlace must agree with Decode on every input: same part, same data, and
-// an error exactly when Decode errors.
-func TestDecodeInPlaceMatchesDecode(t *testing.T) {
+// decodeCases are the bodies the in-place decoders are held to Decode's behaviour on.
+func decodeCases() map[string][]byte {
 	rng := rand.New(rand.NewPCG(1, 2))
 	payload := func(n int) []byte {
 		b := make([]byte, n)
@@ -24,7 +23,7 @@ func TestDecodeInPlaceMatchesDecode(t *testing.T) {
 	corrupt := bytes.Clone(multi)
 	corrupt[len(corrupt)/2] ^= 0x55
 
-	cases := map[string][]byte{
+	return map[string][]byte{
 		"multipart":                multi,
 		"single part":              single,
 		"LF line endings":          []byte(strings.ReplaceAll(string(multi), "\r\n", "\n")),
@@ -39,24 +38,69 @@ func TestDecodeInPlaceMatchesDecode(t *testing.T) {
 		"lone CR line":             []byte("=ybegin line=128 size=3 name=x\r\n=ypart begin=1 end=2\r\n\r\n\x8b\x8c\r"),
 		"ybegin without name/size": []byte("=ybegin part=1\r\nabc\r\n"),
 	}
-	for name, in := range cases {
+}
+
+// DecodeInPlace must agree with Decode on every input: same part, same data, and
+// an error exactly when Decode errors.
+func TestDecodeInPlaceMatchesDecode(t *testing.T) {
+	for name, in := range decodeCases() {
 		t.Run(name, func(t *testing.T) {
 			want, wantErr := Decode(bytes.NewReader(in))
 			got, gotErr := DecodeInPlace(bytes.Clone(in))
-			if (wantErr == nil) != (gotErr == nil) {
-				t.Fatalf("error mismatch: Decode %v, DecodeInPlace %v", wantErr, gotErr)
-			}
-			if wantErr != nil {
-				return
-			}
-			if !bytes.Equal(got.Data, want.Data) {
-				t.Fatalf("data mismatch: %d vs %d bytes", len(got.Data), len(want.Data))
-			}
-			got.Data, want.Data = nil, nil
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("part = %+v, want %+v", *got, *want)
-			}
+			samePart(t, got, gotErr, want, wantErr)
 		})
+	}
+}
+
+// Fed as a body arrives, in pieces cut anywhere (mid-line, between '\r' and
+// '\n'), the decoder must return what Decode returns, and every byte it reports
+// decoded along the way must already be the final one: a reader may have served it.
+func TestInPlaceDecoderFedInPieces(t *testing.T) {
+	rng := rand.New(rand.NewPCG(3, 4))
+	for name, in := range decodeCases() {
+		t.Run(name, func(t *testing.T) {
+			want, wantErr := Decode(bytes.NewReader(in))
+			buf := bytes.Clone(in)
+			var d InPlaceDecoder
+			reported := false
+			for cut := 0; cut < len(buf); cut += 1 + rng.IntN(300) {
+				d.Feed(buf[:cut])
+				start, _, n, ok := d.Progress()
+				if !ok || wantErr != nil {
+					continue
+				}
+				reported = reported || n > 0
+				if start != want.Begin-1 {
+					t.Fatalf("Progress start = %d, want %d", start, want.Begin-1)
+				}
+				if n > len(want.Data) || !bytes.Equal(buf[:n], want.Data[:n]) {
+					t.Fatalf("after %d of %d body bytes the %d bytes reported decoded are not the article's", cut, len(buf), n)
+				}
+			}
+			if name == "multipart" && !reported {
+				t.Fatal("no decoded bytes were reported before the body was complete")
+			}
+			got, gotErr := d.Finish(buf)
+			samePart(t, got, gotErr, want, wantErr)
+		})
+	}
+}
+
+func samePart(t *testing.T, got *Part, gotErr error, want *Part, wantErr error) {
+	t.Helper()
+	if (wantErr == nil) != (gotErr == nil) {
+		t.Fatalf("error mismatch: Decode %v, in place %v", wantErr, gotErr)
+	}
+	if wantErr != nil {
+		return
+	}
+	if !bytes.Equal(got.Data, want.Data) {
+		t.Fatalf("data mismatch: %d vs %d bytes", len(got.Data), len(want.Data))
+	}
+	g, w := *got, *want
+	g.Data, w.Data = nil, nil
+	if !reflect.DeepEqual(g, w) {
+		t.Fatalf("part = %+v, want %+v", g, w)
 	}
 }
 

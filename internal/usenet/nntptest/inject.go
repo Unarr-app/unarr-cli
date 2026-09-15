@@ -2,7 +2,10 @@ package nntptest
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,6 +54,38 @@ func (s *FakeServer) ResetMidBodyNext(n int) {
 	s.mu.Lock()
 	s.resetNext = n
 	s.mu.Unlock()
+}
+
+// HoldBody makes the next BODY for messageID send the first half of the
+// article's lines and wait for release before sending the rest: a body the client
+// has partly received. release may be called more than once.
+func (s *FakeServer) HoldBody(messageID string) (release func()) {
+	ch := make(chan struct{})
+	s.mu.Lock()
+	if s.held == nil {
+		s.held = make(map[string]chan struct{})
+	}
+	s.held[trimAngle(messageID)] = ch
+	s.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(ch) }) }
+}
+
+// holdMidBody sends the first half of body's lines, waits for release, then the rest.
+func (s *FakeServer) holdMidBody(w *bufio.Writer, body []byte, release <-chan struct{}) bool {
+	lines := strings.Split(string(body), "\n")
+	writeDotLines(w, lines[:len(lines)/2])
+	if w.Flush() != nil {
+		return false
+	}
+	select {
+	case <-release:
+	case <-s.quit:
+		return false
+	}
+	writeDotLines(w, lines[len(lines)/2:])
+	w.WriteString(".\r\n")
+	return true
 }
 
 // LimitConnections makes the server greet a new connection with "502 too many
@@ -128,10 +163,15 @@ func (s *FakeServer) applyInjection(w *bufio.Writer, inj injection) (proceed, ke
 	return true, true
 }
 
-// resetMidBody sends half of the article after the status line, gives the client
-// time to consume the status line, and has the connection closed with a reset.
+// resetMidBody sends the first half of the dot-stuffed article after the status
+// line, gives the client time to consume it, and has the connection closed with a
+// reset.
 func (s *FakeServer) resetMidBody(w *bufio.Writer, st *connState, body []byte) bool {
-	w.Write(body[:len(body)/2])
+	var framed bytes.Buffer
+	fw := bufio.NewWriter(&framed)
+	writeDotLines(fw, strings.Split(string(body), "\n"))
+	fw.Flush()
+	w.Write(framed.Bytes()[:framed.Len()/2])
 	w.Flush()
 	time.Sleep(50 * time.Millisecond)
 	st.reset = true

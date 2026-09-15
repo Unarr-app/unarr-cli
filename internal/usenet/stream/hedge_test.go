@@ -145,6 +145,22 @@ func TestHedgeReturnsAMissingArticleAtOnce(t *testing.T) {
 	}
 }
 
+// TestNoHedgeForAnArticleNobodyWaitsOn: a fetch left running in the background
+// after its reader was served and moved on is not raced by a second one.
+func TestNoHedgeForAnArticleNobodyWaitsOn(t *testing.T) {
+	r, f, _, _ := hedgeReader(t, 600*time.Millisecond)
+	seg := r.ix.Segment(30)
+	part, err := r.fetchHedged(seg.MessageID, seg.Bytes, &flight{done: make(chan struct{})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.cache.c.releasePart(part)
+	r.wg.Wait()
+	if n := f.started(seg.MessageID); n != 1 {
+		t.Fatalf("%d fetches, want 1 (no hedge)", n)
+	}
+}
+
 // TestNoHedgeWithoutHistorySmallPoolOrBudget: a reader hedges only with enough
 // recent fetches to judge by, a pool that can run both fetches at once, and a
 // player waiting (no fetch budget).

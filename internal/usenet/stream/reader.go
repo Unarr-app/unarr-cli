@@ -128,6 +128,13 @@ type Reader struct {
 	// only by Read/Seek, never by read-ahead goroutines.
 	cur   *yenc.Part
 	curID string
+	// arriving is the flight of the article the read position is in while it
+	// downloads, which the reader waits on (arriving.go); arrivalWaited says the
+	// reader had to wait for bytes of it, arrivalServed that it was served some.
+	arriving      *flight
+	arrivingID    string
+	arrivalWaited bool
+	arrivalServed bool
 
 	mu        sync.Mutex     // guards lastRead
 	wg        sync.WaitGroup // tracks read-ahead goroutines (drained by Close)
@@ -240,6 +247,15 @@ func (r *Reader) Read(p []byte) (int, error) {
 	}
 	resumed := r.readerIdle()
 	r.readaheadOnArrival(r.pos)
+	n, ok, err := r.readArriving(p)
+	if resumed {
+		r.arrivalWaited = false // waiting after a pause is not outrunning the read-ahead
+	}
+	if ok || err != nil {
+		r.pos += int64(n)
+		r.noteRead()
+		return n, err
+	}
 	part, segIdx, err := r.articleForOffset(r.pos)
 	if err != nil {
 		return 0, err
@@ -253,13 +269,18 @@ func (r *Reader) Read(p []byte) (int, error) {
 		return 0, fmt.Errorf("usenet reader: offset %d outside decoded article [%d,%d)",
 			r.pos, dataStart, dataStart+int64(len(part.Data)))
 	}
-	n := copy(p, part.Data[off:])
+	n = copy(p, part.Data[off:])
 	r.pos += int64(n)
+	r.noteRead()
+	r.triggerReadahead(segIdx, len(part.Data))
+	return n, nil
+}
+
+// noteRead records that the consumer read just now (see readerIdle).
+func (r *Reader) noteRead() {
 	r.mu.Lock()
 	r.lastRead = time.Now()
 	r.mu.Unlock()
-	r.triggerReadahead(segIdx, len(part.Data))
-	return n, nil
 }
 
 // Seek moves the logical position. SeekEnd needs the exact size, so it fetches a
@@ -298,6 +319,7 @@ func (r *Reader) Close() error {
 	r.cancel()
 	r.wg.Wait()
 	r.closeOnce.Do(func() {
+		r.dropArriving()
 		r.cache.c.releasePart(r.cur)
 		r.cur, r.curID = nil, ""
 		r.releaseBoost()
@@ -438,7 +460,7 @@ func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
 	part, err := r.cache.load(r.ctx, seg.MessageID, func() (*yenc.Part, error) {
 		// Segment.Bytes is the ENCODED size — what will actually cross the wire, and
 		// what the budget must be asked for before the fetch starts.
-		return r.fetchHedged(seg.MessageID, seg.Bytes)
+		return r.fetchHedged(seg.MessageID, seg.Bytes, nil)
 	})
 	r.waited = time.Since(start) > readaheadMissLatency
 	if err == nil {

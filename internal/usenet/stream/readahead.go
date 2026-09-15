@@ -118,7 +118,7 @@ func (r *Reader) readaheadOnArrival(pos int64) {
 // article, and not while the map around pos is still an estimate — it can be
 // several articles off, and they would be billed for nothing.
 func (r *Reader) arrivedAt(pos int64) (int, bool) {
-	if r.readaheadK <= 0 || (r.cur != nil && pos >= r.cur.Begin-1 && pos < r.cur.Begin-1+int64(len(r.cur.Data))) {
+	if r.readaheadK <= 0 || r.holds(pos) {
 		return 0, false
 	}
 	if r.smallPool() {
@@ -408,7 +408,7 @@ func (r *Reader) prefetchNext() bool {
 	if !claimed {
 		return true
 	}
-	part, err := r.fetchDecodeRetry(a.id, a.bytes)
+	part, err := r.fetchDecodeRetry(a.id, a.bytes, &fl.arrival)
 	r.cache.finish(a.id, fl, part, err)
 	r.cache.c.releasePart(part) // the cache and waiters hold their own references
 	if err != nil {

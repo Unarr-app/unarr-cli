@@ -542,7 +542,7 @@ func TestBudgetReservesBeforeTheWire(t *testing.T) {
 		go func(seg int) {
 			defer wg.Done()
 			s := ix.Segment(seg)
-			if _, err := r.fetchDecodeRetry(s.MessageID, s.Bytes); err != nil {
+			if _, err := r.fetchDecodeRetry(s.MessageID, s.Bytes, nil); err != nil {
 				refused.Add(1)
 			}
 		}(i)

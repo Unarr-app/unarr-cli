@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/usenet/nntptest"
+	"github.com/Unarr-app/unarr-cli/internal/usenet/yenc"
 )
 
 // TestReaderKeepsCurrentArticleWithoutCache: the many small Reads over one article
@@ -48,7 +49,7 @@ func TestDecodeArticleTrimsOversizedBuffer(t *testing.T) {
 	_, articles := nntptest.BuildDirectFile("movie.mkv", content, partSize)
 	for _, body := range articles {
 		raw := append(make([]byte, 0, 8*len(body)), body...)
-		part, err := decodeArticle(raw, true)
+		part, err := decodeArticle(raw, &yenc.InPlaceDecoder{})
 		if err != nil {
 			t.Fatalf("decodeArticle: %v", err)
 		}
