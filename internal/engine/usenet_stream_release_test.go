@@ -71,6 +71,7 @@ func TestGetOrCreateNNTPReplacesDeadPool(t *testing.T) {
 	u := NewUsenetDownloader(agent.NewClient(apiURL, "", "test"))
 	dead := nntp.NewClient(nntp.Config{Host: host, Port: port}) // never connected: 0 live connections
 	u.nntpClient = dead
+	u.nntpCreds = stale
 	u.credentials = &stale
 	u.credExpiry = time.Now().Add(time.Hour)
 
@@ -125,11 +126,11 @@ func credentialsAPI(t *testing.T, creds *agent.UsenetCredentials) string {
 	return api.URL
 }
 
-// TestGetOrCreateNNTPReplacesPoolEmptiedByMidBodyResets: connections reset
-// mid-article must each leave the open count, so a pool whose every connection
-// died reads as dead (ActiveConnections 0) and the downloader replaces it —
-// instead of keeping a pool whose Body calls block in acquire forever.
-func TestGetOrCreateNNTPReplacesPoolEmptiedByMidBodyResets(t *testing.T) {
+// TestGetOrCreateNNTPKeepsPoolEmptiedByMidBodyResets: connections reset
+// mid-article must each leave the open count (ActiveConnections 0), but with
+// unchanged credentials the downloader keeps the client — live streams and
+// downloads hold it — and the pool re-dials on its next Body.
+func TestGetOrCreateNNTPKeepsPoolEmptiedByMidBodyResets(t *testing.T) {
 	fake := nntptest.NewFakeServer(t)
 	n, articles := nntptest.BuildDirectFile("reset.mkv", usenetTestData(20_000), 20_000)
 	fake.AddArticles(articles)
@@ -159,8 +160,11 @@ func TestGetOrCreateNNTPReplacesPoolEmptiedByMidBodyResets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getOrCreateNNTP on a dead pool: %v", err)
 	}
-	t.Cleanup(func() { _ = next.Close() })
-	if next == client {
-		t.Fatal("dead pool kept instead of replaced")
+	if next != client {
+		_ = next.Close()
+		t.Fatal("client held by live streams was replaced although credentials did not change")
+	}
+	if _, err := client.Body(ctx, id); err != nil {
+		t.Fatalf("Body after the resets: %v (the pool should re-dial)", err)
 	}
 }

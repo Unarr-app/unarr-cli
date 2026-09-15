@@ -33,6 +33,7 @@ type UsenetDownloader struct {
 
 	mu         sync.Mutex
 	nntpClient *nntp.Client
+	nntpCreds  agent.UsenetCredentials // what nntpClient was built with
 	active     map[string]*activeDownload
 
 	// Cached credentials
@@ -572,22 +573,21 @@ func (u *UsenetDownloader) getOrCreateNNTP(ctx context.Context, creds *agent.Use
 		if u.nntpClient.ActiveConnections() > 0 {
 			return u.nntpClient, nil
 		}
-		// Every pooled connection died and could not be re-dialled (a rotated
-		// certificate, a changed password, a provider outage). The cached client
-		// would park every Body in acquire() forever, so a long-running daemon
-		// could never recover without a restart: drop it and connect afresh with
-		// credentials refetched NOW — the caller's creds came from the same cache
-		// that built the dead pool, so dialling with them would replay a rotated
-		// password / TLS name on the first attempt.
-		log.Printf("[usenet] NNTP pool has no live connections - reconnecting with fresh credentials")
+		// Every pooled connection died. The pool re-dials on its next Body by
+		// itself, so after a network blip the cached client recovers — and it must
+		// be kept: live stream plans and batch downloads hold this same pointer,
+		// and closing it would fail all of them for good. Only credentials that
+		// changed server-side (a rotated password, host or TLS name) can never
+		// work again, so refetch them NOW (the caller's creds came from the cache
+		// that built this pool) and rebuild only when they differ.
+		fresh, err := u.fetchCredentialsLocked(ctx)
+		if err != nil || *fresh == u.nntpCreds {
+			return u.nntpClient, nil
+		}
+		log.Printf("[usenet] NNTP pool has no live connections and credentials changed - reconnecting")
 		u.nntpClient.Close()
 		u.nntpClient = nil
-		u.credentials = nil
-		if fresh, err := u.fetchCredentialsLocked(ctx); err == nil {
-			creds = fresh
-		} else {
-			log.Printf("[usenet] credential refetch failed, reconnecting with cached ones: %v", err)
-		}
+		creds = fresh
 	}
 
 	maxConns := creds.MaxConnections
@@ -614,6 +614,7 @@ func (u *UsenetDownloader) getOrCreateNNTP(ctx context.Context, creds *agent.Use
 	}
 
 	u.nntpClient = client
+	u.nntpCreds = *creds
 	return client, nil
 }
 
