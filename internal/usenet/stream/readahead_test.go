@@ -1,10 +1,80 @@
 package stream
 
 import (
+	"context"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// peakCounter records the most fetches ever running at once.
+type peakCounter struct{ cur, peak atomic.Int32 }
+
+// peakFetcher is a pooled fetcher whose Body calls are slow enough to overlap
+// and are counted in a counter shared between fetchers.
+type peakFetcher struct {
+	ArticleFetcher
+	pool int
+	c    *peakCounter
+}
+
+func (p peakFetcher) MaxConcurrency() int { return p.pool }
+
+func (p peakFetcher) Body(ctx context.Context, id string) ([]byte, error) {
+	n := p.c.cur.Add(1)
+	defer p.c.cur.Add(-1)
+	for old := p.c.peak.Load(); n > old && !p.c.peak.CompareAndSwap(old, n); old = p.c.peak.Load() {
+	}
+	time.Sleep(15 * time.Millisecond)
+	return p.ArticleFetcher.Body(ctx, id)
+}
+
+// TestPrefetchGateFollowsPoolSize: a cache that outlives its connection pool
+// resizes the gate for the new pool instead of keeping the first size.
+func TestPrefetchGateFollowsPoolSize(t *testing.T) {
+	c := NewArticleCache(16 << 20)
+	if got := cap(c.prefetchGate(8)); got != 8 {
+		t.Fatalf("gate for 8 slots has %d", got)
+	}
+	g := c.prefetchGate(8)
+	if c.prefetchGate(8) != g {
+		t.Fatal("same size: gate replaced")
+	}
+	if got := cap(c.prefetchGate(3)); got != 3 {
+		t.Fatalf("after the pool shrank the gate has %d slots, want 3", got)
+	}
+	if got := cap(c.prefetchGate(0)); got != 1 {
+		t.Fatalf("zero slots: gate has %d, want at least 1", got)
+	}
+}
+
+// TestReadaheadGateBoundsFetchesAcrossReaders: read-ahead of every reader of a
+// cache shares one set of slots, so connections stay free for articles a
+// consumer is waiting on however many readers are reading ahead.
+func TestReadaheadGateBoundsFetchesAcrossReaders(t *testing.T) {
+	defer func(slots int) { ReadaheadMaxSlots = slots }(ReadaheadMaxSlots)
+	ReadaheadMaxSlots = 2
+	counter := &peakCounter{}
+	cache := NewArticleCache(16 << 20)
+	var readers []*Reader
+	for i := 0; i < 2; i++ {
+		rd, _, _ := newCountingReader(t, 50, 1024)
+		rd.fetcher = peakFetcher{ArticleFetcher: rd.fetcher, pool: 10, c: counter}
+		rd.cache.unretain()
+		rd.cache = cache.NewScope()
+		rd.cache.retain()
+		readers = append(readers, rd)
+	}
+	readers[0].triggerReadahead(0, 1024)
+	readers[1].triggerReadahead(20, 1024)
+	for _, rd := range readers {
+		rd.wg.Wait()
+	}
+	if got := counter.peak.Load(); got != 2 {
+		t.Fatalf("at most %d read-ahead fetches ran at once, want exactly the gate's 2", got)
+	}
+}
 
 // poolHint gives a fetcher a pool size, like *nntp.Client.
 type poolHint struct {

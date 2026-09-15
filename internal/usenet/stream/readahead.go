@@ -131,14 +131,23 @@ func (r *Reader) rampCeiling() int {
 	return r.readaheadK
 }
 
-// prefetchWorkers is how many read-ahead fetches may run at once: every pooled
-// connection but one, which stays free for the consumer's own article after a
-// seek.
-func (r *Reader) prefetchWorkers() int {
+// prefetchWorkers is how many read-ahead goroutines one reader may run: as many
+// as the shared gate can ever let fetch.
+func (r *Reader) prefetchWorkers() int { return r.readaheadSlots() }
+
+// readaheadSlots is how many read-ahead fetches may run at once across every
+// reader of the cache: the pool less ReadaheadReserveConns, which stay free for
+// the article a consumer is actually waiting on (a seek, a new request), capped
+// by ReadaheadMaxSlots when set.
+func (r *Reader) readaheadSlots() int {
+	n := max(1, r.readaheadK)
 	if h, ok := r.fetcher.(concurrencyHinter); ok {
-		return max(1, h.MaxConcurrency()-1)
+		n = max(1, h.MaxConcurrency()-ReadaheadReserveConns)
 	}
-	return max(1, r.readaheadK)
+	if ReadaheadMaxSlots > 0 {
+		n = min(n, ReadaheadMaxSlots)
+	}
+	return n
 }
 
 // readaheadWindow returns how many articles may be prefetched: the article
@@ -302,32 +311,59 @@ func (q *prefetchQueue) next() (int, pendingArticle, bool) {
 // waits on an article that is merely queued.
 func (r *Reader) prefetchWorker() {
 	defer r.wg.Done()
+	gate := r.cache.c.prefetchGate(r.readaheadSlots())
 	for {
-		segIdx, a, ok := r.pq.next()
-		if !ok {
+		// The gate is taken before a segment is, so a worker parked on it holds no
+		// article that a seek might have made stale.
+		select {
+		case gate <- struct{}{}:
+		case <-r.ctx.Done():
+			r.pq.retire()
 			return
 		}
-		if r.ctx.Err() != nil {
-			continue
-		}
-		// A reader that went quiet (player paused, closed, or the HTTP connection
-		// cut) must stop pulling articles nobody will read: we are BILLED for them.
-		if r.readerIdle() {
-			r.pq.mu.Lock()
-			r.pq.dropped = true
-			r.pq.mu.Unlock()
-			continue
-		}
-		fl, claimed := r.cache.claim(a.id)
-		if !claimed {
-			continue
-		}
-		part, err := r.fetchDecodeRetry(a.id, a.bytes)
-		r.cache.finish(a.id, fl, part, err)
-		if err != nil {
-			log.Printf("[usenet-stream] read-ahead segment %d abandoned: %v", segIdx, err)
+		more := r.prefetchNext()
+		<-gate
+		if !more {
+			return
 		}
 	}
+}
+
+// prefetchNext fetches the next queued segment, if it is still worth it. It
+// returns false once the queue is empty and the worker has retired.
+func (r *Reader) prefetchNext() bool {
+	segIdx, a, ok := r.pq.next()
+	if !ok {
+		return false
+	}
+	if r.ctx.Err() != nil {
+		return true
+	}
+	// A reader that went quiet (player paused, closed, or the HTTP connection
+	// cut) must stop pulling articles nobody will read: we are BILLED for them.
+	if r.readerIdle() {
+		r.pq.mu.Lock()
+		r.pq.dropped = true
+		r.pq.mu.Unlock()
+		return true
+	}
+	fl, claimed := r.cache.claim(a.id)
+	if !claimed {
+		return true
+	}
+	part, err := r.fetchDecodeRetry(a.id, a.bytes)
+	r.cache.finish(a.id, fl, part, err)
+	if err != nil {
+		log.Printf("[usenet-stream] read-ahead segment %d abandoned: %v", segIdx, err)
+	}
+	return true
+}
+
+// retire counts a worker out without touching the queue (its reader closed).
+func (q *prefetchQueue) retire() {
+	q.mu.Lock()
+	q.workers--
+	q.mu.Unlock()
 }
 
 // readerIdle reports whether the consumer has stopped reading for longer than the

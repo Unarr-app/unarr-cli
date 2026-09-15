@@ -67,6 +67,18 @@ var (
 	// so a posting with tiny articles cannot queue hundreds of them. It stays above
 	// twice a 16-connection pool, the widest window worth keeping busy.
 	ReadaheadMaxArticles = 32
+	// ReadaheadReserveConns is how many pooled connections read-ahead, summed over
+	// every reader, leaves free for articles a consumer is waiting on right now. It
+	// is not a reservation: batch downloads and consumers' own fetches share the
+	// same pool.
+	ReadaheadReserveConns = 1
+	// ReadaheadMaxSlots caps read-ahead fetches running at once across every
+	// reader (0: the pool less ReadaheadReserveConns). Past about eight parallel
+	// articles a stream gets no faster, while every extra fetch in flight competes
+	// with the article a seek is waiting for and holds another decoded article in
+	// memory: on a 20-connection pool, 8 slots matched the full pool's throughput
+	// with seeks ~30% faster and ~85 MiB less resident memory.
+	ReadaheadMaxSlots = 8
 	// ReadaheadIdleWindow is how long after the last Read a queued prefetch stays
 	// worth issuing. A prefetch goroutine parked on the NNTP connection pool while
 	// the consumer disconnects would otherwise still pull (and bill) its article;

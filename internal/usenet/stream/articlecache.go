@@ -71,6 +71,8 @@ type ArticleCache struct {
 	// baseBytes is the bound the cache was built with. boostCeiling is how far
 	// readers may grow it past that (resizeBoost), boosted how far they have.
 	baseBytes, boostCeiling, boosted int64
+	// gate bounds read-ahead fetches across every reader (prefetchGate).
+	gate chan struct{}
 
 	// onEmpty, when set, runs (without c.mu) after a released source's articles
 	// were dropped and nothing else is cached.
@@ -189,6 +191,23 @@ func (c *ArticleCache) readaheadShare() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.baseBytes / int64(2*max(1, c.readers))
+}
+
+// prefetchGate returns the semaphore that bounds read-ahead fetches across every
+// reader of the cache, sized with slots. One gate for all readers is what keeps
+// connections free for a seek: a per-reader bound still lets several readers (or
+// one that just closed, whose fetches cannot be recalled mid-article) fill the
+// pool between them. The shared cache outlives any one connection pool (new
+// credentials rebuild it with another size), so a gate of the wrong size is
+// replaced; workers holding the old one finish on it, briefly adding up.
+func (c *ArticleCache) prefetchGate(slots int) chan struct{} {
+	slots = max(1, slots)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gate == nil || cap(c.gate) != slots {
+		c.gate = make(chan struct{}, slots)
+	}
+	return c.gate
 }
 
 // countReadahead adds delta to the readers sharing the read-ahead half. Only
