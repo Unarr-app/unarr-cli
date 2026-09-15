@@ -33,6 +33,7 @@ type UsenetDownloader struct {
 
 	mu         sync.Mutex
 	nntpClient *nntp.Client
+	nntpCreds  agent.UsenetCredentials // what nntpClient was built with
 	active     map[string]*activeDownload
 
 	// Cached credentials
@@ -548,7 +549,12 @@ func (u *UsenetDownloader) getCredentials(ctx context.Context) (*agent.UsenetCre
 	if u.credentials != nil && time.Now().Before(u.credExpiry) {
 		return u.credentials, nil
 	}
+	return u.fetchCredentialsLocked(ctx)
+}
 
+// fetchCredentialsLocked fetches credentials from the API and caches them.
+// Caller holds u.mu.
+func (u *UsenetDownloader) fetchCredentialsLocked(ctx context.Context) (*agent.UsenetCredentials, error) {
 	creds, err := u.apiClient.GetUsenetCredentials(ctx)
 	if err != nil {
 		return nil, err
@@ -564,7 +570,24 @@ func (u *UsenetDownloader) getOrCreateNNTP(ctx context.Context, creds *agent.Use
 	defer u.mu.Unlock()
 
 	if u.nntpClient != nil {
-		return u.nntpClient, nil
+		if u.nntpClient.ActiveConnections() > 0 {
+			return u.nntpClient, nil
+		}
+		// Every pooled connection died. The pool re-dials on its next Body by
+		// itself, so after a network blip the cached client recovers — and it must
+		// be kept: live stream plans and batch downloads hold this same pointer,
+		// and closing it would fail all of them for good. Only credentials that
+		// changed server-side (a rotated password, host or TLS name) can never
+		// work again, so refetch them NOW (the caller's creds came from the cache
+		// that built this pool) and rebuild only when they differ.
+		fresh, err := u.fetchCredentialsLocked(ctx)
+		if err != nil || *fresh == u.nntpCreds {
+			return u.nntpClient, nil
+		}
+		log.Printf("[usenet] NNTP pool has no live connections and credentials changed - reconnecting")
+		u.nntpClient.Close()
+		u.nntpClient = nil
+		creds = fresh
 	}
 
 	maxConns := creds.MaxConnections
@@ -583,10 +606,15 @@ func (u *UsenetDownloader) getOrCreateNNTP(ctx context.Context, creds *agent.Use
 	})
 
 	if err := client.Connect(ctx); err != nil {
+		// The credentials may be what is wrong (host, TLS name, password): forget
+		// them so the next attempt refetches from the API instead of replaying the
+		// cached copy for up to 5 minutes.
+		u.credentials = nil
 		return nil, err
 	}
 
 	u.nntpClient = client
+	u.nntpCreds = *creds
 	return client, nil
 }
 

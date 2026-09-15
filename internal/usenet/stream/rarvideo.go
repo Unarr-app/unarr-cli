@@ -133,7 +133,16 @@ func (v *rarVideoReader) useVolume(volIndex int) error {
 	}
 	// The shared byte ceiling is handed to the fresh volume reader — otherwise a
 	// budgeted speculative read would reset its cost at every volume boundary.
-	rv, err := newReaderVolume(v.ctx, v.rs.fetcher, v.rs.volumes[volIndex], v.budget)
+	// The volume's index and the release's article cache are shared with every
+	// other request, so the size probe (Seek-to-end) is answered from what the
+	// header probe already observed instead of re-fetching the volume's first article.
+	rv, err := newReaderVolume(v.ctx, volumeOpen{
+		fetcher: v.rs.fetcher,
+		file:    v.rs.volumes[volIndex],
+		ix:      v.rs.volumeIndex(volIndex),
+		cache:   v.rs.cache,
+		budget:  v.budget,
+	})
 	if err != nil {
 		return fmt.Errorf("usenet rar reader: open volume %d: %w", volIndex, err)
 	}

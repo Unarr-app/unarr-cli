@@ -128,6 +128,40 @@ func TestOffsetIndexUniformOneObserveFixesWholeMap(t *testing.T) {
 	assertExactContiguousMap(t, ix, partSize, len(content))
 }
 
+// TestOffsetIndexLocateExact: a segment is reported exact only once observed
+// articles fix both its ends — for a uniform posting after any one observation,
+// for an irregular one only around what was observed.
+func TestOffsetIndexLocateExact(t *testing.T) {
+	const partSize = 4096
+	content := patternBytes(5*partSize + 777)
+	n, articles := nntptest.BuildDirectFile("movie.mkv", content, partSize)
+	s := nntptest.NewFakeServer(t)
+	s.AddArticles(articles)
+	c := dialFake(t, s)
+	ix := NewOffsetIndex(n.Files[0])
+	if _, exact, _ := ix.LocateExact(3*partSize + 1); exact {
+		t.Fatal("unobserved uniform map reported exact")
+	}
+	ix.Observe(1, fetchPart(t, c, ix, 1))
+	for _, off := range []int64{0, 3*partSize + 1, int64(len(content)) - 1} {
+		if seg, exact, ok := ix.LocateExact(off); !ok || !exact {
+			t.Fatalf("pinned uniform map: LocateExact(%d) = seg %d exact %v ok %v", off, seg, exact, ok)
+		}
+	}
+
+	partSizes := []int{5000, 1200, 8000, 400, 3333}
+	f, irregular, _ := buildNonUniform(t, "irregular.mkv", partSizes)
+	s2 := nntptest.NewFakeServer(t)
+	s2.AddArticles(irregular)
+	ix2 := NewOffsetIndex(f)
+	ix2.Observe(1, fetchPart(t, dialFake(t, s2), ix2, 1))
+	for off, want := range map[int64]bool{100: true, 5500: true, 7000: false, 14700: false} {
+		if seg, exact, _ := ix2.LocateExact(off); exact != want {
+			t.Fatalf("irregular map, segment 1 observed: LocateExact(%d) = seg %d exact %v, want %v", off, seg, exact, want)
+		}
+	}
+}
+
 func TestOffsetIndexNonUniformProgressiveExact(t *testing.T) {
 	// A posting whose parts differ in size: no single observation can pin it, so
 	// each segment becomes exact only once it (or a pin either side) is observed.

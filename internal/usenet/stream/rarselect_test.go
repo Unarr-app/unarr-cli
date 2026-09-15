@@ -128,6 +128,10 @@ func TestVolumeOrder(t *testing.T) {
 		{"release.rar", 0},
 		{"release.r00", 1},
 		{"release.r01", 2},
+		{"release.r99", 100},
+		{"release.s00", 101}, // rolls over after .r99, not beside .r00
+		{"release.t00", 201},
+		{"release.Z17", 818},
 		{"release.part01.rar", 1},
 		{"release.part02.rar", 2},
 		{"release.002", 2},

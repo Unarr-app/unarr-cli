@@ -223,14 +223,44 @@ func TestIsRarFile(t *testing.T) {
 		{"file.r00", true},
 		{"file.r99", true},
 		{"file.s00", true},
+		{"file.t42", true},
+		{"Bashas Expunged 898700094982305.z17", true},
 		{"file.001", true},
 		{"file.mkv", false},
 		{"file.par2", false},
 		{"file.nfo", false},
+		{"file.q00", false},
+		{"file.zip", false},
 	}
 	for _, tt := range tests {
 		if got := isRarFile(tt.name); got != tt.want {
 			t.Errorf("isRarFile(%q) = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+// TestRarFilesLetterRollover: .tNN-.zNN are RAR volumes in a rolled-over set, but
+// not a lone ROM/tape image (.z64) nor the parts of a split ZIP.
+func TestRarFilesLetterRollover(t *testing.T) {
+	file := func(name string) File { return File{Subject: `"` + name + `" yEnc (1/1)`} }
+	tests := []struct {
+		desc  string
+		names []string
+		want  int
+	}{
+		{"rolled-over set on its own", []string{"x.z01", "x.z02", "x.par2"}, 2},
+		{"classic set ending in one .t00", []string{"x.rar", "x.r00", "x.s00", "x.t00"}, 4},
+		{"lone N64 ROM", []string{"game.z64", "game.nfo"}, 0},
+		{"ROM and tape image", []string{"game.z64", "tape.t64"}, 0},
+		{"split zip", []string{"x.z01", "x.z02", "x.zip"}, 0},
+	}
+	for _, tt := range tests {
+		n := &NZB{}
+		for _, name := range tt.names {
+			n.Files = append(n.Files, file(name))
+		}
+		if got := len(n.RarFiles()); got != tt.want || n.HasRars() != (tt.want > 0) {
+			t.Errorf("%s: RarFiles = %d, HasRars = %v; want %d", tt.desc, got, n.HasRars(), tt.want)
 		}
 	}
 }
