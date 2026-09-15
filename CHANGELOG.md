@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-09-15
+
+
+### Fixed
+
+- **usenet**: recognise RAR volumes that roll over past .r99 and .s99
+- **usenet**: keep a dead NNTP pool unless its credentials changed
+- **usenet**: treat missing articles as final and keep the NNTP pool healthy
+- **usenet**: fall back to host on TLS name mismatch and recover dead NNTP pools
+- **usenet**: reuse offset index and decoded articles across stream requests
+
+### Performance
+
+- **usenet**: serve an article's bytes while it downloads
+- **usenet**: race a second fetch when a seek's article is slow
+- **usenet**: read ahead from where a seek lands, not after it
+- **usenet**: keep decoded articles off the Go heap
+- **usenet**: share eight read-ahead slots across every reader
+- **usenet**: keep the connection pool busy for fast consumers
+- **usenet**: cut streaming memory for small hosts
 ## [1.11.11] - 2026-09-14
 
 
@@ -14,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- **release**: 1.11.11
 - **release**: name the remote main tracks in the push hint
 ## [1.11.10] - 2026-09-14
 
@@ -1739,6 +1760,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.12.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.11...v1.12.0
 [1.11.11]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.10...v1.11.11
 [1.11.10]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.9...v1.11.10
 [1.11.9]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.8...v1.11.9
