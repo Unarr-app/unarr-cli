@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.1] - 2026-09-15
+
+
+### Fixed
+
+- **engine**: keep storage Close out of guarded writes already in flight
+- **release**: use the first GOPATH entry when looking for golangci-lint
+- **release**: find golangci-lint before bumping the version
 ## [1.12.0] - 2026-09-15
 
 
@@ -15,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **usenet**: treat missing articles as final and keep the NNTP pool healthy
 - **usenet**: fall back to host on TLS name mismatch and recover dead NNTP pools
 - **usenet**: reuse offset index and decoded articles across stream requests
+
+### Other
+
+- **release**: 1.12.0
 
 ### Performance
 
@@ -1760,6 +1772,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.12.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.12.0...v1.12.1
 [1.12.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.11...v1.12.0
 [1.11.11]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.10...v1.11.11
 [1.11.10]: https://github.com/Unarr-app/unarr-cli/compare/v1.11.9...v1.11.10
