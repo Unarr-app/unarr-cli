@@ -3,7 +3,7 @@ package engine
 import (
 	"context"
 	"io/fs"
-	"sync/atomic"
+	"sync"
 
 	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent/metainfo"
@@ -67,28 +67,25 @@ func (g closeGuard) OpenTorrent(
 	return guardTorrentImpl(impl), nil
 }
 
-// guardTorrentImpl routes every piece of a torrent through one shared closed
-// flag, which the torrent's own Close sets before the inner storage unmaps.
+// guardTorrentImpl routes every piece of a torrent through one shared gate,
+// which the torrent's own Close shuts before the inner storage unmaps.
 func guardTorrentImpl(impl storage.TorrentImpl) storage.TorrentImpl {
-	var closed atomic.Bool
+	gate := &storageGate{}
 
 	if inner := impl.Piece; inner != nil {
 		impl.Piece = func(p metainfo.Piece) storage.PieceImpl {
-			return guardedPiece{PieceImpl: inner(p), closed: &closed}
+			return guardedPiece{PieceImpl: inner(p), gate: gate}
 		}
 	}
 	if inner := impl.PieceWithHash; inner != nil {
 		impl.PieceWithHash = func(p metainfo.Piece, hash g.Option[[]byte]) storage.PieceImpl {
-			return guardedPiece{PieceImpl: inner(p, hash), closed: &closed}
+			return guardedPiece{PieceImpl: inner(p, hash), gate: gate}
 		}
 	}
 
-	// Set the flag BEFORE the inner Close unmaps anything: a writer that reads
-	// the flag after this point is refused, and one that read it before is
-	// already inside the inner storage's own RLock, which Close's Lock waits on.
 	inner := impl.Close
 	impl.Close = func() error {
-		closed.Store(true)
+		gate.shut()
 		if inner == nil {
 			return nil
 		}
@@ -97,22 +94,55 @@ func guardTorrentImpl(impl storage.TorrentImpl) storage.TorrentImpl {
 	return impl
 }
 
+// storageGate lets reads and writes into a torrent's storage run concurrently
+// and keeps them all out of its Close. A plain closed flag is not enough: a write
+// that checked the flag just before Close would still reach the inner storage
+// while it unmaps — the inner storage's own RLock does not stop that — and panic
+// exactly as the unguarded write did. Holding the gate's read lock for the whole
+// inner call closes that window: shut waits for every call in flight.
+type storageGate struct {
+	mu     sync.RWMutex
+	closed bool
+}
+
+// enter admits a read or write, or reports the storage closed. An admitted call
+// must leave.
+func (g *storageGate) enter() bool {
+	g.mu.RLock()
+	if g.closed {
+		g.mu.RUnlock()
+		return false
+	}
+	return true
+}
+
+func (g *storageGate) leave() { g.mu.RUnlock() }
+
+// shut refuses every later read and write once the ones in flight have returned.
+func (g *storageGate) shut() {
+	g.mu.Lock()
+	g.closed = true
+	g.mu.Unlock()
+}
+
 // guardedPiece refuses reads and writes once its torrent's storage is closed.
 type guardedPiece struct {
 	storage.PieceImpl
-	closed *atomic.Bool
+	gate *storageGate
 }
 
 func (p guardedPiece) WriteAt(b []byte, off int64) (int, error) {
-	if p.closed.Load() {
+	if !p.gate.enter() {
 		return 0, fs.ErrClosed
 	}
+	defer p.gate.leave()
 	return p.PieceImpl.WriteAt(b, off)
 }
 
 func (p guardedPiece) ReadAt(b []byte, off int64) (int, error) {
-	if p.closed.Load() {
+	if !p.gate.enter() {
 		return 0, fs.ErrClosed
 	}
+	defer p.gate.leave()
 	return p.PieceImpl.ReadAt(b, off)
 }
