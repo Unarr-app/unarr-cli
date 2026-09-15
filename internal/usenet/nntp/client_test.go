@@ -3,6 +3,7 @@ package nntp
 import (
 	"bufio"
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -107,7 +108,7 @@ func TestReadDotBody(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := bufio.NewReader(bytes.NewBufferString(tt.input))
-			got, err := readDotBody(r)
+			got, err := readDotBody(r, nil)
 			if err != nil {
 				t.Fatalf("readDotBody: %v", err)
 			}
@@ -121,11 +122,38 @@ func TestReadDotBody(t *testing.T) {
 func TestReadDotBodyEOF(t *testing.T) {
 	// No dot terminator — should read until EOF
 	r := bufio.NewReader(bytes.NewBufferString("partial data\r\n"))
-	got, err := readDotBody(r)
+	got, err := readDotBody(r, nil)
 	if err != nil {
 		t.Fatalf("readDotBody EOF: %v", err)
 	}
 	if string(got) != "partial data\n" {
 		t.Errorf("readDotBody EOF = %q", string(got))
+	}
+}
+
+// Lines longer than the reader's buffer arrive in fragments; a dot-stuffed long
+// line and a partial last line must come out exactly as whole-line reads would
+// give them, into the caller's buffer when it is large enough.
+func TestReadDotBodyLongLinesIntoBuffer(t *testing.T) {
+	long := strings.Repeat("x", 10_000)
+	input := "..dotted " + long + "\r\n" + long + "\r\n\r\nshort\r\n.\r\nafter terminator\r\n"
+	want := ".dotted " + long + "\n" + long + "\n\nshort\n"
+
+	buf := make([]byte, 0, 64<<10)
+	r := bufio.NewReaderSize(strings.NewReader(input), 16)
+	got, err := readDotBody(r, buf)
+	if err != nil {
+		t.Fatalf("readDotBody: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("readDotBody = %d bytes, want %d", len(got), len(want))
+	}
+	if &got[0] != &buf[:1][0] {
+		t.Fatal("body was not read into the caller's buffer")
+	}
+
+	partial := bufio.NewReaderSize(strings.NewReader("whole\r\n"+long), 16)
+	if got, err := readDotBody(partial, nil); err != nil || string(got) != "whole\n" {
+		t.Fatalf("partial last line: %q, %v; want the complete lines only", got, err)
 	}
 }

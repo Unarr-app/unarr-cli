@@ -104,6 +104,13 @@ type Reader struct {
 
 	pos int64 // logical read position (moved by Seek, advanced by Read)
 
+	// cur is the article the read position last landed in, kept by the reader
+	// itself so the ~23 Reads over one article never depend on the shared cache
+	// still holding it (evicted by other sources or a large article). Touched
+	// only by Read/Seek, never by read-ahead goroutines.
+	cur   *yenc.Part
+	curID string
+
 	mu        sync.Mutex     // guards lastRead
 	wg        sync.WaitGroup // tracks read-ahead goroutines (drained by Close)
 	closeOnce sync.Once      // drops the cache reference exactly once
@@ -370,11 +377,18 @@ func (r *Reader) ensureSizeExact() error {
 // and caching it.
 func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
 	seg := r.ix.Segment(segIdx)
-	return r.cache.load(r.ctx, seg.MessageID, func() (*yenc.Part, error) {
+	if r.cur != nil && r.curID == seg.MessageID {
+		return r.cur, nil
+	}
+	part, err := r.cache.load(r.ctx, seg.MessageID, func() (*yenc.Part, error) {
 		// Segment.Bytes is the ENCODED size — what will actually cross the wire, and
 		// what the budget must be asked for before the fetch starts.
 		return r.fetchDecodeRetry(seg.MessageID, seg.Bytes)
 	})
+	if err == nil {
+		r.cur, r.curID = part, seg.MessageID
+	}
+	return part, err
 }
 
 // triggerReadahead prefetches the articles following fromSeg so the next

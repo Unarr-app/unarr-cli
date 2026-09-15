@@ -41,6 +41,8 @@ type FakeServer struct {
 	conns     int             // connections accepted
 	stalled   map[string]bool // message-ids whose BODY is never answered
 	quit      chan struct{}   // closed on cleanup; releases stalled handlers
+	// generate produces the body of an article not registered with AddArticle.
+	generate func(messageID string) ([]byte, bool)
 
 	// one-shot injections for the next BODY requests (inject.go)
 	stallNext int
@@ -125,6 +127,15 @@ func (s *FakeServer) AddArticle(messageID string, yencBody []byte) {
 	body := append([]byte(nil), yencBody...)
 	s.mu.Lock()
 	s.articles[id] = body
+	s.mu.Unlock()
+}
+
+// GenerateArticles serves any article not registered with AddArticle from fn,
+// called per BODY with the message-id (no angle brackets); ok=false answers 430.
+// It lets a test serve a large file without holding every encoded article.
+func (s *FakeServer) GenerateArticles(fn func(messageID string) (body []byte, ok bool)) {
+	s.mu.Lock()
+	s.generate = fn
 	s.mu.Unlock()
 }
 
@@ -280,7 +291,11 @@ func (s *FakeServer) handleBody(w *bufio.Writer, st *connState, line string) boo
 	s.bodyCalls++
 	inj := s.takeInjectionLocked(id)
 	body, ok := s.articles[id]
+	generate := s.generate
 	s.mu.Unlock()
+	if !ok && generate != nil {
+		body, ok = generate(id)
+	}
 
 	if proceed, keep := s.applyInjection(w, inj); !proceed {
 		return keep

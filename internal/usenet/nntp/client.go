@@ -134,12 +134,20 @@ func (c *Client) drainPool() {
 // with its greeting and AUTHINFO. So *StallError (IsStalled) only ever reports an
 // article that stalled on a live connection.
 func (c *Client) Body(ctx context.Context, messageID string) ([]byte, error) {
+	return c.BodyInto(ctx, messageID, nil)
+}
+
+// BodyInto is Body reading into buf's backing array (from buf[:0]) and growing
+// it only if the body does not fit, so a caller that knows an article's size
+// pays for one allocation instead of a buffer doubled a dozen times. The result
+// aliases buf when it fit; buf's contents are overwritten either way.
+func (c *Client) BodyInto(ctx context.Context, messageID string, buf []byte) ([]byte, error) {
 	cn, err := c.acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := c.bodyOnConn(ctx, cn, messageID)
+	data, err := c.bodyOnConn(ctx, cn, messageID, buf)
 	if !cn.broken {
 		// Success, or a clean 430/423: the connection is in sync and reusable.
 		c.release(cn)
@@ -161,7 +169,7 @@ func (c *Client) Body(ctx context.Context, messageID string) ([]byte, error) {
 		c.release(cn2)
 		return nil, fmt.Errorf("nntp: body cancelled: %w (original: %v)", ctxErr, err)
 	}
-	data, err = c.bodyOnConn(ctx, cn2, messageID)
+	data, err = c.bodyOnConn(ctx, cn2, messageID, buf)
 	c.release(cn2)
 	return data, err
 }
@@ -291,15 +299,15 @@ func (c *Client) auth(tp *textproto.Conn) error {
 // bodyOnConn issues BODY on cn. Anything but success or a clean 430/423 marks cn
 // broken: a timeout, a reset, a partial body or an unexpected reply all leave the
 // connection's position in its response stream unknown.
-func (c *Client) bodyOnConn(ctx context.Context, cn *conn, messageID string) ([]byte, error) {
-	body, err := c.bodyExchange(ctx, cn, messageID)
+func (c *Client) bodyOnConn(ctx context.Context, cn *conn, messageID string, buf []byte) ([]byte, error) {
+	body, err := c.bodyExchange(ctx, cn, messageID, buf)
 	if err != nil && !IsArticleMissing(err) {
 		cn.broken = true
 	}
 	return body, err
 }
 
-func (c *Client) bodyExchange(ctx context.Context, cn *conn, messageID string) ([]byte, error) {
+func (c *Client) bodyExchange(ctx context.Context, cn *conn, messageID string, buf []byte) ([]byte, error) {
 	// Set deadline from context
 	deadline, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
@@ -335,7 +343,7 @@ func (c *Client) bodyExchange(ctx context.Context, cn *conn, messageID string) (
 	cn.raw.SetDeadline(deadline)
 
 	// Read dot-terminated body
-	body, err := readDotBody(cn.tp.R)
+	body, err := readDotBody(cn.tp.R, buf)
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
@@ -343,39 +351,49 @@ func (c *Client) bodyExchange(ctx context.Context, cn *conn, messageID string) (
 	return body, nil
 }
 
-// readDotBody reads a dot-terminated text block from the NNTP server.
-// Lines beginning with a dot have the dot removed (dot-stuffing).
-// The final ".\r\n" line signals the end.
-func readDotBody(r *bufio.Reader) ([]byte, error) {
-	var buf bytes.Buffer
-
+// readDotBody reads a dot-terminated text block from the NNTP server, appending
+// it to buf[:0]. Lines beginning with a dot have the dot removed (dot-stuffing),
+// each line is stored with a bare '\n', and the final ".\r\n" line signals the
+// end. Lines are read in place (ReadSlice), so the body costs no allocation
+// beyond growing buf.
+func readDotBody(r *bufio.Reader, buf []byte) ([]byte, error) {
+	out := buf[:0]
 	for {
-		line, err := r.ReadBytes('\n')
-		if err != nil {
+		start := len(out)
+		var err error
+		if out, err = appendLine(r, out); err != nil {
 			if err == io.EOF {
-				break
+				return out, nil
 			}
 			return nil, err
 		}
 
-		// Trim trailing \r\n
-		line = bytes.TrimRight(line, "\r\n")
-
-		// Check for terminator: single dot
+		line := bytes.TrimRight(out[start:], "\r\n")
 		if len(line) == 1 && line[0] == '.' {
-			break
+			return out[:start], nil // terminator
 		}
-
-		// Dot-unstuffing: remove leading dot if present
 		if len(line) > 0 && line[0] == '.' {
-			line = line[1:]
+			line = line[1:] // dot-unstuffing
 		}
-
-		buf.Write(line)
-		buf.WriteByte('\n')
+		out = append(append(out[:start], line...), '\n')
 	}
+}
 
-	return buf.Bytes(), nil
+// appendLine appends the next line, '\n' included, to out. A line longer than
+// the reader's buffer arrives in several fragments. On an error the partial line
+// is dropped and the error returned.
+func appendLine(r *bufio.Reader, out []byte) ([]byte, error) {
+	start := len(out)
+	for {
+		frag, err := r.ReadSlice('\n')
+		out = append(out, frag...)
+		if err == nil {
+			return out, nil
+		}
+		if err != bufio.ErrBufferFull {
+			return out[:start], err
+		}
+	}
 }
 
 // ArticleNotFoundError is returned when the server responds with 430 (or 423).

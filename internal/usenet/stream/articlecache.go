@@ -4,7 +4,10 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"log"
+	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/usenet/yenc"
@@ -14,10 +17,9 @@ import (
 // for streamable sources, summed across every source. A package var (like
 // ReadaheadBytes) rather than a config key: it is read once, when the first
 // streamable plan is built, so a caller/test can retune it before that without a
-// rebuild. 256 MiB is ~340 articles at the usual ~750 KB — minutes of 1080p video,
-// enough that a player's seek-back or ffmpeg's second pass over a range costs
-// nothing, and small enough for the NAS/SBC hosts the daemon runs on.
-var ArticleCacheBytes int64 = 256 << 20
+// rebuild. It defaults to 16-32 MiB sized from usable memory, or to
+// UNARR_USENET_CACHE_MB (see cachesize.go).
+var ArticleCacheBytes = defaultArticleCacheBytes()
 
 // readerCacheBytes bounds the private cache of a standalone Reader (one opened
 // with NewReader rather than through a plan): the old 16-article cap, in bytes.
@@ -31,7 +33,11 @@ var (
 // sharedArticleCache returns the process-wide cache every streamable plan draws
 // its scope from, so the byte ceiling holds however many sources are live.
 func sharedArticleCache() *ArticleCache {
-	sharedCacheOnce.Do(func() { sharedCache = NewArticleCache(ArticleCacheBytes) })
+	sharedCacheOnce.Do(func() {
+		sharedCache = NewArticleCache(ArticleCacheBytes)
+		sharedCache.onEmpty = returnMemoryToOS
+		log.Printf("[usenet-stream] decoded article cache: %d MiB (%s overrides)", ArticleCacheBytes>>20, ArticleCacheSizeEnv)
+	})
 	return sharedCache
 }
 
@@ -53,6 +59,9 @@ type ArticleCache struct {
 	entries  map[cacheKey]*list.Element
 	flights  map[cacheKey]*flight
 	dead     map[cacheKey]deadMark // dead-article memo (deadmemo.go)
+	// onEmpty, when set, runs (without c.mu) after a released source's articles
+	// were dropped and nothing else is cached.
+	onEmpty func()
 }
 
 // CacheScope is one source's view of an ArticleCache. Readers retain it while
@@ -145,11 +154,10 @@ func (s *CacheScope) Bytes() int64 {
 // In-flight fetches still complete for their waiters.
 func (s *CacheScope) Release() {
 	s.c.mu.Lock()
-	defer s.c.mu.Unlock()
 	s.released = true
-	if s.refs == 0 {
-		s.purgeLocked()
-	}
+	emptied := s.refs == 0 && s.purgeLocked()
+	s.c.mu.Unlock()
+	s.c.noteEmptied(emptied)
 }
 
 // retain registers an open reader. Pair with exactly one unretain.
@@ -163,24 +171,26 @@ func (s *CacheScope) retain() {
 // the last one.
 func (s *CacheScope) unretain() {
 	s.c.mu.Lock()
-	defer s.c.mu.Unlock()
 	s.refs--
-	if s.dormantLocked() {
-		s.purgeLocked()
-	}
+	emptied := s.dormantLocked() && s.purgeLocked()
+	s.c.mu.Unlock()
+	s.c.noteEmptied(emptied)
 }
 
 // dormantLocked reports a released scope no reader holds: nothing may be cached
 // or registered in it any more.
 func (s *CacheScope) dormantLocked() bool { return s.released && s.refs <= 0 }
 
-// purgeLocked drops every article and in-flight registration of this scope.
-func (s *CacheScope) purgeLocked() {
+// purgeLocked drops every article and in-flight registration of this scope. It
+// reports whether that emptied the whole cache.
+func (s *CacheScope) purgeLocked() bool {
 	c := s.c
+	removed := 0
 	for el := c.lru.Front(); el != nil; {
 		next := el.Next()
 		if e := el.Value.(*cacheEntry); e.key.scope == s {
 			c.removeLocked(el)
+			removed++
 		}
 		el = next
 	}
@@ -190,6 +200,31 @@ func (s *CacheScope) purgeLocked() {
 		}
 	}
 	c.purgeDeadLocked(s)
+	return removed > 0 && c.lru.Len() == 0 && len(c.flights) == 0
+}
+
+// noteEmptied runs onEmpty once a purge left the cache with nothing in it.
+func (c *ArticleCache) noteEmptied(emptied bool) {
+	if emptied && c.onEmpty != nil {
+		c.onEmpty()
+	}
+}
+
+// returningMemory is set while returnMemoryToOS runs.
+var returningMemory atomic.Bool
+
+// returnMemoryToOS hands freed heap back to the OS in the background, one run at
+// a time. The shared cache calls it when the last source's articles are dropped:
+// the runtime otherwise keeps that heap mapped for minutes, so an idle daemon
+// would go on showing the resident size of its last stream.
+func returnMemoryToOS() {
+	if !returningMemory.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer returningMemory.Store(false)
+		debug.FreeOSMemory()
+	}()
 }
 
 // load returns the decoded article id, from the cache, by joining a fetch already

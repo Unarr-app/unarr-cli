@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -88,14 +89,14 @@ func (r *Reader) fetchDecodeRetry(messageID string, estBytes int64) (*yenc.Part,
 		if !r.budget.reserve(estBytes) {
 			return nil, ErrFetchBudgetExhausted
 		}
-		raw, err := r.fetcher.Body(nntp.WithStallTimeout(r.ctx, r.stallTimeout), messageID)
+		raw, owned, err := r.fetchBody(messageID, estBytes)
 		// Reconcile against what came off the wire, whether or not it decodes — a
 		// corrupt body was still transferred and still billed. A failed Body
 		// transferred nothing we can account for and refunds the reservation.
 		r.budget.settle(estBytes, int64(len(raw)))
 		if err == nil {
 			var part *yenc.Part
-			if part, err = yenc.DecodeBytes(raw); err == nil {
+			if part, err = decodeArticle(raw, owned); err == nil {
 				return part, nil
 			}
 			err = fmt.Errorf("decode: %w", err)
@@ -109,4 +110,45 @@ func (r *Reader) fetchDecodeRetry(messageID string, estBytes int64) (*yenc.Part,
 	}
 	return nil, fmt.Errorf("usenet reader: article %s failed after %d attempts: %w",
 		messageID, r.maxAttempts, lastErr)
+}
+
+// bufferedFetcher is an ArticleFetcher that reads a body into a caller-supplied
+// buffer (nntp.Client.BodyInto).
+type bufferedFetcher interface {
+	BodyInto(ctx context.Context, messageID string, buf []byte) ([]byte, error)
+}
+
+// maxBodyBuffer caps the buffer pre-sized from an NZB's claimed article size, so
+// a bogus size cannot allocate more than a real article needs.
+const maxBodyBuffer = 16 << 20
+
+// fetchBody issues one BODY. A fetcher that supports it reads into a buffer sized
+// from the segment's encoded size, which is then this reader's own (owned) to
+// decode in place: one article-sized allocation per fetch, kept as the decoded
+// part. Any other fetcher's result may be shared, so it is decoded into a copy.
+func (r *Reader) fetchBody(messageID string, estBytes int64) (raw []byte, owned bool, err error) {
+	ctx := nntp.WithStallTimeout(r.ctx, r.stallTimeout)
+	if f, ok := r.fetcher.(bufferedFetcher); ok {
+		raw, err = f.BodyInto(ctx, messageID, make([]byte, 0, max(0, min(estBytes, maxBodyBuffer))))
+		return raw, true, err
+	}
+	raw, err = r.fetcher.Body(ctx, messageID)
+	return raw, false, err
+}
+
+// decodeArticle decodes a fetched body, in place when the buffer is the reader's
+// own. The part keeps the buffer, so the cache accounts cap(Data), which is what
+// stays alive.
+func decodeArticle(raw []byte, owned bool) (*yenc.Part, error) {
+	if !owned {
+		return yenc.DecodeBytes(raw)
+	}
+	part, err := yenc.DecodeInPlace(raw)
+	if err == nil && cap(part.Data) > len(part.Data)+len(part.Data)/4 {
+		// The buffer was sized from an NZB that overstated the article. Keeping it
+		// would charge the cache for bytes the part does not use — enough, on a
+		// small cache, to make it refuse the part and re-fetch it on every Read.
+		part.Data = append([]byte(nil), part.Data...)
+	}
+	return part, err
 }
