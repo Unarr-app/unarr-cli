@@ -37,13 +37,18 @@ type countingFetcher struct {
 	mu   sync.Mutex
 	byID map[string]int
 	sum  int
+	errs map[string]error // when set for a message-id, returned instead of fetching it
 }
 
 func (c *countingFetcher) Body(ctx context.Context, messageID string) ([]byte, error) {
 	c.mu.Lock()
 	c.byID[messageID]++
 	c.sum++
+	injected := c.errs[messageID]
 	c.mu.Unlock()
+	if injected != nil {
+		return nil, injected
+	}
 	if c.delay > 0 {
 		time.Sleep(c.delay)
 	}
@@ -92,8 +97,18 @@ type reuseFixture struct {
 
 func newReuseFixture(t *testing.T, parts int, delay time.Duration) *reuseFixture {
 	t.Helper()
+	return buildReuseFixture(t, parts, delay, -1)
+}
+
+// buildReuseFixture is newReuseFixture with an optional dead article: dead >= 0
+// leaves that article off the server, so BODY for it answers 430.
+func buildReuseFixture(t *testing.T, parts int, delay time.Duration, dead int) *reuseFixture {
+	t.Helper()
 	content := usenetTestData(parts*reusePartSize + 5_000)
 	n, articles := nntptest.BuildDirectFile("movie.mkv", content, reusePartSize)
+	if dead >= 0 {
+		delete(articles, n.Files[0].Segments[dead].MessageID)
+	}
 	cf := &countingFetcher{inner: dialFakeArticles(t, articles), delay: delay, byID: map[string]int{}}
 
 	ss := NewStreamServer(0, 1)
@@ -114,12 +129,7 @@ func newReuseFixture(t *testing.T, parts int, delay time.Duration) *reuseFixture
 // rangeGet issues one ranged GET for [lo, hi] and checks the body is byte-exact.
 func (f *reuseFixture) rangeGet(t *testing.T, lo, hi int) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodGet, f.url, nil)
-	req.Header.Set("Range", "bytes="+strconv.Itoa(lo)+"-"+strconv.Itoa(hi))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("ranged GET: %v", err)
-	}
+	resp := f.rangeRequest(t, lo, hi)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPartialContent {
 		t.Fatalf("status = %d, want 206", resp.StatusCode)
@@ -128,6 +138,18 @@ func (f *reuseFixture) rangeGet(t *testing.T, lo, hi int) {
 	if !bytes.Equal(body, f.content[lo:hi+1]) {
 		t.Fatalf("range [%d,%d] body mismatch: got %d bytes", lo, hi, len(body))
 	}
+}
+
+// rangeRequest issues one ranged GET for [lo, hi]; the caller closes the body.
+func (f *reuseFixture) rangeRequest(t *testing.T, lo, hi int) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, f.url, nil)
+	req.Header.Set("Range", "bytes="+strconv.Itoa(lo)+"-"+strconv.Itoa(hi))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("ranged GET: %v", err)
+	}
+	return resp
 }
 
 // TestUsenetRangeRequestsDoNotRefetchSizeArticle: the plan pins the exact size by

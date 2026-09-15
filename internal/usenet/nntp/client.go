@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,10 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// dialTimeout bounds each phase of opening a connection: TCP connect plus TLS
+// handshake (the dialer), then greeting plus AUTHINFO (a connection deadline).
+const dialTimeout = 30 * time.Second
 
 // Config holds NNTP server connection parameters.
 type Config struct {
@@ -26,12 +31,20 @@ type Config struct {
 }
 
 // Client manages a pool of authenticated NNTP connections.
+//
+// Accounting: open counts the connections that exist, idle in the pool or held
+// by a Body call. It grows only when a dial succeeds (Connect, acquire's redial of
+// a lost slot, replace) and shrinks only in retire, exactly once per connection.
+// A connection whose state became unknown is never put back in the pool.
 type Client struct {
 	cfg  Config
 	pool chan *conn
 	mu   sync.Mutex
 	open int
 	done chan struct{} // closed on Close()
+	// freed wakes callers blocked in acquire when a slot is retired, so they redial
+	// it instead of waiting for a release that will never come.
+	freed chan struct{}
 
 	// tlsOverrideStale is set once a handshake proved cfg.TLSServerName does not
 	// match the server's certificate while Host does (see dialTLS).
@@ -40,14 +53,25 @@ type Client struct {
 	// rootCAs overrides the system trust store. Unexported: only this package's
 	// tests set it, to trust a locally generated CA.
 	rootCAs *x509.CertPool
+	// handshakeTimeout bounds greeting plus AUTHINFO; 0 means dialTimeout. Only
+	// this package's tests shorten it.
+	handshakeTimeout time.Duration
 }
 
-// conn is a single NNTP connection.
+// conn is a single NNTP connection. Only its current holder touches it.
 type conn struct {
-	tp     *textproto.Conn
-	raw    net.Conn
-	closed bool
+	tp  *textproto.Conn
+	raw net.Conn
+	// broken: a command failed with anything but a clean 430/423, so where the
+	// connection stands in its response stream is unknown — a timed-out BODY may
+	// still be answered later, and reading that reply as the NEXT command's answer
+	// would hand one article's bytes out under another's message-id. Never reused.
+	broken bool
+	// retired: closed and removed from open (see retire).
+	retired bool
 }
+
+var errClientClosed = errors.New("nntp: client closed")
 
 // NewClient creates a new NNTP client (does not connect yet).
 func NewClient(cfg Config) *Client {
@@ -55,9 +79,10 @@ func NewClient(cfg Config) *Client {
 		cfg.MaxConnections = 10
 	}
 	return &Client{
-		cfg:  cfg,
-		pool: make(chan *conn, cfg.MaxConnections),
-		done: make(chan struct{}),
+		cfg:   cfg,
+		pool:  make(chan *conn, cfg.MaxConnections),
+		done:  make(chan struct{}),
+		freed: make(chan struct{}, cfg.MaxConnections),
 	}
 }
 
@@ -72,38 +97,42 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	for i := 0; i < c.cfg.MaxConnections; i++ {
-		conn, err := c.dial(ctx)
+		cn, err := c.dial(ctx)
 		if err != nil {
 			// Close any connections we already opened, but keep client reusable
 			c.drainPool()
 			return fmt.Errorf("nntp: connect %d/%d: %w", i+1, c.cfg.MaxConnections, err)
 		}
-		c.pool <- conn
-		c.mu.Lock()
-		c.open++
-		c.mu.Unlock()
+		c.adopt()
+		c.pool <- cn
 	}
 	return nil
 }
 
-// drainPool closes all connections in the pool without closing the done channel.
+// drainPool retires every idle connection without closing the done channel.
 func (c *Client) drainPool() {
 	for {
 		select {
 		case cn := <-c.pool:
-			c.closeConn(cn)
+			c.retire(cn)
 		default:
-			c.mu.Lock()
-			c.open = 0
-			c.mu.Unlock()
 			return
 		}
 	}
 }
 
-// Body downloads the body of an NNTP article by message-ID.
-// Returns the raw body reader (typically yEnc encoded).
-// The caller MUST call release() when done reading.
+// Body downloads the body of an NNTP article by message-ID and returns the raw
+// (typically yEnc encoded) bytes.
+//
+// A 430/423 comes back as *ArticleNotFoundError on the connection that answered
+// it, which stays in the pool. Any other failure leaves that connection broken: it
+// is retired and the BODY is re-issued ONCE on a freshly dialled connection, whose
+// outcome is what the caller gets. The retry is unconditional on purpose. A
+// timeout on a pooled connection says nothing about the article — an idle
+// connection silently dropped by a NAT, a firewall or a host sleep accepts the
+// write and never answers — while a fresh connection has just proven itself alive
+// with its greeting and AUTHINFO. So *StallError (IsStalled) only ever reports an
+// article that stalled on a live connection.
 func (c *Client) Body(ctx context.Context, messageID string) ([]byte, error) {
 	cn, err := c.acquire(ctx)
 	if err != nil {
@@ -111,36 +140,30 @@ func (c *Client) Body(ctx context.Context, messageID string) ([]byte, error) {
 	}
 
 	data, err := c.bodyOnConn(ctx, cn, messageID)
-	if err != nil {
-		// Connection might be broken, try to reconnect. The dial deliberately
-		// ignores the caller's cancellation (it stays bounded by the dialer
-		// timeout): the connection being replaced is a POOL slot, not the caller's,
-		// and a reconnect that fails because a player closed its range would drop
-		// that slot for good — shrinking the pool of a long-running daemon to empty.
-		cn2, reconErr := c.reconnect(context.WithoutCancel(ctx), cn)
-		if reconErr != nil {
-			// reconnect already closed cn and dropped it from the open count;
-			// discarding it again counted every failed reconnect twice, so the pool
-			// looked empty (ActiveConnections 0) while connections were still live.
-			return nil, fmt.Errorf("nntp: body failed and reconnect failed: %w (original: %v)", reconErr, err)
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			// The slot is restored; the caller is gone, so do not issue its BODY.
-			c.release(cn2)
-			return nil, fmt.Errorf("nntp: body cancelled: %w (original: %v)", ctxErr, err)
-		}
-		// Retry once on the fresh connection
-		data, err = c.bodyOnConn(ctx, cn2, messageID)
-		if err != nil {
-			c.release(cn2)
-			return nil, err
-		}
-		c.release(cn2)
-		return data, nil
+	if !cn.broken {
+		// Success, or a clean 430/423: the connection is in sync and reusable.
+		c.release(cn)
+		return data, err
 	}
 
-	c.release(cn)
-	return data, nil
+	// The dial deliberately ignores the caller's cancellation (it stays bounded
+	// by dialTimeout per phase): the connection being replaced is a POOL slot, not
+	// the caller's, and a reconnect that fails because a player closed its range
+	// would drop that slot for good.
+	cn2, dialErr := c.replace(context.WithoutCancel(ctx), cn)
+	if dialErr != nil {
+		// A transport failure, never an article verdict: neither error is wrapped,
+		// so neither a dial timeout nor the dead connection's timeout reads as a stall.
+		return nil, fmt.Errorf("nntp: body failed (%v) and reconnect failed: %v", err, dialErr)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The slot is restored; the caller is gone, so do not issue its BODY.
+		c.release(cn2)
+		return nil, fmt.Errorf("nntp: body cancelled: %w (original: %v)", ctxErr, err)
+	}
+	data, err = c.bodyOnConn(ctx, cn2, messageID)
+	c.release(cn2)
+	return data, err
 }
 
 // ActiveConnections returns the number of open connections.
@@ -157,7 +180,8 @@ func (c *Client) MaxConcurrency() int {
 	return c.cfg.MaxConnections
 }
 
-// Close shuts down all connections in the pool.
+// Close shuts down all connections in the pool. Connections held by a Body call
+// are retired when it releases them.
 func (c *Client) Close() error {
 	select {
 	case <-c.done:
@@ -165,16 +189,8 @@ func (c *Client) Close() error {
 	default:
 		close(c.done)
 	}
-
-	// Drain pool and close connections
-	for {
-		select {
-		case cn := <-c.pool:
-			c.closeConn(cn)
-		default:
-			return nil
-		}
-	}
+	c.drainPool()
+	return nil
 }
 
 // --- Internal ---
@@ -182,7 +198,7 @@ func (c *Client) Close() error {
 func (c *Client) dial(ctx context.Context) (*conn, error) {
 	addr := fmt.Sprintf("%s:%d", c.cfg.Host, c.cfg.Port)
 
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	dialer := &net.Dialer{Timeout: dialTimeout}
 
 	var rawConn net.Conn
 	var err error
@@ -198,6 +214,11 @@ func (c *Client) dial(ctx context.Context) (*conn, error) {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
 
+	// The dialer bounds only connect and TLS handshake. A server, or a proxy in
+	// front of one, that accepts and never greets would otherwise hold this dial
+	// forever — and with it the Body call and its pool slot, since replace dials
+	// with the caller's cancellation removed.
+	rawConn.SetDeadline(c.handshakeDeadline(ctx))
 	tp := textproto.NewConn(rawConn)
 	cn := &conn{tp: tp, raw: rawConn}
 
@@ -219,7 +240,22 @@ func (c *Client) dial(ctx context.Context) (*conn, error) {
 		}
 	}
 
+	rawConn.SetDeadline(time.Time{})
 	return cn, nil
+}
+
+// handshakeDeadline is the deadline for greeting plus AUTHINFO: handshakeTimeout
+// (dialTimeout by default), or ctx's deadline when that is earlier.
+func (c *Client) handshakeDeadline(ctx context.Context) time.Time {
+	timeout := c.handshakeTimeout
+	if timeout <= 0 {
+		timeout = dialTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		return d
+	}
+	return deadline
 }
 
 func (c *Client) auth(tp *textproto.Conn) error {
@@ -252,13 +288,25 @@ func (c *Client) auth(tp *textproto.Conn) error {
 	return nil
 }
 
+// bodyOnConn issues BODY on cn. Anything but success or a clean 430/423 marks cn
+// broken: a timeout, a reset, a partial body or an unexpected reply all leave the
+// connection's position in its response stream unknown.
 func (c *Client) bodyOnConn(ctx context.Context, cn *conn, messageID string) ([]byte, error) {
+	body, err := c.bodyExchange(ctx, cn, messageID)
+	if err != nil && !IsArticleMissing(err) {
+		cn.broken = true
+	}
+	return body, err
+}
+
+func (c *Client) bodyExchange(ctx context.Context, cn *conn, messageID string) ([]byte, error) {
 	// Set deadline from context
 	deadline, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
 		deadline = time.Now().Add(60 * time.Second)
 	}
-	cn.raw.SetDeadline(deadline)
+	status, stallBounded := statusDeadline(ctx, deadline)
+	cn.raw.SetDeadline(status)
 	defer cn.raw.SetDeadline(time.Time{})
 
 	// Send BODY command
@@ -273,17 +321,22 @@ func (c *Client) bodyOnConn(ctx context.Context, cn *conn, messageID string) ([]
 	// Read response code
 	code, msg, err := cn.tp.ReadCodeLine(222)
 	if err != nil {
-		if code == 430 {
-			return nil, &ArticleNotFoundError{MessageID: messageID}
+		// 430 is the RFC 3977 answer for an unknown message-id; 423 is the
+		// by-number code some servers send for it anyway. Both are final.
+		if code == 430 || code == 423 {
+			return nil, &ArticleNotFoundError{MessageID: messageID, Code: code}
+		}
+		if stallBounded && isNetTimeout(err) {
+			return nil, &StallError{MessageID: messageID, Err: err}
 		}
 		return nil, fmt.Errorf("BODY response: %d %s: %w", code, msg, err)
 	}
+	// The stall bound covers the status line only: the body keeps the command deadline.
+	cn.raw.SetDeadline(deadline)
 
 	// Read dot-terminated body
 	body, err := readDotBody(cn.tp.R)
 	if err != nil {
-		// Partial read leaves textproto in broken state — mark connection as dead
-		cn.closed = true
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 
@@ -325,62 +378,11 @@ func readDotBody(r *bufio.Reader) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (c *Client) acquire(ctx context.Context) (*conn, error) {
-	for {
-		select {
-		case cn := <-c.pool:
-			if cn.closed {
-				c.mu.Lock()
-				c.open--
-				c.mu.Unlock()
-				continue // discard and try next
-			}
-			return cn, nil
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-c.done:
-			return nil, fmt.Errorf("nntp: client closed")
-		}
-	}
-}
-
-func (c *Client) release(cn *conn) {
-	if cn == nil || cn.closed {
-		return
-	}
-	select {
-	case c.pool <- cn:
-	default:
-		// Pool full, close the connection
-		c.closeConn(cn)
-	}
-}
-
-func (c *Client) reconnect(ctx context.Context, old *conn) (*conn, error) {
-	c.closeConn(old)
-	newConn, err := c.dial(ctx)
-	if err != nil {
-		c.mu.Lock()
-		c.open--
-		c.mu.Unlock()
-		return nil, err
-	}
-	return newConn, nil
-}
-
-func (c *Client) closeConn(cn *conn) {
-	if cn == nil || cn.closed {
-		return
-	}
-	cn.closed = true
-	// Best-effort QUIT
-	cn.tp.Cmd("QUIT")
-	cn.raw.Close()
-}
-
-// ArticleNotFoundError is returned when the server responds with 430.
+// ArticleNotFoundError is returned when the server responds with 430 (or 423).
+// See IsArticleMissing.
 type ArticleNotFoundError struct {
 	MessageID string
+	Code      int // 430 or 423; 0 when constructed without a server answer
 }
 
 func (e *ArticleNotFoundError) Error() string {

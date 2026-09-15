@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/usenet/yenc"
 )
@@ -51,6 +52,7 @@ type ArticleCache struct {
 	lru      *list.List // of *cacheEntry, most recently used at the front
 	entries  map[cacheKey]*list.Element
 	flights  map[cacheKey]*flight
+	dead     map[cacheKey]deadMark // dead-article memo (deadmemo.go)
 }
 
 // CacheScope is one source's view of an ArticleCache. Readers retain it while
@@ -103,6 +105,7 @@ func NewArticleCache(maxBytes int64) *ArticleCache {
 		lru:      list.New(),
 		entries:  make(map[cacheKey]*list.Element),
 		flights:  make(map[cacheKey]*flight),
+		dead:     make(map[cacheKey]deadMark),
 	}
 }
 
@@ -186,6 +189,7 @@ func (s *CacheScope) purgeLocked() {
 			delete(c.flights, k)
 		}
 	}
+	c.purgeDeadLocked(s)
 }
 
 // load returns the decoded article id, from the cache, by joining a fetch already
@@ -222,8 +226,9 @@ func (s *CacheScope) claim(id string) (*flight, bool) {
 	return fl, part == nil && leader
 }
 
-// begin resolves id to a cached part, an existing flight to wait on, or a new
-// flight the caller now leads.
+// begin resolves id to a cached part, an existing flight to wait on (possibly an
+// already-settled one carrying a memoised dead-article verdict), or a new flight
+// the caller now leads.
 func (s *CacheScope) begin(id string) (*yenc.Part, *flight, bool) {
 	c := s.c
 	c.mu.Lock()
@@ -233,6 +238,9 @@ func (s *CacheScope) begin(id string) (*yenc.Part, *flight, bool) {
 		return nil, fl, true // untracked: no reader left to share with or store for
 	}
 	key := cacheKey{scope: s, id: id}
+	if dead, ok := c.deadLocked(key, time.Now()); ok {
+		return nil, settledFlight(dead), false
+	}
 	if el, ok := c.entries[key]; ok {
 		c.lru.MoveToFront(el)
 		return el.Value.(*cacheEntry).part, nil, false
@@ -253,8 +261,12 @@ func (s *CacheScope) finish(id string, fl *flight, part *yenc.Part, err error) {
 	if c.flights[key] == fl {
 		delete(c.flights, key)
 	}
-	if err == nil && part != nil && !s.dormantLocked() {
-		c.storeLocked(key, part)
+	if !s.dormantLocked() {
+		if err == nil && part != nil {
+			c.storeLocked(key, part)
+		} else if err != nil {
+			c.markDeadLocked(key, err, time.Now())
+		}
 	}
 	fl.part, fl.err = part, err
 	fl.retry = err != nil && leaderSpecific(err)

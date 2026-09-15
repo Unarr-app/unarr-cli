@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/usenet/nntp"
 )
@@ -37,6 +38,19 @@ type FakeServer struct {
 	username  string
 	password  string
 	checkAuth bool
+	conns     int             // connections accepted
+	stalled   map[string]bool // message-ids whose BODY is never answered
+	quit      chan struct{}   // closed on cleanup; releases stalled handlers
+
+	// one-shot injections for the next BODY requests (inject.go)
+	stallNext int
+	delayNext int
+	delayFor  time.Duration
+	resetNext int
+
+	// connection cap (inject.go): 0 = unlimited
+	maxLive int
+	live    int // connections greeted and not yet closed by the server
 }
 
 // NewFakeServer starts a FakeServer on a loopback port and registers cleanup
@@ -54,10 +68,40 @@ func NewFakeServer(tb testing.TB) *FakeServer {
 		articles: make(map[string][]byte),
 		username: "user",
 		password: "pass",
+		stalled:  make(map[string]bool),
+		quit:     make(chan struct{}),
 	}
 	go s.acceptLoop()
-	tb.Cleanup(func() { _ = s.ln.Close() })
+	tb.Cleanup(func() {
+		close(s.quit)
+		_ = s.ln.Close()
+	})
 	return s
+}
+
+// RemoveArticle deletes a registered article, so BODY for it answers 430 — a
+// dead article (expired, DMCA'd, never propagated) in an otherwise healthy post.
+func (s *FakeServer) RemoveArticle(messageID string) {
+	s.mu.Lock()
+	delete(s.articles, trimAngle(messageID))
+	s.mu.Unlock()
+}
+
+// StallArticle makes BODY for messageID never answer — the provider that stalls
+// instead of saying 430. The handler holds the connection until the client gives
+// up (or the test ends).
+func (s *FakeServer) StallArticle(messageID string) {
+	s.mu.Lock()
+	s.stalled[trimAngle(messageID)] = true
+	s.mu.Unlock()
+}
+
+// Connections returns how many connections the server has accepted, letting a
+// test assert that a failure did not tear down and redial a healthy connection.
+func (s *FakeServer) Connections() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conns
 }
 
 // RequireCorrectAuth makes the server actually VERIFY the credentials instead
@@ -138,19 +182,32 @@ func (s *FakeServer) acceptLoop() {
 		if err != nil {
 			return // listener closed on cleanup
 		}
+		s.mu.Lock()
+		s.conns++
+		s.mu.Unlock()
 		go s.handleConn(conn)
 	}
 }
 
 func (s *FakeServer) handleConn(conn net.Conn) {
-	defer conn.Close()
+	st := &connState{}
+	defer func() {
+		if tc, ok := conn.(*net.TCPConn); ok && st.reset {
+			_ = tc.SetLinger(0) // close with RST
+		}
+		conn.Close()
+	}()
 	r := bufio.NewReader(conn)
 	w := bufio.NewWriter(conn)
 
-	if _, err := w.WriteString("200 nntptest ready\r\n"); err != nil {
+	greeting, admitted := s.admit()
+	if admitted {
+		defer s.leave()
+	}
+	if _, err := w.WriteString(greeting); err != nil {
 		return
 	}
-	if w.Flush() != nil {
+	if w.Flush() != nil || !admitted {
 		return
 	}
 
@@ -159,7 +216,7 @@ func (s *FakeServer) handleConn(conn net.Conn) {
 		if err != nil {
 			return // client closed or read error
 		}
-		if !s.dispatch(w, strings.TrimRight(line, "\r\n")) {
+		if !s.dispatch(w, st, strings.TrimRight(line, "\r\n")) {
 			return
 		}
 		if w.Flush() != nil {
@@ -189,7 +246,7 @@ func (s *FakeServer) authAccepts(line string) bool {
 
 // dispatch handles one command line, returning false when the connection should
 // close (QUIT or a fatal error).
-func (s *FakeServer) dispatch(w *bufio.Writer, line string) bool {
+func (s *FakeServer) dispatch(w *bufio.Writer, st *connState, line string) bool {
 	verb := strings.ToUpper(line)
 	switch {
 	case strings.HasPrefix(verb, "AUTHINFO USER"):
@@ -204,7 +261,7 @@ func (s *FakeServer) dispatch(w *bufio.Writer, line string) bool {
 		}
 		fmt.Fprint(w, "281 authenticated\r\n")
 	case strings.HasPrefix(verb, "BODY"):
-		return s.handleBody(w, line)
+		return s.handleBody(w, st, line)
 	case strings.HasPrefix(verb, "QUIT"):
 		fmt.Fprint(w, "205 bye\r\n")
 		return false
@@ -217,28 +274,25 @@ func (s *FakeServer) dispatch(w *bufio.Writer, line string) bool {
 // handleBody serves a BODY request, honouring any pending FailNext injection.
 // A dropped-connection failure (code <= 0) returns false so the caller closes
 // the socket, forcing the client to reconnect and retry.
-func (s *FakeServer) handleBody(w *bufio.Writer, line string) bool {
+func (s *FakeServer) handleBody(w *bufio.Writer, st *connState, line string) bool {
+	id := trimAngle(bodyArg(line))
 	s.mu.Lock()
 	s.bodyCalls++
-	if s.failCount > 0 {
-		s.failCount--
-		code := s.failCode
-		s.mu.Unlock()
-		if code <= 0 {
-			return false // drop connection mid-request
-		}
-		fmt.Fprintf(w, "%d injected failure\r\n", code)
-		return true
-	}
-	id := trimAngle(bodyArg(line))
+	inj := s.takeInjectionLocked(id)
 	body, ok := s.articles[id]
 	s.mu.Unlock()
 
+	if proceed, keep := s.applyInjection(w, inj); !proceed {
+		return keep
+	}
 	if !ok {
 		fmt.Fprint(w, "430 no such article\r\n")
 		return true
 	}
 	fmt.Fprintf(w, "222 0 <%s> body follows\r\n", id)
+	if inj.kind == injReset {
+		return s.resetMidBody(w, st, body)
+	}
 	writeDotBody(w, body)
 	return true
 }

@@ -173,6 +173,13 @@ func (ss *StreamServer) usenetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reader.Close()
 
+	// A range whose first byte cannot be produced (dead/stalled article) gets an
+	// error status before ServeContent commits a 206 (stream_usenet_failure.go).
+	if err := checkUsenetRangeStart(r, reader, provider.FileSize()); err != nil {
+		failUsenetRequest(w, r, id, err)
+		return
+	}
+
 	w.Header().Set("Content-Type", mimeTypeFromExt(provider.FileName()))
 	w.Header().Set("Accept-Ranges", "bytes")
 	// no-store: the source is streamed on the fly and the tokenised URL is
@@ -182,6 +189,9 @@ func (ss *StreamServer) usenetHandler(w http.ResponseWriter, r *http.Request) {
 
 	// http.ServeContent handles HEAD (headers + size, no body), Range (206 +
 	// Content-Range), and full GET (200) uniformly, driving the reader's
-	// Seek/Read exactly as the debrid/disk providers expect.
-	http.ServeContent(w, r, provider.FileName(), time.Time{}, reader)
+	// Seek/Read exactly as the debrid/disk providers expect. A failure after the
+	// body started aborts the connection instead of ending it short.
+	rec := &usenetReadRecorder{ReadSeeker: reader}
+	http.ServeContent(w, r, provider.FileName(), time.Time{}, rec)
+	abortOnUsenetReadFailure(r, id, rec)
 }

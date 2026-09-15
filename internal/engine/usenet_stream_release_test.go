@@ -64,18 +64,11 @@ func TestGetOrCreateNNTPReplacesDeadPool(t *testing.T) {
 	// The credentials were rotated server-side: the API now hands out the right
 	// password, while the caller (and the cache) still hold the old one.
 	fake.RequireCorrectAuth()
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/internal/agent/usenet-credentials" {
-			http.NotFound(w, r)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(creds)
-	}))
-	t.Cleanup(api.Close)
+	apiURL := credentialsAPI(t, creds)
 	stale := *creds
 	stale.Password = "rotated-away"
 
-	u := NewUsenetDownloader(agent.NewClient(api.URL, "", "test"))
+	u := NewUsenetDownloader(agent.NewClient(apiURL, "", "test"))
 	dead := nntp.NewClient(nntp.Config{Host: host, Port: port}) // never connected: 0 live connections
 	u.nntpClient = dead
 	u.credentials = &stale
@@ -115,5 +108,59 @@ func TestGetOrCreateNNTPConnectFailureForgetsCredentials(t *testing.T) {
 	}
 	if u.credentials != nil {
 		t.Fatal("credentials that failed to connect are still cached")
+	}
+}
+
+// credentialsAPI serves creds on the agent credentials endpoint and returns its URL.
+func credentialsAPI(t *testing.T, creds *agent.UsenetCredentials) string {
+	t.Helper()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/internal/agent/usenet-credentials" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(creds)
+	}))
+	t.Cleanup(api.Close)
+	return api.URL
+}
+
+// TestGetOrCreateNNTPReplacesPoolEmptiedByMidBodyResets: connections reset
+// mid-article must each leave the open count, so a pool whose every connection
+// died reads as dead (ActiveConnections 0) and the downloader replaces it —
+// instead of keeping a pool whose Body calls block in acquire forever.
+func TestGetOrCreateNNTPReplacesPoolEmptiedByMidBodyResets(t *testing.T) {
+	fake := nntptest.NewFakeServer(t)
+	n, articles := nntptest.BuildDirectFile("reset.mkv", usenetTestData(20_000), 20_000)
+	fake.AddArticles(articles)
+	id := n.Files[0].Segments[0].MessageID
+	host, port := fake.Addr()
+	creds := &agent.UsenetCredentials{Host: host, Port: port, Username: "user", Password: "pass", MaxConnections: 2}
+
+	u := NewUsenetDownloader(agent.NewClient(credentialsAPI(t, creds), "", "test"))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := u.getOrCreateNNTP(ctx, creds)
+	if err != nil {
+		t.Fatalf("getOrCreateNNTP: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	fake.ResetMidBodyNext(4) // both attempts of two Body calls are cut mid-article
+	for i := 0; i < 2; i++ {
+		if _, err := client.Body(ctx, id); err == nil {
+			t.Fatalf("Body %d succeeded through two mid-body resets", i+1)
+		}
+	}
+	if got := client.ActiveConnections(); got != 0 {
+		t.Fatalf("ActiveConnections = %d after every connection was reset, want 0", got)
+	}
+	next, err := u.getOrCreateNNTP(ctx, creds)
+	if err != nil {
+		t.Fatalf("getOrCreateNNTP on a dead pool: %v", err)
+	}
+	t.Cleanup(func() { _ = next.Close() })
+	if next == client {
+		t.Fatal("dead pool kept instead of replaced")
 	}
 }

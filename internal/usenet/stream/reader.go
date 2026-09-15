@@ -114,6 +114,8 @@ type Reader struct {
 	idleWindow     time.Duration
 	maxAttempts    int
 	retryBackoff   time.Duration
+	// stallTimeout bounds each BODY's wait for its status line (ArticleStallTimeout).
+	stallTimeout time.Duration
 
 	// budget, when set, is a hard ceiling on the NNTP bytes this reader may pull.
 	// Used by speculative reads that run with NO player attached (the cold-buffer
@@ -172,6 +174,7 @@ func openReader(ctx context.Context, src readerSource) *Reader {
 		idleWindow:     ReadaheadIdleWindow,
 		maxAttempts:    defaultMaxAttempts,
 		retryBackoff:   defaultRetryBackoff,
+		stallTimeout:   ArticleStallTimeout,
 	}
 }
 
@@ -372,48 +375,6 @@ func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
 		// what the budget must be asked for before the fetch starts.
 		return r.fetchDecodeRetry(seg.MessageID, seg.Bytes)
 	})
-}
-
-// fetchDecodeRetry fetches and yEnc-decodes one article, retrying transient
-// failures (a not-yet-propagated article, a dropped connection, a corrupt body)
-// up to maxAttempts with a bounded backoff. Every failure is logged; the final
-// error is wrapped so the caller can degrade cleanly rather than hang.
-func (r *Reader) fetchDecodeRetry(messageID string, estBytes int64) (*yenc.Part, error) {
-	var lastErr error
-	for attempt := 0; attempt < r.maxAttempts; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-time.After(r.retryBackoff):
-			case <-r.ctx.Done():
-				return nil, r.ctx.Err()
-			}
-		}
-		// Cost ceiling BEFORE the wire, claimed rather than merely checked: a
-		// speculative reader (cold-buffer warm-up, no player attached) stops pulling
-		// once its byte budget is spoken for, however much wall clock is left.
-		// Usenet is billed by volume, so this is the bound that protects the
-		// account — and it is per ATTEMPT, because a retry re-transfers the article.
-		if !r.budget.reserve(estBytes) {
-			return nil, ErrFetchBudgetExhausted
-		}
-		raw, err := r.fetcher.Body(r.ctx, messageID)
-		// Reconcile against what came off the wire, whether or not it decodes — a
-		// corrupt body was still transferred and still billed. A failed Body
-		// transferred nothing we can account for and refunds the reservation.
-		r.budget.settle(estBytes, int64(len(raw)))
-		if err == nil {
-			var part *yenc.Part
-			if part, err = yenc.DecodeBytes(raw); err == nil {
-				return part, nil
-			}
-			err = fmt.Errorf("decode: %w", err)
-		}
-		lastErr = err
-		log.Printf("[usenet-stream] article %s attempt %d/%d failed: %v",
-			messageID, attempt+1, r.maxAttempts, err)
-	}
-	return nil, fmt.Errorf("usenet reader: article %s failed after %d attempts: %w",
-		messageID, r.maxAttempts, lastErr)
 }
 
 // triggerReadahead prefetches the articles following fromSeg so the next

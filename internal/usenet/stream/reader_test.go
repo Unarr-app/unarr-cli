@@ -153,14 +153,15 @@ func TestReaderSeekMiddleFetchesOneArticle(t *testing.T) {
 	}
 }
 
-func TestReaderTransientArticleMissingRetries(t *testing.T) {
+func TestReaderTransientServerErrorRetries(t *testing.T) {
 	const partSize = 4096
 	content := patternBytes(2 * partSize)
 	r, s := newDirectReader(t, "movie.mkv", content, partSize)
 
-	// The first article is briefly missing (430) twice — propagation delay — then
-	// appears. The read must transparently retry and still return exact bytes.
-	s.FailNext(2, 430)
+	// The server fails the first article twice with a non-final error, then serves
+	// it. The read must transparently retry and still return exact bytes. (A 430 is
+	// NOT such an error any more: it is final, see deadarticle tests.)
+	s.FailNext(2, 503)
 
 	buf := make([]byte, 1000)
 	if _, err := io.ReadFull(r, buf); err != nil {
