@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
@@ -120,5 +121,59 @@ func TestCloseGuardWriteRacingClose(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dir, info.Name)); err != nil {
 		t.Fatalf("stat data file: %v", err)
+	}
+}
+
+// blockingPiece parks a write inside the inner storage until released, so a
+// test can hold a write exactly where the old flag-only guard let Close unmap.
+type blockingPiece struct {
+	storage.PieceImpl
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p blockingPiece) WriteAt(b []byte, _ int64) (int, error) {
+	p.entered <- struct{}{}
+	<-p.release
+	return len(b), nil
+}
+
+// TestCloseGuardWaitsForWriteInFlight pins the window the racing test only hits
+// by luck: a write already past the guard must finish before the inner storage
+// closes, and writes after Close must be refused.
+func TestCloseGuardWaitsForWriteInFlight(t *testing.T) {
+	piece := blockingPiece{entered: make(chan struct{}), release: make(chan struct{})}
+	innerClosed := make(chan struct{})
+	impl := guardTorrentImpl(storage.TorrentImpl{
+		Piece: func(metainfo.Piece) storage.PieceImpl { return piece },
+		Close: func() error { close(innerClosed); return nil },
+	})
+	guarded := impl.Piece(metainfo.Piece{})
+
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := guarded.WriteAt(make([]byte, 8), 0)
+		wrote <- err
+	}()
+	<-piece.entered
+
+	closed := make(chan error, 1)
+	go func() { closed <- impl.Close() }()
+
+	select {
+	case <-innerClosed:
+		t.Fatal("inner storage closed while a write was still inside it")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(piece.release)
+	if err := <-wrote; err != nil {
+		t.Fatalf("write in flight: %v", err)
+	}
+	if err := <-closed; err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := guarded.WriteAt(make([]byte, 8), 0); !errors.Is(err, fs.ErrClosed) {
+		t.Fatalf("write after close: want fs.ErrClosed, got %v", err)
 	}
 }
