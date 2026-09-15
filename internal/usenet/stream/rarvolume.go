@@ -143,8 +143,9 @@ func rarBaseName(name string) string {
 // partVolRe matches new-style RAR5 volume names like "release.part07.rar".
 var partVolRe = regexp.MustCompile(`(?i)\.part(\d+)\.rar$`)
 
-// oldVolRe matches classic ".r00"/".s00" continuation volumes.
-var oldVolRe = regexp.MustCompile(`(?i)\.([rs])(\d+)$`)
+// oldVolRe matches classic continuation volumes: ".r00"-".r99", rolling over to
+// ".s00" and on through the alphabet on large sets.
+var oldVolRe = regexp.MustCompile(`(?i)\.([r-z])(\d{2})$`)
 
 // numVolRe matches split ".001"/".002" volumes.
 var numVolRe = regexp.MustCompile(`\.(\d{3,})$`)
@@ -163,7 +164,8 @@ func volumeOrder(name string) int {
 	}
 	if m := oldVolRe.FindStringSubmatch(name); m != nil {
 		n, _ := strconv.Atoi(m[2])
-		return n + 1 // ".r00" is the second classic volume
+		letter := int(strings.ToLower(m[1])[0] - 'r')
+		return letter*100 + n + 1 // ".r00" is the second classic volume, ".s00" follows ".r99"
 	}
 	if m := numVolRe.FindStringSubmatch(name); m != nil {
 		n, _ := strconv.Atoi(m[1])

@@ -47,7 +47,12 @@ func probeConcurrency(fetcher ArticleFetcher, volumeCount int) int {
 // (logged) outcome, not a failure.
 type NotStreamableError struct{ Reason string }
 
-func (e *NotStreamableError) Error() string { return "rar not streamable: " + e.Reason }
+func (e *NotStreamableError) Error() string {
+	if e.Reason == "" {
+		return "not streamable" // the bare sentinel, wrapped with its reason by callers
+	}
+	return "not streamable: " + e.Reason
+}
 
 // Is lets errors.Is(err, ErrNotStreamable) match any NotStreamableError.
 func (e *NotStreamableError) Is(target error) bool { return target == ErrNotStreamable }

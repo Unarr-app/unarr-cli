@@ -171,12 +171,20 @@ func archiveVolumesOf(dir, entryPath string) []string {
 		return []string{entryPath}
 	}
 
+	names := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		names[strings.ToLower(e.Name())] = true
+	}
 	var parts []string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
 		name := e.Name()
+		if isRolledOverVolumeOf(name, stem, names) {
+			parts = append(parts, filepath.Join(dir, name))
+			continue
+		}
 		if archiveStem(name) != stem {
 			continue
 		}

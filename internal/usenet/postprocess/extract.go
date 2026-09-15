@@ -347,6 +347,7 @@ func IsPasswordProtected(archivePath string) bool {
 func listExtractedFiles(dir, archivePath string) ([]string, error) {
 	archiveBase := filepath.Base(archivePath)
 	archiveDir := filepath.Dir(archivePath)
+	archiveNames := lowerNames(archiveDir)
 	var files []string
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -358,7 +359,7 @@ func listExtractedFiles(dir, archivePath string) ([]string, error) {
 		}
 		base := filepath.Base(path)
 		// Skip archive files themselves
-		if isArchiveFile(base) && filepath.Dir(path) == archiveDir {
+		if filepath.Dir(path) == archiveDir && (isArchiveFile(base) || isRolledOverVolume(base, archiveNames)) {
 			return nil
 		}
 		if base == archiveBase {
@@ -377,12 +378,16 @@ func Cleanup(dir string) error {
 		return err
 	}
 
+	names := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		names[strings.ToLower(entry.Name())] = true
+	}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
-		if isCleanupTarget(name) {
+		if isCleanupTarget(name) || isRolledOverVolume(name, names) {
 			path := filepath.Join(dir, name)
 			log.Printf("[usenet] cleanup: removing %s", name)
 			os.Remove(path)

@@ -237,15 +237,65 @@ func (n *NZB) Par2VolumeFiles() []File {
 	return result
 }
 
-// RarFiles returns rar archive files (.rar, .rNN, .NNN).
+// RarFiles returns rar archive files (.rar, .rNN … .zNN, .NNN).
 func (n *NZB) RarFiles() []File {
 	var result []File
+	rollover := n.rolloverLetters()
 	for _, f := range n.Files {
-		if isRarFile(f.Filename()) {
+		name := f.Filename()
+		if l := rolloverLetter(name); l != 0 {
+			if rollover[l] {
+				result = append(result, f)
+			}
+			continue
+		}
+		if isRarFile(name) {
 			result = append(result, f)
 		}
 	}
 	return result
+}
+
+// rolloverLetter returns the letter of a rolled-over volume extension
+// (.t00-.z99), or 0 for any other name.
+func rolloverLetter(name string) byte {
+	ext := strings.ToLower(filepath.Ext(name))
+	if len(ext) != 4 || ext[1] < 't' || ext[1] > 'z' {
+		return 0
+	}
+	if _, err := strconv.Atoi(ext[2:]); err != nil {
+		return 0
+	}
+	return ext[1]
+}
+
+// rolloverLetters reports which .tNN-.zNN letters of this NZB are RAR volumes.
+// The names alone are ambiguous — .z64/.v64/.t64 are ROM and tape images, and
+// .z01, .z02 … are split-ZIP parts — so a letter counts only beside a classic
+// volume (.rar/.rNN/.sNN) or with at least two numbers of its own, and .zNN
+// never counts when the NZB ships a .zip.
+func (n *NZB) rolloverLetters() map[byte]bool {
+	numbers := map[byte]map[string]bool{}
+	classic, zip := false, false
+	for _, f := range n.Files {
+		name := f.Filename()
+		switch l := rolloverLetter(name); {
+		case l != 0:
+			if numbers[l] == nil {
+				numbers[l] = map[string]bool{}
+			}
+			numbers[l][strings.ToLower(filepath.Ext(name))] = true
+		case strings.EqualFold(filepath.Ext(name), ".zip"):
+			zip = true
+		case isRarFile(name):
+			classic = true
+		}
+	}
+	accepted := make(map[byte]bool, len(numbers))
+	for l, exts := range numbers {
+		accepted[l] = (classic || len(exts) >= 2) && !(l == 'z' && zip)
+	}
+	return accepted
 }
 
 // LargestFile returns the file with the most total bytes.
@@ -287,12 +337,7 @@ func IsObfuscatedName(name string) bool {
 
 // HasRars returns true if the NZB contains rar archive files.
 func (n *NZB) HasRars() bool {
-	for _, f := range n.Files {
-		if isRarFile(f.Filename()) {
-			return true
-		}
-	}
-	return false
+	return len(n.RarFiles()) > 0
 }
 
 // HasPar2 returns true if the NZB contains par2 parity files.
@@ -379,8 +424,9 @@ func isRarFile(name string) bool {
 	if ext == ".rar" {
 		return true
 	}
-	// Match .r00, .r01, ..., .r99 and .s00, .s01
-	if len(ext) == 4 && (ext[1] == 'r' || ext[1] == 's') {
+	// Match old-style volumes .r00-.r99, which roll over to .s00 and on through
+	// the alphabet on large sets (.t00 ... .z17).
+	if len(ext) == 4 && ext[1] >= 'r' && ext[1] <= 'z' {
 		_, err := strconv.Atoi(ext[2:])
 		return err == nil
 	}
