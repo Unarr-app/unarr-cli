@@ -55,7 +55,11 @@ command -v git-cliff >/dev/null 2>&1 || die "git-cliff not found. Install: https
 # already rewritten.
 if ! command -v golangci-lint >/dev/null 2>&1 && command -v go >/dev/null 2>&1; then
   GO_BIN_DIR="$(go env GOBIN)"
-  [ -n "$GO_BIN_DIR" ] || GO_BIN_DIR="$(go env GOPATH)/bin"
+  if [ -z "$GO_BIN_DIR" ]; then
+    # GOPATH may list several directories; `go install` uses the first.
+    GO_BIN_DIR="$(go env GOPATH)"
+    GO_BIN_DIR="${GO_BIN_DIR%%:*}/bin"
+  fi
   if [ -x "$GO_BIN_DIR/golangci-lint" ]; then
     export PATH="$GO_BIN_DIR:$PATH"
   fi
