@@ -4,12 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
 	"net/textproto"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,6 +32,14 @@ type Client struct {
 	mu   sync.Mutex
 	open int
 	done chan struct{} // closed on Close()
+
+	// tlsOverrideStale is set once a handshake proved cfg.TLSServerName does not
+	// match the server's certificate while Host does (see dialTLS).
+	tlsOverrideStale atomic.Bool
+	tlsFallbackLog   sync.Once
+	// rootCAs overrides the system trust store. Unexported: only this package's
+	// tests set it, to trust a locally generated CA.
+	rootCAs *x509.CertPool
 }
 
 // conn is a single NNTP connection.
@@ -103,11 +112,22 @@ func (c *Client) Body(ctx context.Context, messageID string) ([]byte, error) {
 
 	data, err := c.bodyOnConn(ctx, cn, messageID)
 	if err != nil {
-		// Connection might be broken, try to reconnect
-		cn2, reconErr := c.reconnect(ctx, cn)
+		// Connection might be broken, try to reconnect. The dial deliberately
+		// ignores the caller's cancellation (it stays bounded by the dialer
+		// timeout): the connection being replaced is a POOL slot, not the caller's,
+		// and a reconnect that fails because a player closed its range would drop
+		// that slot for good — shrinking the pool of a long-running daemon to empty.
+		cn2, reconErr := c.reconnect(context.WithoutCancel(ctx), cn)
 		if reconErr != nil {
-			c.discard(cn)
+			// reconnect already closed cn and dropped it from the open count;
+			// discarding it again counted every failed reconnect twice, so the pool
+			// looked empty (ActiveConnections 0) while connections were still live.
 			return nil, fmt.Errorf("nntp: body failed and reconnect failed: %w (original: %v)", reconErr, err)
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// The slot is restored; the caller is gone, so do not issue its BODY.
+			c.release(cn2)
+			return nil, fmt.Errorf("nntp: body cancelled: %w (original: %v)", ctxErr, err)
 		}
 		// Retry once on the fresh connection
 		data, err = c.bodyOnConn(ctx, cn2, messageID)
@@ -168,16 +188,9 @@ func (c *Client) dial(ctx context.Context) (*conn, error) {
 	var err error
 
 	if c.cfg.SSL {
-		// Use TLSServerName if set (e.g., cert is for xsnews.nl but host is reader.torrentclaw.com)
-		serverName := c.cfg.TLSServerName
-		if serverName == "" {
-			serverName = c.cfg.Host
-		}
-		tlsCfg := &tls.Config{
-			ServerName: serverName,
-			MinVersion: tls.VersionTLS12,
-		}
-		rawConn, err = tls.DialWithDialer(dialer, "tcp", addr, tlsCfg)
+		// Verified against TLSServerName when set, falling back to Host only on a
+		// certificate name mismatch (see dialTLS).
+		rawConn, err = c.dialTLS(ctx, dialer, addr)
 	} else {
 		rawConn, err = dialer.DialContext(ctx, "tcp", addr)
 	}
@@ -341,13 +354,6 @@ func (c *Client) release(cn *conn) {
 		// Pool full, close the connection
 		c.closeConn(cn)
 	}
-}
-
-func (c *Client) discard(cn *conn) {
-	c.closeConn(cn)
-	c.mu.Lock()
-	c.open--
-	c.mu.Unlock()
 }
 
 func (c *Client) reconnect(ctx context.Context, old *conn) (*conn, error) {

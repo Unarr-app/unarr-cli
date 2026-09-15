@@ -548,7 +548,12 @@ func (u *UsenetDownloader) getCredentials(ctx context.Context) (*agent.UsenetCre
 	if u.credentials != nil && time.Now().Before(u.credExpiry) {
 		return u.credentials, nil
 	}
+	return u.fetchCredentialsLocked(ctx)
+}
 
+// fetchCredentialsLocked fetches credentials from the API and caches them.
+// Caller holds u.mu.
+func (u *UsenetDownloader) fetchCredentialsLocked(ctx context.Context) (*agent.UsenetCredentials, error) {
 	creds, err := u.apiClient.GetUsenetCredentials(ctx)
 	if err != nil {
 		return nil, err
@@ -564,7 +569,25 @@ func (u *UsenetDownloader) getOrCreateNNTP(ctx context.Context, creds *agent.Use
 	defer u.mu.Unlock()
 
 	if u.nntpClient != nil {
-		return u.nntpClient, nil
+		if u.nntpClient.ActiveConnections() > 0 {
+			return u.nntpClient, nil
+		}
+		// Every pooled connection died and could not be re-dialled (a rotated
+		// certificate, a changed password, a provider outage). The cached client
+		// would park every Body in acquire() forever, so a long-running daemon
+		// could never recover without a restart: drop it and connect afresh with
+		// credentials refetched NOW — the caller's creds came from the same cache
+		// that built the dead pool, so dialling with them would replay a rotated
+		// password / TLS name on the first attempt.
+		log.Printf("[usenet] NNTP pool has no live connections - reconnecting with fresh credentials")
+		u.nntpClient.Close()
+		u.nntpClient = nil
+		u.credentials = nil
+		if fresh, err := u.fetchCredentialsLocked(ctx); err == nil {
+			creds = fresh
+		} else {
+			log.Printf("[usenet] credential refetch failed, reconnecting with cached ones: %v", err)
+		}
 	}
 
 	maxConns := creds.MaxConnections
@@ -583,6 +606,10 @@ func (u *UsenetDownloader) getOrCreateNNTP(ctx context.Context, creds *agent.Use
 	})
 
 	if err := client.Connect(ctx); err != nil {
+		// The credentials may be what is wrong (host, TLS name, password): forget
+		// them so the next attempt refetches from the API instead of replaying the
+		// cached copy for up to 5 minutes.
+		u.credentials = nil
 		return nil, err
 	}
 
