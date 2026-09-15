@@ -239,6 +239,7 @@ func (r *Reader) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	resumed := r.readerIdle()
+	r.readaheadOnArrival(r.pos)
 	part, segIdx, err := r.articleForOffset(r.pos)
 	if err != nil {
 		return 0, err

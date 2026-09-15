@@ -3,6 +3,7 @@ package stream
 import (
 	"context"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -273,6 +274,102 @@ func TestSeekDropsQueuedReadahead(t *testing.T) {
 	}
 	if len(r.pq.pending) != 0 || r.pq.lastFront != -1 {
 		t.Fatalf("after seek: %d pending, lastFront %d; want 0, -1", len(r.pq.pending), r.pq.lastFront)
+	}
+}
+
+// spanFetcher records when each article's fetch starts and ends, and takes long
+// enough that fetches which run side by side overlap.
+type spanFetcher struct {
+	ArticleFetcher
+	mu    sync.Mutex
+	start map[string]time.Time
+	end   map[string]time.Time
+}
+
+func (f *spanFetcher) Body(ctx context.Context, id string) ([]byte, error) {
+	f.mu.Lock()
+	f.start[id] = time.Now()
+	f.mu.Unlock()
+	time.Sleep(40 * time.Millisecond)
+	body, err := f.ArticleFetcher.Body(ctx, id)
+	f.mu.Lock()
+	f.end[id] = time.Now()
+	f.mu.Unlock()
+	return body, err
+}
+
+// landingFetcher holds the landing article's fetch until the next article's
+// fetch has started, and records whether it gave up waiting.
+type landingFetcher struct {
+	ArticleFetcher
+	landing, next string
+	nextStarted   chan struct{}
+	once          sync.Once
+	gaveUp        atomic.Bool
+}
+
+func (f *landingFetcher) Body(ctx context.Context, id string) ([]byte, error) {
+	switch id {
+	case f.next:
+		f.once.Do(func() { close(f.nextStarted) })
+	case f.landing:
+		select {
+		case <-f.nextStarted:
+		case <-time.After(2 * time.Second):
+			f.gaveUp.Store(true)
+		}
+	}
+	return f.ArticleFetcher.Body(ctx, id)
+}
+
+// TestSeekStartsReadaheadWithTheLandingArticle: after a seek, the article past
+// the one it lands on starts fetching alongside it, not once it is served — a
+// read running on past it must not wait for two articles back to back.
+func TestSeekStartsReadaheadWithTheLandingArticle(t *testing.T) {
+	r, _, _ := newCountingReader(t, 50, 1024)
+	if _, err := r.Seek(0, io.SeekEnd); err != nil { // as http.ServeContent does: pins the offset map
+		t.Fatal(err)
+	}
+	f := &landingFetcher{ArticleFetcher: r.fetcher, landing: r.ix.Segment(30).MessageID,
+		next: r.ix.Segment(31).MessageID, nextStarted: make(chan struct{})}
+	r.fetcher = f
+	if _, err := r.Seek(30*1024+10, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Read(make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	r.wg.Wait()
+	if f.gaveUp.Load() {
+		t.Fatal("the next article did not start while the landing article was being fetched")
+	}
+}
+
+// TestSeekOnAnEstimatedMapQueuesNothingEarly: before any article has pinned the
+// offset map, the segment an offset maps to is a guess several articles off; a
+// seek must not read ahead from the guess, fetching articles nobody will read.
+func TestSeekOnAnEstimatedMapQueuesNothingEarly(t *testing.T) {
+	r, _, _ := newCountingReader(t, 50, 1024)
+	spans := &spanFetcher{ArticleFetcher: r.fetcher, start: map[string]time.Time{}, end: map[string]time.Time{}}
+	r.fetcher = spans
+	guess, exact, _ := r.ix.LocateExact(30*1024 + 10)
+	if exact || guess >= 29 {
+		t.Fatalf("fixture no longer exercises an estimate: guess %d exact %v", guess, exact)
+	}
+	if _, err := r.Seek(30*1024+10, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Read(make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	r.wg.Wait()
+
+	spans.mu.Lock()
+	defer spans.mu.Unlock()
+	for seg := guess + 1; seg < 30; seg++ {
+		if _, fetched := spans.start[r.ix.Segment(seg).MessageID]; fetched {
+			t.Fatalf("segment %d, read ahead from the guess %d, was fetched", seg, guess)
+		}
 	}
 }
 

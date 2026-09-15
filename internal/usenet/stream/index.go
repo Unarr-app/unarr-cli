@@ -68,7 +68,8 @@ type OffsetIndex struct {
 	sizeExact bool
 
 	// Cached layout, rebuilt by recompute() on construction and every Observe.
-	starts []int64 // 0-based start offset of each segment (monotonic)
+	starts     []int64 // 0-based start offset of each segment (monotonic)
+	startExact []bool  // starts[i] follows from observed articles, not the estimate
 }
 
 // NewOffsetIndex builds an index over a single NZB file. Segments are copied and
@@ -85,6 +86,7 @@ func NewOffsetIndex(f nzb.File) *OffsetIndex {
 		exactLen:   make([]int64, n),
 		exactStart: make([]int64, n),
 		starts:     make([]int64, n),
+		startExact: make([]bool, n),
 	}
 	var est int64
 	for i, s := range segs {
@@ -143,16 +145,40 @@ func (ix *OffsetIndex) SizeExact() bool {
 func (ix *OffsetIndex) Locate(offset int64) (segIdx int, start, end int64, ok bool) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
+	i, ok := ix.locateLocked(offset)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return i, ix.starts[i], ix.endOf(i), true
+}
+
+// LocateExact is Locate reporting only the segment, and whether the answer is
+// certain: the segment's start and end follow from observed articles, so the
+// segment does carry offset, rather than from the encoded-size estimate, which
+// can be several segments off before the first observation.
+func (ix *OffsetIndex) LocateExact(offset int64) (segIdx int, exact, ok bool) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	i, ok := ix.locateLocked(offset)
+	if !ok {
+		return 0, false, false
+	}
+	endExact := ix.sizeExact
+	if i < len(ix.segs)-1 {
+		endExact = ix.startExact[i+1]
+	}
+	return i, ix.startExact[i] && endExact, true
+}
+
+// locateLocked is the largest segment starting at or before offset.
+func (ix *OffsetIndex) locateLocked(offset int64) (int, bool) {
 	n := len(ix.segs)
 	if n == 0 || offset < 0 || offset >= ix.fileSizeLocked() {
-		return 0, 0, 0, false
+		return 0, false
 	}
 	// Largest i with starts[i] <= offset. starts is monotonic non-decreasing.
 	i := sort.Search(n, func(k int) bool { return ix.starts[k] > offset }) - 1
-	if i < 0 {
-		i = 0
-	}
-	return i, ix.starts[i], ix.endOf(i), true
+	return max(i, 0), true
 }
 
 // Observe fixes the exact bounds of segment segIdx from a decoded yEnc part and
@@ -225,6 +251,13 @@ func (ix *OffsetIndex) stepLen(i int) int64 {
 	return ix.estLen[i]
 }
 
+// stepExact reports whether stepLen(i) comes from observed articles: segment i's
+// own observation, or the anchor of a uniform posting it has the shape of.
+func (ix *OffsetIndex) stepExact(i int) bool {
+	return ix.exactLen[i] >= 0 ||
+		(i < len(ix.segs)-1 && ix.anchorLen > 0 && sameEncodedShape(ix.estLen[i], ix.anchorEst))
+}
+
 // sameEncodedShape reports whether two encoded article sizes are close enough to
 // be the same part size. Equal decoded parts still differ a little once encoded,
 // because yEnc escapes are content-dependent, so this cannot demand equality; a
@@ -250,14 +283,17 @@ func (ix *OffsetIndex) recompute() {
 		return
 	}
 	ix.starts[0] = 0 // the first article always begins the logical file
+	ix.startExact[0] = true
 	for i := 1; i < n; i++ {
 		if ix.exactStart[i] >= 0 {
 			ix.starts[i] = ix.exactStart[i]
 		} else {
 			ix.starts[i] = ix.starts[i-1] + ix.stepLen(i-1)
 		}
+		ix.startExact[i] = ix.exactStart[i] >= 0 || (ix.startExact[i-1] && ix.stepExact(i-1))
 		if ix.starts[i] < ix.starts[i-1] {
 			ix.starts[i] = ix.starts[i-1]
+			ix.startExact[i] = false // clamped: not where the article really starts
 		}
 	}
 }

@@ -81,6 +81,56 @@ func (r *Reader) triggerReadahead(fromSeg, articleBytes int) {
 	r.enqueue(fromSeg, want)
 }
 
+// arrivalReadahead is how many articles past the landing one start with it
+// (readaheadOnArrival). They are billed even if the request is abandoned before
+// its first byte, so the rest of the window still waits for that byte.
+const arrivalReadahead = 2
+
+// readaheadOnArrival starts the articles after the one pos lands on together with
+// it, when the consumer has just arrived there: a new reader or a seek. Queued
+// only after the first byte, the next article starts once the landing one is
+// complete, so a read that runs past it — a player refilling its buffer after a
+// seek, or starting playback — waits for two articles one after the other. The
+// full window is still queued after the first byte, and sequential reads keep
+// queuing there, where the window learns whether the consumer waited.
+func (r *Reader) readaheadOnArrival(pos int64) {
+	seg, ok := r.arrivedAt(pos)
+	if !ok {
+		return
+	}
+	r.rampReadahead(seg) // first: a seek narrows the window before it is sized
+	bytes := r.ix.Segment(seg).Bytes
+	if bytes <= 0 {
+		return // no size to budget with: leave it to the queue after the first byte
+	}
+	k := min(arrivalReadahead, r.readaheadWindow(int(bytes)))
+	want := make(map[int]pendingArticle, k)
+	for j := seg + 1; j <= seg+k && j < r.ix.SegmentCount(); j++ {
+		s := r.ix.Segment(j)
+		want[j] = pendingArticle{id: s.MessageID, bytes: s.Bytes}
+	}
+	r.enqueue(seg, want)
+}
+
+// arrivedAt returns the segment a Read at pos arrives in when that is a new
+// place worth reading ahead from: not the article already held or the next one
+// in order, not on a pool too small to spare a connection from the landing
+// article, and not while the map around pos is still an estimate — it can be
+// several articles off, and they would be billed for nothing.
+func (r *Reader) arrivedAt(pos int64) (int, bool) {
+	if r.readaheadK <= 0 || (r.cur != nil && pos >= r.cur.Begin-1 && pos < r.cur.Begin-1+int64(len(r.cur.Data))) {
+		return 0, false
+	}
+	if h, ok := r.fetcher.(concurrencyHinter); ok && h.MaxConcurrency() <= 2 {
+		return 0, false
+	}
+	seg, exact, ok := r.ix.LocateExact(pos)
+	if !ok || !exact || seg == r.lastSeg || (r.lastSeg >= 0 && seg == r.lastSeg+1) {
+		return 0, false
+	}
+	return seg, true
+}
+
 // rampReadahead widens the window while the consumer reads straight through AND
 // keeps catching up with it, and narrows it back on a seek. A consumer reading at
 // the video's bitrate never waits, so it stays on the base window and pays for no
