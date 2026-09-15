@@ -75,6 +75,8 @@ type ArticleCache struct {
 	gate chan struct{}
 	// refs counts the holders of each part whose buffer is recycled (bufpool.go).
 	refs map[*yenc.Part]int
+	// latency holds recent fetch durations, which hedging is judged by (hedge.go).
+	latency latencyRing
 
 	// onEmpty, when set, runs (without c.mu) after a released source's articles
 	// were dropped and nothing else is cached.

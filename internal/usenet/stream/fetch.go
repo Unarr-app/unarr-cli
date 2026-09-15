@@ -89,6 +89,7 @@ func (r *Reader) fetchDecodeRetry(messageID string, estBytes int64) (*yenc.Part,
 		if !r.budget.reserve(estBytes) {
 			return nil, ErrFetchBudgetExhausted
 		}
+		start := time.Now()
 		raw, pooled, owned, err := r.fetchBody(messageID, estBytes)
 		// Reconcile against what came off the wire, whether or not it decodes — a
 		// corrupt body was still transferred and still billed. A failed Body
@@ -97,6 +98,7 @@ func (r *Reader) fetchDecodeRetry(messageID string, estBytes int64) (*yenc.Part,
 		if err == nil {
 			var part *yenc.Part
 			if part, err = r.keepDecoded(raw, pooled, owned); err == nil {
+				r.cache.c.latency.note(time.Since(start))
 				return part, nil
 			}
 		} else if u := asUnavailable(messageID, err); u != nil {

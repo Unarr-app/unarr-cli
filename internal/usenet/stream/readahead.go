@@ -121,7 +121,7 @@ func (r *Reader) arrivedAt(pos int64) (int, bool) {
 	if r.readaheadK <= 0 || (r.cur != nil && pos >= r.cur.Begin-1 && pos < r.cur.Begin-1+int64(len(r.cur.Data))) {
 		return 0, false
 	}
-	if h, ok := r.fetcher.(concurrencyHinter); ok && h.MaxConcurrency() <= 2 {
+	if r.smallPool() {
 		return 0, false
 	}
 	seg, exact, ok := r.ix.LocateExact(pos)
@@ -129,6 +129,13 @@ func (r *Reader) arrivedAt(pos int64) (int, bool) {
 		return 0, false
 	}
 	return seg, true
+}
+
+// smallPool reports a connection pool of two or fewer: a second fetch started
+// for the article a consumer waits on would only queue behind it.
+func (r *Reader) smallPool() bool {
+	h, ok := r.fetcher.(concurrencyHinter)
+	return ok && h.MaxConcurrency() <= 2
 }
 
 // rampReadahead widens the window while the consumer reads straight through AND

@@ -438,7 +438,7 @@ func (r *Reader) fetchArticle(segIdx int) (*yenc.Part, error) {
 	part, err := r.cache.load(r.ctx, seg.MessageID, func() (*yenc.Part, error) {
 		// Segment.Bytes is the ENCODED size — what will actually cross the wire, and
 		// what the budget must be asked for before the fetch starts.
-		return r.fetchDecodeRetry(seg.MessageID, seg.Bytes)
+		return r.fetchHedged(seg.MessageID, seg.Bytes)
 	})
 	r.waited = time.Since(start) > readaheadMissLatency
 	if err == nil {
