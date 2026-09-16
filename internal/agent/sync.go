@@ -343,6 +343,9 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 func (sc *SyncClient) processResponse(resp *SyncResponse) {
 	// New tasks
 	if len(resp.NewTasks) > 0 && sc.OnNewTasks != nil {
+		for i := range resp.NewTasks {
+			resp.NewTasks[i].NormalizeSourceSet()
+		}
 		log.Printf("sync: received %d new task(s)", len(resp.NewTasks))
 		sc.OnNewTasks(resp.NewTasks)
 	}

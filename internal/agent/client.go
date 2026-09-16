@@ -243,6 +243,26 @@ func (c *Client) RefreshStreamURL(ctx context.Context, sessionID string) (string
 	return resp.DirectURL, nil
 }
 
+// ResolveTaskSource asks the web to mint a fresh URL for one cached-only
+// SourceSet candidate. The server owns provider credentials and validates the
+// task/hash/file identity; the agent sends only opaque ids.
+func (c *Client) ResolveTaskSource(ctx context.Context, taskID, sourceID string) (Source, error) {
+	req := struct {
+		TaskID   string `json:"taskId"`
+		SourceID string `json:"sourceId"`
+	}{TaskID: taskID, SourceID: sourceID}
+	var resp struct {
+		Source Source `json:"source"`
+	}
+	if err := c.doPost(ctx, "/api/internal/agent/task-source", req, &resp); err != nil {
+		return Source{}, fmt.Errorf("resolve task source: %w", err)
+	}
+	if resp.Source.ID == "" || resp.Source.DirectURL == "" {
+		return Source{}, fmt.Errorf("resolve task source: incomplete source in response")
+	}
+	return resp.Source, nil
+}
+
 // ReportStatus reports download progress. Returns server-side flags the CLI must act on.
 func (c *Client) ReportStatus(ctx context.Context, update StatusUpdate) (*StatusResponse, error) {
 	var resp StatusResponse

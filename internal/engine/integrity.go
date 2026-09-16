@@ -55,6 +55,22 @@ func IsSizeConflict(err error) bool {
 	return errors.As(err, &ie) && ie.Reason == reasonSizeConflict
 }
 
+// IsDebridSourceRepairable reports integrity failures caused by the remote
+// link/entity rather than the destination disk or a local verification step.
+// A second provider can repair these while preserving the partial bytes.
+func IsDebridSourceRepairable(err error) bool {
+	var ie *IntegrityError
+	if !errors.As(err, &ie) {
+		return true
+	}
+	switch ie.Reason {
+	case reasonSizeConflict, "truncated", "stub_response", "overlong":
+		return true
+	default:
+		return false
+	}
+}
+
 // integrityErr builds an IntegrityError with a printf-style message.
 func integrityErr(reason, format string, args ...any) *IntegrityError {
 	return &IntegrityError{Reason: reason, Message: fmt.Sprintf(format, args...)}

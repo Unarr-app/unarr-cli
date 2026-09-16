@@ -111,6 +111,35 @@ func TestReportStatus(t *testing.T) {
 	}
 }
 
+func TestResolveTaskSource(t *testing.T) {
+	var received struct {
+		TaskID   string `json:"taskId"`
+		SourceID string `json:"sourceId"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/internal/agent/task-source" {
+			t.Errorf("path = %s, want /api/internal/agent/task-source", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&received)
+		_ = json.NewEncoder(w).Encode(map[string]any{"source": Source{
+			ID: "debrid:premiumize", Transport: "debrid", DirectURL: "https://cdn/fresh",
+		}})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-key", "unarr-test")
+	source, err := c.ResolveTaskSource(context.Background(), "task-1", "debrid:premiumize")
+	if err != nil {
+		t.Fatalf("ResolveTaskSource failed: %v", err)
+	}
+	if received.TaskID != "task-1" || received.SourceID != "debrid:premiumize" {
+		t.Fatalf("request = %+v", received)
+	}
+	if source.DirectURL != "https://cdn/fresh" {
+		t.Fatalf("source = %+v", source)
+	}
+}
+
 func TestAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

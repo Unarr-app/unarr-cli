@@ -528,6 +528,7 @@ func runDaemonStart() error {
 		OutputDir:        cfg.Download.Dir,
 		Notifications:    cfg.Notifications.Enabled,
 		PreferredMethods: methodOrder,
+		ResolveSource:    agentClient.ResolveTaskSource,
 		// Same source as the torrent downloader's SeedEnabled above: while the
 		// torrent seeds, post-processing must not delete the archive parts it is
 		// still serving.
