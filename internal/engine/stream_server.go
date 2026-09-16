@@ -1197,6 +1197,9 @@ func (ss *StreamServer) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rawReader.Close()
+	if ranged, ok := rawReader.(interface{ LimitRange(string) }); ok {
+		ranged.LimitRange(r.Header.Get("Range"))
+	}
 
 	// Wrap reader to track bytes read for progress estimation + rate limit.
 	// Rate limiting at ~2x bitrate ensures VLC can't download far ahead of

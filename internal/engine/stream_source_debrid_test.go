@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -213,6 +216,81 @@ func TestDebridReaderServeContentRoundTrip(t *testing.T) {
 	want := data[10000:20000]
 	if !bytes.Equal(body, want) {
 		t.Fatalf("ranged body mismatch: got %d bytes", len(body))
+	}
+}
+
+func TestDebridReaderBoundedRangeReusesConnection(t *testing.T) {
+	data := makeData(80_000)
+	var connections atomic.Int64
+	var rangesMu sync.Mutex
+	var ranges []string
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			rangesMu.Lock()
+			ranges = append(ranges, r.Header.Get("Range"))
+			rangesMu.Unlock()
+		}
+		http.ServeContent(w, r, "movie.mp4", time.Time{}, bytes.NewReader(data))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	p, err := NewDebridFileProvider(context.Background(), srv.URL, "movie.mp4", 0, nil)
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	for _, bounds := range [][2]int64{{10_000, 19_999}, {30_000, 39_999}} {
+		rd := p.NewFileReader(context.Background())
+		rd.(interface{ LimitRange(string) }).LimitRange(fmt.Sprintf("bytes=%d-%d", bounds[0], bounds[1]))
+		if _, err := rd.Seek(bounds[0], io.SeekStart); err != nil {
+			t.Fatalf("seek: %v", err)
+		}
+		got, err := io.ReadAll(io.LimitReader(rd, bounds[1]-bounds[0]+1))
+		if closeErr := rd.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatalf("read bounded range: %v", err)
+		}
+		want := data[bounds[0] : bounds[1]+1]
+		if !bytes.Equal(got, want) {
+			t.Fatalf("bounded range mismatch: got %d bytes, want %d", len(got), len(want))
+		}
+	}
+
+	rangesMu.Lock()
+	gotRanges := append([]string(nil), ranges...)
+	rangesMu.Unlock()
+	if want := []string{"bytes=10000-19999", "bytes=30000-39999"}; !slices.Equal(gotRanges, want) {
+		t.Fatalf("upstream ranges = %q, want %q", gotRanges, want)
+	}
+	if got := connections.Load(); got != 1 {
+		t.Fatalf("upstream connections = %d, want 1 reused connection", got)
+	}
+}
+
+func TestDebridReaderLeavesLargeAndOpenRangesUnbounded(t *testing.T) {
+	r := &debridRangeReader{}
+	for _, header := range []string{
+		"bytes=10-",
+		"bytes=-100",
+		"bytes=0-16777216",
+		"bytes=0-10,20-30",
+		"garbage",
+	} {
+		r.LimitRange(header)
+		if r.limitStart != -1 || r.limitEnd != -1 {
+			t.Fatalf("LimitRange(%q) = %d-%d, want unbounded", header, r.limitStart, r.limitEnd)
+		}
+	}
+	r.LimitRange("bytes=5-20")
+	if r.limitStart != 5 || r.limitEnd != 20 {
+		t.Fatalf("small explicit range = %d-%d, want 5-20", r.limitStart, r.limitEnd)
 	}
 }
 

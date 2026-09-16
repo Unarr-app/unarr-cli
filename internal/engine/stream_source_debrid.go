@@ -37,6 +37,7 @@ var debridHTTPClient = &http.Client{
 		// debrid CDNs are remote; a generous idle-conn pool avoids a fresh TLS
 		// handshake on every seek-driven reopen.
 		MaxIdleConns:        4,
+		MaxIdleConnsPerHost: 4,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 15 * time.Second,
 	},
@@ -157,9 +158,11 @@ func (p *debridFileProvider) refreshURL(ctx context.Context) (string, error) {
 
 func (p *debridFileProvider) NewFileReader(ctx context.Context) io.ReadSeekCloser {
 	return &debridRangeReader{
-		ctx:  ctx,
-		prov: p,
-		size: p.size,
+		ctx:        ctx,
+		prov:       p,
+		size:       p.size,
+		limitStart: -1,
+		limitEnd:   -1,
 	}
 }
 
@@ -178,10 +181,39 @@ type debridRangeReader struct {
 	prov *debridFileProvider
 	size int64
 
-	pos    int64         // logical position (moved by Seek, advanced by Read)
-	body   io.ReadCloser // current open response body, or nil
-	bodyAt int64         // position the open body's next byte maps to
+	pos        int64         // logical position (moved by Seek, advanced by Read)
+	body       io.ReadCloser // current open response body, or nil
+	bodyAt     int64         // position the open body's next byte maps to
+	limitStart int64         // explicit client Range start, or -1 when unbounded
+	limitEnd   int64         // explicit client Range end, or -1 when unbounded
 }
+
+// LimitRange lets the stream handler pass through a small explicit client
+// Range. Without the end, TorBox returns an open HTTP/1.1 body; when the player
+// has enough bytes it closes that body early, so net/http must discard the TCP
+// connection and repeat DNS/TCP/TLS on the next seek. Matching the upstream
+// end to a small player request lets the body complete and the connection go
+// back to the idle pool. Large and open-ended reads stay open so sustained
+// playback keeps its existing single-GET path.
+func (r *debridRangeReader) LimitRange(header string) {
+	r.limitStart, r.limitEnd = -1, -1
+	if !strings.HasPrefix(header, "bytes=") || strings.Contains(header, ",") {
+		return
+	}
+	spec := strings.TrimPrefix(header, "bytes=")
+	dash := strings.IndexByte(spec, '-')
+	if dash <= 0 || dash == len(spec)-1 {
+		return
+	}
+	start, startErr := strconv.ParseInt(strings.TrimSpace(spec[:dash]), 10, 64)
+	end, endErr := strconv.ParseInt(strings.TrimSpace(spec[dash+1:]), 10, 64)
+	if startErr != nil || endErr != nil || start < 0 || end < start || end-start+1 > maxDebridReusableRange {
+		return
+	}
+	r.limitStart, r.limitEnd = start, end
+}
+
+const maxDebridReusableRange int64 = 16 << 20
 
 func (r *debridRangeReader) Read(p []byte) (int, error) {
 	if r.size > 0 && r.pos >= r.size {
@@ -256,9 +288,14 @@ func (r *debridRangeReader) reopen() error {
 		if err != nil {
 			return fmt.Errorf("debrid reader: build request: %w", err)
 		}
-		// Always send a Range so a seek to 0 still gets a 206 (and so partial
-		// reopens after a mid-file seek work). An open-ended range runs to EOF.
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", r.pos))
+		// A small explicit player range is safe to bound and lets an HTTP/1.1
+		// response finish, which makes its connection reusable. Otherwise keep
+		// the original open-ended behavior for sustained playback.
+		if r.limitEnd >= r.pos && r.pos >= r.limitStart {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", r.pos, r.limitEnd))
+		} else {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", r.pos))
+		}
 		resp, err := debridHTTPClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("debrid reader: GET: %w", err)
