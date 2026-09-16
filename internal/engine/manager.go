@@ -36,6 +36,10 @@ type ManagerConfig struct {
 	// through the downloader so the post-processing decision does not depend on
 	// which method happened to resolve.
 	SeedEnabled bool
+	// ResolveSource mints a fresh URL for one SourceSet candidate. Infrastructure
+	// (the agent API client) is injected here so the engine owns failover policy
+	// without knowing about HTTP or provider credentials.
+	ResolveSource func(context.Context, string, string) (agent.Source, error)
 }
 
 // Manager orchestrates concurrent downloads with method resolution and fallback.
@@ -654,8 +658,22 @@ func (m *Manager) attemptDownload(ctx context.Context, task *Task) (*Result, err
 		// the wrong side may be our own metadata — so this one DOES fall through
 		// to the next method (torrent/usenet), which gets the release from a
 		// different source instead of reporting it damaged three attempts later.
-		if IsInsufficientDisk(err) || IsStorage(err) || (IsIntegrity(err) && !IsSizeConflict(err)) {
+		if IsInsufficientDisk(err) || IsStorage(err) ||
+			(IsIntegrity(err) && !IsSizeConflict(err) &&
+				!(method == MethodDebrid && IsDebridSourceRepairable(err))) {
 			return nil, err
+		}
+		if method == MethodDebrid && ctx.Err() == nil && m.cfg.ResolveSource != nil {
+			if repaired, repairErr, attempted := m.tryDebridSourceRepair(ctx, task, err); attempted {
+				if repairErr == nil {
+					return repaired, nil
+				}
+				err = repairErr
+				if IsInsufficientDisk(err) || IsStorage(err) ||
+					(IsIntegrity(err) && !IsDebridSourceRepairable(err)) || ctx.Err() != nil {
+					return nil, err
+				}
+			}
 		}
 		// ErrVPNTunnelDown: the tunnel died mid-download (torrent dropped, partial
 		// kept). Prefer a genuinely-available SAFE fallback (debrid/usenet, HTTPS/NNTP
@@ -664,8 +682,10 @@ func (m *Manager) attemptDownload(ctx context.Context, task *Task) (*Result, err
 		vpnDown := errors.Is(err, ErrVPNTunnelDown)
 		if tryFallback(task, m.downloaders, m.cfg.PreferredMethods) {
 			log.Printf("[%s] %s failed, trying fallback: %v", agent.ShortID(task.ID), method, err)
-			if terr := task.Transition(StatusResolving); terr != nil {
-				return nil, err
+			if task.GetStatus() != StatusResolving {
+				if terr := task.Transition(StatusResolving); terr != nil {
+					return nil, err
+				}
 			}
 			res, ferr := m.attemptFallback(ctx, task)
 			if ferr != nil && vpnDown {
@@ -676,6 +696,71 @@ func (m *Manager) attemptDownload(ctx context.Context, task *Task) (*Result, err
 		return nil, err
 	}
 	return result, nil
+}
+
+// tryDebridSourceRepair walks cached provider candidates before changing
+// transport. Each successful resolve is still downloaded through the ordinary
+// DebridDownloader, so its Range/provenance/size guards protect partial resume.
+func (m *Manager) tryDebridSourceRepair(
+	ctx context.Context,
+	task *Task,
+	initialErr error,
+) (*Result, error, bool) {
+	lastErr := initialErr
+	attempted := false
+	for {
+		source, ok := task.NextDebridRepairSource()
+		if !ok {
+			if attempted {
+				return nil, fmt.Errorf("%w (debrid source repair exhausted: %v)", initialErr, lastErr), true
+			}
+			return nil, initialErr, false
+		}
+		attempted = true
+		result, err, stop := m.attemptDebridRepairSource(ctx, task, source, lastErr)
+		if err != nil {
+			lastErr = err
+		}
+		if stop {
+			return result, err, true
+		}
+	}
+}
+
+func (m *Manager) attemptDebridRepairSource(
+	ctx context.Context,
+	task *Task,
+	source agent.Source,
+	previousErr error,
+) (*Result, error, bool) {
+	if task.GetStatus() != StatusResolving {
+		if err := task.Transition(StatusResolving); err != nil {
+			return nil, err, true
+		}
+	}
+
+	resolved, err := m.cfg.ResolveSource(ctx, task.ID, source.ID)
+	if err != nil {
+		log.Printf("[%s] debrid candidate %s unavailable: %v", task.ShortID(), source.ID, err)
+		return nil, err, ctx.Err() != nil
+	}
+	if err := task.ApplyDebridRepairSource(resolved); err != nil {
+		log.Printf("[%s] rejected debrid candidate %s: %v", task.ShortID(), source.ID, err)
+		return nil, err, false
+	}
+
+	log.Printf("[%s] debrid failed, resuming with source %s (%s): %v",
+		task.ShortID(), source.ID, source.Provider, previousErr)
+	if err := task.Transition(StatusDownloading); err != nil {
+		return nil, err, true
+	}
+	result, err := m.runDownload(ctx, task, MethodDebrid)
+	if err == nil {
+		return result, nil, true
+	}
+	terminal := ctx.Err() != nil || IsInsufficientDisk(err) || IsStorage(err) ||
+		(IsIntegrity(err) && !IsDebridSourceRepairable(err))
+	return nil, err, terminal
 }
 
 // attemptFallback runs the next available method after a transport failure.

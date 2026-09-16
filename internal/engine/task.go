@@ -52,20 +52,22 @@ type Task struct {
 	Title           string
 	ContentID       *int
 	IMDbID          string
-	PreferredMethod string // auto | torrent | debrid | usenet
-	DirectURL       string // HTTPS download URL (debrid, etc.)
-	DirectFileName  string // Original filename from direct URL
-	DirectFileSize  int64  // Exact provider-listed byte size of that file (0 = unknown)
-	NzbID           string // Pre-resolved NZB ID (usenet)
-	NzbPassword     string // Password for encrypted NZB archives
-	ReplacePath     string // File to replace after download (upgrade mode)
-	LibraryItemID   int    // Library item being upgraded
-	ContentType     string // "movie" | "show" — from server metadata
-	ContentTitle    string // Clean title from TMDB
-	Season          *int   // Season number
-	Episode         *int   // Episode number
-	ContentYear     *int   // Year from TMDB (avoids regex on torrent title)
-	CollectionName  string // Collection name (e.g., "Harry Potter Collection")
+	PreferredMethod string           // auto | torrent | debrid | usenet
+	DirectURL       string           // HTTPS download URL (debrid, etc.)
+	DirectFileName  string           // Original filename from direct URL
+	DirectFileSize  int64            // Exact provider-listed byte size of that file (0 = unknown)
+	NzbID           string           // Pre-resolved NZB ID (usenet)
+	NzbPassword     string           // Password for encrypted NZB archives
+	ReplacePath     string           // File to replace after download (upgrade mode)
+	LibraryItemID   int              // Library item being upgraded
+	ContentType     string           // "movie" | "show" — from server metadata
+	ContentTitle    string           // Clean title from TMDB
+	Season          *int             // Season number
+	Episode         *int             // Episode number
+	ContentYear     *int             // Year from TMDB (avoids regex on torrent title)
+	CollectionName  string           // Collection name (e.g., "Harry Potter Collection")
+	SourceSet       *agent.SourceSet // Versioned release sources retained for future repair/failover
+	triedSourceIDs  map[string]struct{}
 
 	// Runtime state
 	Status          TaskStatus
@@ -95,6 +97,7 @@ type Task struct {
 
 // NewTaskFromAgent creates a Task from a server-claimed agent.Task.
 func NewTaskFromAgent(at agent.Task) *Task {
+	at.NormalizeSourceSet()
 	mode := at.Mode
 	if mode == "" {
 		mode = "download"
@@ -119,6 +122,7 @@ func NewTaskFromAgent(at agent.Task) *Task {
 		Season:          at.Season,
 		Episode:         at.Episode,
 		CollectionName:  at.CollectionName,
+		SourceSet:       at.SourceSet,
 		Mode:            mode,
 		Status:          StatusClaimed,
 		ClaimedAt:       time.Now(),

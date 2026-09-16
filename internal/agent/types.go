@@ -170,27 +170,28 @@ type UsenetServerInfo struct {
 
 // Task represents a download task claimed from the server.
 type Task struct {
-	ID              string `json:"id"`
-	InfoHash        string `json:"infoHash"`
-	Title           string `json:"title"`
-	ContentID       *int   `json:"contentId,omitempty"`
-	IMDbID          string `json:"imdbId,omitempty"`
-	PreferredMethod string `json:"preferredMethod"`          // auto | debrid | usenet | torrent
-	Mode            string `json:"mode,omitempty"`           // download | stream
-	DirectURL       string `json:"directUrl,omitempty"`      // HTTPS download URL (debrid, etc.)
-	DirectFileName  string `json:"directFileName,omitempty"` // Original filename from direct URL
-	DirectFileSize  int64  `json:"directFileSize,omitempty"` // Exact provider-listed byte size of that file (0 = unknown)
-	NzbID           string `json:"nzbId,omitempty"`          // Pre-resolved NZB ID from server
-	NzbPassword     string `json:"nzbPassword,omitempty"`    // Password for encrypted NZB archives
-	ReplacePath     string `json:"replacePath,omitempty"`    // File to replace after download (upgrade mode)
-	LibraryItemID   int    `json:"libraryItemId,omitempty"`  // Library item being upgraded
-	ForceStart      bool   `json:"forceStart,omitempty"`     // Bypass queue (like Transmission's Force Start)
-	ContentType     string `json:"contentType,omitempty"`    // "movie" | "show" — from server metadata
-	ContentTitle    string `json:"contentTitle,omitempty"`   // Clean title from TMDB (e.g., "Frieren: Beyond Journey's End")
-	Season          *int   `json:"season,omitempty"`         // Season number
-	Episode         *int   `json:"episode,omitempty"`        // Episode number
-	ContentYear     *int   `json:"contentYear,omitempty"`    // Year from TMDB (avoids regex on torrent title)
-	CollectionName  string `json:"collectionName,omitempty"` // Collection name (e.g., "Harry Potter Collection")
+	ID              string     `json:"id"`
+	InfoHash        string     `json:"infoHash"`
+	Title           string     `json:"title"`
+	ContentID       *int       `json:"contentId,omitempty"`
+	IMDbID          string     `json:"imdbId,omitempty"`
+	PreferredMethod string     `json:"preferredMethod"`          // auto | debrid | usenet | torrent
+	Mode            string     `json:"mode,omitempty"`           // download | stream
+	DirectURL       string     `json:"directUrl,omitempty"`      // HTTPS download URL (debrid, etc.)
+	DirectFileName  string     `json:"directFileName,omitempty"` // Original filename from direct URL
+	DirectFileSize  int64      `json:"directFileSize,omitempty"` // Exact provider-listed byte size of that file (0 = unknown)
+	NzbID           string     `json:"nzbId,omitempty"`          // Pre-resolved NZB ID from server
+	NzbPassword     string     `json:"nzbPassword,omitempty"`    // Password for encrypted NZB archives
+	ReplacePath     string     `json:"replacePath,omitempty"`    // File to replace after download (upgrade mode)
+	LibraryItemID   int        `json:"libraryItemId,omitempty"`  // Library item being upgraded
+	ForceStart      bool       `json:"forceStart,omitempty"`     // Bypass queue (like Transmission's Force Start)
+	ContentType     string     `json:"contentType,omitempty"`    // "movie" | "show" — from server metadata
+	ContentTitle    string     `json:"contentTitle,omitempty"`   // Clean title from TMDB (e.g., "Frieren: Beyond Journey's End")
+	Season          *int       `json:"season,omitempty"`         // Season number
+	Episode         *int       `json:"episode,omitempty"`        // Episode number
+	ContentYear     *int       `json:"contentYear,omitempty"`    // Year from TMDB (avoids regex on torrent title)
+	CollectionName  string     `json:"collectionName,omitempty"` // Collection name (e.g., "Harry Potter Collection")
+	SourceSet       *SourceSet `json:"sourceSet,omitempty"`      // Versioned release sources; flat fields stay during migration
 
 	// FilePath is the on-disk path of the file the agent is being asked
 	// to operate on. Currently used by mode=seed_file to know which

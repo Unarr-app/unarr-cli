@@ -26,6 +26,31 @@ func TestNewTaskFromAgent(t *testing.T) {
 	}
 }
 
+func TestNewTaskFromAgentNormalizesSourceSetOnlyPayload(t *testing.T) {
+	at := agent.Task{
+		ID: "uuid-source-set",
+		SourceSet: &agent.SourceSet{
+			Version:           1,
+			PreferredSourceID: "usenet",
+			Sources: []agent.Source{
+				{
+					ID: "usenet", Transport: "usenet", NzbID: "release-guid",
+					Password: "archive-password",
+				},
+			},
+		},
+	}
+
+	task := NewTaskFromAgent(at)
+
+	if task.PreferredMethod != "usenet" || task.NzbID != "release-guid" {
+		t.Fatalf("SourceSet was not normalized: %+v", task)
+	}
+	if task.NzbPassword != "archive-password" || task.SourceSet == nil {
+		t.Errorf("SourceSet metadata was not retained: %+v", task)
+	}
+}
+
 func TestTransitionValid(t *testing.T) {
 	transitions := []struct {
 		from TaskStatus
@@ -282,5 +307,57 @@ func TestTransitionNilOnChangeNoPanic(t *testing.T) {
 	task := NewTaskFromAgent(agent.Task{ID: "t2"}) // no onChange set
 	if err := task.Transition(StatusResolving); err != nil {
 		t.Fatalf("Transition with nil onChange must not error: %v", err)
+	}
+}
+
+func TestDebridRepairSourceOrderAndIdentityGuards(t *testing.T) {
+	task := NewTaskFromAgent(agent.Task{
+		ID:             "repair-task",
+		InfoHash:       "abc123",
+		DirectURL:      "https://old",
+		DirectFileName: "Show.S01E01.mkv",
+		DirectFileSize: 100,
+		SourceSet: &agent.SourceSet{Version: 1, Sources: []agent.Source{
+			{ID: "debrid:current", Relation: "exact_release", Transport: "debrid", DirectURL: "https://old"},
+			{ID: "debrid:torbox", Relation: "exact_release", Transport: "debrid", Provider: "torbox", InfoHash: "abc123"},
+			{ID: "debrid:premiumize", Relation: "exact_release", Transport: "debrid", Provider: "premiumize", InfoHash: "abc123"},
+		}},
+	})
+
+	first, ok := task.NextDebridRepairSource()
+	if !ok || first.ID != "debrid:torbox" {
+		t.Fatalf("first repair source = %+v, %v", first, ok)
+	}
+	second, ok := task.NextDebridRepairSource()
+	if !ok || second.ID != "debrid:premiumize" {
+		t.Fatalf("second repair source = %+v, %v", second, ok)
+	}
+	if _, ok := task.NextDebridRepairSource(); ok {
+		t.Fatal("repair candidates were not exhausted")
+	}
+
+	bad := second
+	bad.DirectURL = "https://new"
+	bad.FileName = "Show.S01E02.mkv"
+	bad.FileSize = 100
+	if err := task.ApplyDebridRepairSource(bad); err == nil {
+		t.Fatal("accepted a repair source for a different file")
+	}
+	if task.DirectURL != "https://old" {
+		t.Fatal("rejected source changed the active URL")
+	}
+
+	good := second
+	good.DirectURL = "https://new"
+	good.FileName = "folder/Show.S01E01.mkv"
+	good.FileSize = 100
+	if err := task.ApplyDebridRepairSource(good); err != nil {
+		t.Fatalf("same-file repair rejected: %v", err)
+	}
+	if task.DirectURL != "https://new" || task.DirectFileName != "Show.S01E01.mkv" {
+		t.Fatalf("repair did not preserve file identity: %+v", task)
+	}
+	if task.SourceSet.Sources[2].DirectURL != "" {
+		t.Fatal("runtime repair mutated the wire SourceSet shared with persisted agent state")
 	}
 }
