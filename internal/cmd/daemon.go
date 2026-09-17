@@ -598,11 +598,11 @@ func runDaemonStart() error {
 	if cfg.Download.RequireStreamToken {
 		d.UpdateStreamSecret(streamSrv.StreamSecretHex())
 	}
-	// CORS extras = operator config + dynamic mirror list from /api/mirrors.
+	// CORS extras = operator config + dynamic mirror list from /api/v1/mirrors.
 	// Without the mirror merge, a user playing from `torrentclaw.to` (or any
 	// future mirror) hits the daemon, gets 200 + body, but no
 	// `Access-Control-Allow-Origin` → browser drops the response → player
-	// reports "404 todos los canales". Fetching /api/mirrors at startup
+	// reports "404 todos los canales". Fetching the list at startup
 	// future-proofs against mirror additions without a CLI rebuild.
 	corsExtras := append([]string(nil), cfg.Download.CORSExtraOrigins...)
 	corsExtras = append(corsExtras, mirrorCORSOrigins(ctx, cfg, userAgent)...)
@@ -2134,14 +2134,14 @@ func recentPartials(downloadDir string, maxAge time.Duration) map[string]bool {
 	return active
 }
 
-// mirrorCORSOrigins fetches /api/mirrors from the configured primary (+ extra
+// mirrorCORSOrigins fetches /api/v1/mirrors from the configured primary (+ extra
 // mirror candidates + static IPFS fallback) and returns the discovered URLs as
 // Origin strings. Best-effort: any failure logs a warning and returns an empty
 // slice; the static defaultCORSAllowedOrigins in validate.go covers the known
 // mirrors (.com / .to / built-in onion) so the daemon still accepts the
 // official surfaces when this call fails.
 //
-// Bounded to a short timeout so a slow /api/mirrors response can't delay
+// Bounded to a short timeout so a slow mirrors response can't delay
 // daemon startup — every second here is a second the user can't play.
 func mirrorCORSOrigins(parent context.Context, cfg config.Config, userAgent string) []string {
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
@@ -2174,7 +2174,7 @@ func mirrorCORSOrigins(parent context.Context, cfg config.Config, userAgent stri
 		add(resp.Tor.URL)
 	}
 	if len(out) > 0 {
-		log.Printf("[cors] merged %d mirror origins from /api/mirrors", len(out))
+		log.Printf("[cors] merged %d mirror origins from /api/v1/mirrors", len(out))
 	}
 	return out
 }

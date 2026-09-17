@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -298,13 +299,55 @@ type HTTPError struct {
 	// user should read: it knows specifics the client cannot (which plan, how
 	// many machines). Empty for older servers and non-JSON errors.
 	Detail string
+	// FromGateway marks a status the EDGE produced without the app ever seeing
+	// the request — the reverse proxy answering for a backend it has no route to
+	// (its body is a bare "404 page not found", never the API's JSON error). A
+	// rolling deploy leaves that window open for a few seconds, and a 404 read as
+	// the API's own verdict is the wrong lesson from it: the route exists, this
+	// mirror just cannot reach it right now. IsTransient uses this to fail over
+	// instead of failing the call.
+	FromGateway bool
 }
 
 func (e *HTTPError) Error() string {
+	if e.FromGateway {
+		return fmt.Sprintf("HTTP %d from the edge proxy, not the API"+
+			" (no route to a backend — deploy in progress?)", e.StatusCode)
+	}
 	if e.Detail != "" {
 		return fmt.Sprintf("API error %d: %s (%s)", e.StatusCode, e.Detail, e.Message)
 	}
 	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
+}
+
+// gatewayNotFoundBody is what a reverse proxy with no matching router writes:
+// Go's http.NotFound, which is what Traefik (the edge in front of every mirror)
+// serves in that case. The API's own 404s are JSON, so this text can only come
+// from the edge.
+const gatewayNotFoundBody = "404 page not found"
+
+// httpErrorFromBody builds the HTTPError for a failed response: the API's JSON
+// error when that is what arrived, the edge's verdict when the body is the
+// proxy's bare not-found, and a truncated raw body otherwise (an HTML error page
+// says nothing a user can act on, so it is summarized instead).
+func httpErrorFromBody(statusCode int, body []byte) *HTTPError {
+	var errResp ErrorResponse
+	if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+		return &HTTPError{
+			StatusCode: statusCode,
+			Message:    errResp.Error,
+			Detail:     errResp.Message,
+		}
+	}
+
+	msg := strings.TrimSpace(string(body))
+	if statusCode == http.StatusNotFound && msg == gatewayNotFoundBody {
+		return &HTTPError{StatusCode: statusCode, Message: msg, FromGateway: true}
+	}
+	if len(msg) > 120 || strings.Contains(msg, "<html") || strings.Contains(msg, "<!DOCTYPE") {
+		msg = fmt.Sprintf("server returned %d (non-JSON response, likely a server error)", statusCode)
+	}
+	return &HTTPError{StatusCode: statusCode, Message: msg}
 }
 
 // IsRevoked reports whether an error is an EXPLICIT server revocation signal —

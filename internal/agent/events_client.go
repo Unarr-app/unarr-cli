@@ -107,7 +107,7 @@ func (c *Client) OpenEventStream(ctx context.Context) (*EventStream, error) {
 		if r.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<10))
 			r.Body.Close()
-			return &HTTPError{StatusCode: r.StatusCode, Message: strings.TrimSpace(string(body))}
+			return httpErrorFromBody(r.StatusCode, body)
 		}
 		resp = r
 		return nil

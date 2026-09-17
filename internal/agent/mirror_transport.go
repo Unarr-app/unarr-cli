@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 )
@@ -67,7 +69,7 @@ func (m *MirrorRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 				return nil, err
 			}
 			lastErr = err
-		case resp.StatusCode >= 400 && IsTransient(&HTTPError{StatusCode: resp.StatusCode}):
+		case resp.StatusCode >= 400 && IsTransient(classifyStatus(resp)):
 			if last {
 				return resp, nil // surface the real 5xx to the caller
 			}
@@ -85,4 +87,27 @@ func (m *MirrorRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 		lastErr = fmt.Errorf("mirror transport: all mirrors failed")
 	}
 	return nil, lastErr
+}
+
+// classifyStatus turns a failed response into the HTTPError IsTransient judges.
+//
+// The status alone is not enough for a 404: only the edge's own not-found (a
+// router with no backend, mid-deploy) is worth another mirror, and telling it
+// from the API's 404 takes the body. Read here and put back, so a caller that
+// gets this very response still reads it whole; every other status is judged on
+// the code alone and the body is left untouched.
+func classifyStatus(resp *http.Response) *HTTPError {
+	if resp.StatusCode != http.StatusNotFound || resp.Body == nil {
+		return &HTTPError{StatusCode: resp.StatusCode}
+	}
+	// The edge's body is 18 bytes; anything longer is someone else's 404.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if err != nil {
+		return &HTTPError{StatusCode: resp.StatusCode}
+	}
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(body), resp.Body), resp.Body}
+	return httpErrorFromBody(resp.StatusCode, body)
 }

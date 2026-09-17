@@ -127,6 +127,15 @@ func IsTransient(err error) bool {
 			http.StatusRequestTimeout:
 			return true
 		}
+		// A 404 the EDGE produced — its router has no backend for this host, which
+		// is what a rolling deploy looks like from outside — is transport, not a
+		// verdict on the route: another mirror serves it now, and this one will
+		// again in seconds. Field agents logged `sync failed: API error 404: 404
+		// page not found` (Traefik's body, never the API's JSON) and simply lost
+		// that cycle. Only FromGateway qualifies; the API's own 404s stay final.
+		if httpErr.StatusCode == http.StatusNotFound && httpErr.FromGateway {
+			return true
+		}
 		// 4xx (auth, rate limit, validation) won't get healthier on another mirror.
 		return false
 	}
