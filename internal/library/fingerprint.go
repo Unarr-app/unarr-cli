@@ -102,6 +102,50 @@ func FirstOrLastMiBAllZero(path string, size int64) (bool, error) {
 	return isAllZero(tail), nil
 }
 
+// headerProbe is how much of the start of a file HeaderAllZero reads. One page,
+// not the 1 MiB fpChunk the fingerprint uses: every container this scanner can
+// index puts its magic in the first bytes of the file — `RIFF` (AVI) and `ftyp`
+// (MP4) at offset 0, EBML (MKV) at offset 0, and MPEG-TS's 0x47 sync inside the
+// first 188-byte packet. None of them is preceded by 4 KiB of padding, so a
+// larger read buys no accuracy and costs a scan of the whole library: at 1 MiB
+// per file a 10k-file NAS library paid ~10 GB of reads EVERY cycle, because this
+// runs in discoverFiles, ahead of the incremental cache that spares unchanged
+// files their ffprobe and their fingerprint.
+const headerProbe = 4096
+
+// HeaderAllZero reports whether the start of a file is entirely NUL bytes. Head
+// ONLY, deliberately — unlike FirstOrLastMiBAllZero, which judges a
+// supposedly-complete file and so looks at both ends.
+//
+// A video whose header is a hole of zeros carries no container magic, so NO
+// demuxer can open it: not ffmpeg, not VLC, not a browser. That makes it a safe
+// NON-DESTRUCTIVE skip signal for the library scan, where acting on a zeroed
+// TAIL would be wrong — a download still writing sequentially has a zero tail
+// and plays fine from the start.
+//
+// A read error returns (false, err): "can't prove it's a hole" is not a hole.
+func HeaderAllZero(path string, size int64) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	n := int64(headerProbe)
+	if size < n {
+		n = size
+	}
+	if n <= 0 {
+		return false, nil
+	}
+
+	head := make([]byte, n)
+	if _, err := io.ReadFull(f, head); err != nil {
+		return false, err
+	}
+	return isAllZero(head), nil
+}
+
 // isAllZero reports whether every byte in b is NUL. Cheap linear scan; returns
 // false for an empty slice (nothing to judge).
 func isAllZero(b []byte) bool {

@@ -8,26 +8,45 @@ import (
 	"testing"
 )
 
+// videoFixture writes a file of `size` bytes that stands in for a real video:
+// a NON-ZERO first MiB (a plausible container header) backed by real allocated
+// blocks.
+//
+// A plain `make([]byte, size)` no longer works as a fixture, and that is the
+// point: discoverFiles skips zero-content stubs, because a file whose header is
+// all NUL has no container magic and no demuxer can open it (see
+// isZeroContentStub). Every fixture here used to be exactly that shape, so
+// after the gate landed these tests discovered nothing and passed for the
+// wrong reason.
+//
+// The non-zero run covers a whole fpChunk rather than just headerProbe, so the
+// fixture stays valid if the probe window ever grows.
+func videoFixture(t *testing.T, path string, size int) {
+	t.Helper()
+	buf := make([]byte, size)
+	for i := 0; i < fpChunk && i < size; i++ {
+		buf[i] = 0x1A
+	}
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
 func TestDiscoverFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create video files (need to be >= 100MB to pass size check)
-	largeContent := make([]byte, 101*1024*1024)
+	// Video files need to be >= 100MB to pass the size check.
+	const largeSize = 101 * 1024 * 1024
 
 	videoFiles := []string{"movie.mkv", "show.mp4", "clip.avi"}
 	for _, name := range videoFiles {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, largeContent, 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
+		videoFixture(t, filepath.Join(dir, name), largeSize)
 	}
 
 	// Non-video files (should be excluded)
 	nonVideo := []string{"readme.txt", "cover.jpg", "subs.srt"}
 	for _, name := range nonVideo {
-		if err := os.WriteFile(filepath.Join(dir, name), largeContent, 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
+		videoFixture(t, filepath.Join(dir, name), largeSize)
 	}
 
 	// Small video file (should be excluded, < 100MB)
@@ -38,9 +57,7 @@ func TestDiscoverFiles(t *testing.T) {
 	// Excluded pattern (sample)
 	sampleDir := filepath.Join(dir, "sample")
 	os.MkdirAll(sampleDir, 0o755)
-	if err := os.WriteFile(filepath.Join(sampleDir, "sample.mkv"), largeContent, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	videoFixture(t, filepath.Join(sampleDir, "sample.mkv"), largeSize)
 
 	files, err := discoverFiles(dir)
 	if err != nil {
@@ -74,15 +91,14 @@ func TestDiscoverFilesEmptyDir(t *testing.T) {
 
 func TestDiscoverFilesExcludePatterns(t *testing.T) {
 	dir := t.TempDir()
-	largeContent := make([]byte, 101*1024*1024)
 
 	excludeDirs := []string{"trailer", "featurette", "extras", "bonus"}
 	for _, name := range excludeDirs {
 		sub := filepath.Join(dir, name)
 		os.MkdirAll(sub, 0o755)
-		if err := os.WriteFile(filepath.Join(sub, "video.mkv"), largeContent, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		// A REAL video in each excluded dir: with a zero-content stub the test
+		// would pass on the stub gate instead of on the exclude patterns.
+		videoFixture(t, filepath.Join(sub, "video.mkv"), 101*1024*1024)
 	}
 
 	files, err := discoverFiles(dir)
@@ -106,15 +122,10 @@ func TestDiscoverFilesExcludePatterns(t *testing.T) {
 func TestScanCancelledContextFailsInsteadOfFlaggingFiles(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"a.mkv", "b.mkv", "c.mkv", "d.mkv", "e.mkv"} {
-		f, err := os.Create(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		// Sparse file over the 100MB discovery floor — no real bytes written.
-		if err := f.Truncate(minFileSize + 1); err != nil {
-			t.Fatal(err)
-		}
-		f.Close()
+		// Real bytes, not a truncate: a sparse stub over the discovery floor is
+		// now skipped as zero-content, so this test would have gone on passing
+		// while probing nothing at all.
+		videoFixture(t, filepath.Join(dir, name), minFileSize+1)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

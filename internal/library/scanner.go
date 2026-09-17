@@ -341,6 +341,59 @@ func scanSingleFile(ctx context.Context, ffprobePath, ffmpegPath, filePath strin
 	return item
 }
 
+// isZeroContentStub reports whether a video file of acceptable APPARENT size
+// holds no playable bytes, and why. Non-destructive: the caller skips the file,
+// nothing is ever deleted (that is `library clean --apply`'s job, gated behind
+// Cleanup.RemoveCorruptVideos).
+//
+// This closes the hole that let an EMPTY file become a playable-looking library
+// item. A torrent client preallocates every file in a pack at its final size, so
+// a release that never downloaded a byte is a 553 MB apparent / 0 block sparse
+// file. discoverFiles gates on info.Size(), which reports the apparent size, so
+// the stub sailed past the 100 MB floor, got scanned, and was published as a
+// library_item. The web then offered it in the player and handed VLC a URL, and
+// both failed with "Invalid data found when processing input" — a dead-end with
+// nothing pointing at the cause (La Brea S01E01, 2026-09-17).
+//
+// Two signals, both certain rather than heuristic:
+//
+//   - NO REAL BLOCKS. diskUsage(info) counts st_blocks*512, what `du` reports and
+//     what actually frees on delete. Zero real blocks behind a non-zero apparent
+//     size means the whole file is holes. A POSIX-only signal: diskUsage falls
+//     back to the apparent size on Windows, where this check is a silent no-op —
+//     hence the second signal.
+//   - ZEROED HEADER. The first 4 KiB is all NUL, so there is no container magic
+//     and no demuxer can open the file. Catches the non-sparse variant (a
+//     preallocation the filesystem materialised as real zero blocks, common on
+//     the NFS/SMB NAS mounts agents use) and covers Windows.
+//
+// Order matters for COST, not just for correctness. The block check is free — it
+// reads the stat discoverFiles already performed — so it is tried first, and the
+// only files that pay for a read are those that survive it. The read itself is
+// one page (see headerProbe): this runs in discoverFiles, upstream of the
+// incremental cache, so it is charged to EVERY file on EVERY cycle, unlike
+// ComputeFingerprint's 1 MiB head, which unchanged files skip.
+//
+// Deliberately NOT a completeness check. A download at 86 % with a real header
+// still plays from the start and stays indexed exactly as before; there is no
+// percentage threshold here to tune.
+func isZeroContentStub(path string, info os.FileInfo) (bool, string) {
+	if diskUsage(info) == 0 {
+		return true, "sparse stub, 0 bytes on disk (download never started)"
+	}
+
+	zero, err := HeaderAllZero(path, info.Size())
+	if err != nil {
+		// Unreadable is not the same as empty — an EACCES or a torn NFS handle
+		// must not silently drop a real file out of the user's library.
+		return false, ""
+	}
+	if zero {
+		return true, "header is all zeros (no container magic)"
+	}
+	return false, ""
+}
+
 // discoverFiles walks a directory and returns paths of video files.
 func discoverFiles(root string) ([]string, error) {
 	var files []string
@@ -365,6 +418,15 @@ func discoverFiles(root string) ([]string, error) {
 			return nil
 		}
 		if info.Size() < minFileSize {
+			return nil
+		}
+
+		// A file of the right APPARENT size that holds no playable bytes is not
+		// a library item. See isZeroContentStub — this gate exists because the
+		// size floor above reads info.Size(), which for a sparse preallocated
+		// download reports the full release size while the file is a hole.
+		if stub, why := isZeroContentStub(path, info); stub {
+			log.Printf("[scan] skipping %s: %s", filepath.Base(path), why)
 			return nil
 		}
 
