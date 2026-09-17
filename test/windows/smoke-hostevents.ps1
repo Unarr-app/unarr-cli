@@ -61,6 +61,24 @@ foreach ($q in $queries) {
     }
 }
 
+# Parsing is not finding. A machine that has booted has 6006/6008/1074 events
+# somewhere in its history, so widen the window until the query has something to
+# match: that is what proves the predicate selects, and not merely that wevtutil
+# accepted it. Recorded, not asserted - a VM installed minutes ago legitimately
+# has none, and this file must not fail for being run on a fresh one.
+$wide = (Get-Date).ToUniversalTime().AddDays(-3650).ToString("yyyy-MM-ddTHH:mm:ss.000Z")
+$wideXPath = "*[System[(EventID=1074 or EventID=6006 or EventID=6008 or (EventID=41 and Provider[@Name='Microsoft-Windows-Kernel-Power'])) and TimeCreated[@SystemTime>='$wide']]]"
+$wideOut = & wevtutil qe System "/q:$wideXPath" /f:text /rd:true /c:20 2>&1
+Check ($LASTEXITCODE -eq 0) "the wide host-down query parsed (exit $LASTEXITCODE)"
+$wideEvents = @($wideOut | Where-Object { $_ -match '^Event\[' })
+Say "    host-down events in all of history: $($wideEvents.Count)"
+if ($wideEvents.Count -gt 0) {
+    $ids = @($wideOut | Where-Object { $_ -match '^\s*Event ID:' } | Select-Object -First 5)
+    Say "    first ids: $(($ids -replace '\s+',' ') -join ' ')"
+} else {
+    Say "    [NOTE] none at all - expected on a VM that has never been shut down"
+}
+
 # The tray's own rendering of the same thing, end to end: `unarr-desktop` is not
 # scriptable, so this just confirms the binary that ships carries the section.
 $exe = 'C:\unarr\unarr-desktop.exe'
