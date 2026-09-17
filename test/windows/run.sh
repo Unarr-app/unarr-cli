@@ -24,9 +24,12 @@ echo "==> Building Windows binaries (amd64)…"
     -o "test/windows/shared/unarr-desktop.exe" ./cmd/unarr-desktop )
 echo "    unarr.exe + unarr-desktop.exe (-H=windowsgui) → $SHARED/"
 
-# Drop the manual checklist + smoke script where the guest can reach them.
+# Drop the manual checklist + smoke scripts where the guest can reach them.
 cp checklist.md "$SHARED/CHECKLIST.md"
 cp smoke.ps1    "$SHARED/smoke.ps1"
+# The rest are run on demand from the guest (see the header of each). Copied
+# here so a VM that is already up gets them without another deploy step.
+cp smoke-hostevents.ps1 "$SHARED/smoke-hostevents.ps1"
 
 echo "==> Booting Windows VM (first boot installs Windows unattended, ~10-20 min)…"
 docker compose up -d
