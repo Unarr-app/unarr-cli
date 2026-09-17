@@ -976,6 +976,15 @@ func (d *TorrentDownloader) GetStreamProvider(taskID string) (FileProvider, erro
 		return nil, fmt.Errorf("no active torrent for task %s", agent.ShortID(taskID))
 	}
 
+	// A task is registered in d.active the moment the magnet is added, before
+	// metadata arrives — and the web's stream flag is re-sent on every sync, so
+	// it lands inside that window routinely. Files() dereferences t.files, which
+	// is nil until GotInfo, so it panics there. The error is recoverable: the
+	// next re-send, once metadata is in, starts the stream.
+	if t.Info() == nil {
+		return nil, fmt.Errorf("torrent %s has no metadata yet", agent.ShortID(taskID))
+	}
+
 	// Select largest video file
 	files := t.Files()
 	var video *torrent.File
