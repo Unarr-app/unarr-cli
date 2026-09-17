@@ -47,7 +47,7 @@ var defaultCORSAllowedOrigins = []string{
 	// Tor mirror — Tor Browser sends `Origin: http://<addr>.onion` (plain
 	// http, no port). Mirror address is the BUILT_IN_ONION constant from
 	// torrentclaw-web/src/lib/mirrors-config.ts; rotates rarely, kept in
-	// sync by hand. Daemon also dynamically merges /api/mirrors at startup
+	// sync by hand. Daemon also dynamically merges /api/v1/mirrors at startup
 	// (see daemon.go) so a new key doesn't need a CLI rebuild.
 	"http://torrentf3aifidcsaaanmnmuhv2s53r6hqsl3zkmfidiaxainkeqk5id.onion",
 	// Google Cast Default Media Receiver. When a <castable-video> casts an HLS

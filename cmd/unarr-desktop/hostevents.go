@@ -20,6 +20,37 @@ import "strings"
 // context is never trimmed, so this budget comes straight out of the log tail.
 const hostEventsMaxBytes = 4096
 
+// The three event-log queries a report makes, as wevtutil XPath. They live here,
+// outside the windows build tag, so their shape is tested on every platform —
+// a typo in one of them degrades silently into "unavailable" in the one place
+// nobody can reproduce. stamp is an event-log UTC timestamp
+// (2006-01-02T15:04:05.000Z).
+//
+// crashEventsXPath: Application Error (1000), WER (1001), Application Hang
+// (1002) — the daemon dying of an access violation or being reported by WER.
+func crashEventsXPath(stamp string) string {
+	return "*[System[(EventID=1000 or EventID=1001 or EventID=1002) and " +
+		"TimeCreated[@SystemTime>='" + stamp + "']]]"
+}
+
+// lowMemoryXPath: the Resource-Exhaustion-Detector's warnings, which name the
+// top memory consumers themselves.
+func lowMemoryXPath(stamp string) string {
+	return "*[System[Provider[@Name='Microsoft-Windows-Resource-Exhaustion-Detector'] and " +
+		"TimeCreated[@SystemTime>='" + stamp + "']]]"
+}
+
+// hostDownXPath: the machine going down under the daemon. 1074 names the process
+// that requested the shutdown, 6006 is the event log closing on a clean one,
+// 6008 is the previous shutdown having been unexpected, and Kernel-Power 41 is
+// the box losing power or hanging. A death with none of these and no crash event
+// happened while the host stayed up — it was killed.
+func hostDownXPath(stamp string) string {
+	return "*[System[(EventID=1074 or EventID=6006 or EventID=6008 or " +
+		"(EventID=41 and Provider[@Name='Microsoft-Windows-Kernel-Power'])) and " +
+		"TimeCreated[@SystemTime>='" + stamp + "']]]"
+}
+
 // keepEvents splits `wevtutil qe /f:text` output into events and keeps, in the
 // order given (newest first with /rd:true), those that mention needle — any
 // case; every event when needle is empty — until maxBytes is spent. An event

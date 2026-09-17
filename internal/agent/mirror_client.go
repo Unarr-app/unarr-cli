@@ -23,8 +23,10 @@ type MirrorChannel struct {
 	Label string `json:"label"`
 }
 
-// MirrorsResponse is the JSON document served by /api/v1/mirrors and
-// /api/mirrors.
+// MirrorsResponse is the JSON document served by /api/v1/mirrors — the only
+// route the CLI may use. The same document is also at /api/mirrors, but that
+// path is NOT on unarr's brand allow-list and 404s there, so asking for it
+// reads as an outage that isn't one.
 type MirrorsResponse struct {
 	Revision  int             `json:"revision"`
 	Mirrors   []MirrorEntry   `json:"mirrors"`

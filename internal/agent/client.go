@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 )
@@ -342,7 +341,7 @@ func (c *Client) DownloadNzb(ctx context.Context, nzbID string) ([]byte, error) 
 
 		if resp.StatusCode >= 400 {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-			return &HTTPError{StatusCode: resp.StatusCode, Message: string(body)}
+			return httpErrorFromBody(resp.StatusCode, body)
 		}
 
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 100<<20)) // 100MB limit
@@ -456,7 +455,7 @@ func (c *Client) WaitForWake(ctx context.Context) (bool, error) {
 
 		if resp.StatusCode >= 400 {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
-			return &HTTPError{StatusCode: resp.StatusCode, Message: string(body)}
+			return httpErrorFromBody(resp.StatusCode, body)
 		}
 
 		var result struct {
@@ -591,21 +590,7 @@ func (c *Client) handleResponse(resp *http.Response, dst any) error {
 	}
 
 	if resp.StatusCode >= 400 {
-		// Try to parse as JSON error
-		var errResp ErrorResponse
-		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return &HTTPError{
-				StatusCode: resp.StatusCode,
-				Message:    errResp.Error,
-				Detail:     errResp.Message,
-			}
-		}
-		// Non-JSON response (e.g. HTML error page) — truncate to something readable
-		msg := string(body)
-		if len(msg) > 120 || strings.Contains(msg, "<html") || strings.Contains(msg, "<!DOCTYPE") {
-			msg = fmt.Sprintf("server returned %s (non-JSON response, likely a server error)", resp.Status)
-		}
-		return &HTTPError{StatusCode: resp.StatusCode, Message: msg}
+		return httpErrorFromBody(resp.StatusCode, body)
 	}
 
 	if dst != nil {

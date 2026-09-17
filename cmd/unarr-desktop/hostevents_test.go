@@ -55,3 +55,34 @@ func TestKeepEventsRespectsTheBudget(t *testing.T) {
 		t.Errorf("events use %d bytes, budget 120", total)
 	}
 }
+
+// The queries themselves: a typo degrades into "unavailable" on a machine nobody
+// can reproduce, so their shape is asserted here, on every platform.
+func TestEventQueriesCarryTheirIDsAndWindow(t *testing.T) {
+	const stamp = "2026-09-16T04:52:28.000Z"
+	for _, tc := range []struct {
+		name  string
+		xpath string
+		ids   []string
+	}{
+		{"crash", crashEventsXPath(stamp), []string{"EventID=1000", "EventID=1001", "EventID=1002"}},
+		{"low memory", lowMemoryXPath(stamp), []string{"Microsoft-Windows-Resource-Exhaustion-Detector"}},
+		{"host down", hostDownXPath(stamp), []string{
+			"EventID=1074", "EventID=6006", "EventID=6008",
+			"EventID=41", "Microsoft-Windows-Kernel-Power",
+		}},
+	} {
+		if !strings.Contains(tc.xpath, "TimeCreated[@SystemTime>='"+stamp+"']") {
+			t.Errorf("%s query does not bound the time window: %s", tc.name, tc.xpath)
+		}
+		if strings.Count(tc.xpath, "[") != strings.Count(tc.xpath, "]") ||
+			strings.Count(tc.xpath, "(") != strings.Count(tc.xpath, ")") {
+			t.Errorf("%s query is unbalanced: %s", tc.name, tc.xpath)
+		}
+		for _, id := range tc.ids {
+			if !strings.Contains(tc.xpath, id) {
+				t.Errorf("%s query does not ask for %s: %s", tc.name, id, tc.xpath)
+			}
+		}
+	}
+}
