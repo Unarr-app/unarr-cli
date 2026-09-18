@@ -30,7 +30,7 @@ func newReportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "report", Aliases: []string{"reports"}, GroupID: "system",
 		Short: "Preview and optionally send a private technical report",
-		Long:  "Prepare technical events locally, review the exact JSON, then separately consent to upload. Only the agent UUID identifies the installation. Unrecognized log text is omitted. No account, IP, paths, credentials or raw logs are attached.",
+		Long:  "Prepare technical events locally, review the exact JSON, then separately consent to upload. Only the agent UUID identifies the installation inside the report. Unrecognized log text is omitted. No account, IP, paths, credentials or raw logs are attached.",
 		Args:  cobra.NoArgs,
 		// The inherited pre-run initializes the authenticated client and Sentry.
 		PersistentPreRun: func(_ *cobra.Command, _ []string) {},
@@ -94,7 +94,7 @@ func runReport(ctx context.Context, in io.Reader, out io.Writer, actions reportA
 	case "save":
 		return keepPrivateReport(out, actions.save, payload)
 	case "send":
-		fmt.Fprintln(out, "Send exactly this report to Unarr support? The agent UUID can be linked to your installation. The connection necessarily reveals a source IP to the receiver; this dedicated endpoint is enabled only after IP logging has been disabled. [yes/N]")
+		fmt.Fprintln(out, "Send exactly this report to Unarr support? The agent UUID can be linked to your installation. The network connection reveals your source IP to the services carrying it, but the IP is not included in the report. [yes/N]")
 		if reportAnswer(r) != "yes" {
 			return nil
 		}
