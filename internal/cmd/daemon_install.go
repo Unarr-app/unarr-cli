@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -63,19 +64,24 @@ const launchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
   <string>com.torrentclaw.unarr</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{{.BinPath}}</string>
+    <string>{{.BinPath | html}}</string>
     <string>start</string>
     <string>--log-file</string>
-    <string>{{.LogDir}}/unarr.log</string>
+    <string>{{.LogDir | html}}/unarr.log</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>LimitLoadToSessionType</key>
+  <array>
+    <string>Aqua</string>
+    <string>Background</string>
+  </array>
   <key>StandardOutPath</key>
-  <string>{{.LogDir}}/unarr.boot.log</string>
+  <string>{{.LogDir | html}}/unarr.boot.log</string>
   <key>StandardErrorPath</key>
-  <string>{{.LogDir}}/unarr.boot.log</string>
+  <string>{{.LogDir | html}}/unarr.boot.log</string>
 </dict>
 </plist>
 `
@@ -347,58 +353,63 @@ func installSystemd(data serviceData, green *color.Color) error {
 }
 
 func installLaunchd(data serviceData, green *color.Color) error {
-	os.MkdirAll(data.LogDir, 0o755)
+	a, err := newLaunchdAgent(data.Home)
+	if err != nil {
+		return err
+	}
+	return installLaunchdWithAgent(data, green, a)
+}
+
+func installLaunchdWithAgent(data serviceData, green *color.Color, a *launchdAgent) error {
+	if err := os.MkdirAll(data.LogDir, 0o755); err != nil {
+		return fmt.Errorf("create launchd log directory: %w", err)
+	}
+	a.label, a.path = service.LaunchdLabel, service.PlistPath(data.Home)
+	if err := a.findDomain(); err != nil {
+		return err
+	}
+	// Validate access before changing a working definition or stopping its job.
+	if _, err := legacyPlistLabel(service.LegacyPlistPath(data.Home)); err != nil && !errors.Is(err, errUnknownLegacyPlist) {
+		return err
+	}
+	// Render atomically before stopping anything: an unwritable directory or
+	// a failed render must not tear down a working installation.
+	path := a.path
+	previous, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	existed := err == nil
+	if err := writeServiceFile(path, launchdTemplate, data); err != nil {
+		return err
+	}
+	if err := a.stop(); err != nil {
+		return err
+	}
+	if err := removeLegacyLaunchd(a, data.Home); err != nil {
+		return err
+	}
 	// launchd opens StandardOutPath itself and holds it for the life of the
 	// agent, so an oversized boot log has to be trimmed here, before `launchctl
-	// load` below. From then on the daemon's own janitor keeps it bounded. The
+	// bootstrap` below. From then on the daemon's own janitor keeps it bounded. The
 	// main log is trimmed too: an install that predates --log-file may have left
 	// one over budget, and this is the same free gap for it.
 	rotateDaemonLogIn(data.LogDir)
 	rotateBootLogIn(data.LogDir)
 
-	path := service.PlistPath(data.Home)
-	if err := writeServiceFile(path, launchdTemplate, data); err != nil {
-		return err
-	}
-
-	// Same reasoning as the systemd unit: service.Respawns() treats this plist's
-	// existence as "a supervisor owns the daemon", so a plist that outlives a
-	// failed install makes `unarr stop` unload an agent that was never loaded.
-	installed := false
-	defer func() {
-		if !installed {
-			os.Remove(path)
-		}
-	}()
-
 	fmt.Printf("  Created: %s\n", path)
-
-	// Same reasoning as systemd: a discarded launchctl error printed a green
-	// check over a plist nothing had loaded.
-	if _, err := exec.LookPath("launchctl"); err != nil {
-		return fmt.Errorf("launchd is not available here (launchctl not found).\n%s", noServiceManagerHelp)
+	if err := a.start(); err != nil {
+		// A registered job needs its definition for Stop/Resume, but a rejected
+		// bootstrap must not create a phantom supervisor for a manual daemon.
+		return errors.Join(err, rollbackLaunchdDefinition(a, previous, existed))
 	}
-	// `launchctl load` exits non-zero when the label is already bootstrapped, so
-	// on a healthy machine a re-install would hard-fail. Unload first; its error
-	// when nothing is loaded (the normal first install) is expected, not a
-	// problem, so it is deliberately discarded.
-	_, _ = svcOutput("launchctl", "unload", path)
-	if out, err := svcOutput("launchctl", "load", path); err != nil {
-		return fmt.Errorf("launchctl load failed: %w\n  %s\n%s", err, out, noServiceManagerHelp)
-	}
-	if out, err := svcOutput("launchctl", "list", service.LaunchdLabel); err != nil {
-		return fmt.Errorf("the unarr agent did not load (launchctl list: %s).\n  Check: %s\n%s",
-			firstLine(out, err), filepath.Join(data.LogDir, logFileName), noServiceManagerHelp)
-	}
-
-	installed = true
 
 	fmt.Println()
 	green.Println("  ✓ Installed and loaded!")
 	fmt.Println()
 	fmt.Println("  Manage with:")
-	fmt.Println("    launchctl list | grep unarr")
-	fmt.Println("    launchctl unload " + path)
+	fmt.Println("    unarr daemon status")
+	fmt.Println("    unarr daemon stop")
 	fmt.Println("    unarr logs -f              (" + filepath.Join(data.LogDir, logFileName) + ")")
 	fmt.Println("    unarr logs --boot          (" + filepath.Join(data.LogDir, bootLogFileName) + ", startup + crashes)")
 	fmt.Println()
@@ -433,10 +444,19 @@ func runDaemonUninstall() error {
 
 	case "darwin":
 		path := service.PlistPath(home)
-		unloadCmd := exec.Command("launchctl", "unload", path)
-		winproc.HideWindow(unloadCmd)
-		unloadCmd.Run()
-		os.Remove(path)
+		a, err := newLaunchdAgent(home)
+		if err != nil {
+			return err
+		}
+		if err := stopLaunchdServices(a, home); err != nil {
+			return err
+		}
+		if err := removeLegacyLaunchd(a, home); err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 		green.Printf("  ✓ Removed %s\n", path)
 
 	case "windows":

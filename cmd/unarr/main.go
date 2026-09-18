@@ -17,9 +17,11 @@ func main() {
 		os.Exit(engine.BoltCheckMain(path))
 	}
 
-	sentry.Init(cmd.Version)
-	defer sentry.Close()
-	defer sentry.RecoverPanic()
+	if !cmd.PrivateReportRequested(os.Args[1:]) {
+		sentry.Init(cmd.Version)
+		defer sentry.Close()
+		defer sentry.RecoverPanic()
+	}
 
 	cmd.Execute()
 }

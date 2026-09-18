@@ -218,6 +218,7 @@ recovery path, and how these interact with the website.
 |---------|-------------|
 | `unarr stats` | Show catalog statistics |
 | `unarr doctor` | Diagnose configuration and connectivity |
+| `unarr report` | Prepare and review private technical events; save locally or separately consent to upload (alias: `unarr reports`). See [privacy and delivery availability](REPORTS.md). |
 | `unarr mirrors` | Manage mirror failover list (list / update / test) |
 | `unarr logs` | Read the daemon log — `-f`, `--since`, `--level`, `--grep`, `-n` (alias: `unarr daemon logs`) |
 | `unarr clean` | Remove temporary files, logs, and cached data |
