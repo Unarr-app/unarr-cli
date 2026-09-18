@@ -37,3 +37,21 @@ func TestRespawnsDetectsAnInstalledSupervisor(t *testing.T) {
 		t.Fatalf("service installed at %s, want true", path)
 	}
 }
+
+func TestRespawnsDetectsLegacyLaunchdAgent(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS only")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := LegacyPlistPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("plist"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !Respawns() {
+		t.Fatal("legacy service must use launchd for Pause/Resume")
+	}
+}

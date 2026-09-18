@@ -22,6 +22,9 @@ const SystemdUnitName = "unarr"
 // LaunchdLabel is the launchd agent label.
 const LaunchdLabel = "com.torrentclaw.unarr"
 
+// LegacyLaunchdLabel is also found in existing macOS daemon installations.
+const LegacyLaunchdLabel = "app.unarr.daemon"
+
 // UnitPath is the systemd user unit `unarr daemon install` writes.
 // Empty when the home directory cannot be resolved.
 func UnitPath() string {
@@ -41,6 +44,10 @@ func SystemdUnitPathIn(home string) string {
 // PlistPath is the launchd user agent `unarr daemon install` writes.
 func PlistPath(home string) string {
 	return filepath.Join(home, "Library", "LaunchAgents", LaunchdLabel+".plist")
+}
+
+func LegacyPlistPath(home string) string {
+	return filepath.Join(home, "Library", "LaunchAgents", LegacyLaunchdLabel+".plist")
 }
 
 // Respawns reports whether an installed supervisor would restart the daemon
@@ -69,6 +76,9 @@ func Respawns() bool {
 			return false
 		}
 		path = PlistPath(home)
+		if _, err := os.Stat(LegacyPlistPath(home)); err == nil {
+			return true
+		}
 	default:
 		return false
 	}

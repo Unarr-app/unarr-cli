@@ -25,7 +25,7 @@ func newDaemonStartCmd() *cobra.Command {
 Requires 'unarr daemon install' to have been run first, except on Windows.
 
   Linux:   systemctl --user start unarr
-  macOS:   launchctl load ~/Library/LaunchAgents/com.torrentclaw.unarr.plist
+  macOS:   enable and bootstrap/kickstart the launchd user agent
   Windows: schtasks /run /tn unarr, or - with no task installed - a detached
            daemon that still writes unarr.log and unarr.boot.log`,
 		Example: `  unarr daemon start`,
@@ -42,7 +42,7 @@ func newDaemonStopCmd() *cobra.Command {
 		Long: `Stop the unarr daemon service.
 
   Linux:   systemctl --user stop unarr
-  macOS:   launchctl unload ~/Library/LaunchAgents/com.torrentclaw.unarr.plist
+  macOS:   bootout the launchd user agent and wait for it to stop
   Windows: sends stop signal via process PID`,
 		Example: `  unarr daemon stop`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -58,7 +58,7 @@ func newDaemonRestartCmd() *cobra.Command {
 		Long: `Restart the unarr daemon service.
 
   Linux:   systemctl --user restart unarr
-  macOS:   unload + reload launchd agent
+  macOS:   bootout + bootstrap the launchd user agent
   Windows: stop by PID + schtasks /run`,
 		Example: `  unarr daemon restart`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -154,12 +154,17 @@ func runDaemonSvcStart() error {
 		}
 	case "darwin":
 		home, _ := os.UserHomeDir()
-		plist := launchdPlistPath(home)
-		if _, err := os.Stat(plist); err != nil {
-			return fmt.Errorf("service not installed — run 'unarr daemon install' first")
+		a, err := newLaunchdAgent(home)
+		if err != nil {
+			return err
 		}
-		if err := svcExec("launchctl", "load", plist); err != nil {
-			return fmt.Errorf("load service: %w", err)
+		if a.path == service.PlistPath(home) {
+			if err := removeLegacyLaunchd(a, home); err != nil {
+				return err
+			}
+		}
+		if err := a.start(); err != nil {
+			return err
 		}
 	case "windows":
 		started, err := startWindowsDaemon()
@@ -234,9 +239,12 @@ func runDaemonSvcStop() error {
 		}
 	case "darwin":
 		home, _ := os.UserHomeDir()
-		plist := launchdPlistPath(home)
-		if err := svcExec("launchctl", "unload", plist); err != nil {
-			return fmt.Errorf("unload service: %w", err)
+		a, err := newLaunchdAgent(home)
+		if err != nil {
+			return err
+		}
+		if err := stopLaunchdServices(a, home); err != nil {
+			return err
 		}
 	default:
 		return stopDaemonByPID()
@@ -257,6 +265,11 @@ func runDaemonSvcRestart() error {
 		color.New(color.FgGreen).Println("  ✓ Restarted")
 		fmt.Println()
 		return nil
+	case "darwin":
+		if err := runDaemonSvcStop(); err != nil {
+			return err
+		}
+		return runDaemonSvcStart()
 	default:
 		fmt.Println("  Stopping...")
 		_ = runDaemonSvcStop()
@@ -289,27 +302,32 @@ func runDaemonReload() error {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-func launchdPlistPath(home string) string { return service.PlistPath(home) }
-
-// printDaemonStatusDarwin shows launchd service state by filtering launchctl output.
+// Query the same explicit service target used by Start/Stop, including over SSH.
 func printDaemonStatusDarwin() {
-	cmd := exec.Command("launchctl", "list")
-	winproc.HideWindow(cmd)
-	out, err := cmd.Output()
+	home, _ := os.UserHomeDir()
+	a, err := newLaunchdAgent(home)
 	if err != nil {
 		fmt.Printf("  Could not query launchctl: %v\n", err)
 		return
 	}
-	found := false
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "unarr") {
-			// Format: PID  ExitCode  Label
-			fmt.Printf("  launchd: %s\n", strings.TrimSpace(line))
-			found = true
-		}
+	out, loaded, err := a.status()
+	if err != nil {
+		fmt.Printf("  Could not query launchctl: %v\n", err)
+		return
 	}
-	if !found {
+	if !loaded {
 		fmt.Println("  launchd: service not loaded")
+		return
+	}
+	fmt.Printf("  launchd: %s\n", a.target())
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "\t\t") {
+			continue // nested resource states are not the daemon's state
+		}
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "state = ") || strings.HasPrefix(line, "pid = ") || strings.HasPrefix(line, "last exit code = ") {
+			fmt.Printf("    %s\n", line)
+		}
 	}
 }
 
