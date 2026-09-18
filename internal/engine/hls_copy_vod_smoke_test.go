@@ -134,8 +134,7 @@ func TestCopyVODHTTPServe(t *testing.T) {
 		t.Fatalf("probe: %v", err)
 	}
 
-	tmpDir := filepath.Join(os.TempDir(), "vodhttp", "session")
-	_ = os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpDir, "video"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +150,7 @@ func TestCopyVODHTTPServe(t *testing.T) {
 	if !startCopyVOD(ctx, s) {
 		t.Fatalf("startCopyVOD false (codec %q)", probe.VideoCodec)
 	}
+	defer s.Close()
 
 	ss := NewStreamServer(0, 1)
 	ss.SetRequireStreamToken(false) // drop the token segment for a simpler test URL

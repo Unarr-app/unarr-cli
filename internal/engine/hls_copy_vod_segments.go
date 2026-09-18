@@ -1,15 +1,4 @@
-// Package engine — hls_copy_vod_segments.go: MPEG-TS segment generation for the
-// COPY-VOD model (the model itself lives in hls_copy_vod.go). Two producers:
-//
-//   - PASS (local, preferred): buildCopyVODPassArgs — ONE `-f segment` ffmpeg
-//     reads the file linearly (no seek) and cuts at the exact keyframe boundaries.
-//     Correct on any container/fps because it never seeks; ensureCopySegment waits
-//     on readyMax like encode mode.
-//   - LAZY (remote/uniform, or local without disk headroom): buildCopyVODSegmentArgs
-//     — one `-ss start -to end -c:v copy` spawn per requested segment, single-
-//     flighted per index, written to a .tmp then atomically renamed. On VBR/scene-
-//     cut sources the input `-ss` lands on the keyframe BEFORE the boundary (→ GOP
-//     overlap / echo); the PASS exists precisely to avoid that for local files.
+// Package engine — exact, on-demand MPEG-TS segment generation.
 package engine
 
 import (
@@ -17,12 +6,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/winproc"
@@ -61,35 +50,48 @@ func copyVODAudioArgs(cfg HLSSessionConfig, probe *StreamProbe) []string {
 }
 
 // buildCopyVODSegmentArgs builds the ffmpeg invocation that produces ONE
-// COPY-VOD MPEG-TS fragment for [start,end) into outPath. Correctness rests on:
-//
-//   - `-copyts`: keep the source's absolute timestamps so the segment's PTS
-//     equals its real position. MPEG-TS carries them directly, so the player
-//     places the segment correctly relative to its neighbours (no init needed).
-//   - `-ss start` BEFORE `-i`: keyframe-accurate input seek. start is a real
-//     keyframe time, so ffmpeg lands exactly on it (no preceding-GOP slop).
-//   - `-to end`: an output limit against the copyts timestamps — stop at the
-//     next boundary keyframe.
-//
-// Verified empirically (Wistoria S02E09, H.264+AAC): seg-N PTS = [start..end)
-// with no gaps/overlap; hls.js shows the full duration + seeks anywhere.
+// COPY-VOD MPEG-TS fragment for [start,end). Input seeking is only an I/O
+// optimisation: with stream copy FFmpeg may return a PREVIOUS GOP even when
+// start is a keyframe. The bitstream filter explicitly owns whole GOPs by their
+// keyframe PTS. Filtering individual picture PTS would lose reordered B-frames.
+// Audio owns packets on [start,end), independently of video decode order.
 func buildCopyVODSegmentArgs(cfg HLSSessionConfig, probe *StreamProbe, outPath string, start, end float64) []string {
+	// Read enough preroll for audio decoder/resampler/encoder warmup. Absolute
+	// seek timestamps prevent FFmpeg adding the container start_time a second time.
+	seek := math.Max(0, start-1)
 	args := []string{
 		"-y", "-nostdin", "-hide_banner", "-loglevel", "error",
 		"-copyts",
-		"-ss", strconv.FormatFloat(start, 'f', 6, 64),
+		"-seek_timestamp", "1",
+		"-ss", strconv.FormatFloat(seek, 'f', 6, 64),
 		"-i", cfg.sourceRef(),
-		"-to", strconv.FormatFloat(end, 'f', 6, 64),
+		// Let reordered packets reach the filter; membership is NOT set by -to.
+		"-to", strconv.FormatFloat(end+2, 'f', 6, 64),
 		"-map", "0:v:0",
 	}
-	args = append(args, copyVODAudioArgs(cfg, probe)...)
+	audio := copyVODAudioArgs(cfg, probe)
+	args = append(args, audio...)
+	if audio[len(audio)-1] != "copy" {
+		// All AAC encoders start on the SAME 1024-sample lattice. Otherwise each
+		// seek resets priming/rounding and adjacent segments overlap or drift.
+		// Warm up before the cut; discard priming packets via bsf:a below.
+		grid := int64(math.Floor(math.Max(0, start-0.25)*48000/1024)) * 1024
+		args = append(args, "-af", fmt.Sprintf("aresample=48000:async=1:first_pts=%d", grid))
+	}
 	// -bsf:v h264_mp4toannexb: H.264 in MP4/MKV is stored length-prefixed (avcC)
 	// with SPS/PPS only in the container header. MPEG-TS needs in-band Annex-B
 	// with SPS/PPS repeated per segment, else the segment is undecodable (mp4
 	// sources produced 0-frame TS without this). No-op passthrough on a stream
 	// already Annex-B, so it is applied unconditionally.
-	args = append(args, "-c:v", "copy", "-bsf:v", "h264_mp4toannexb")
+	videoDrop := fmt.Sprintf("h264_mp4toannexb,noise=amount=0:drop='if(key,st(0,gte(pts*tb,%.9f)*lt(pts*tb,%.9f)));not(ld(0))'", start-0.000001, end-0.000001)
+	// Older FFmpeg versions put buffering-period SEI before the repeated SPS.
+	// Prepend the converted Annex-B extradata to each retained key packet so
+	// a fresh decoder has its SPS/PPS before parsing those SEI messages too.
+	videoDrop += ",dump_extra=freq=keyframe"
+	audioDrop := fmt.Sprintf("noise=amount=0:drop='lt(pts*tb,%.9f)+gte(pts*tb,%.9f)'", start-0.000001, end-0.000001)
+	args = append(args, "-c:v", "copy", "-bsf:v", videoDrop, "-bsf:a", audioDrop)
 	args = append(args,
+		"-avoid_negative_ts", "disabled", "-mpegts_copyts", "1",
 		"-muxdelay", "0", "-muxpreload", "0",
 		"-f", "mpegts",
 		outPath,
@@ -97,72 +99,54 @@ func buildCopyVODSegmentArgs(cfg HLSSessionConfig, probe *StreamProbe, outPath s
 	return args
 }
 
-// buildCopyVODPassArgs builds the SINGLE ffmpeg invocation that produces EVERY
-// COPY-VOD segment in one linear read (LOCAL sources). It replaces the per-index
-// `-ss` spawns, whose input-seek lands on the keyframe BEFORE the boundary on
-// VBR/scene-cut sources → each segment re-emits ~1 GOP → the player echoes.
-//
-// The segment muxer instead reads sequentially (no seek) and cuts at the exact
-// keyframe boundaries in `starts`, so segments are contiguous with zero overlap
-// (measured: total frames == source, 0 dup, across mkv/mp4 @ 23.976–29.97fps).
-//   - `-segment_times`: the interior boundaries (starts[1 : len-1]); starts[0]==0
-//     and the final element (duration) are implicit.
-//   - `mpegts_copyts=1`: keep absolute source PTS (no +1.4s TS base offset), so
-//     the manifest EXTINF positions line up with each segment's real PTS.
-//   - `-bsf:v h264_mp4toannexb`: same in-band SPS/PPS requirement as above.
-//   - `-reset_timestamps 0`: absolute PTS across segments (seek-anywhere).
-func buildCopyVODPassArgs(cfg HLSSessionConfig, probe *StreamProbe, starts []float64, tmpDir string) []string {
-	args := []string{
-		"-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-		"-i", cfg.sourceRef(),
-		"-map", "0:v:0",
-	}
-	args = append(args, copyVODAudioArgs(cfg, probe)...)
-	args = append(args, "-c:v", "copy", "-bsf:v", "h264_mp4toannexb",
-		"-muxpreload", "0", "-muxdelay", "0",
-		"-f", "segment",
-		"-reset_timestamps", "0",
-		"-segment_format", "mpegts",
-		"-segment_format_options", "mpegts_copyts=1",
-	)
-	// Interior boundaries only. With a single segment (starts=[0,dur]) there are
-	// none — omit -segment_times so the muxer emits one segment for the whole file.
-	if len(starts) > 2 {
-		times := make([]string, 0, len(starts)-2)
-		for i := 1; i < len(starts)-1; i++ {
-			times = append(times, strconv.FormatFloat(starts[i], 'f', 6, 64))
-		}
-		args = append(args, "-segment_times", strings.Join(times, ","))
-	}
-	args = append(args, filepath.Join(tmpDir, "video", "seg-%d"+copyVODSegExt))
-	return args
-}
-
-// ensureCopySegment makes seg-idx.ts available before it is served.
-//
-// PASS mode (local, copyLazy=false): a single background segment-muxer pass owns
-// generation. Wait on readyMax — advanced by pollSegments only once the SUCCESSOR
-// file exists, proving seg-idx is fully closed. No per-index stat fast-path here:
-// the segment muxer writes each file in place (no .tmp+rename), so a Size>0 stat
-// could read the segment the muxer is writing RIGHT NOW.
-//
-// LAZY mode (remote/uniform, or local without disk headroom): generate on demand
-// via a per-index `-ss` spawn, single-flighted so concurrent fetches don't spawn
-// duplicate ffmpegs.
+// ensureCopySegment single-flights each fragment and bounds parallel FFmpeg
+// processes. Both waiting and generation stop on request/session cancellation.
 func (s *HLSSession) ensureCopySegment(ctx context.Context, idx int) error {
+	if idx < 0 || idx >= s.segmentCount {
+		return fmt.Errorf("hls: segment out of range")
+	}
 	if !s.copyLazy {
 		return s.waitForSegment(ctx, idx)
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return context.Canceled
+	}
+	s.copyWG.Add(1)
+	s.mu.Unlock()
+	defer s.copyWG.Done()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if s.copyCtx != nil {
+		stop := context.AfterFunc(s.copyCtx, cancel)
+		defer stop()
 	}
 	path := s.copySegPath(idx)
 	if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
 		return nil
 	}
 	gate := s.copyGenGate(idx)
-	gate.Lock()
-	defer gate.Unlock()
+	select {
+	case gate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-gate }()
 	// Re-check under the gate: a racer may have produced it while we waited.
 	if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
 		return nil
+	}
+	if s.copySlots != nil {
+		select {
+		case s.copySlots <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		defer func() { <-s.copySlots }()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return s.generateCopySegment(ctx, idx)
 }
@@ -172,17 +156,16 @@ func (s *HLSSession) copySegPath(idx int) string {
 	return filepath.Join(s.tmpDir, "video", fmt.Sprintf("seg-%d%s", idx, copyVODSegExt))
 }
 
-// copyGenGate returns the per-index mutex used to single-flight segment
-// generation. A tiny map under copyGenMu — no external singleflight dep.
-func (s *HLSSession) copyGenGate(idx int) *sync.Mutex {
+// copyGenGate returns the cancellable per-index generation gate.
+func (s *HLSSession) copyGenGate(idx int) chan struct{} {
 	s.copyGenMu.Lock()
 	defer s.copyGenMu.Unlock()
 	if s.copyGen == nil {
-		s.copyGen = make(map[int]*sync.Mutex)
+		s.copyGen = make(map[int]chan struct{})
 	}
 	g := s.copyGen[idx]
 	if g == nil {
-		g = &sync.Mutex{}
+		g = make(chan struct{}, 1)
 		s.copyGen[idx] = g
 	}
 	return g
@@ -199,7 +182,7 @@ func (s *HLSSession) generateCopySegment(ctx context.Context, idx int) error {
 	end := s.copySegStarts[idx+1]
 	final := s.copySegPath(idx)
 	tmp := final + ".tmp"
-	defer os.Remove(tmp) //nolint:errcheck — best-effort cleanup of a stale temp
+	defer os.Remove(tmp) //nolint:errcheck // Best-effort cleanup of a stale temp.
 
 	args := buildCopyVODSegmentArgs(s.cfg, s.probe, tmp, start, end)
 	genCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -215,10 +198,38 @@ func (s *HLSSession) generateCopySegment(ctx context.Context, idx int) error {
 	if fi, err := os.Stat(tmp); err != nil || fi.Size() == 0 {
 		return fmt.Errorf("hls: copy-vod seg-%d not produced", idx)
 	}
+	if err := s.validateCopySegment(genCtx, tmp, start); err != nil {
+		return err
+	}
+	if err := genCtx.Err(); err != nil {
+		return err
+	}
 	if err := os.Rename(tmp, final); err != nil {
 		return fmt.Errorf("hls: copy-vod seg-%d publish: %w", idx, err)
 	}
 	log.Printf("[hls %s] copy-vod seg-%d ready (%.1f-%.1fs, %dms)",
 		shortHLSID(s.cfg.SessionID), idx, start, end, time.Since(startedAt).Milliseconds())
+	return nil
+}
+
+// A wrong/stale seek table must fail before publication, not silently splice
+// the next GOP into a segment whose manifest promises a different start. Read
+// just the first video packet; this does not decode video or scan the fragment.
+func (s *HLSSession) validateCopySegment(ctx context.Context, path string, start float64) error {
+	packet, length, err := firstCopyVideoPacket(ctx, s.cfg.Transcode.FFprobePath, path, "%+#1")
+	if err != nil {
+		return fmt.Errorf("hls: validate copy segment: %w", err)
+	}
+	if !strings.Contains(packet.Flags, "K") || !copyPacketHasIDR(packet.Data, length) {
+		return fmt.Errorf("hls: copy segment has no independent IDR picture")
+	}
+	pts, err := strconv.ParseFloat(packet.PTS, 64)
+	tolerance := 0.002
+	if start == 0 {
+		tolerance = 0.25
+	} // normal encoder audio/video start offset
+	if err != nil || math.IsNaN(pts) || math.IsInf(pts, 0) || math.Abs(pts-start) > tolerance {
+		return fmt.Errorf("hls: copy segment starts at %s, expected %.6f", packet.PTS, start)
+	}
 	return nil
 }

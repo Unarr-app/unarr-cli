@@ -378,15 +378,17 @@ type HLSSession struct {
 	// keyframe boundary table — segment i spans copySegStarts[i]..[i+1], with
 	// copySegStarts[len-1] == durationSec. Empty when the session uses the legacy
 	// EVENT copy path (remote URL / keyframe-index failure).
-	copyVOD       bool
-	copySegStarts []float64
-	copyGenMu     sync.Mutex
-	copyGen       map[int]*sync.Mutex // per-index gate single-flighting segment gen
-	// copyLazy=true means this COPY-VOD session generates segments lazily per
-	// request via `-ss` (remote/uniform sources, or a local file with too little
-	// disk for the background pass). copyLazy=false means a single background
-	// segment-muxer pass writes every seg-N.ts sequentially and handlers wait on
-	// readyMax (like encode mode) — the echo-free path for local files.
+	copyVOD         bool
+	copyNeedsEncode bool // open-GOP/non-IDR copy would need previous pictures
+	copySegStarts   []float64
+	copyGenMu       sync.Mutex
+	copyGen         map[int]chan struct{} // cancellable per-index gate
+	copyCtx         context.Context
+	copyCancel      context.CancelFunc
+	copySlots       chan struct{}
+	copyWG          sync.WaitGroup // Add under mu; Close sets closed before Wait
+	// Exact COPY-VOD sessions produce only requested segments. Legacy pass
+	// sessions (constructed by older callers/tests) still use readyMax.
 	copyLazy     bool
 	srcSizeBytes int64 // source size in bytes; sizes the copy-pass segment-wait deadline
 }
@@ -801,9 +803,9 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		// offset tfdt under an EVENT playlist breaks iOS's parser). With a
 		// meaningful resume the viewer would watch a black player until the linear
 		// remux reached their position.
-		if shouldTranscodeForResume(cfg, probe) {
-			log.Printf("[hls %s] copy-vod unavailable and resume=%.0fs is set - transcoding instead (EVENT copy cannot seek)",
-				shortHLSID(cfg.SessionID), cfg.StartSec)
+		if s.copyNeedsEncode || shouldTranscodeForResume(cfg, probe) {
+			log.Printf("[hls %s] copy-vod unavailable (independent-cuts=%t, resume=%.0fs) - using seekable HLS encode",
+				shortHLSID(cfg.SessionID), !s.copyNeedsEncode, cfg.StartSec)
 			// Clearing the flag before the startIdx block below is what makes the
 			// resume take effect: that block skips the seek entirely while
 			// VideoCopy is set, and the encode arg builder reads it too. The latch
@@ -1241,6 +1243,10 @@ func (s *HLSSession) Close() error {
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if s.copyCancel != nil {
+		s.copyCancel()
+		s.copyWG.Wait()
 	}
 	// Unblock any handler waiting on readyCh.
 	s.readyMu.Lock()
@@ -1682,6 +1688,13 @@ func (s *HLSSession) waitForSegment(ctx context.Context, idx int) error {
 		if exited {
 			if exitErr != nil {
 				return fmt.Errorf("hls: ffmpeg exited: %w", exitErr)
+			}
+			// A short encode can finish before the 250ms poller has published
+			// its watermark. Successful process exit proves all output files
+			// are closed; don't report a failure for an already-complete file.
+			path := filepath.Join(s.tmpDir, "video", s.segmentFileName(idx))
+			if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
+				return nil
 			}
 			return errors.New("hls: ffmpeg exited before segment ready")
 		}

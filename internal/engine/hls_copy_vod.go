@@ -1,44 +1,9 @@
-// Package engine — hls_copy_vod.go implements the COPY-VOD streaming model.
-//
-// The legacy VideoCopy path (buildHLSCopyArgs) runs ONE continuous ffmpeg
-// `-c:v copy` writing an EVENT playlist that GROWS as ffmpeg outruns playback.
-// Two problems for the viewer:
-//   - the playlist's duration is unknown until ENDLIST → the seekbar total
-//     keeps climbing ("1:23 / 5:10" then "1:48 / 20:55");
-//   - you can't seek past the produced region → jumping to minute 50 means
-//     waiting for the linear remux to reach it.
-//
-// COPY-VOD fixes both, Plex/Jellyfin-style, WITHOUT re-encoding video:
-//   1. Index the source's keyframes once (ffprobe, key-frames only).
-//   2. Group them into ~copyVODTargetSec segments, each STARTING on a keyframe
-//      (copy can only cut at keyframes). Render a COMPLETE VOD playlist upfront
-//      — every segment listed, real total duration, full seekbar from t=0.
-//   3. Transcode each segment ON DEMAND when the player requests it
-//      (`ffmpeg -copyts -ss start -i src -to end -c:v copy -f mpegts`),
-//      keyframe-aligned. Seeking to minute 50 = generating one ~6 s segment
-//      (~100 ms for copy), not waiting out a linear remux.
-//
-// Transport is MPEG-TS, NOT fMP4. fMP4 needs a single shared EXT-X-MAP init,
-// but ffmpeg bakes the `-ss` start offset into each segment's init as an edit
-// list (elst) — so a shared init mis-places every segment but the first (the
-// player clamps them all to t=0; verified empirically). MPEG-TS segments are
-// self-contained: each carries absolute PTS and no init, so independently-cut
-// `-c copy` segments concatenate seamlessly across players (hls.js transmux +
-// Safari native). The trade-off is codec reach: TS reliably carries H.264 +
-// AAC/AC3 across browsers, but NOT HEVC (Apple HLS mandates fMP4 for HEVC) or
-// AV1. So COPY-VOD is gated to H.264 sources; HEVC/AV1 copy (only chosen when
-// the device declares native decode, i.e. Safari) stays on the legacy EVENT
-// path — no regression, just no seek-anywhere there yet.
-//
-// Scope: H.264 copy sessions. LOCAL files get an exact keyframe index
-// (frame-accurate seek). REMOTE sources (connector/IPTV/debrid) can't be
-// keyframe-indexed without downloading the whole file, so they plan UNIFORM
-// segments from the known duration instead — full duration + seek still work,
-// but seek is GOP-rounded (the on-demand `-ss` input-seek lands on the nearest
-// keyframe ≤ the boundary). A remote source without HTTP range support, or with
-// no known duration, falls back to the legacy EVENT path (see StartHLSSession).
-// Remote COPY-VOD also spawns a one-shot subtitle sidecar extractor, since its
-// on-demand video segments never read the whole file the way the EVENT copy does.
+// Package engine implements exact, seekable H.264 COPY-VOD HLS. MP4 sample
+// tables / Matroska Cues provide real boundaries for local and ranged remote
+// sources. Each requested segment copies video without decoding, trims seek
+// preroll by GOP membership, and places audio on one continuous timeline.
+// No full-file materialisation is needed. Unsupported/unindexed sources retain
+// the continuous HLS path; fabricated uniform VOD boundaries are never used.
 
 package engine
 
@@ -47,8 +12,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -125,7 +88,7 @@ func renderVideoPlaylistCopyVOD(starts []float64) string {
 	b.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
 	b.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
 	for i := 0; i+1 < len(starts); i++ {
-		b.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", starts[i+1]-starts[i]))
+		b.WriteString(fmt.Sprintf("#EXTINF:%.6f,\n", starts[i+1]-starts[i]))
 		b.WriteString(fmt.Sprintf("seg-%d%s\n", i, copyVODSegExt))
 	}
 	b.WriteString("#EXT-X-ENDLIST\n")
@@ -156,47 +119,11 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 		return false
 	}
 
-	var starts []float64
-	// Whether every interior boundary is a real keyframe. The single-pass local
-	// muxer relies on that (it cuts a linear read at those exact times); a
-	// windowed table is only exact around the resume point, so it must stay lazy.
-	exactKeyframes := false
-	switch {
-	case s.cfg.SourceURL != "":
-		// REMOTE (connector/IPTV/debrid): a keyframe index would download the
-		// whole file, so plan UNIFORM segments from the known duration. The
-		// on-demand `-ss` input-seek rounds DOWN to the nearest keyframe, so seek
-		// is GOP-accurate (≤copyVODTargetSec off) while the full timeline shows
-		// upfront. Needs a known duration + HTTP range support (else every
-		// segment's -ss would re-read from byte 0); without either, EVENT copy.
-		if s.durationSec <= 0 {
-			log.Printf("[hls %s] copy-vod skipped: remote source has no known duration - using EVENT copy",
-				shortHLSID(s.cfg.SessionID))
-			return false
-		}
-		if !sourceSupportsRange(ctx, s.cfg.sourceRef()) {
-			log.Printf("[hls %s] copy-vod skipped: remote source lacks HTTP range support - using EVENT copy",
-				shortHLSID(s.cfg.SessionID))
-			return false
-		}
-		starts = planUniformSegments(s.durationSec)
-		// The on-demand video segments never read the whole file, so subtitles
-		// ride a separate one-shot pass that fills subs/ progressively.
-		startCopyVODSubtitles(s)
-	case s.cfg.SourcePath != "":
-		// LOCAL: exact keyframe boundaries (frame-accurate seek, no GOP rounding).
-		// Prefer the scan-time sidecar (.unarr/<file>.copyseg.json); on a miss,
-		// indexKeyframesFast plans from a bounded window around the resume point
-		// instead of blocking on the whole-file demux, and finishes the exact index
-		// in the background. exactKeyframes=false means the table is only
-		// keyframe-accurate around that window.
-		var exact, ok bool
-		starts, exact, ok = indexKeyframesFast(ctx, s, s.cfg.sourceRef())
-		if !ok {
-			return false
-		}
-		exactKeyframes = exact
-	default:
+	if s.durationSec <= 0 || s.cfg.sourceRef() == "" {
+		return false
+	}
+	starts, _, ok := indexKeyframesFast(ctx, s, s.cfg.sourceRef())
+	if !ok {
 		return false
 	}
 
@@ -205,87 +132,34 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 			shortHLSID(s.cfg.SessionID))
 		return false
 	}
+	if !copySourceHasIDR(ctx, s, starts) {
+		log.Printf("[hls %s] copy-vod requires IDR cuts; using seekable video encode", shortHLSID(s.cfg.SessionID))
+		s.copyNeedsEncode = true
+		return false
+	}
 	s.copyVOD = true
 	s.copySegStarts = starts
 	s.segmentCount = len(starts) - 1
 	s.manifestVideo = renderVideoPlaylistCopyVOD(starts)
 	s.manifestRoot = renderMasterPlaylistCopy(s.probe)
 
-	// LOCAL files run a single background segment-muxer PASS: it reads the file
-	// linearly (never seeks) and cuts at the exact keyframe boundaries, so
-	// segments are contiguous with zero overlap — the echo-free path. Handlers
-	// then wait on readyMax like encode mode.
-	//
-	// REMOTE/uniform sources, and a local file without disk headroom for the
-	// whole-file .ts materialisation, stay LAZY: each segment is generated on
-	// demand by a per-index `-ss` spawn (GOP-overlap echo present on scene-cut
-	// sources, but it plays and doesn't download the whole remote file).
-	// The pass also requires an EXACT table: it cuts one linear read at the listed
-	// times, so a windowed table's uniform boundaries would land mid-GOP. A
-	// windowed session stays lazy (per-segment `-ss` rounds down to a real
-	// keyframe) until the background index upgrades the sidecar.
-	mode := "remote/uniform lazy"
-	if !exactKeyframes && s.cfg.SourcePath != "" {
-		mode = "local/windowed lazy"
+	// Every boundary is exact. Produce only requested segments; seeking far
+	// ahead never waits for a linear pass or consumes a film's worth of disk.
+	s.copyLazy = true
+	s.copyCtx, s.copyCancel = context.WithCancel(context.Background())
+	s.copySlots = make(chan struct{}, 2)
+	s.readyMu.Lock()
+	s.readyMax = s.segmentCount
+	s.exited = true
+	s.readyMu.Unlock()
+	if s.cfg.SourceURL != "" {
+		startCopyVODSubtitles(s)
 	}
-	if s.cfg.SourcePath != "" && exactKeyframes && launchCopyVODPass(s) {
-		mode = "local/keyframe pass"
-	} else {
-		s.copyLazy = true
-		// No background writer → mark every segment "ready" immediately so the
-		// "Preparando…" overlay flips and the player fetches; each fetch then
-		// generates its segment on demand.
-		s.readyMu.Lock()
-		s.readyMax = s.segmentCount
-		s.exited = true
-		s.readyMu.Unlock()
-	}
+	mode := "exact/on-demand"
+
 	log.Printf("[hls %s] copy-vod: %d segments, %.1fs (%s)",
 		shortHLSID(s.cfg.SessionID), s.segmentCount, s.durationSec, mode)
 	return true
-}
-
-// planUniformSegments plans a COPY-VOD segment table at fixed copyVODTargetSec
-// boundaries across 0..duration — for REMOTE sources where a real keyframe index
-// isn't affordable. Same shape as planCopySegments (starts[0]==0, final element
-// ==duration, len-1 == segment count); the difference is the interior boundaries
-// are wall-clock multiples, not keyframes, so an on-demand `-ss` input-seek
-// rounds down to the nearest preceding keyframe. A sub-1 s trailing sliver is
-// folded into the last segment (no near-empty final fragment).
-func planUniformSegments(duration float64) []float64 {
-	if duration <= 0 {
-		return nil
-	}
-	starts := []float64{0}
-	for t := copyVODTargetSec; t < duration-1.0; t += copyVODTargetSec {
-		starts = append(starts, t)
-	}
-	starts = append(starts, duration)
-	return starts
-}
-
-// sourceSupportsRange reports whether url answers an HTTP byte-range request
-// (status 206). COPY-VOD on a remote source seeks every segment with `-ss`,
-// which only stays cheap when the server honours Range — otherwise each segment
-// re-reads from byte 0. A tight timeout keeps a dead/slow panel from stalling
-// session start; any error reports false (→ caller uses the EVENT copy path).
-func sourceSupportsRange(ctx context.Context, url string) bool {
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("Range", "bytes=0-1")
-	// IPTV panels commonly gate on a player UA; match a VLC-class client so the
-	// probe reflects what the segment ffmpeg can actually pull, not a Go default.
-	req.Header.Set("User-Agent", "VLC/3.0.20 LibVLC/3.0.20")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false
-	}
-	_ = resp.Body.Close()
-	return resp.StatusCode == http.StatusPartialContent
 }
 
 // startCopyVODSubtitles spawns a background ffmpeg that reads the remote source
@@ -346,117 +220,4 @@ func startCopyVODSubtitles(s *HLSSession) {
 			log.Printf("[hls %s] copy-vod subtitle sidecars complete", shortHLSID(s.cfg.SessionID))
 		}
 	}()
-}
-
-// copyVODPassDiskReserve is the free space to keep AFTER the background pass
-// materialises every segment (~source size) into the session tmpdir. Below it,
-// startCopyVOD degrades to lazy per-segment generation rather than risk a full disk.
-const copyVODPassDiskReserve = 512 * 1024 * 1024
-
-// copyVODPassMaxRestarts bounds restart-from-0 attempts when the pass ffmpeg dies
-// unexpectedly. The pass is deterministic and the segment muxer overwrites the
-// same seg-N.ts filenames, so a restart re-produces byte-identical segments.
-const copyVODPassMaxRestarts = 2
-
-// launchCopyVODPass starts the background segment-muxer pass for a LOCAL source.
-// It returns false (caller falls back to lazy per-segment generation) when the
-// source can't be stat'd or the disk can't hold the materialised segments. On
-// success it resets readyMax=0/exited=false and spawns the pass + poller, so
-// handlers block on readyMax exactly like encode mode.
-func launchCopyVODPass(s *HLSSession) bool {
-	src := s.cfg.sourceRef()
-	fi, err := os.Stat(src)
-	if err != nil {
-		// Can't size the source → can't run the disk guard (CheckDiskSpace with
-		// needBytes<=0 no-ops, defeating it) and segmentWaitTimeout would fall to
-		// the 60s encode default instead of the size-derived ceiling. Fall back to
-		// lazy per-segment generation, which stat-verifies each segment itself.
-		log.Printf("[hls %s] copy-vod pass skipped (stat source: %v) - lazy per-segment",
-			shortHLSID(s.cfg.SessionID), err)
-		return false
-	}
-	srcSize := fi.Size()
-	if err := CheckDiskSpace(s.tmpDir, srcSize, copyVODPassDiskReserve); err != nil {
-		log.Printf("[hls %s] copy-vod pass skipped (%v) - lazy per-segment",
-			shortHLSID(s.cfg.SessionID), err)
-		return false
-	}
-
-	args := buildCopyVODPassArgs(s.cfg, s.probe, s.copySegStarts, s.tmpDir)
-	ffCtx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
-	winproc.HideWindow(cmd)
-	errBuf := &bytes.Buffer{}
-	cmd.Stderr = errBuf
-	if err := cmd.Start(); err != nil {
-		cancel()
-		log.Printf("[hls %s] copy-vod pass start failed (%v) - lazy per-segment",
-			shortHLSID(s.cfg.SessionID), err)
-		return false
-	}
-
-	// Construction-time (session not yet registered / no handlers): plain writes.
-	s.cancel = cancel
-	s.srcSizeBytes = srcSize
-	s.readyMu.Lock()
-	s.readyMax = 0
-	s.exited = false
-	s.readyMu.Unlock()
-
-	go s.waitCopyPass(cmd, ffCtx, errBuf)
-	go s.pollSegments(ffCtx)
-	return true
-}
-
-// waitCopyPass reaps the background segment-muxer pass. On an unexpected failure
-// (not a Close-triggered cancel) it restarts from 0 a bounded number of times —
-// the pass is deterministic, so a restart re-produces identical segments. When it
-// finally stops it marks the session exited so waitForSegment unblocks (nil on a
-// clean finish, error on give-up); pollSegments then seals the final segment.
-func (s *HLSSession) waitCopyPass(cmd *exec.Cmd, ffCtx context.Context, errBuf *bytes.Buffer) {
-	err := cmd.Wait()
-	for attempt := 1; err != nil && ffCtx.Err() == nil && attempt <= copyVODPassMaxRestarts; attempt++ {
-		log.Printf("[hls %s] copy-vod pass failed (%v: %s) - restart %d/%d from 0",
-			shortHLSID(s.cfg.SessionID), err, strings.TrimSpace(errBuf.String()), attempt, copyVODPassMaxRestarts)
-		// Restart-from-0 truncates+rewrites every seg-N.ts IN PLACE (segment
-		// muxer, no .tmp+rename). Roll the watermark back to 0 so no handler
-		// serves a segment the restarted pass is overwriting; pollSegments
-		// re-advances it as the segments reappear. Mirrors restartFromSegment.
-		s.readyMu.Lock()
-		s.readyMax = 0
-		s.readyMu.Unlock()
-		errBuf.Reset()
-		args := buildCopyVODPassArgs(s.cfg, s.probe, s.copySegStarts, s.tmpDir)
-		cmd = exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
-		winproc.HideWindow(cmd)
-		cmd.Stderr = errBuf
-		if serr := cmd.Start(); serr != nil {
-			err = serr
-			break
-		}
-		err = cmd.Wait()
-	}
-
-	clean := err == nil && ffCtx.Err() == nil
-	s.readyMu.Lock()
-	s.exited = true
-	if clean {
-		// The pass wrote every segment (`-segment_times` yields exactly
-		// segmentCount files). Advance readyMax to the full count HERE, before
-		// unblocking waiters: otherwise a handler woken by the readyCh close could
-		// race ahead of the 250ms pollSegments tick that seals the LAST segment
-		// and wrongly see "exited before segment ready".
-		s.readyMax = s.segmentCount
-	} else if err != nil && ffCtx.Err() == nil {
-		s.exitErr = fmt.Errorf("copy-vod pass: %w (%s)", err, strings.TrimSpace(errBuf.String()))
-	}
-	if s.readyCh != nil {
-		close(s.readyCh)
-		s.readyCh = nil
-	}
-	s.readyMu.Unlock()
-
-	if clean {
-		log.Printf("[hls %s] copy-vod pass complete", shortHLSID(s.cfg.SessionID))
-	}
 }
