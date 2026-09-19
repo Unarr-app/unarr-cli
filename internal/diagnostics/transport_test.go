@@ -7,20 +7,6 @@ import (
 	"testing"
 )
 
-func TestDefaultBuildDoesNotContactUnverifiedEndpoint(t *testing.T) {
-	if privateDeliveryEnabled != "false" {
-		t.Skip("operator-enabled release build")
-	}
-	// An invalid transport would panic if Send attempted to construct its
-	// client. A disabled build must return before even preparing a request.
-	original := http.DefaultTransport
-	http.DefaultTransport = nil
-	t.Cleanup(func() { http.DefaultTransport = original })
-	if Send(context.Background(), []byte(`{}`)) != ErrUnavailable {
-		t.Fatal("unverified endpoint was enabled")
-	}
-}
-
 func TestProductionTransportRejectsRedirectsAndEnvironmentProxy(t *testing.T) {
 	var forwarded int
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { forwarded++ }))

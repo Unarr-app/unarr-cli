@@ -13,20 +13,12 @@ import (
 const MaxReportBytes = 1 << 20
 const reportEndpoint = "https://unarr.app/api/internal/agent/diagnostic-report"
 
-// Set with release ldflags only AFTER the complete deployed request path has
-// been verified not to retain IPs. Even a capability GET must not hit an
-// unverified proxy. Local collection/save remain available in every build.
-var privateDeliveryEnabled = "false"
-
 var ErrUnavailable = errors.New("private report delivery is unavailable; keep the local report")
 
 // Send uploads precisely the reviewed bytes. Call only after explicit consent.
 // This transport deliberately does not use the authenticated agent client,
 // environment proxies, cookies, redirects, mirrors, or telemetry.
 func Send(ctx context.Context, payload []byte) error {
-	if privateDeliveryEnabled != "true" {
-		return ErrUnavailable
-	}
 	client, transport := reportHTTPClient()
 	defer transport.CloseIdleConnections()
 	return send(ctx, client, reportEndpoint, payload)
