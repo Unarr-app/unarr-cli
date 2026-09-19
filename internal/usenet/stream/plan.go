@@ -145,12 +145,18 @@ func planDirect(ctx context.Context, fetcher ArticleFetcher, n *nzb.NZB) *Stream
 	if err != nil {
 		return unsupportedPlan(streamableReason(err))
 	}
-	f := *video
+	return PlanFile(ctx, fetcher, *video)
+}
+
+// PlanFile indexes one directly posted file, including subtitles and other
+// non-video files in a virtual mount. Callers must reject archive/password
+// wrappers before using it; archive contents need StreamPlanFromNZB instead.
+func PlanFile(ctx context.Context, fetcher ArticleFetcher, f nzb.File) *StreamPlan {
 	src := readerSource{fetcher: fetcher, ix: NewOffsetIndex(f), cache: sharedArticleCache().NewScope()}
 	size, err := establishSize(ctx, src)
 	if err != nil {
 		src.cache.Release()
-		return unsupportedPlan("establish size " + video.Filename() + ": " + err.Error())
+		return unsupportedPlan("establish size " + f.Filename() + ": " + err.Error())
 	}
 	name := f.Filename()
 	open := func(c context.Context) io.ReadSeekCloser {

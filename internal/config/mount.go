@@ -1,0 +1,56 @@
+package config
+
+import (
+	"fmt"
+	"net"
+	"path/filepath"
+	"time"
+)
+
+// MountConfig holds device-local settings only; accounts are managed on the web.
+type MountConfig struct {
+	Enabled         bool   `toml:"enabled"`
+	Listen          string `toml:"listen,omitempty"`
+	CacheDir        string `toml:"cache_dir,omitempty"`
+	NZBDir          string `toml:"nzb_dir,omitempty"`
+	RefreshInterval string `toml:"refresh_interval,omitempty"`
+}
+
+func (m MountConfig) Address() string {
+	if m.Listen == "" {
+		return "127.0.0.1:11820"
+	}
+	return m.Listen
+}
+func (m MountConfig) RefreshEvery() time.Duration {
+	d, err := time.ParseDuration(m.RefreshInterval)
+	if err != nil || d <= 0 {
+		return time.Minute
+	}
+	return d
+}
+func (m MountConfig) Validate() error {
+	if !m.Enabled {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(m.Address())
+	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+		return fmt.Errorf("mount.listen must be a loopback IP:port")
+	}
+	if _, err := net.LookupPort("tcp", port); err != nil {
+		return fmt.Errorf("invalid mount.listen port")
+	}
+	if m.RefreshInterval != "" {
+		d, err := time.ParseDuration(m.RefreshInterval)
+		if err != nil || d < 10*time.Second {
+			return fmt.Errorf("mount.refresh_interval must be at least 10s")
+		}
+	}
+	if m.CacheDir != "" && !filepath.IsAbs(m.CacheDir) {
+		return fmt.Errorf("mount.cache_dir must be absolute")
+	}
+	if m.NZBDir != "" && !filepath.IsAbs(m.NZBDir) {
+		return fmt.Errorf("mount.nzb_dir must be absolute")
+	}
+	return nil
+}

@@ -164,6 +164,7 @@ unarr start
 | `unarr login` | Authenticate with your account (opens browser) |
 | `unarr config` | Edit all settings interactively (speed, organization, etc.) |
 | `unarr config check` | Validate `config.toml` — unknown keys (with suggestions) and out-of-range values; exits non-zero when anything is reported |
+| `unarr config mount` | Configure the optional local mount; provider accounts and credentials are managed on the web |
 | `unarr migrate` | Import settings and wanted list from Sonarr/Radarr/Prowlarr [pre-beta] |
 
 ### Search & Discovery
@@ -187,6 +188,8 @@ unarr start
 | `unarr downloads retry <id>` | Start it over |
 | `unarr downloads purge` | Forget queued downloads that are not running |
 | `unarr stream <hash\|magnet>` | Stream a torrent directly to mpv/vlc/browser |
+| `unarr mount <directory>` | Mount a remote debrid/Usenet library as a read-only local folder (opt-in; requires rclone) |
+| `unarr mount serve` | Serve that remote library over loopback WebDAV without mounting it |
 
 See [Controlling downloads](#controlling-downloads) for the flags, the offline
 recovery path, and how these interact with the website.
@@ -1055,6 +1058,19 @@ UNARR_TELEMETRY=off unarr start
 
 When disabled the agent sends **nothing** — it still registers, syncs, and
 downloads exactly the same. Telemetry is purely additive.
+
+## Remote library as a local folder (optional)
+
+`unarr mount` exposes completed Real-Debrid / AllDebrid / TorBox / Torrin files and a directory of
+NZBs as a local folder, reading media on demand. This is **disabled by default**
+and independent of the existing WebDAV export of downloaded files. Enable
+the mount with `unarr config mount`, connect providers on the Unarr website, install
+rclone plus FUSE/WinFsp, then run `unarr mount /path/to/empty/folder`.
+
+See [setup, configuration and limitations](REMOTE_MOUNT.md) and the
+[performance report](REMOTE_MOUNT_PERFORMANCE.md). The mount runs in the
+foreground; Ctrl-C stops it. The normal download daemon does not start it
+automatically, even when configured.
 
 ## Shell Completion
 

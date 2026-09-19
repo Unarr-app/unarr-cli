@@ -21,6 +21,9 @@ func (c *Config) ValueIssues() []Issue {
 	l = append(l, c.downloadValueIssues()...)
 	l = append(l, c.libraryValueIssues()...)
 	l = append(l, c.miscValueIssues()...)
+	if err := c.Mount.Validate(); err != nil {
+		l.add("mount", err.Error())
+	}
 	return l
 }
 

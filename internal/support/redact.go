@@ -36,6 +36,11 @@ var configFields = map[string]Sensitivity{
 	"Agent.Hash":              Secret,
 	"Download.WebDAVPassword": Secret,
 	"Download.WebDAVUsername": Secret,
+	"Mount.Enabled":           Publishable,
+	"Mount.Listen":            Publishable,
+	"Mount.CacheDir":          Publishable,
+	"Mount.NZBDir":            Publishable,
+	"Mount.RefreshInterval":   Publishable,
 
 	// ── Identity ───────────────────────────────────────────────────────────
 	// Not credentials, but they name the user's machine and account. Published

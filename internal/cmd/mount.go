@@ -1,0 +1,175 @@
+package cmd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/engine"
+	"github.com/Unarr-app/unarr-cli/internal/remotefs"
+)
+
+func newMountCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use: "mount <directory>", GroupID: "daemon",
+		Short: "Mount the optional remote debrid/Usenet library (requires rclone)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfig()
+			if !cfg.Mount.Enabled {
+				return errors.New("remote mount is disabled; set mount.enabled = true in config.toml")
+			}
+			if _, err := exec.LookPath("rclone"); err != nil {
+				return errors.New("install rclone and FUSE (Linux/macOS) or WinFsp (Windows) first")
+			}
+			ctx, stop := signal.NotifyContext(cmd.Context(), mountSignals()...)
+			defer stop()
+			return runRemoteMount(ctx, cfg, args[0])
+		},
+	}
+	c.AddCommand(&cobra.Command{
+		Use: "serve", Short: "Serve the remote library over loopback WebDAV", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg := loadConfig()
+			if !cfg.Mount.Enabled {
+				return errors.New("remote mount is disabled; set mount.enabled = true in config.toml")
+			}
+			ctx, stop := signal.NotifyContext(cmd.Context(), mountSignals()...)
+			defer stop()
+			s, err := startRemoteLibrary(ctx, cfg)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			log.Printf("[mount] remote library at %s/dav/", s.URL)
+			select {
+			case <-ctx.Done():
+				return nil
+			case err := <-s.errors:
+				return err
+			}
+		},
+	})
+	return c
+}
+
+type remoteLibrary struct {
+	URL, user, password string
+	server              *http.Server
+	catalog             *remotefs.Catalog
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	done                chan struct{}
+	errors              chan error
+}
+
+func remoteSources(cfg config.Config) []remotefs.Source {
+	c := agent.NewClient(cfg.Auth.APIURL, cfg.Auth.APIKey, "unarr-mount")
+	sources := []remotefs.Source{&remotefs.WebSource{API: c, AccountIdentity: cfg.Auth.APIURL + ":" + cfg.Auth.APIKey}}
+	if cfg.Mount.NZBDir != "" {
+		n := &mountNNTP{api: c}
+		sources = append(sources, &remotefs.NZBSource{Directory: cfg.Mount.NZBDir, Fetcher: n, CloseFetcher: n.Close})
+	}
+	return sources
+}
+
+func startRemoteLibrary(parent context.Context, cfg config.Config) (*remoteLibrary, error) {
+	if !cfg.Mount.Enabled {
+		return nil, errors.New("remote mount disabled")
+	}
+	if err := cfg.Mount.Validate(); err != nil {
+		return nil, err
+	}
+	user, pass, active := engine.ResolveWebDAVCreds("", "", cfg.Auth.APIKey)
+	if !active {
+		return nil, errors.New("sign in to Unarr before mounting; provider accounts are managed on the website")
+	}
+	api := agent.NewClient(cfg.Auth.APIURL, cfg.Auth.APIKey, "unarr-mount")
+	if err := api.MountAccess(parent); err != nil {
+		return nil, fmt.Errorf("mount access: %w", err)
+	}
+	ln, err := net.Listen("tcp", cfg.Mount.Address())
+	if err != nil {
+		return nil, fmt.Errorf("mount listener: %w", err)
+	}
+	sources := remoteSources(cfg)
+	dir := cfg.Mount.CacheDir
+	if dir == "" {
+		dir = filepath.Join(filepath.Dir(resolvedConfigPath()), "remote-library")
+	}
+	cat, err := remotefs.OpenCatalog(dir, sources)
+	if err != nil {
+		_ = ln.Close()
+		for _, s := range sources {
+			_ = s.Close()
+		}
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(parent)
+	srv := &http.Server{
+		Handler: remotefs.Handler(cat.FS, user, pass), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return ctx },
+	}
+	s := &remoteLibrary{URL: "http://" + ln.Addr().String(), user: user, password: pass, server: srv, catalog: cat, ctx: ctx, cancel: cancel, done: make(chan struct{}), errors: make(chan error, 1)}
+	go watchMountAccess(ctx, api.MountAccess, 30*time.Second, s.revokeAccess)
+	go func() {
+		defer close(s.done)
+		cat.Run(ctx, cfg.Mount.RefreshEvery(), func(name string, err error) {
+			if err != nil {
+				log.Printf("[mount] %s refresh: %v (retaining last valid catalog)", name, err)
+			}
+		})
+	}()
+	go func() {
+		err := srv.Serve(ln)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.errors <- err
+			cancel()
+		}
+	}()
+	return s, nil
+}
+
+func (s *remoteLibrary) Close() {
+	s.cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.server.Shutdown(ctx); err != nil {
+		_ = s.server.Close()
+	}
+	<-s.done
+	_ = s.catalog.Close()
+}
+
+func runRemoteMount(ctx context.Context, cfg config.Config, directory string) error {
+	if err := cfg.Mount.Validate(); err != nil {
+		return err
+	}
+	dir, err := validateMountPoint(directory)
+	if err != nil {
+		return err
+	}
+	s, err := startRemoteLibrary(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	err = runRclone(s.ctx, s, dir)
+	select {
+	case serveErr := <-s.errors:
+		return serveErr
+	default:
+		return err
+	}
+}
