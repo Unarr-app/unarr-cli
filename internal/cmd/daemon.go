@@ -376,6 +376,9 @@ func runDaemonStart() error {
 	// Daemon-scoped context — cancelled on shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if cfg.Mount.Enabled {
+		go superviseRemoteMount(ctx, cfg)
+	}
 
 	// Keep every FOREIGN-HELD daemon log inside its size budget for the whole
 	// run: whoever started us (launchd, the Windows shim, the detached launcher)
@@ -772,7 +775,9 @@ func runDaemonStart() error {
 	// Wire: sync receives new tasks → submit to manager or handle stream
 	d.OnTasksClaimed = func(tasks []agent.Task) {
 		for _, t := range tasks {
-			if t.Mode == "stream" {
+			if t.Mode == "mount" {
+				go handleMountTask(ctx, t, cfg, agentClient)
+			} else if t.Mode == "stream" {
 				if isStreamingTask(t.ID) {
 					continue
 				}

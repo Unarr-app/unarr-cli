@@ -12,6 +12,7 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/Unarr-app/unarr-cli/internal/mountsetup"
+	"github.com/Unarr-app/unarr-cli/internal/service"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 )
@@ -98,7 +99,7 @@ func runMountCommand(cmd *cobra.Command, args []string) error {
 	if err := enableRemoteMount(&cfg); err != nil {
 		return err
 	}
-	binary, err := prepareMountDependencies(ctx, &cfg)
+	_, err := prepareMountDependencies(ctx, &cfg)
 	if err != nil {
 		return err
 	}
@@ -106,8 +107,54 @@ func runMountCommand(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Mounting at %s. Keep this command running; Ctrl-C stops the mount.\n", directory)
-	return runRemoteMount(ctx, cfg, directory, binary)
+	cfg.Mount.Directory = directory
+	if err := config.Save(cfg, resolvedConfigPath()); err != nil {
+		return fmt.Errorf("save mount activation: %w", err)
+	}
+	appCfg = cfg
+	if err := ensurePersistentMountService(); err != nil {
+		return fmt.Errorf("mount was configured at %s, but the background service could not start: %w", directory, err)
+	}
+	fmt.Printf("Remote folder active at %s. It will stay active in the background and start automatically.\n", directory)
+	fmt.Println("Run unarr umount to disable it.")
+	return nil
+}
+
+func ensurePersistentMountService() error {
+	if service.Respawns() || (runtime.GOOS == "windows" && windowsTaskInstalled()) {
+		return runDaemonSvcRestart()
+	}
+	return runDaemonInstall()
+}
+
+func newUmountCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "umount",
+		Aliases: []string{"unmount"},
+		GroupID: "daemon",
+		Short:   "Disable and unmount the persistent remote folder",
+		Args:    cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cfg := loadConfig()
+			if !cfg.Mount.Enabled {
+				fmt.Println("Remote folder is already disabled.")
+				return nil
+			}
+			cfg.Mount.Enabled = false
+			if err := config.Save(cfg, resolvedConfigPath()); err != nil {
+				return fmt.Errorf("disable remote folder: %w", err)
+			}
+			appCfg = cfg
+			if service.Respawns() || (runtime.GOOS == "windows" && windowsTaskInstalled()) {
+				if err := runDaemonSvcRestart(); err != nil {
+					return fmt.Errorf("remote folder was disabled, but the agent could not restart to unmount it: %w", err)
+				}
+				fmt.Println("Remote folder disabled and unmounted. The unarr agent remains active.")
+				return nil
+			}
+			return errors.New("remote folder disabled; restart the foreground unarr agent to finish unmounting it")
+		},
+	}
 }
 
 func enableRemoteMount(cfg *config.Config) error {

@@ -177,7 +177,7 @@ type Task struct {
 	ContentID       *int       `json:"contentId,omitempty"`
 	IMDbID          string     `json:"imdbId,omitempty"`
 	PreferredMethod string     `json:"preferredMethod"`          // auto | debrid | usenet | torrent
-	Mode            string     `json:"mode,omitempty"`           // download | stream
+	Mode            string     `json:"mode,omitempty"`           // download | stream | mount
 	DirectURL       string     `json:"directUrl,omitempty"`      // HTTPS download URL (debrid, etc.)
 	DirectFileName  string     `json:"directFileName,omitempty"` // Original filename from direct URL
 	DirectFileSize  int64      `json:"directFileSize,omitempty"` // Exact provider-listed byte size of that file (0 = unknown)

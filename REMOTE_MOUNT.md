@@ -15,26 +15,30 @@ There is no separate local provider configuration or encryption key file.
 
 1. Connect your Real-Debrid, AllDebrid, TorBox or Torrin account in the existing
    Unarr web settings. Configure Usenet there too if you want direct NZB access.
-2. Run `unarr mount`. On first use, enable the optional feature and optionally
-   choose a local NZB directory. Missing/expired device authentication opens the
-   existing browser sign-in flow; a valid session is reused.
+2. Run `unarr mount`. On first use, enable the optional feature. Missing/expired
+   device authentication opens the existing browser sign-in flow; a valid
+   session is reused.
 3. unarr checks paid access, reuses compatible dependencies and downloads a
    pinned, SHA-256-verified official rclone into its private tools directory.
    Before installing a missing FUSE/macFUSE/WinFsp driver, it explains why it is
    needed and any system password, approval or restart, then asks permission.
 4. The default folder is `~/unarr-media` on Linux/macOS; Windows chooses a free
    drive letter. A custom destination is `unarr mount /path/to/remote-media`.
-   `unarr config mount` remains available for preparation without starting a mount.
+   The command installs or restarts the normal agent service, which keeps the
+   folder mounted after the terminal closes and restores it after login/reboot.
+   Run `unarr umount` (or `unarr unmount`) to disable it. `unarr config mount`
+   remains available for advanced local settings.
 
 On Windows, use an unused drive letter (`unarr mount X:`) or a nonexistent
 directory below an existing parent. Linux/macOS create a missing directory and
 reject nonempty destinations. Existing files are never replaced.
-The command starts a loopback WebDAV service and rclone. Ctrl-C or SIGTERM on
-Unix stops it and unmounts. The normal download daemon does not start this
-separate experimental service.
+The agent starts a loopback WebDAV service and rclone. They share the agent's
+lifecycle and are retried after transient failure. Stopping the whole agent also
+stops the mount; starting it again restores an enabled mount.
 
-Dependency preparation never runs while disabled or from the normal daemon.
-Noninteractive sessions cannot approve system installations or enable the feature.
+Dependency preparation never runs while disabled. The normal daemon may validate
+or reuse the private rclone binary, but noninteractive sessions cannot approve
+system installations or enable the feature.
 On supported Linux distributions unarr uses apt/dnf/yum/pacman/zypper/apk and
 sudo/doas if needed. macOS uses the verified official macFUSE installer; Windows
 installs the default WinFsp components with a progress indicator after explaining
@@ -56,6 +60,7 @@ The complete local settings are:
 ```toml
 [mount]
 enabled = false                 # set true explicitly, or use unarr config mount
+directory = "/home/me/unarr-media" # persisted by unarr mount
 listen = "127.0.0.1:11820"        # loopback only
 refresh_interval = "1m"          # minimum 10s
 # cache_dir = "/absolute/path/to/private-metadata"
@@ -66,7 +71,7 @@ No provider names, tokens, NNTP host/password or duplicate WebDAV password are
 stored in this section. Device authentication continues to use Unarr's existing
 login mechanism. The local WebDAV credentials are derived in memory from that
 login using the existing credential derivation. Local paths and listener changes
-require restarting the mount; web account changes are discovered on refresh.
+require restarting the agent; web account changes are discovered on refresh.
 
 Example tree:
 
@@ -104,12 +109,17 @@ Removing an account removes its entries after a successful refresh. Previously
 resolved CDN URLs and active readers can remain usable until upstream expiry;
 the mount does not claim immediate revocation of those already-issued URLs.
 
-For local NZBs, the CLI uses `/api/internal/agent/mount/usenet-credentials`,
+For Usenet NZBs, the CLI uses `/api/internal/agent/mount/usenet-credentials`,
 which adds the paid-plan gate to the existing Usenet credential resolver.
 NNTP needs the credentials on the device to connect directly: they are fetched
 lazily, retained only in memory, refreshed after five minutes on subsequent
 article access, and never written to the mount configuration or catalog.
-This endpoint retains the existing web-side Usenet entitlement checks.
+This endpoint retains the existing web-side Usenet entitlement checks. The web
+action **Add to local Usenet folder** dispatches only the selected NZB manifest
+to a compatible online agent (CLI 1.15.0+), which stores it in the managed
+`mount-nzbs` inbox beside `config.toml`. If there is no agent, the web shows the
+install CTA; an older agent gets the update CTA. Copying a complete `.nzb` file
+into the same inbox manually is also supported.
 
 ## Continuity and limits
 
@@ -143,11 +153,11 @@ other users' files. Premiumize and other adapters still need account enumeration
 Unsupported compressed/encrypted archives, ambiguous multi-video RARs and zipped
 TorBox members are not silently presented as independently streamable files.
 
-Direct Usenet watches a nonrecursive local NZB directory; it is not a web NZB
-inbox. Add complete manifests by renaming them to `.nzb`. It supports direct
-files (including episodes/subtitles) and the existing uncompressed RAR4/RAR5
-streaming paths. The original download workflow remains available for other
-archives.
+Direct Usenet watches the nonrecursive managed NZB inbox. The website can add
+manifests through the agent, or you can add complete files manually by renaming
+them to `.nzb`. It supports direct files (including episodes/subtitles) and the
+existing uncompressed RAR4/RAR5 streaming paths. The original download workflow
+remains available for other archives.
 
 ## Service-only and containers
 

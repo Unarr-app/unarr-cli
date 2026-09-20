@@ -36,6 +36,7 @@ var configFields = map[string]Sensitivity{
 	"Agent.Hash":              Secret,
 	"Download.WebDAVPassword": Secret,
 	"Download.WebDAVUsername": Secret,
+	"Mount.Directory":         Secret,
 	"Mount.Enabled":           Publishable,
 	"Mount.Listen":            Publishable,
 	"Mount.CacheDir":          Publishable,

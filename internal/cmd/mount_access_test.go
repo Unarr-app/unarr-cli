@@ -1,18 +1,52 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/config"
 )
+
+func TestMountAccountStatusOnlyConfirmsPaidAccessAfterGrant(t *testing.T) {
+	for _, allowed := range []bool{true, false} {
+		t.Run(map[bool]string{true: "paid", false: "denied"}[allowed], func(t *testing.T) {
+			web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if !allowed {
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"code":"mount_paid_required","error":"Paid plan required"}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"allowed":true}`))
+			}))
+			defer web.Close()
+			cfg := config.Default()
+			cfg.Auth.APIURL, cfg.Auth.APIKey = web.URL, "device-key"
+			var out bytes.Buffer
+			err := printMountAccountStatus(context.Background(), &cfg, &out)
+			confirmed := strings.Contains(out.String(), "available because your account has an active paid plan")
+			upgrade := strings.Contains(out.String(), "Upgrade: https://unarr.app/pricing")
+			if allowed && (err != nil || !confirmed) {
+				t.Fatalf("paid access not confirmed: output=%q err=%v", out.String(), err)
+			}
+			if allowed && upgrade {
+				t.Fatalf("paid access was shown an upgrade: output=%q", out.String())
+			}
+			if !allowed && (err == nil || confirmed || !upgrade) {
+				t.Fatalf("denied access was presented as paid: output=%q err=%v", out.String(), err)
+			}
+		})
+	}
+}
 
 func TestMountUsesConfiguredMirrorsWithoutBypassingPaidDenial(t *testing.T) {
 	for _, code := range []int{http.StatusServiceUnavailable, http.StatusForbidden} {
@@ -48,7 +82,7 @@ func TestMountUsesConfiguredMirrorsWithoutBypassingPaidDenial(t *testing.T) {
 			if err != nil {
 				t.Fatal("mount preflight ignored working mirror", err)
 			}
-			source := remoteSources(cfg)[0]
+			source := remoteSources(cfg, t.TempDir())[0]
 			defer source.Close()
 			records, err := source.List(context.Background(), nil)
 			if err != nil || len(records) != 0 || mirrorCalls.Load() != 2 {

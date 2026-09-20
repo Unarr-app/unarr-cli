@@ -188,7 +188,8 @@ unarr start
 | `unarr downloads retry <id>` | Start it over |
 | `unarr downloads purge` | Forget queued downloads that are not running |
 | `unarr stream <hash\|magnet>` | Stream a torrent directly to mpv/vlc/browser |
-| `unarr mount <directory>` | Mount a remote debrid/Usenet library as a read-only local folder (opt-in; requires rclone) |
+| `unarr mount <directory>` | Configure and activate the persistent read-only remote folder (directory is optional) |
+| `unarr umount` | Disable and unmount the remote folder (`unarr unmount` is an alias) |
 | `unarr mount serve` | Serve that remote library over loopback WebDAV without mounting it |
 
 See [Controlling downloads](#controlling-downloads) for the flags, the offline
@@ -1061,19 +1062,21 @@ downloads exactly the same. Telemetry is purely additive.
 
 ## Remote library as a local folder (optional)
 
-`unarr mount` exposes completed Real-Debrid / AllDebrid / TorBox / Torrin files and a directory of
+`unarr mount` exposes completed Real-Debrid / AllDebrid / TorBox / Torrin files and compatible
 NZBs as a local folder, reading media on demand. This is **disabled by default**
 and independent of the existing WebDAV export of downloaded files. Enable
 the mount with `unarr mount` and connect providers on the Unarr website. unarr
 prepares rclone automatically, explains missing filesystem drivers before asking
-permission to install them, and creates a default mount folder. Use
-`unarr config mount` to prepare without mounting, or `unarr mount <directory>`
-to choose a destination.
+permission to install them, and creates a default mount folder. The normal agent
+service then keeps the folder active after the command exits and restores it
+automatically after login or reboot. Use `unarr umount` to disable it,
+`unarr config mount` for advanced local settings, or `unarr mount <directory>`
+to choose a destination. On the website, **Add to local Usenet folder** sends
+only the selected NZB to the agent's managed inbox; manual NZB copies remain
+supported.
 
 See [setup, configuration and limitations](REMOTE_MOUNT.md) and the
-[performance report](REMOTE_MOUNT_PERFORMANCE.md). The mount runs in the
-foreground; Ctrl-C stops it. The normal download daemon does not start it
-automatically, even when configured.
+[performance report](REMOTE_MOUNT_PERFORMANCE.md).
 
 ## Shell Completion
 

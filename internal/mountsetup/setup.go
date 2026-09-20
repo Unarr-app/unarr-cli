@@ -1,5 +1,6 @@
-// Package mountsetup prepares optional mounting dependencies on demand. It never
-// runs from the download daemon, and system changes require an explained opt-in.
+// Package mountsetup prepares optional mounting dependencies on demand. The
+// daemon may reuse or validate prepared dependencies, but system changes always
+// require an explained interactive opt-in.
 package mountsetup
 
 import (

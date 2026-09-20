@@ -2,21 +2,28 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"strings"
 
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/charmbracelet/huh"
 )
 
 func configMount(cfg *config.Config) error {
 	m := cfg.Mount
-	fmt.Println("  Debrid accounts and Usenet credentials are managed on the Unarr website.")
-	fmt.Println("  Remote mounting requires a paid plan. Upgrade: https://unarr.app/pricing")
-	fmt.Println("  Setup: https://unarr.app/profile?tab=agents")
+	ctx, cancel := mountContext(context.Background())
+	defer cancel()
+	if err := printMountAccountStatus(ctx, cfg, os.Stdout); err != nil {
+		return err
+	}
 	if err := huh.NewForm(huh.NewGroup(
 		huh.NewConfirm().Title("Enable remote folder mounting?").Description("Optional and off by default. unarr prepares dependencies automatically and explains any required system permissions before installation.").Value(&m.Enabled),
-		huh.NewInput().Title("Local NZB folder (optional)").Description("Uses the Usenet account configured on the web. Blank disables local NZB scanning.").Value(&m.NZBDir),
+		huh.NewInput().Title("NZB inbox override (optional)").Description("Web-selected NZBs use a managed local inbox. Set a folder only to override its location.").Value(&m.NZBDir),
 	)).Run(); err != nil {
 		return err
 	}
@@ -26,13 +33,25 @@ func configMount(cfg *config.Config) error {
 		return err
 	}
 	if m.Enabled {
-		ctx, cancel := mountContext(context.Background())
-		defer cancel()
 		if _, err := prepareMountDependencies(ctx, cfg); err != nil {
 			return err
 		}
 		fmt.Println("Ready. Run unarr mount to use the default folder, or unarr mount <directory> to choose one.")
 	}
 	cfg.Mount = m
+	return nil
+}
+
+func printMountAccountStatus(ctx context.Context, cfg *config.Config, out io.Writer) error {
+	fmt.Fprintln(out, "  Debrid accounts and Usenet credentials are managed on the Unarr website.")
+	if err := checkMountAccount(ctx, cfg); err != nil {
+		var httpError *agent.HTTPError
+		if errors.As(err, &httpError) && httpError.StatusCode == http.StatusForbidden {
+			fmt.Fprintln(out, "  Remote mounting requires a paid plan. Upgrade: https://unarr.app/pricing")
+		}
+		return err
+	}
+	fmt.Fprintln(out, "  Remote mounting is available because your account has an active paid plan.")
+	fmt.Fprintln(out, "  Setup: https://unarr.app/profile?tab=agents")
 	return nil
 }

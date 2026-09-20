@@ -429,7 +429,7 @@ func saveIfChanged(cfg, original config.Config, green, dim *color.Color) error {
 	fmt.Println()
 	green.Printf("  ✓ Configuration saved to %s\n", configPath)
 	if !reflect.DeepEqual(cfg.Mount, original.Mount) {
-		dim.Println("  Restart 'unarr mount' to apply local settings. Manage provider accounts on the Unarr website.")
+		dim.Println("  Run 'unarr mount' to apply local settings and keep the folder active in the background. Manage provider accounts on the Unarr website.")
 	}
 
 	// Saving is not applying: the daemon snapshots config at startup. Users

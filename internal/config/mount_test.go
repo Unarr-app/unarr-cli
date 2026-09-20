@@ -13,6 +13,7 @@ func TestMountDefaultsAndRoundTrip(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "config.toml")
 	text := `[mount]
 enabled = true
+directory = "/tmp/unarr-media"
 refresh_interval = "30s"
 `
 	if err := os.WriteFile(f, []byte(text), 0o600); err != nil {
@@ -38,8 +39,20 @@ refresh_interval = "30s"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Mount.RefreshInterval != "30s" {
+	if got.Mount.RefreshInterval != "30s" || got.Mount.Directory != "/tmp/unarr-media" {
 		t.Fatal("lost mount settings")
+	}
+}
+
+func TestMountNZBDirectoryUsesManagedDefaultAndExplicitOverride(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	m := MountConfig{}
+	if got, want := m.NZBDirectory(configPath), filepath.Join(filepath.Dir(configPath), "mount-nzbs"); got != want {
+		t.Fatalf("NZBDirectory() = %q, want %q", got, want)
+	}
+	m.NZBDir = filepath.Join(t.TempDir(), "custom")
+	if got := m.NZBDirectory(configPath); got != m.NZBDir {
+		t.Fatalf("NZBDirectory() ignored override: %q", got)
 	}
 }
 
@@ -63,6 +76,11 @@ func TestMountValidation(t *testing.T) {
 	m.RefreshInterval = "-1s"
 	if m.Validate() == nil {
 		t.Fatal("negative interval")
+	}
+	m = base
+	m.Directory = "relative"
+	if m.Validate() == nil {
+		t.Fatal("relative mount directory")
 	}
 	m = base
 	m.Enabled = false

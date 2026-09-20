@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"path/filepath"
 	"time"
@@ -22,7 +23,7 @@ import (
 func newMountCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use: "mount [directory]", GroupID: "daemon",
-		Short: "Mount the optional remote library with automatic dependency setup",
+		Short: "Configure and activate the persistent remote folder",
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  runMountCommand,
 	}
@@ -63,13 +64,11 @@ type remoteLibrary struct {
 	errors              chan error
 }
 
-func remoteSources(cfg config.Config) []remotefs.Source {
+func remoteSources(cfg config.Config, nzbDir string) []remotefs.Source {
 	c := mountAPIClient(cfg)
 	sources := []remotefs.Source{&remotefs.WebSource{API: c, AccountIdentity: cfg.Auth.APIURL + ":" + cfg.Auth.APIKey}}
-	if cfg.Mount.NZBDir != "" {
-		n := &mountNNTP{api: c}
-		sources = append(sources, &remotefs.NZBSource{Directory: cfg.Mount.NZBDir, Fetcher: n, CloseFetcher: n.Close})
-	}
+	n := &mountNNTP{api: c}
+	sources = append(sources, &remotefs.NZBSource{Directory: nzbDir, Fetcher: n, CloseFetcher: n.Close})
 	return sources
 }
 
@@ -92,11 +91,15 @@ func startRemoteLibrary(parent context.Context, cfg config.Config) (*remoteLibra
 	if err := api.MountAccess(parent); err != nil {
 		return nil, fmt.Errorf("mount access: %w", err)
 	}
+	nzbDir := cfg.Mount.NZBDirectory(resolvedConfigPath())
+	if err := os.MkdirAll(nzbDir, 0o700); err != nil {
+		return nil, fmt.Errorf("mount NZB inbox: %w", err)
+	}
 	ln, err := net.Listen("tcp", cfg.Mount.Address())
 	if err != nil {
 		return nil, fmt.Errorf("mount listener: %w", err)
 	}
-	sources := remoteSources(cfg)
+	sources := remoteSources(cfg, nzbDir)
 	dir := cfg.Mount.CacheDir
 	if dir == "" {
 		dir = filepath.Join(filepath.Dir(resolvedConfigPath()), "remote-library")
@@ -118,11 +121,7 @@ func startRemoteLibrary(parent context.Context, cfg config.Config) (*remoteLibra
 	go watchMountAccess(ctx, api.MountAccess, 30*time.Second, s.revokeAccess)
 	go func() {
 		defer close(s.done)
-		cat.Run(ctx, cfg.Mount.RefreshEvery(), func(name string, err error) {
-			if err != nil {
-				log.Printf("[mount] %s refresh: %v (retaining last valid catalog)", name, err)
-			}
-		})
+		cat.Run(ctx, cfg.Mount.RefreshEvery(), logMountRefresh)
 	}()
 	go func() {
 		err := srv.Serve(ln)
@@ -132,6 +131,12 @@ func startRemoteLibrary(parent context.Context, cfg config.Config) (*remoteLibra
 		}
 	}()
 	return s, nil
+}
+
+func logMountRefresh(name string, err error) {
+	if err != nil {
+		log.Printf("[mount] %s refresh: %v (retaining last valid catalog)", name, err)
+	}
 }
 
 func (s *remoteLibrary) Close() {
