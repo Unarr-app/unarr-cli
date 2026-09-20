@@ -115,8 +115,9 @@ credential redaction, authenticated read-only WebDAV, offline metadata access,
 concurrent snapshot refresh, persistence and partial-refresh failures, provider
 pagination, account-bound references, shared link renewal, invalid/truncated HTTP ranges, real
 NNTP framing with synthetic yEnc articles, direct multi-file NZBs and supported
-RAR streaming. macOS validates compilation only; its driver still requires
-platform-specific runtime testing.
+RAR streaming. See [the platform test matrix](REMOTE_MOUNT_TEST_MATRIX.md) for
+subsequent native setup checks, including macOS installation/upgrade and its
+remaining system-extension approval requirement.
 
 On 2026-09-20, the Windows 11 VM passed the real kernel mount test after automatic
 installation of checksum-verified WinFsp 2.1.25156 and rclone 1.75.1. The test

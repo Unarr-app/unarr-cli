@@ -43,6 +43,14 @@ restarts are disabled. macOS security approval/recovery changes are never automa
 Unsupported distributions and containers without host FUSE access get actionable
 instructions. `mount serve` needs neither rclone nor a filesystem driver.
 
+Older rclone installations are reused only when they support all required mount
+options. Incompatible versions get a private verified replacement; the user's
+existing executable is preserved. Inactive macFUSE requires explained activation
+and any native security approval. On Arch, installing missing FUSE also performs
+a full system upgrade to avoid a partial upgrade; this is explicitly disclosed
+before consent. See [the test matrix](REMOTE_MOUNT_TEST_MATRIX.md) for native
+results and remaining platform limitations.
+
 The complete local settings are:
 
 ```toml

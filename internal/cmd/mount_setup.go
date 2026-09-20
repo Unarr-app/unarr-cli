@@ -22,7 +22,7 @@ func confirmMountInstall(explanation string) error {
 		return errors.New("installation needs your approval; run unarr config mount in a terminal")
 	}
 	accepted := false
-	err := huh.NewConfirm().Title("Install the required filesystem driver?").Affirmative("Install").Negative("Cancel").Value(&accepted).Run()
+	err := huh.NewConfirm().Title("Continue with the required system setup?").Affirmative("Continue").Negative("Cancel").Value(&accepted).Run()
 	if err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/mountsetup"
 	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
@@ -41,13 +42,8 @@ func runRclone(ctx context.Context, s *remoteLibrary, directory string) error {
 	if err != nil {
 		return fmt.Errorf("rclone password setup failed: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, binary, "mount", "unarr:", directory,
-		"--config", os.DevNull, "--read-only", "--vfs-cache-mode", "off",
-		"--buffer-size", "4M", "--vfs-read-chunk-size", "32M",
-		"--vfs-read-chunk-size-limit", "128M", "--dir-cache-time", "15s",
-		"--poll-interval", "0", "--webdav-pacer-min-sleep", "0",
-		"--low-level-retries", "2", "--retries", "2",
-	)
+	args := append([]string{"mount", "unarr:", directory}, mountsetup.MountFlags()...)
+	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = rcloneEnvironment(s, strings.TrimSpace(string(password)))
 	winproc.HideWindow(cmd)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr

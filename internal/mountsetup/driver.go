@@ -16,10 +16,16 @@ import (
 var errDriverMissing = errors.New("mount driver is not installed")
 
 func ensureDriver(ctx context.Context, opts Options) error {
-	return prepareDriver(ctx, opts, driverReady, installDriver)
+	if err := prepareDriver(ctx, opts, driverReady, installDriver); err != nil {
+		return err
+	}
+	return activateDriver(ctx, opts)
 }
 
 func prepareDriver(ctx context.Context, opts Options, ready func() error, install func(context.Context, Options) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	err := ready()
 	if !errors.Is(err, errDriverMissing) {
 		return err
@@ -29,6 +35,9 @@ func prepareDriver(ctx context.Context, opts Options, ready func() error, instal
 		return fmt.Errorf("%s\nRun unarr config mount in a terminal to approve installation", explanation)
 	}
 	if err := opts.Confirm(explanation); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := install(ctx, opts); err != nil {
@@ -43,12 +52,21 @@ func prepareDriver(ctx context.Context, opts Options, ready func() error, instal
 func driverExplanation(goos string) string {
 	switch goos {
 	case "windows":
-		return "WinFsp is needed to make the remote library appear as a Windows drive or folder. unarr will download the verified official installer and install the default filesystem components automatically, showing progress. Windows will request administrator approval (UAC) if needed. Review WinFsp and its license at https://winfsp.dev before continuing. A restart may be required, but unarr will not restart your computer. Nothing will be installed until you agree."
+		return "WinFsp is needed to make the remote library appear as a Windows drive or folder. unarr will download the verified official installer and install the default filesystem components automatically, showing progress. If a legacy WinFsp 1.x installation needs replacement, its official uninstaller must run first; close any other apps using WinFsp mounts before continuing. Windows will request administrator approval (UAC) if needed. Review WinFsp and its license at https://winfsp.dev before continuing. A restart may be required between removal and installation, but unarr will not restart your computer. Nothing will be installed until you agree."
 	case "darwin":
 		return "macFUSE is needed to make the remote library appear as a local folder on macOS. unarr will download the verified official macFUSE installer and install its filesystem driver. macOS will request your administrator password and may require approval in System Settings > Privacy & Security and a restart. On Apple Silicon, macOS may also require a security change in Recovery; unarr will not change that setting. Nothing will be installed until you agree."
 	default:
-		return "FUSE is needed to make the remote library appear as a local folder on Linux. unarr will install the FUSE package and its dependencies using your system package manager, and load the fuse module if needed. sudo/doas may request your administrator password. This changes system packages; nothing will be installed until you agree."
+		return linuxDriverExplanation()
 	}
+}
+
+func linuxDriverExplanation() string {
+	explanation := "FUSE is needed to make the remote library appear as a local folder on Linux. unarr will install the FUSE package and its dependencies using your system package manager, and load the fuse module if needed. sudo/doas may request your administrator password. This changes system packages; nothing will be installed until you agree."
+	command, err := linuxPackageCommand(exec.LookPath)
+	if err == nil && filepath.Base(command[0]) == "pacman" {
+		explanation += " On Arch Linux this runs pacman -Syu: it also upgrades ALL installed system packages to avoid an unsupported partial upgrade. This may require a restart later. Cancel if you do not want a full system upgrade; unarr will not restart the computer."
+	}
+	return explanation
 }
 
 func installDriver(ctx context.Context, opts Options) error {
@@ -58,10 +76,10 @@ func installDriver(ctx context.Context, opts Options) error {
 	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
 		return fmt.Errorf("automatic driver installation is unavailable on %s", runtime.GOOS)
 	}
-	if err := os.MkdirAll(opts.Directory, 0o700); err != nil {
-		return err
-	}
-	dir, err := os.MkdirTemp(opts.Directory, "driver-*")
+	// Elevated Windows Installer cannot reliably read the user's network share.
+	// Stage system installers in the OS temp directory even if config/tools live
+	// on a UNC path. rclone's private cache still follows the configured location.
+	dir, err := os.MkdirTemp("", "unarr-mount-driver-*")
 	if err != nil {
 		return err
 	}
@@ -85,7 +103,7 @@ func installDriver(ctx context.Context, opts Options) error {
 	err = runWindowsInstaller(ctx, installer)
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && (exit.ExitCode() == 3010 || exit.ExitCode() == 1641) {
-		return fmt.Errorf("WinFsp installed; Windows requires a restart before mounting. Restart, then run unarr mount again")
+		return fmt.Errorf("WinFsp setup requires a Windows restart before continuing. Restart, then run unarr mount again")
 	}
 	return err
 }
@@ -93,7 +111,7 @@ func installDriver(ctx context.Context, opts Options) error {
 func linuxPackageCommand(look func(string) (string, error)) ([]string, error) {
 	for _, command := range [][]string{
 		{"apt-get", "install", "-y", "fuse3"}, {"dnf", "install", "-y", "fuse3"},
-		{"yum", "install", "-y", "fuse3"}, {"pacman", "-S", "--needed", "--noconfirm", "fuse3"},
+		{"yum", "install", "-y", "fuse3"}, {"pacman", "-Syu", "--needed", "--noconfirm", "fuse3"},
 		{"zypper", "--non-interactive", "install", "fuse3"}, {"apk", "add", "fuse3"},
 	} {
 		if path, err := look(command[0]); err == nil {
@@ -117,11 +135,7 @@ func privileged(ctx context.Context, command []string) error {
 
 func installLinuxDriver(ctx context.Context) error {
 	if !hasFuseHelper() {
-		command, err := linuxPackageCommand(exec.LookPath)
-		if err != nil {
-			return err
-		}
-		if err := privileged(ctx, command); err != nil {
+		if err := installLinuxPackage(ctx); err != nil {
 			return err
 		}
 	}
@@ -129,6 +143,20 @@ func installLinuxDriver(ctx context.Context) error {
 		return privileged(ctx, []string{"modprobe", "fuse"})
 	}
 	return nil
+}
+
+func installLinuxPackage(ctx context.Context) error {
+	command, err := linuxPackageCommand(exec.LookPath)
+	if err != nil {
+		return err
+	}
+	// Fresh Debian/Ubuntu images have no package index.
+	if filepath.Base(command[0]) == "apt-get" {
+		if err := privileged(ctx, []string{command[0], "update"}); err != nil {
+			return err
+		}
+	}
+	return privileged(ctx, command)
 }
 
 func hasFuseHelper() bool {

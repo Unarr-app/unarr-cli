@@ -2,6 +2,7 @@ package mountsetup
 
 import (
 	"context"
+	"debug/pe"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,10 +14,23 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
+func activateDriver(context.Context, Options) error { return nil }
+
 func runWindowsInstaller(ctx context.Context, installer string) error {
+	if code := legacyWinFspProduct(); code != "" {
+		if err := runWindowsMSI(ctx, `/x `+code+` /passive /norestart`); err != nil {
+			return err
+		}
+	}
+	return runWindowsMSI(ctx, `/i "`+installer+`" /passive /norestart`)
+}
+
+func runWindowsMSI(ctx context.Context, args string) error {
+	// Prefer a deferred reboot to Restart Manager closing unrelated applications
+	// (or our own controller when WinFsp's network provider is loaded into it).
+	args += " MSIRESTARTMANAGERCONTROL=Disable"
 	// RunAs preserves the native UAC consent/credential prompt. Passive MSI UI
 	// removes redundant Next/Finish clicks after our explained approval.
-	args := `/i "` + installer + `" /passive /norestart`
 	script := `$ErrorActionPreference='Stop'; $p=Start-Process -FilePath 'msiexec.exe' -ArgumentList '` + strings.ReplaceAll(args, "'", "''") + `' -Verb RunAs -Wait -PassThru; exit $p.ExitCode`
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	winproc.HideWindow(cmd)
@@ -55,6 +69,14 @@ func hasWinFspDLL(dir string) bool {
 	if runtime.GOARCH == "arm64" {
 		name = "winfsp-a64.dll"
 	}
-	info, err := os.Stat(filepath.Join(dir, "bin", name))
-	return err == nil && info.Mode().IsRegular()
+	file, err := pe.Open(filepath.Join(dir, "bin", name))
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	machine := uint16(pe.IMAGE_FILE_MACHINE_AMD64)
+	if runtime.GOARCH == "arm64" {
+		machine = pe.IMAGE_FILE_MACHINE_ARM64
+	}
+	return file.Machine == machine && file.Characteristics&pe.IMAGE_FILE_DLL != 0
 }
