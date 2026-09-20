@@ -1064,8 +1064,11 @@ downloads exactly the same. Telemetry is purely additive.
 `unarr mount` exposes completed Real-Debrid / AllDebrid / TorBox / Torrin files and a directory of
 NZBs as a local folder, reading media on demand. This is **disabled by default**
 and independent of the existing WebDAV export of downloaded files. Enable
-the mount with `unarr config mount`, connect providers on the Unarr website, install
-rclone plus FUSE/WinFsp, then run `unarr mount /path/to/empty/folder`.
+the mount with `unarr mount` and connect providers on the Unarr website. unarr
+prepares rclone automatically, explains missing filesystem drivers before asking
+permission to install them, and creates a default mount folder. Use
+`unarr config mount` to prepare without mounting, or `unarr mount <directory>`
+to choose a destination.
 
 See [setup, configuration and limitations](REMOTE_MOUNT.md) and the
 [performance report](REMOTE_MOUNT_PERFORMANCE.md). The mount runs in the

@@ -15,18 +15,33 @@ There is no separate local provider configuration or encryption key file.
 
 1. Connect your Real-Debrid, AllDebrid, TorBox or Torrin account in the existing
    Unarr web settings. Configure Usenet there too if you want direct NZB access.
-2. Run `unarr login` to link this device to that Unarr account.
-3. Install [rclone](https://rclone.org/install/) and FUSE on Linux, macFUSE on
-   macOS, or WinFsp on Windows.
-4. Run `unarr config mount` (also available as **Mount** in `unarr config`).
-   Enable the mount and optionally choose a local NZB directory.
-5. Create an empty directory and run `unarr mount /path/to/remote-media`.
+2. Run `unarr mount`. On first use, enable the optional feature and optionally
+   choose a local NZB directory. Missing/expired device authentication opens the
+   existing browser sign-in flow; a valid session is reused.
+3. unarr checks paid access, reuses compatible dependencies and downloads a
+   pinned, SHA-256-verified official rclone into its private tools directory.
+   Before installing a missing FUSE/macFUSE/WinFsp driver, it explains why it is
+   needed and any system password, approval or restart, then asks permission.
+4. The default folder is `~/unarr-media` on Linux/macOS; Windows chooses a free
+   drive letter. A custom destination is `unarr mount /path/to/remote-media`.
+   `unarr config mount` remains available for preparation without starting a mount.
 
 On Windows, use an unused drive letter (`unarr mount X:`) or a nonexistent
-directory below an existing parent. Linux/macOS use an existing empty directory.
+directory below an existing parent. Linux/macOS create a missing directory and
+reject nonempty destinations. Existing files are never replaced.
 The command starts a loopback WebDAV service and rclone. Ctrl-C or SIGTERM on
 Unix stops it and unmounts. The normal download daemon does not start this
 separate experimental service.
+
+Dependency preparation never runs while disabled or from the normal daemon.
+Noninteractive sessions cannot approve system installations or enable the feature.
+On supported Linux distributions unarr uses apt/dnf/yum/pacman/zypper/apk and
+sudo/doas if needed. macOS uses the verified official macFUSE installer; Windows
+installs the default WinFsp components with a progress indicator after explaining
+the installation and requesting consent. Native UAC prompts remain, and automatic
+restarts are disabled. macOS security approval/recovery changes are never automated.
+Unsupported distributions and containers without host FUSE access get actionable
+instructions. `mount serve` needs neither rclone nor a filesystem driver.
 
 The complete local settings are:
 

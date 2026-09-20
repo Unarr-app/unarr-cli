@@ -29,7 +29,11 @@ func rcloneEnvironment(s *remoteLibrary, obscured string) []string {
 }
 
 func runRclone(ctx context.Context, s *remoteLibrary, directory string) error {
-	obscure := exec.CommandContext(ctx, "rclone", "obscure", "-")
+	binary := s.rclone
+	if binary == "" {
+		binary = "rclone"
+	}
+	obscure := exec.CommandContext(ctx, binary, "obscure", "-")
 	winproc.HideWindow(obscure)
 	obscure.Stdin = strings.NewReader(s.password + "\n")
 	obscure.Env = rcloneEnvironment(s, "")
@@ -37,7 +41,7 @@ func runRclone(ctx context.Context, s *remoteLibrary, directory string) error {
 	if err != nil {
 		return fmt.Errorf("rclone password setup failed: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "rclone", "mount", "unarr:", directory,
+	cmd := exec.CommandContext(ctx, binary, "mount", "unarr:", directory,
 		"--config", os.DevNull, "--read-only", "--vfs-cache-mode", "off",
 		"--buffer-size", "4M", "--vfs-read-chunk-size", "32M",
 		"--vfs-read-chunk-size-limit", "128M", "--dir-cache-time", "15s",

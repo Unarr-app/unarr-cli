@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"time"
@@ -22,21 +21,10 @@ import (
 
 func newMountCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use: "mount <directory>", GroupID: "daemon",
-		Short: "Mount the optional remote debrid/Usenet library (requires rclone)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := loadConfig()
-			if !cfg.Mount.Enabled {
-				return errors.New("remote mount is disabled; set mount.enabled = true in config.toml")
-			}
-			if _, err := exec.LookPath("rclone"); err != nil {
-				return errors.New("install rclone and FUSE (Linux/macOS) or WinFsp (Windows) first")
-			}
-			ctx, stop := signal.NotifyContext(cmd.Context(), mountSignals()...)
-			defer stop()
-			return runRemoteMount(ctx, cfg, args[0])
-		},
+		Use: "mount [directory]", GroupID: "daemon",
+		Short: "Mount the optional remote library with automatic dependency setup",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  runMountCommand,
 	}
 	c.AddCommand(&cobra.Command{
 		Use: "serve", Short: "Serve the remote library over loopback WebDAV", Args: cobra.NoArgs,
@@ -66,6 +54,7 @@ func newMountCmd() *cobra.Command {
 
 type remoteLibrary struct {
 	URL, user, password string
+	rclone              string
 	server              *http.Server
 	catalog             *remotefs.Catalog
 	ctx                 context.Context
@@ -152,7 +141,7 @@ func (s *remoteLibrary) Close() {
 	_ = s.catalog.Close()
 }
 
-func runRemoteMount(ctx context.Context, cfg config.Config, directory string) error {
+func runRemoteMount(ctx context.Context, cfg config.Config, directory, binary string) error {
 	if err := cfg.Mount.Validate(); err != nil {
 		return err
 	}
@@ -165,6 +154,7 @@ func runRemoteMount(ctx context.Context, cfg config.Config, directory string) er
 		return err
 	}
 	defer s.Close()
+	s.rclone = binary
 	err = runRclone(s.ctx, s, dir)
 	select {
 	case serveErr := <-s.errors:
@@ -172,4 +162,8 @@ func runRemoteMount(ctx context.Context, cfg config.Config, directory string) er
 	default:
 		return err
 	}
+}
+
+func mountContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(parent, mountSignals()...)
 }

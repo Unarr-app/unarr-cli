@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/mountsetup"
 	"github.com/Unarr-app/unarr-cli/internal/remotefs"
 )
 
@@ -76,22 +77,31 @@ func TestRcloneKernelMount(t *testing.T) {
 	if os.Getenv("UNARR_TEST_RCLONE_MOUNT") != "1" {
 		t.Skip("set UNARR_TEST_RCLONE_MOUNT=1 to exercise an actual FUSE mount")
 	}
-	if runtime.GOOS == "windows" {
-		t.Skip("kernel smoke currently uses POSIX mountpoint lifecycle")
+	binary, err := exec.LookPath("rclone")
+	if os.Getenv("UNARR_TEST_DEPENDENCY_INSTALL") == "1" {
+		// Explicit opt-in for disposable VM tests. The native installer still
+		// retains native administrator approval; never enabled by normal CI.
+		binary, err = mountsetup.Ensure(context.Background(), mountsetup.Options{
+			Directory: t.TempDir(), Output: os.Stdout,
+			Confirm: func(explanation string) error { t.Log("TEST APPROVAL:", explanation); return nil },
+		})
 	}
-	if _, err := exec.LookPath("rclone"); err != nil {
+	if err != nil {
 		t.Fatal(err)
 	}
 	data := bytes.Repeat([]byte("abcdefgh01234567"), 1<<17)
 	f := remotefs.New()
-	err := f.Replace([]remotefs.Entry{{Path: "rd/Release [123]/a & b.mkv", Key: "file", Size: int64(len(data)), Modified: time.Now(), Open: func(context.Context) (io.ReadSeekCloser, error) { return mountMemoryReader{bytes.NewReader(data)}, nil }}})
+	err = f.Replace([]remotefs.Entry{{Path: "rd/Release [123]/a & b.mkv", Key: "file", Size: int64(len(data)), Modified: time.Now(), Open: func(context.Context) (io.ReadSeekCloser, error) { return mountMemoryReader{bytes.NewReader(data)}, nil }}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	httpSrv := httptest.NewServer(remotefs.Handler(f, "u", "p"))
 	defer httpSrv.Close()
-	s := &remoteLibrary{URL: httpSrv.URL, user: "u", password: "p"}
+	s := &remoteLibrary{URL: httpSrv.URL, user: "u", password: "p", rclone: binary}
 	mountpoint := t.TempDir()
+	if runtime.GOOS == "windows" {
+		mountpoint = filepath.Join(mountpoint, "mount")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
