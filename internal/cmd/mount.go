@@ -64,13 +64,17 @@ type remoteLibrary struct {
 }
 
 func remoteSources(cfg config.Config) []remotefs.Source {
-	c := agent.NewClient(cfg.Auth.APIURL, cfg.Auth.APIKey, "unarr-mount")
+	c := mountAPIClient(cfg)
 	sources := []remotefs.Source{&remotefs.WebSource{API: c, AccountIdentity: cfg.Auth.APIURL + ":" + cfg.Auth.APIKey}}
 	if cfg.Mount.NZBDir != "" {
 		n := &mountNNTP{api: c}
 		sources = append(sources, &remotefs.NZBSource{Directory: cfg.Mount.NZBDir, Fetcher: n, CloseFetcher: n.Close})
 	}
 	return sources
+}
+
+func mountAPIClient(cfg config.Config) *agent.Client {
+	return agent.NewClientWithMirrors(cfg.Auth.APIURL, cfg.Auth.Mirrors, cfg.Auth.APIKey, "unarr-mount")
 }
 
 func startRemoteLibrary(parent context.Context, cfg config.Config) (*remoteLibrary, error) {
@@ -84,7 +88,7 @@ func startRemoteLibrary(parent context.Context, cfg config.Config) (*remoteLibra
 	if !active {
 		return nil, errors.New("sign in to Unarr before mounting; provider accounts are managed on the website")
 	}
-	api := agent.NewClient(cfg.Auth.APIURL, cfg.Auth.APIKey, "unarr-mount")
+	api := mountAPIClient(cfg)
 	if err := api.MountAccess(parent); err != nil {
 		return nil, fmt.Errorf("mount access: %w", err)
 	}

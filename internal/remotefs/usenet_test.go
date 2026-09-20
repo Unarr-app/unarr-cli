@@ -160,3 +160,44 @@ func TestNZBMultiFileAndUnsupported(t *testing.T) {
 		t.Fatal("deletion not applied", err)
 	}
 }
+
+func TestNZBMissingSidecarKeepsVideoAndRetriesUnchangedManifest(t *testing.T) {
+	server := nntptest.NewFakeServer(t)
+	client := nntp.NewClient(server.Config())
+	defer client.Close()
+	n, video := nntptest.BuildDirectFile("movie.mkv", []byte("playable video"), 32)
+	server.AddArticles(video)
+	sidecar, missing := nntptest.BuildDirectFile("movie.nfo", []byte("metadata"), 32)
+	n.Files = append(sidecar.Files, n.Files...) // Failure before the video matters.
+	dir := t.TempDir()
+	writeNZB(t, dir, "release.nzb", n)
+	s := &NZBSource{Directory: dir, Fetcher: client}
+	defer s.Close()
+	ctx := context.Background()
+	partial, err := s.List(ctx, nil)
+	if err != nil || len(partial) != 1 || partial[0].FileIndex != 1 {
+		t.Fatalf("missing sidecar hid healthy video: %v, %v", partial, err)
+	}
+	r, err := s.Open(ctx, partial[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil || string(got) != "playable video" {
+		t.Fatalf("healthy video read: %q, %v", got, err)
+	}
+	server.AddArticles(missing)
+	beforeRecovery := server.BodyCalls()
+	recovered, err := s.List(ctx, partial)
+	if err != nil || len(recovered) != 2 {
+		t.Fatalf("unchanged manifest did not recover: %v, %v", recovered, err)
+	}
+	if server.BodyCalls() != beforeRecovery+1 {
+		t.Fatal("partial recovery fetched articles for an already indexed file")
+	}
+	calls := server.BodyCalls()
+	if _, err = s.List(ctx, recovered); err != nil || server.BodyCalls() != calls {
+		t.Fatal("complete manifest must resume metadata-only refreshes", err)
+	}
+}

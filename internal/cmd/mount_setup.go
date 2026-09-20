@@ -71,7 +71,7 @@ func mountSignIn(cfg *config.Config) error {
 func probeMountAccount(ctx context.Context, cfg *config.Config) error {
 	probe, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	if err := agent.NewClient(cfg.Auth.APIURL, cfg.Auth.APIKey, "unarr-mount").MountAccess(probe); err != nil {
+	if err := mountAPIClient(*cfg).MountAccess(probe); err != nil {
 		return fmt.Errorf("mount access: %w", err)
 	}
 	return nil

@@ -86,12 +86,28 @@ func (s *NZBSource) List(ctx context.Context, previous []Record) ([]Record, erro
 			records = append(records, fresh...)
 			continue
 		}
-		// An incomplete copy, unsupported archive or temporary article failure
-		// must neither remove the last known entry nor block other NZBs.
-		log.Printf("[mount] NZB %q not indexed: %v", file.Name(), err)
-		records = append(records, old[id]...)
+		// Independent direct files can survive a missing sidecar or episode.
+		// Retain known entries and retry partial manifests on the next refresh.
+		log.Printf("[mount] NZB %q indexing incomplete: %v", file.Name(), err)
+		records = append(records, partialManifest(fresh, old[id])...)
 	}
 	return records, nil
+}
+
+func partialManifest(fresh, previous []Record) []Record {
+	seen := make(map[string]bool, len(fresh))
+	out := make([]Record, 0, len(fresh)+len(previous))
+	for _, group := range [][]Record{fresh, previous} {
+		for _, r := range group {
+			if seen[r.Path] {
+				continue
+			}
+			seen[r.Path] = true
+			r.ManifestStamp = "" // Do not cache a partially successful probe.
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func (s *NZBSource) indexFile(ctx context.Context, file os.DirEntry, previous []Record) ([]Record, error) {
@@ -111,7 +127,7 @@ func (s *NZBSource) indexFile(ctx context.Context, file os.DirEntry, previous []
 		return nil, err
 	}
 	fingerprint := digest(string(data))
-	if len(previous) > 0 && previous[0].Fingerprint == fingerprint {
+	if len(previous) > 0 && previous[0].ManifestStamp != "" && previous[0].Fingerprint == fingerprint {
 		out := append([]Record(nil), previous...)
 		for i := range out {
 			out[i].ManifestStamp = stamp
@@ -124,7 +140,7 @@ func (s *NZBSource) indexFile(ctx context.Context, file os.DirEntry, previous []
 	}
 	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	return s.indexManifest(rctx, parsed, manifestInfo{file.Name(), digest(file.Name())[:16], fingerprint, stamp, info.ModTime()})
+	return s.indexManifest(rctx, parsed, manifestInfo{file.Name(), digest(file.Name())[:16], fingerprint, stamp, info.ModTime()}, previous)
 }
 
 type manifestInfo struct {
@@ -132,8 +148,10 @@ type manifestInfo struct {
 	modified                     time.Time
 }
 
-func (s *NZBSource) indexManifest(ctx context.Context, n *nzb.NZB, info manifestInfo) ([]Record, error) {
+func (s *NZBSource) indexManifest(ctx context.Context, n *nzb.NZB, info manifestInfo, previous []Record) ([]Record, error) {
 	var records []Record
+	var failures []error
+	known := knownManifestFiles(previous, info.fingerprint)
 	indices := []int{-1}
 	if !n.HasRars() {
 		indices = nil
@@ -142,10 +160,20 @@ func (s *NZBSource) indexManifest(ctx context.Context, n *nzb.NZB, info manifest
 		}
 	}
 	for _, idx := range indices {
+		if err := ctx.Err(); err != nil {
+			return records, err
+		}
+		if record, ok := known[idx]; ok {
+			record.ManifestStamp = info.stamp
+			record.Modified = info.modified
+			records = append(records, record)
+			continue
+		}
 		plan := s.makePlan(ctx, n, idx)
 		if !plan.Streamable() {
 			plan.Close()
-			return nil, fmt.Errorf("%w: %s", stream.ErrNotStreamable, plan.Reason)
+			failures = append(failures, fmt.Errorf("%w: %s", stream.ErrNotStreamable, plan.Reason))
+			continue
 		}
 		title := strings.TrimSuffix(info.name, filepath.Ext(info.name))
 		records = append(records, Record{Entry: Entry{
@@ -154,9 +182,19 @@ func (s *NZBSource) indexManifest(ctx context.Context, n *nzb.NZB, info manifest
 		plan.Close()
 	}
 	if len(records) == 0 {
-		return nil, errors.New("NZB has no supported files")
+		failures = append(failures, errors.New("NZB has no supported files"))
 	}
-	return records, nil
+	return records, errors.Join(failures...)
+}
+
+func knownManifestFiles(previous []Record, fingerprint string) map[int]Record {
+	known := make(map[int]Record, len(previous))
+	for _, record := range previous {
+		if record.Fingerprint == fingerprint {
+			known[record.FileIndex] = record
+		}
+	}
+	return known
 }
 
 func (s *NZBSource) makePlan(ctx context.Context, n *nzb.NZB, idx int) *stream.StreamPlan {

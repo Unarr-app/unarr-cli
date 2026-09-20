@@ -116,6 +116,10 @@ This endpoint retains the existing web-side Usenet entitlement checks.
 Metadata snapshots and a private local database keep listings available during
 outages and after restart. Failed refreshes retain known entries and can publish
 safe partial progress. Account removals apply after a successful complete scan.
+Mount setup, paid-access checks and source requests use the existing configured
+API mirrors for transient failures. A paid-access denial is not retried through
+another mirror. Missing files in a direct NZB do not hide healthy siblings;
+partial manifests are retried on later refreshes while retaining known entries.
 The cache defaults to `remote-library/` beside the selected config, honoring
 `--config`. It contains metadata and signed references, not media or API keys.
 
