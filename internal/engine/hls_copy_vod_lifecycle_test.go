@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -250,6 +251,31 @@ func TestCopyVODCloseStopsPrefetcher(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close blocked on the prefetcher")
+	}
+}
+
+// Seen in the field: a seek cancels the stale prefetch, exec reports that as
+// "signal: killed", and the log called it a failed segment. A cancelled run must
+// surface as the cancellation, not as an ffmpeg failure.
+func TestCopyVODCancelledGenerationReportsCancellation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX shell stub")
+	}
+	s := lazyLifecycleSession(t)
+	stub := filepath.Join(t.TempDir(), "ffmpeg-stub")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil { //nolint:gosec // G306: test stub must be executable.
+		t.Fatal(err)
+	}
+	s.cfg.Transcode.FFmpegPath = stub
+	s.probe = &StreamProbe{}
+	if err := os.MkdirAll(filepath.Join(s.tmpDir, "video"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	err := s.generateCopySegment(ctx, 0)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled generation reported as: %v", err)
 	}
 }
 

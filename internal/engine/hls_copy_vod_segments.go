@@ -132,6 +132,12 @@ func (s *HLSSession) generateCopySegment(ctx context.Context, idx int) error {
 	cmd.Stderr = &errBuf
 	startedAt := time.Now()
 	if err := cmd.Run(); err != nil {
+		// A cancelled run (seek away, session close) surfaces from exec as
+		// "signal: killed". Report the cancellation itself so callers can tell it
+		// from a real ffmpeg failure; the 60 s genCtx timeout stays an error.
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		return fmt.Errorf("hls: copy-vod seg-%d ffmpeg: %w (%s)", idx, err, strings.TrimSpace(errBuf.String()))
 	}
 	if fi, err := os.Stat(tmp); err != nil || fi.Size() == 0 {
