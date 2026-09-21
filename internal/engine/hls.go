@@ -1928,7 +1928,9 @@ func (s *HLSSession) ServeSegment(w http.ResponseWriter, r *http.Request, idx in
 			return
 		}
 		if err := s.ensureCopySegment(r.Context(), idx); err != nil {
-			log.Printf("[hls %s] copy-vod seg-%d gen failed: %v", shortHLSID(s.cfg.SessionID), idx, err)
+			if r.Context().Err() == nil { // a viewer who left (seek, reload) is no failure; generation goes on
+				log.Printf("[hls %s] copy-vod seg-%d gen failed: %v", shortHLSID(s.cfg.SessionID), idx, err)
+			}
 			http.Error(w, "segment unavailable", http.StatusServiceUnavailable)
 			return
 		}
