@@ -87,6 +87,20 @@ func findVideolessDirs(roots []string, skip map[string]bool, floor int64) []Find
 			if dirHasRealVideo(path, floor) {
 				return nil
 			}
+			// A dir holding a partial is not "video-less" — it is a download's
+			// working dir. Only the per-file orphan-partial category may judge a
+			// partial: it knows the active set, and is switched off while any
+			// download is paused (a paused .part keeps a frozen mtime nothing else
+			// can protect). Removing the whole dir here bypassed both: the auto-sweep
+			// deleted the release dir of a debrid download 9 s into it, the finished
+			// file could not be read back, and it failed as "storage unavailable".
+			// An orphan partial is reaped by its own category; the dir it leaves
+			// empty is pruned on the next sweep. SkipDir, not nil: a release's
+			// Subs/ or Sample/ beside the .part holds no video either, and must not
+			// be RemoveAll'd out from under the running download.
+			if dirHasPartial(path) {
+				return filepath.SkipDir
+			}
 			out = append(out, dirFinding(path, KindEmptyDir,
 				"directory contains no valid video (empty or only junk/stubs)"))
 			skip[path] = true
@@ -108,6 +122,24 @@ func dirHasRealVideo(dir string, floor int64) bool {
 				found = true
 				return filepath.SkipAll
 			}
+		}
+		return nil
+	})
+	return found
+}
+
+// dirHasPartial reports whether any in-progress/partial download file
+// (IsPartialExt: .part, .!qb, .aria2, …, and the debrid .part.meta.json) exists
+// anywhere under dir.
+func dirHasPartial(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if IsPartialExt(path) {
+			found = true
+			return filepath.SkipAll
 		}
 		return nil
 	})
