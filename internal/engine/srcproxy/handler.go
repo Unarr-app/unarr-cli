@@ -22,8 +22,8 @@ func (p *Proxy) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !background {
-		p.foreground.Add(1)
-		defer p.foreground.Add(-1)
+		foreground.Add(1)
+		defer foreground.Add(-1)
 	}
 	rd := &reader{p: p, ctx: r.Context()}
 	defer rd.close()
@@ -139,7 +139,7 @@ func (p *Proxy) yield(ctx context.Context) error {
 	deadline := time.Now().Add(backgroundDrip)
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
-	for p.foreground.Load() > 0 && time.Now().Before(deadline) {
+	for foreground.Load() > 0 && time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

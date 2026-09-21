@@ -221,8 +221,10 @@ func startCopyVODSubtitles(s *HLSSession) {
 	s.mu.Lock()
 	s.cancel = cancel
 	s.mu.Unlock()
+	s.subsDone = make(chan struct{}) // session not published yet: no reader can race this
 
 	go func() {
+		defer close(s.subsDone)
 		// Yield the panel to the first video segment before opening a second read.
 		select {
 		case <-ffCtx.Done():
