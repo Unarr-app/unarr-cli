@@ -117,6 +117,7 @@ func TestSubtitleWindowsOnlyExtractOfferedSegments(t *testing.T) {
 func TestSubtitleWindowsFollowTheViewer(t *testing.T) {
 	rec := newWindowRecorder()
 	rec.hold[0] = make(chan struct{})
+	rec.hold[150] = make(chan struct{})
 	w := newSubtitleWindows("[t]", testSegStarts(200), rec.extract)
 	defer runWindows(t, w)()
 
@@ -126,13 +127,27 @@ func TestSubtitleWindowsFollowTheViewer(t *testing.T) {
 	}
 	w.offer(1)
 	w.offer(2)
-	w.offer(151) // prefetched past the new position
-	w.offer(150)
+	// Production order: the seek is noted when the viewer ASKS for segment 150,
+	// a second or two before that segment exists and its window can be offered.
+	// Until then the windows left behind must stay put — picking window 0 back
+	// up here is what made window 150 queue behind it.
 	w.seek(150)
+	waitFor(t, "window 0 to be set aside", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return w.running < 0
+	})
+	time.Sleep(50 * time.Millisecond)
+	if got, want := rec.seen(), []int{0}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("after the seek, before its segment exists: extracted %v, want %v", got, want)
+	}
+	close(rec.hold[0]) // from here on window 0 would run straight through
+	w.offer(150)
 	if k := <-rec.started; k != 150 {
 		t.Fatalf("window after the seek = %d, want 150", k)
 	}
-	close(rec.hold[0]) // the retry of window 0 runs straight through
+	w.offer(151) // prefetched past the new position, while 150 is being read
+	close(rec.hold[150])
 	waitFor(t, "all five windows", func() bool { return w.progress() == 5 })
 
 	if got, want := rec.seen(), []int{0, 150, 151, 0, 1, 2}; !reflect.DeepEqual(got, want) {
@@ -192,17 +207,56 @@ func TestSubtitleWindowsDedupeAcrossSeams(t *testing.T) {
 	}
 }
 
+func countOf(seen []int, k int) (n int) {
+	for _, s := range seen {
+		if s == k {
+			n++
+		}
+	}
+	return n
+}
+
+// A network blip must not cost the viewer a segment of subtitles for good: the
+// attempts are SPACED OUT (retrying at once put them all inside the same blip),
+// the others go on meanwhile, and until the retry lands the window is not
+// reported as covered — "covered" tells the player there is no dialogue there.
+func TestSubtitleWindowsRetryAFailedWindowLater(t *testing.T) {
+	rec := newWindowRecorder()
+	rec.fail[1] = 1
+	w := newSubtitleWindows("[t]", testSegStarts(3), rec.extract)
+	w.retryDelay = 150 * time.Millisecond
+	for k := range 3 {
+		w.offer(k)
+	}
+	done := make(chan struct{})
+	go func() { w.run(context.Background()); close(done) }()
+
+	waitFor(t, "windows 0 and 2", func() bool { return w.progress() == 2 })
+	if got, want := rec.seen(), []int{0, 1, 2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("before the retry delay: extracted %v, want %v (no immediate retry)", got, want)
+	}
+	want := [][2]float64{{0, testSegSec}, {2 * testSegSec, 3 * testSegSec}}
+	if got := w.covered(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("covered = %v, want %v (a window awaiting its retry is not covered)", got, want)
+	}
+	<-done // the retry succeeds and completes the set
+	if len(w.snapshot(0)) != 6 {
+		t.Fatalf("got %d cues, want all 6 after the retry", len(w.snapshot(0)))
+	}
+}
+
 // A window that keeps failing is given up on rather than retried forever.
 func TestSubtitleWindowsGiveUpOnAFailingWindow(t *testing.T) {
 	rec := newWindowRecorder()
 	rec.fail[1] = subtitleWindowAttempts
 	w := newSubtitleWindows("[t]", testSegStarts(3), rec.extract)
+	w.retryDelay = time.Millisecond
 	for k := range 3 {
 		w.offer(k)
 	}
 	w.run(context.Background())
-	if got, want := rec.seen(), []int{0, 1, 1, 2}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("extraction order = %v, want %v", got, want)
+	if got := countOf(rec.seen(), 1); got != subtitleWindowAttempts {
+		t.Fatalf("window 1 tried %d times, want %d: %v", got, subtitleWindowAttempts, rec.seen())
 	}
 	if w.progress() != 3 {
 		t.Fatalf("progress = %d, want 3 (the hole counts as settled)", w.progress())

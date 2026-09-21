@@ -52,8 +52,9 @@ func (s *HLSSession) copySource() string {
 	return s.cfg.sourceRef()
 }
 
-// copyBulkSource is what whole-file readers open (subtitle extractor): through
-// the proxy they yield the link to segment generation.
+// copyBulkSource is what readers that must never delay the picture open (the
+// subtitle extractor): through the proxy, cache hits are served at once and
+// anything that needs the network yields the link to segment generation.
 func (s *HLSSession) copyBulkSource() string {
 	if s.copyProxy != nil {
 		return s.copyProxy.BackgroundURL()

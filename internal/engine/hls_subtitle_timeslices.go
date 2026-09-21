@@ -20,11 +20,17 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"time"
 )
 
 // subtitleWindowAttempts is how often a window is tried before it is given up
 // on: better a hole of one segment in the subtitles than retrying forever.
-const subtitleWindowAttempts = 2
+const subtitleWindowAttempts = 3
+
+// subtitleWindowRetryDelay spaces the attempts out. Retrying at once put every
+// attempt inside the same network blip, turning a two-second hiccup into a
+// permanent hole that was then reported as covered ("no dialogue here").
+const subtitleWindowRetryDelay = 4 * time.Second
 
 // extractWindowFunc returns the cues found reading [start, end), per subtitle
 // track index, on the session timeline. Cues of neighbouring windows may come
@@ -32,9 +38,10 @@ const subtitleWindowAttempts = 2
 type extractWindowFunc func(ctx context.Context, start, end float64) (map[int][]vttCue, error)
 
 type subtitleWindows struct {
-	tag     string    // log prefix
-	starts  []float64 // segment boundary table: window k is [starts[k], starts[k+1])
-	extract extractWindowFunc
+	tag        string    // log prefix
+	starts     []float64 // segment boundary table: window k is [starts[k], starts[k+1])
+	extract    extractWindowFunc
+	retryDelay time.Duration // between attempts at a failed window
 
 	mu       sync.Mutex
 	done     []bool
@@ -53,7 +60,7 @@ type subtitleWindows struct {
 func newSubtitleWindows(tag string, starts []float64, extract extractWindowFunc) *subtitleWindows {
 	n := max(len(starts)-1, 0)
 	return &subtitleWindows{
-		tag: tag, starts: starts, extract: extract,
+		tag: tag, starts: starts, extract: extract, retryDelay: subtitleWindowRetryDelay,
 		done: make([]bool, n), attempts: make([]int, n), running: -1,
 		pending: make(map[int]struct{}),
 		cues:    make(map[int][]vttCue), seen: make(map[int]map[string]struct{}),
@@ -80,12 +87,18 @@ func (w *subtitleWindows) offer(k int) {
 
 // seek moves extraction to the viewer's new position: a window being read for
 // the old one is set aside (it stays pending) so the new one goes first.
+//
+// It runs BEFORE the segment at k exists — the viewer's request is what
+// generates it — so window k is typically not even offered yet. See next.
 func (w *subtitleWindows) seek(k int) {
 	if w == nil {
 		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if k < 0 || k >= len(w.done) {
+		return
+	}
 	w.anchor = k
 	if w.running >= 0 && (w.running < k || w.running > k+copyVODLookahead) {
 		w.stop()
@@ -93,7 +106,13 @@ func (w *subtitleWindows) seek(k int) {
 }
 
 // next is the pending window to extract now: the first one from the anchor on,
-// else the earliest left behind it. -1 when nothing is pending.
+// else the earliest left behind it. -1 when there is nothing to do yet.
+//
+// Windows behind the anchor wait until the anchor's own window was dealt with.
+// Without that, a seek set the running window aside only for it to be picked
+// right back up (nothing at the new position is offered for a second or two),
+// and the window the viewer is waiting for then queued behind it — behind a read
+// that, off the cache, yields to the very segment fetches the seek just started.
 func (w *subtitleWindows) next() int {
 	ahead, behind := -1, -1
 	for k := range w.pending {
@@ -106,6 +125,9 @@ func (w *subtitleWindows) next() int {
 	}
 	if ahead >= 0 {
 		return ahead
+	}
+	if anchorOpen := !w.done[w.anchor] && w.attempts[w.anchor] == 0; anchorOpen {
+		return -1
 	}
 	return behind
 }
@@ -135,7 +157,8 @@ func (w *subtitleWindows) claim(ctx context.Context) (k int, wctx context.Contex
 }
 
 // settle records the outcome of window k. A window set aside by a seek stays
-// pending.
+// pending; a failed one is taken off the queue and offered again after
+// retryDelay, until its attempts run out and it is given up on (settled empty).
 func (w *subtitleWindows) settle(k int, cues map[int][]vttCue, err error, cancelled bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -145,8 +168,11 @@ func (w *subtitleWindows) settle(k int, cues map[int][]vttCue, err error, cancel
 			return
 		}
 		w.attempts[k]++
-		log.Printf("%s subtitle window %d failed (attempt %d): %v", w.tag, k, w.attempts[k], err)
+		log.Printf("%s subtitle window %d failed (attempt %d/%d): %v",
+			w.tag, k, w.attempts[k], subtitleWindowAttempts, err)
 		if w.attempts[k] < subtitleWindowAttempts {
+			delete(w.pending, k)
+			time.AfterFunc(w.retryDelay, func() { w.offer(k) })
 			return
 		}
 	}

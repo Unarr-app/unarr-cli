@@ -23,6 +23,19 @@ func subtitleStatus(t *testing.T, s *HLSSession) bool {
 	return *body.Complete
 }
 
+// The player polls this for as long as the page is open, and a COPY-VOD session
+// may never report complete — so it must not count as the viewer being there, or
+// a paused, forgotten tab keeps ffmpeg and the debrid link alive forever.
+func TestSubtitleStatusPollDoesNotKeepTheSessionAlive(t *testing.T) {
+	s := &HLSSession{copyVOD: true, subsDone: make(chan struct{})}
+	subtitleStatus(t, s)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.lastTouch.IsZero() {
+		t.Fatal("a status poll touched the session; the idle sweep would never reap it")
+	}
+}
+
 // The web player re-fetches a partial subtitle track once this flips to true, so
 // it must be false exactly while a sidecar can still grow.
 func TestSubtitleStatusTracksExtraction(t *testing.T) {
