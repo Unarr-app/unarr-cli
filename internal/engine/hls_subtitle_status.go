@@ -35,10 +35,21 @@ func (s *HLSSession) subtitleSidecarsComplete() bool {
 // even while it is still being written (holding the response open instead stalls
 // playback — see ServeSubtitleVTT). So a client that fetched early holds a
 // partial track. This tells it when re-fetching will finally yield the complete
-// one; until then it may re-fetch as the playhead outruns the cues it has.
+// one. Until then `progress`, when present, grows each time more cues became
+// available (they arrive in viewer-first order, not playback order, so the
+// client cannot infer it from the cues it holds); without it the client may
+// re-fetch as the playhead outruns the cues it has.
 func (s *HLSSession) ServeSubtitleStatus(w http.ResponseWriter, _ *http.Request) {
 	s.Touch()
+	status := struct {
+		Complete bool `json:"complete"`
+		Progress *int `json:"progress,omitempty"`
+	}{Complete: s.subtitleSidecarsComplete()}
+	if s.subWin != nil {
+		n := s.subWin.progress()
+		status.Progress = &n
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"complete": s.subtitleSidecarsComplete()})
+	_ = json.NewEncoder(w).Encode(status)
 }

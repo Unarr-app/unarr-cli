@@ -137,7 +137,8 @@ func (s *HLSSession) noteCopyPlayhead(idx int) {
 	s.copyGenMu.Lock()
 	prev := s.copyHead
 	s.copyHead = idx
-	if idx < prev || idx > prev+copyVODLookahead+1 {
+	seeked := idx < prev || idx > prev+copyVODLookahead+1
+	if seeked {
 		for i, call := range s.copyGen {
 			if call.prefetch && (i <= idx || i > idx+copyVODLookahead) {
 				call.cancel()
@@ -145,6 +146,9 @@ func (s *HLSSession) noteCopyPlayhead(idx int) {
 		}
 	}
 	s.copyGenMu.Unlock()
+	if seeked && idx < len(s.copySegStarts) {
+		s.subWin.seek(s.copySegStarts[idx]) // subtitles follow the viewer too
+	}
 	select {
 	case s.copyWake <- struct{}{}:
 	default:
