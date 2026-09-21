@@ -82,10 +82,19 @@ func formatVTTStamp(d time.Duration) string {
 	return fmt.Sprintf("%02d:%02d:%02d.%03d", ms/3_600_000, ms/60_000%60, ms/1000%60, ms%1000)
 }
 
+// vttProgressNote prefixes the comment block carrying the progress value a
+// served sidecar is current as of. In the body rather than a response header: a
+// cross-origin player could not read a header without it being CORS-exposed.
+const vttProgressNote = "NOTE progress="
+
 // renderVTT writes cues as a WebVTT document, each with its identifier line.
-func renderVTT(cues []vttCue) []byte {
+// progress < 0 leaves the progress note out.
+func renderVTT(cues []vttCue, progress int) []byte {
 	var b strings.Builder
 	b.WriteString("WEBVTT\n")
+	if progress >= 0 {
+		b.WriteString("\n" + vttProgressNote + strconv.Itoa(progress) + "\n")
+	}
 	for _, c := range cues {
 		b.WriteString("\n" + c.id() + "\n")
 		b.WriteString(formatVTTStamp(c.start) + " --> " + formatVTTStamp(c.end))

@@ -59,7 +59,7 @@ func TestWindowedSubtitlesMatchWholeFilePass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, got := parseVTTCues(mediainfo.FilterVTTDrawingCues(raw)), w.snapshot(track)
+	want, got := parseVTTCues(mediainfo.FilterVTTDrawingCues(raw)), allCues(w, track)
 	if len(want) == 0 {
 		t.Fatal("whole-file pass produced no cues")
 	}

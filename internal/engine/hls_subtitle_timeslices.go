@@ -51,10 +51,10 @@ type subtitleWindows struct {
 	anchor   int              // window of the viewer's last seek
 	running  int              // -1 when idle
 	stop     context.CancelFunc
-	cues     map[int][]vttCue            // by track index, sorted by start
-	seen     map[int]map[string]struct{} // cue ids held, by track index
-	first    chan struct{}               // closed once any window has been settled
-	wake     chan struct{}               // cap 1: something was offered
+	cues     map[int][]vttCue       // by track index, sorted by start
+	seen     map[int]map[string]int // cue id → progress it appeared at, by track index
+	first    chan struct{}          // closed once any window has been settled
+	wake     chan struct{}          // cap 1: something was offered
 }
 
 func newSubtitleWindows(tag string, starts []float64, extract extractWindowFunc) *subtitleWindows {
@@ -63,7 +63,7 @@ func newSubtitleWindows(tag string, starts []float64, extract extractWindowFunc)
 		tag: tag, starts: starts, extract: extract, retryDelay: subtitleWindowRetryDelay,
 		done: make([]bool, n), attempts: make([]int, n), running: -1,
 		pending: make(map[int]struct{}),
-		cues:    make(map[int][]vttCue), seen: make(map[int]map[string]struct{}),
+		cues:    make(map[int][]vttCue), seen: make(map[int]map[string]int),
 		first: make(chan struct{}), wake: make(chan struct{}, 1),
 	}
 }
@@ -187,11 +187,13 @@ func (w *subtitleWindows) settle(k int, cues map[int][]vttCue, err error, cancel
 	}
 }
 
-// merge adds the cues the track does not hold yet. Caller holds mu.
+// merge adds the cues the track does not hold yet, stamping each with the
+// progress value it becomes visible at (settle bumps nDone right after), which is
+// what lets snapshot answer "what is new since N". Caller holds mu.
 func (w *subtitleWindows) merge(track int, add []vttCue) {
 	seen := w.seen[track]
 	if seen == nil {
-		seen = make(map[string]struct{})
+		seen = make(map[string]int)
 		w.seen[track] = seen
 	}
 	merged := w.cues[track]
@@ -200,7 +202,7 @@ func (w *subtitleWindows) merge(track int, add []vttCue) {
 		if _, dup := seen[id]; dup {
 			continue
 		}
-		seen[id] = struct{}{}
+		seen[id] = w.nDone + 1
 		merged = append(merged, c)
 	}
 	sort.SliceStable(merged, func(i, j int) bool { return merged[i].start < merged[j].start })
@@ -227,11 +229,21 @@ func (w *subtitleWindows) run(ctx context.Context) {
 	}
 }
 
-// snapshot is the cues extracted so far for one track.
-func (w *subtitleWindows) snapshot(track int) []vttCue {
+// snapshot is one track's cues that became visible after progress value `since`
+// (0: all of them), in timeline order, with the progress they are current as of.
+// A player topping a track up asks for the delta: the whole sidecar re-sent for
+// every finished segment is O(n²) over a film — ~1200 fetches of a file that
+// grows to 100 KB — and most of that would cross a Cloudflare tunnel.
+func (w *subtitleWindows) snapshot(track, since int) (cues []vttCue, progress int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return append([]vttCue(nil), w.cues[track]...)
+	seen := w.seen[track]
+	for _, c := range w.cues[track] {
+		if seen[c.id()] > since {
+			cues = append(cues, c)
+		}
+	}
+	return cues, w.nDone
 }
 
 // progress counts settled windows; it only ever grows, so a client can tell

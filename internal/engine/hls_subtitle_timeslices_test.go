@@ -70,6 +70,12 @@ func (r *windowRecorder) seen() []int {
 	return append([]int(nil), r.order...)
 }
 
+// allCues is everything extracted so far for one track.
+func allCues(w *subtitleWindows, track int) []vttCue {
+	cues, _ := w.snapshot(track, 0)
+	return cues
+}
+
 func runWindows(t *testing.T, w *subtitleWindows) (stop func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -187,7 +193,7 @@ func TestSubtitleWindowsDedupeAcrossSeams(t *testing.T) {
 	w.offer(0)
 	w.run(context.Background()) // returns by itself: every window is done
 
-	cues := w.snapshot(0)
+	cues := allCues(w, 0)
 	ids := map[string]bool{}
 	for i, c := range cues {
 		ids[c.id()] = true
@@ -202,7 +208,7 @@ func TestSubtitleWindowsDedupeAcrossSeams(t *testing.T) {
 	w.mu.Lock()
 	w.merge(0, cues) // the same cues again, as an overlapping read would
 	w.mu.Unlock()
-	if got := len(w.snapshot(0)); got != 6 {
+	if got := len(allCues(w, 0)); got != 6 {
 		t.Fatalf("re-merging known cues grew the track to %d", got)
 	}
 }
@@ -240,8 +246,8 @@ func TestSubtitleWindowsRetryAFailedWindowLater(t *testing.T) {
 		t.Fatalf("covered = %v, want %v (a window awaiting its retry is not covered)", got, want)
 	}
 	<-done // the retry succeeds and completes the set
-	if len(w.snapshot(0)) != 6 {
-		t.Fatalf("got %d cues, want all 6 after the retry", len(w.snapshot(0)))
+	if got := len(allCues(w, 0)); got != 6 {
+		t.Fatalf("got %d cues, want all 6 after the retry", got)
 	}
 }
 
@@ -289,8 +295,8 @@ func TestVTTCuesRoundTripWithStableIDs(t *testing.T) {
 	if cues[0].start != 5050*time.Millisecond || cues[0].settings != "line:10%" || cues[0].text != "<i>Hola</i>\nmundo" {
 		t.Fatalf("cue 0 = %+v", cues[0])
 	}
-	out := string(renderVTT(cues))
-	want := "WEBVTT\n\n" + cues[0].id() + "\n00:00:05.050 --> 00:00:08.090 line:10%\n<i>Hola</i>\nmundo\n\n" +
+	out := string(renderVTT(cues, 7))
+	want := "WEBVTT\n\nNOTE progress=7\n\n" + cues[0].id() + "\n00:00:05.050 --> 00:00:08.090 line:10%\n<i>Hola</i>\nmundo\n\n" +
 		cues[1].id() + "\n01:00:00.000 --> 01:00:01.500\nSí.\n"
 	if out != want {
 		t.Fatalf("rendered:\n%s\nwant:\n%s", out, want)
