@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,8 +55,11 @@ func subtitleWindowArgs(src, dir string, tracks []int, start, end float64) []str
 	if start > 0 {
 		args = append(args, "-ss", stamp(start))
 	}
+	// 0:V:0, not 0:v:0: capital V skips attached pictures. With cover art listed
+	// first the clock would be a single packet, never reach the limit, and every
+	// window would read on to the end of the file.
 	args = append(args, "-i", src,
-		"-map", "0:v:0", "-c", "copy",
+		"-map", "0:V:0", "-c", "copy",
 		"-to", stamp(end+subtitleClockSlackSec+1),
 		"-f", "framecrc", "pipe:1")
 	for _, idx := range tracks {
@@ -101,8 +105,10 @@ func (c *frameClock) position(line string) (time.Duration, bool) {
 }
 
 // runFFmpegUntil runs ffmpeg and ends it once the frame clock on its stdout
-// reaches limit (a success), or lets it finish by itself if it never does.
-func runFFmpegUntil(ctx context.Context, ffmpeg string, args []string, limit time.Duration) error {
+// reaches limit (a success), or lets it finish by itself if it never does. It
+// returns how far the clock got, so the caller can tell a read that covered its
+// window from one that merely ended.
+func runFFmpegUntil(ctx context.Context, ffmpeg string, args []string, limit time.Duration) (time.Duration, error) {
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	cmd := exec.CommandContext(runCtx, ffmpeg, args...)
@@ -111,31 +117,47 @@ func runFFmpegUntil(ctx context.Context, ffmpeg string, args []string, limit tim
 	cmd.Stderr = &errBuf
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := cmd.Start(); err != nil {
-		return err
+		return 0, err
 	}
-	reached := false
 	var clock frameClock
+	var got time.Duration
 	sc := bufio.NewScanner(stdout)
 	for sc.Scan() {
-		if pos, ok := clock.position(sc.Text()); ok && pos >= limit {
-			reached = true
+		if pos, ok := clock.position(sc.Text()); ok {
+			got = max(got, pos)
+		}
+		if got >= limit {
 			stop()
 			break
 		}
 	}
 	err = cmd.Wait()
 	switch {
-	case reached:
-		return nil
+	case got >= limit:
+		return got, nil
 	case ctx.Err() != nil:
-		return ctx.Err()
+		return got, ctx.Err()
 	case err != nil:
-		return fmt.Errorf("%w (%s)", err, strings.TrimSpace(errBuf.String()))
+		return got, fmt.Errorf("%w (%s)", err, strings.TrimSpace(errBuf.String()))
 	}
-	return nil
+	return got, nil
+}
+
+// subtitleTailToleranceSec: near the end of the file the video track may stop
+// short of the container duration, so a clock that never reaches the window's
+// end is normal there and only there.
+const subtitleTailToleranceSec = 15.0
+
+// windowReadComplete reports whether a read whose clock got to `got` covered
+// [.., end). The source proxy ends a response silently when its upstream fetch
+// fails, and ffmpeg takes a short body for the end of the file and exits 0 —
+// which used to settle the window as done, with whatever cues came before the
+// cut. Falling short anywhere but at the file's tail is a failed read.
+func windowReadComplete(got time.Duration, end, duration float64) bool {
+	return got.Seconds() >= end || end >= duration-subtitleTailToleranceSec
 }
 
 // extractSubtitleWindow is the session's extractWindowFunc. Whatever the read
@@ -156,8 +178,12 @@ func (s *HLSSession) extractSubtitleWindow(ctx context.Context, start, end float
 	// fetched — extraction never costs the viewer a stall.
 	args := subtitleWindowArgs(s.copyBulkSource(), dir, tracks, start, end)
 	limit := time.Duration((end + subtitleClockSlackSec) * float64(time.Second))
-	if err := runFFmpegUntil(ctx, s.cfg.Transcode.FFmpegPath, args, limit); err != nil {
+	got, err := runFFmpegUntil(ctx, s.cfg.Transcode.FFmpegPath, args, limit)
+	if err != nil {
 		return nil, err
+	}
+	if !windowReadComplete(got, end, s.durationSec) {
+		return nil, fmt.Errorf("source read ended at %.1fs, before the window's end (%.1fs)", got.Seconds(), end)
 	}
 	out := make(map[int][]vttCue, len(tracks))
 	for _, idx := range tracks {
@@ -182,8 +208,21 @@ func (s *HLSSession) textSubtitleTracks() []int {
 }
 
 // serveWindowedSubtitleVTT serves track idx from the windows extracted so far.
-// One-shot, never held open — see ServeSubtitleVTT.
+// One-shot, never held open — see ServeSubtitleVTT. `?since=<progress>` narrows
+// it to the cues that appeared after that progress value (see snapshot); the
+// response always says which progress it is current as of.
 func (s *HLSSession) serveWindowedSubtitleVTT(w http.ResponseWriter, r *http.Request, idx int) {
+	if !slices.Contains(s.textSubtitleTracks(), idx) {
+		// Not a track this session extracts (bitmap, external, out of range):
+		// say so now instead of 6 s later with an empty 200.
+		http.Error(w, "no such subtitle track", http.StatusNotFound)
+		return
+	}
+	since, _ := strconv.Atoi(r.URL.Query().Get("since")) // absent/garbage → 0 → everything
+	if since > 0 {
+		s.writeSubtitleVTT(w, idx, since) // a top-up: the track is loaded, nothing to wait for
+		return
+	}
 	wait := time.NewTimer(subtitleFirstWindowWait)
 	defer wait.Stop()
 	select {
@@ -195,7 +234,11 @@ func (s *HLSSession) serveWindowedSubtitleVTT(w http.ResponseWriter, r *http.Req
 	case <-r.Context().Done():
 		return
 	}
-	vtt := renderVTT(s.subWin.snapshot(idx))
+	s.writeSubtitleVTT(w, idx, 0)
+}
+
+func (s *HLSSession) writeSubtitleVTT(w http.ResponseWriter, idx, since int) {
+	vtt := renderVTT(s.subWin.snapshot(idx, since))
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Content-Length", strconv.Itoa(len(vtt)))
