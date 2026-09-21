@@ -36,18 +36,23 @@ func (s *HLSSession) subtitleSidecarsComplete() bool {
 // playback — see ServeSubtitleVTT). So a client that fetched early holds a
 // partial track. This tells it when re-fetching will finally yield the complete
 // one. Until then `progress`, when present, grows each time more cues became
-// available (they arrive in viewer-first order, not playback order, so the
-// client cannot infer it from the cues it holds); without it the client may
-// re-fetch as the playhead outruns the cues it has.
+// available (they follow the viewer, not playback order, so the client cannot
+// infer it from the cues it holds) and `covered` lists the [start, end] ranges,
+// in seconds, already extracted — a client may tell the viewer that subtitles
+// are still loading while the playhead sits outside them. COPY-VOD only ever
+// extracts what is watched, so `complete` may stay false for a whole session.
+// Without `progress` the client may re-fetch as the playhead outruns its cues.
 func (s *HLSSession) ServeSubtitleStatus(w http.ResponseWriter, _ *http.Request) {
 	s.Touch()
 	status := struct {
-		Complete bool `json:"complete"`
-		Progress *int `json:"progress,omitempty"`
+		Complete bool         `json:"complete"`
+		Progress *int         `json:"progress,omitempty"`
+		Covered  [][2]float64 `json:"covered"` // null: not a windowed session
 	}{Complete: s.subtitleSidecarsComplete()}
 	if s.subWin != nil {
 		n := s.subWin.progress()
 		status.Progress = &n
+		status.Covered = s.subWin.covered()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

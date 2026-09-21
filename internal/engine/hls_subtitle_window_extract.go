@@ -138,24 +138,27 @@ func runFFmpegUntil(ctx context.Context, ffmpeg string, args []string, limit tim
 	return nil
 }
 
-// extractSubtitleWindow is the session's extractWindowFunc.
-func (s *HLSSession) extractSubtitleWindow(ctx context.Context, start, dur float64) (map[int][]vttCue, error) {
-	dir := filepath.Join(s.tmpDir, "subs", fmt.Sprintf("w%d", int(start)))
+// extractSubtitleWindow is the session's extractWindowFunc. Whatever the read
+// turns up is returned, including a cue that began before `start` and is still
+// showing there: after a seek its own window may never be extracted, and the
+// store dedupes it if it is.
+func (s *HLSSession) extractSubtitleWindow(ctx context.Context, start, end float64) (map[int][]vttCue, error) {
+	dir := filepath.Join(s.tmpDir, "subs", fmt.Sprintf("w%d", int(start*1000)))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
 	tracks := s.textSubtitleTracks()
-	end := start + dur
-	// Through the proxy's background lane: it only gets bytes while no video
-	// segment is being fetched, so extraction never costs the viewer a stall.
+	// Through the proxy's background lane. The segment's blocks are cache hits,
+	// served at once; only the few seconds of clock slack past its end may need
+	// the network, and for those the lane waits until no segment is being
+	// fetched — extraction never costs the viewer a stall.
 	args := subtitleWindowArgs(s.copyBulkSource(), dir, tracks, start, end)
 	limit := time.Duration((end + subtitleClockSlackSec) * float64(time.Second))
 	if err := runFFmpegUntil(ctx, s.cfg.Transcode.FFmpegPath, args, limit); err != nil {
 		return nil, err
 	}
-	last := end >= s.durationSec
 	out := make(map[int][]vttCue, len(tracks))
 	for _, idx := range tracks {
 		vtt, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("s%d.vtt", idx))) //nolint:gosec // G304: session tmpDir + probe-derived index.
@@ -163,26 +166,9 @@ func (s *HLSSession) extractSubtitleWindow(ctx context.Context, start, dur float
 			continue // `-map 0:s:N?` — a track ffmpeg could not map has no file
 		}
 		// ffmpeg's ass→webvtt leaks vector-drawing paths as cue text.
-		cues := parseVTTCues(mediainfo.FilterVTTDrawingCues(vtt))
-		out[idx] = windowCues(cues, start, end, last)
+		out[idx] = parseVTTCues(mediainfo.FilterVTTDrawingCues(vtt))
 	}
 	return out, nil
-}
-
-// windowCues keeps the cues that START inside [from, to). The read covers more
-// than the window on both sides (the seek lands on an earlier keyframe, the
-// clock overshoots the end) and a cue must belong to exactly one window. The
-// last window has no successor, so it keeps everything after from.
-func windowCues(cues []vttCue, from, to float64, last bool) []vttCue {
-	sec := func(f float64) time.Duration { return time.Duration(f * float64(time.Second)) }
-	kept := cues[:0]
-	for _, c := range cues {
-		if c.start < sec(from) || (c.start >= sec(to) && !last) {
-			continue
-		}
-		kept = append(kept, c)
-	}
-	return kept
 }
 
 func (s *HLSSession) textSubtitleTracks() []int {

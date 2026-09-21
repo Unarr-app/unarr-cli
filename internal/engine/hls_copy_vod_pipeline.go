@@ -45,6 +45,7 @@ func (s *HLSSession) ensureCopySegment(ctx context.Context, idx int) error {
 	}
 	if s.copySegmentReady(idx) {
 		s.noteCopyPlayhead(idx)
+		s.subWin.offer(idx) // a segment reused from the HLS cache was never generated here
 		return nil
 	}
 	call := s.startCopyGen(idx, false)
@@ -99,6 +100,9 @@ func (s *HLSSession) runCopyGen(ctx context.Context, idx int, call *copyGenCall)
 	defer s.copyWG.Done()
 	defer call.cancel()
 	err := s.produceCopySegment(ctx, idx)
+	if err == nil {
+		s.subWin.offer(idx) // its bytes are in the proxy cache right now
+	}
 	// Forget the call BEFORE waking waiters, so a retry after a failure starts a
 	// fresh run instead of joining the dead one.
 	s.copyGenMu.Lock()
@@ -146,8 +150,8 @@ func (s *HLSSession) noteCopyPlayhead(idx int) {
 		}
 	}
 	s.copyGenMu.Unlock()
-	if seeked && idx < len(s.copySegStarts) {
-		s.subWin.seek(s.copySegStarts[idx]) // subtitles follow the viewer too
+	if seeked {
+		s.subWin.seek(idx) // subtitles follow the viewer too
 	}
 	select {
 	case s.copyWake <- struct{}{}:

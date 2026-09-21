@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+// testSegSec is the segment length of the fake boundary tables below.
+const testSegSec = 6.0
+
+func testSegStarts(n int) []float64 {
+	starts := make([]float64, n+1)
+	for i := range starts {
+		starts[i] = float64(i) * testSegSec
+	}
+	return starts
+}
+
 // windowRecorder is a fake extractor: it records the order windows are asked
 // for and can hold one open until told to go on.
 type windowRecorder struct {
@@ -24,8 +35,8 @@ func newWindowRecorder() *windowRecorder {
 	return &windowRecorder{hold: map[int]chan struct{}{}, started: make(chan int, 64), fail: map[int]int{}}
 }
 
-func (r *windowRecorder) extract(ctx context.Context, start, _ float64) (map[int][]vttCue, error) {
-	k := int(start / subtitleWindowSec)
+func (r *windowRecorder) extract(ctx context.Context, start, end float64) (map[int][]vttCue, error) {
+	k := int(start / testSegSec)
 	r.mu.Lock()
 	r.order = append(r.order, k)
 	gate := r.hold[k]
@@ -45,8 +56,12 @@ func (r *windowRecorder) extract(ctx context.Context, start, _ float64) (map[int
 	if failing {
 		return nil, errors.New("boom")
 	}
-	at := time.Duration(start*1000) * time.Millisecond
-	return map[int][]vttCue{0: {{start: at + time.Second, end: at + 2*time.Second, text: "w"}}}, nil
+	sec := func(f float64) time.Duration { return time.Duration(f * float64(time.Second)) }
+	return map[int][]vttCue{0: {
+		{start: sec(start + 1), end: sec(start + 2), text: "own"},
+		// The read is wider than the window: the next window finds this one too.
+		{start: sec(end + 0.5), end: sec(end + 1.5), text: "neighbour's"},
+	}}, nil
 }
 
 func (r *windowRecorder) seen() []int {
@@ -55,119 +70,159 @@ func (r *windowRecorder) seen() []int {
 	return append([]int(nil), r.order...)
 }
 
-// The field bug: a viewer who seeks to minute 15 must not wait for a 0→end pass
-// to crawl there. The window under the new position goes next, the ones after
-// it follow, and what was skipped is back-filled last.
+func runWindows(t *testing.T, w *subtitleWindows) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { w.run(ctx); close(done) }()
+	return func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("run did not return after the session context ended")
+		}
+	}
+}
+
+// Subtitles ride along with the video: a window is only ever read once its
+// segment was generated (its bytes are then in the proxy cache). Nothing is
+// downloaded for a part of the file nobody watches.
+func TestSubtitleWindowsOnlyExtractOfferedSegments(t *testing.T) {
+	rec := newWindowRecorder()
+	w := newSubtitleWindows("[t]", testSegStarts(100), rec.extract)
+	defer runWindows(t, w)()
+
+	w.offer(0)
+	w.offer(1)
+	w.offer(1) // a retried request offers again
+	waitFor(t, "both offered windows", func() bool { return w.progress() == 2 })
+	time.Sleep(50 * time.Millisecond)
+	if got, want := rec.seen(), []int{0, 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("extracted %v, want %v and nothing else", got, want)
+	}
+	if got, want := w.covered(), [][2]float64{{0, 2 * testSegSec}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("covered = %v, want %v", got, want)
+	}
+	w.offer(0) // already done
+	time.Sleep(50 * time.Millisecond)
+	if len(rec.seen()) != 2 {
+		t.Fatalf("a done window was extracted again: %v", rec.seen())
+	}
+}
+
+// The field bug: after a seek to minute 15 the subtitles there must not queue
+// behind anything. The window being read for the old position is set aside, the
+// new position goes first, and what was left behind follows — it is not lost.
 func TestSubtitleWindowsFollowTheViewer(t *testing.T) {
 	rec := newWindowRecorder()
 	rec.hold[0] = make(chan struct{})
-	w := newSubtitleWindows("[t]", 5*subtitleWindowSec, rec.extract)
-	done := make(chan struct{})
-	go func() { w.run(context.Background()); close(done) }()
+	w := newSubtitleWindows("[t]", testSegStarts(200), rec.extract)
+	defer runWindows(t, w)()
 
+	w.offer(0)
 	if k := <-rec.started; k != 0 {
 		t.Fatalf("first window = %d, want 0", k)
 	}
-	w.seek(3*subtitleWindowSec + 1) // cancels window 0, which is NOT lost
-	if k := <-rec.started; k != 3 {
-		t.Fatalf("window after the seek = %d, want 3", k)
+	w.offer(1)
+	w.offer(2)
+	w.offer(151) // prefetched past the new position
+	w.offer(150)
+	w.seek(150)
+	if k := <-rec.started; k != 150 {
+		t.Fatalf("window after the seek = %d, want 150", k)
 	}
 	close(rec.hold[0]) // the retry of window 0 runs straight through
-	<-done
+	waitFor(t, "all five windows", func() bool { return w.progress() == 5 })
 
-	if got, want := rec.seen(), []int{0, 3, 4, 0, 1, 2}; !reflect.DeepEqual(got, want) {
+	if got, want := rec.seen(), []int{0, 150, 151, 0, 1, 2}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("extraction order = %v, want %v", got, want)
 	}
-	cues := w.snapshot(0)
-	if len(cues) != 5 {
-		t.Fatalf("got %d cues, want one per window (5)", len(cues))
+	want := [][2]float64{{0, 3 * testSegSec}, {150 * testSegSec, 152 * testSegSec}}
+	if got := w.covered(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("covered = %v, want %v", got, want)
 	}
-	for i := 1; i < len(cues); i++ {
-		if cues[i].start < cues[i-1].start {
-			t.Fatalf("cues not in timeline order: %v", cues)
+}
+
+// Ordinary playback moves the position too; a window just ahead of it is
+// exactly what is wanted next and must not be thrown away.
+func TestSubtitleWindowsSeekNearbyKeepsTheRunningWindow(t *testing.T) {
+	rec := newWindowRecorder()
+	rec.hold[11] = make(chan struct{})
+	w := newSubtitleWindows("[t]", testSegStarts(100), rec.extract)
+	defer runWindows(t, w)()
+
+	w.offer(11)
+	<-rec.started
+	w.seek(10)
+	close(rec.hold[11])
+	waitFor(t, "window 11", func() bool { return w.progress() == 1 })
+	if got, want := rec.seen(), []int{11}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("extraction order = %v, want %v (window 11 must not be restarted)", got, want)
+	}
+}
+
+// Neighbouring windows both turn up the cues around their seam; the viewer must
+// get each once, in timeline order whatever order the windows came in.
+func TestSubtitleWindowsDedupeAcrossSeams(t *testing.T) {
+	rec := newWindowRecorder()
+	w := newSubtitleWindows("[t]", testSegStarts(3), rec.extract)
+	w.offer(2)
+	w.offer(1)
+	w.offer(0)
+	w.run(context.Background()) // returns by itself: every window is done
+
+	cues := w.snapshot(0)
+	ids := map[string]bool{}
+	for i, c := range cues {
+		ids[c.id()] = true
+		if i > 0 && c.start < cues[i-1].start {
+			t.Fatalf("cues not in timeline order: %+v", cues)
 		}
 	}
-	if w.progress() != 5 {
-		t.Fatalf("progress = %d, want 5", w.progress())
+	// 3 × "own" + 3 × "neighbour's" — all distinct; nothing doubled by the merge.
+	if len(cues) != 6 || len(ids) != 6 {
+		t.Fatalf("got %d cues / %d ids, want 6 distinct: %+v", len(cues), len(ids), cues)
+	}
+	w.mu.Lock()
+	w.merge(0, cues) // the same cues again, as an overlapping read would
+	w.mu.Unlock()
+	if got := len(w.snapshot(0)); got != 6 {
+		t.Fatalf("re-merging known cues grew the track to %d", got)
 	}
 }
 
-// Seeking into a region that is already extracted has nothing to make room for.
-func TestSubtitleWindowsSeekIntoCoveredRegionKeepsRunning(t *testing.T) {
-	rec := newWindowRecorder()
-	rec.hold[1] = make(chan struct{})
-	w := newSubtitleWindows("[t]", 3*subtitleWindowSec, rec.extract)
-	done := make(chan struct{})
-	go func() { w.run(context.Background()); close(done) }()
-
-	<-rec.started // 0, completes
-	<-rec.started // 1, held
-	w.seek(1)     // window 0: done
-	close(rec.hold[1])
-	<-done
-	if got, want := rec.seen(), []int{0, 1, 2}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("extraction order = %v, want %v (window 1 must not be restarted)", got, want)
-	}
-}
-
-// A window that keeps failing is given up on, so extraction still completes.
+// A window that keeps failing is given up on rather than retried forever.
 func TestSubtitleWindowsGiveUpOnAFailingWindow(t *testing.T) {
 	rec := newWindowRecorder()
 	rec.fail[1] = subtitleWindowAttempts
-	w := newSubtitleWindows("[t]", 3*subtitleWindowSec, rec.extract)
+	w := newSubtitleWindows("[t]", testSegStarts(3), rec.extract)
+	for k := range 3 {
+		w.offer(k)
+	}
 	w.run(context.Background())
 	if got, want := rec.seen(), []int{0, 1, 1, 2}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("extraction order = %v, want %v", got, want)
 	}
-	if len(w.snapshot(0)) != 2 || w.progress() != 3 {
-		t.Fatalf("cues=%d progress=%d, want 2 and 3", len(w.snapshot(0)), w.progress())
+	if w.progress() != 3 {
+		t.Fatalf("progress = %d, want 3 (the hole counts as settled)", w.progress())
 	}
 }
 
 func TestSubtitleWindowsStopWithTheSession(t *testing.T) {
 	rec := newWindowRecorder()
 	rec.hold[0] = make(chan struct{})
-	w := newSubtitleWindows("[t]", 3*subtitleWindowSec, rec.extract)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { w.run(ctx); close(done) }()
+	w := newSubtitleWindows("[t]", testSegStarts(3), rec.extract)
+	stop := runWindows(t, w)
+	w.offer(0)
 	<-rec.started
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("run did not return after the session context ended")
-	}
-}
+	stop() // mid-extraction
+	idle := newSubtitleWindows("[t]", testSegStarts(3), rec.extract)
+	runWindows(t, idle)() // and while waiting for an offer
 
-func TestSubtitleWindowBoundsCoverTheTimelineOnce(t *testing.T) {
-	w := newSubtitleWindows("[t]", 2*subtitleWindowSec+7.5, nil)
-	if len(w.done) != 3 {
-		t.Fatalf("windows = %d, want 3", len(w.done))
-	}
-	if start, dur := w.bounds(2); start != 2*subtitleWindowSec || dur != 7.5 {
-		t.Fatalf("last window = %v+%v, want %v+7.5", start, dur, 2*subtitleWindowSec)
-	}
-	var nilW *subtitleWindows
-	nilW.seek(10) // sessions without text tracks have no extractor
-}
-
-func TestWindowCuesKeepOnlyTheirOwnAndShiftToSessionTime(t *testing.T) {
-	sec := func(f float64) time.Duration { return time.Duration(f * float64(time.Second)) }
-	in := []vttCue{
-		{start: sec(898.47), end: sec(900.52), text: "previous window's, still showing at the seek point"},
-		{start: sec(900), end: sec(902), text: "starts exactly on the window"},
-		{start: sec(929.9), end: sec(933), text: "starts inside, ends after"},
-		{start: sec(930), end: sec(931), text: "next window's"},
-	}
-	got := windowCues(append([]vttCue(nil), in...), 900, 930, false)
-	if len(got) != 2 || got[0].start != sec(900) || got[1].end != sec(933) {
-		t.Fatalf("windowCues = %+v", got)
-	}
-	// The last window has no successor to pick up a cue past the nominal end.
-	if got := windowCues(append([]vttCue(nil), in...), 900, 930, true); len(got) != 3 {
-		t.Fatalf("last window kept %d cues, want 3", len(got))
-	}
+	var none *subtitleWindows // sessions without text tracks have no extractor
+	none.offer(1)
+	none.seek(1)
 }
 
 func TestVTTCuesRoundTripWithStableIDs(t *testing.T) {
