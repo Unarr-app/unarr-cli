@@ -177,22 +177,22 @@ func planCopyVOD(ctx context.Context, s *HLSSession) (starts []float64, ok bool)
 // startCopyVODSubtitles starts extracting a WebVTT sidecar per TEXT subtitle
 // track (served as subs/s<idx>.vtt), mirroring the EVENT copy path's in-pass
 // sidecars — needed because COPY-VOD's on-demand segments never read the whole
-// file. Extraction goes window by window from the viewer's position; see
-// hls_subtitle_timeslices.go. No-op when the source has no text subtitles.
+// file. Each generated segment's cues are extracted right after it, from the
+// bytes the source proxy still has cached; see hls_subtitle_timeslices.go. No-op
+// when the source has no text subtitles.
 //
-// Between them the windows still download the WHOLE file (MKV interleaves cues
-// with the video, so mapping fewer tracks saves no bytes), which on a
-// bandwidth-bound link used to starve segment generation outright: 19 s of
-// video played per 80 s of wall clock. They therefore read through the proxy's
-// background lane, which only hands out bytes while no segment is being fetched.
+// This used to be a second download of the WHOLE file next to playback (MKV
+// interleaves cues with the video, so mapping fewer tracks saves no bytes),
+// which on a bandwidth-bound link starved segment generation outright: 19 s of
+// video played per 80 s of wall clock.
 //
-// Caller must have set copyCtx and must not have published the session yet.
+// Caller must have set copyCtx + copySegStarts and not published the session.
 func startCopyVODSubtitles(s *HLSSession) {
 	if len(s.textSubtitleTracks()) == 0 {
 		return
 	}
 	tag := fmt.Sprintf("[hls %s]", shortHLSID(s.cfg.SessionID))
-	s.subWin = newSubtitleWindows(tag, s.durationSec, s.extractSubtitleWindow)
+	s.subWin = newSubtitleWindows(tag, s.copySegStarts, s.extractSubtitleWindow)
 	s.subsDone = make(chan struct{})
 	s.copyWG.Add(1)
 	go func() {

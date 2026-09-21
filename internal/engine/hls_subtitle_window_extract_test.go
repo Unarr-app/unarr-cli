@@ -12,8 +12,9 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 )
 
-// Windowed extraction must yield exactly what one whole-file pass yields: no cue
-// lost or doubled at a window seam, none shifted. Needs real media:
+// Extracting segment by segment must yield, once every segment was watched,
+// exactly what one whole-file pass yields: no cue lost or doubled at a seam, none
+// shifted. Needs real media:
 //
 //	UNARR_SUBS_SAMPLE=/path/to/file-with-text-subs.mkv go test -run WindowedSubtitlesMatch ./internal/engine/
 func TestWindowedSubtitlesMatchWholeFilePass(t *testing.T) {
@@ -35,9 +36,17 @@ func TestWindowedSubtitlesMatchWholeFilePass(t *testing.T) {
 		t.Skip("sample has no text subtitle track")
 	}
 
-	w := newSubtitleWindows("[t]", s.durationSec, s.extractSubtitleWindow)
-	w.seek(s.durationSec / 2) // out of order on purpose
-	w.run(ctx)
+	starts := []float64{0}
+	for at := copyVODTargetSec; at < s.durationSec-1; at += copyVODTargetSec {
+		starts = append(starts, at)
+	}
+	starts = append(starts, s.durationSec)
+	w := newSubtitleWindows("[t]", starts, s.extractSubtitleWindow)
+	for k := len(starts) - 2; k >= 0; k-- { // out of order on purpose
+		w.offer(k)
+	}
+	w.seek(len(starts) / 2)
+	w.run(ctx) // returns by itself once every window is done
 
 	track := tracks[0]
 	whole := filepath.Join(s.tmpDir, "whole.vtt")
