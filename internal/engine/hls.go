@@ -394,10 +394,6 @@ type HLSSession struct {
 	copyGenerate func(ctx context.Context, idx int) error
 	// copyProxy fronts a REMOTE source with a range cache (hls_copy_vod_source.go).
 	copyProxy *srcproxy.Proxy
-	// subsDone is closed when the whole-file subtitle extractor exits (any
-	// reason). nil when the session has none. While open, sidecars are served as
-	// a streamed response (hls_subtitle_stream.go).
-	subsDone chan struct{}
 	// Exact COPY-VOD sessions produce only requested segments. Legacy pass
 	// sessions (constructed by older callers/tests) still use readyMax.
 	copyLazy     bool
@@ -1863,12 +1859,15 @@ func (s *HLSSession) ServeSubtitleVTT(w http.ResponseWriter, r *http.Request, id
 		case <-time.After(150 * time.Millisecond):
 		}
 	}
-	// Still being extracted: a one-shot body would freeze the browser's track at
-	// the cues read so far. Stream it until the extractor is done instead.
-	if s.subtitleExtractionRunning() {
-		s.streamSubtitleVTT(w, r, path)
-		return
-	}
+	// Served ONE-SHOT even while the extractor is still writing, so a client that
+	// fetches early only ever gets the cues read so far (a browser fetches a
+	// <track> once). Do NOT "fix" that by holding the response open until the
+	// extractor finishes: a media element cannot advance past HAVE_CURRENT_DATA
+	// while a non-disabled text track is still loading, so a long-lived track
+	// response stalls PLAYBACK for as long as it stays open (tried, measured in
+	// the field: micro-stalls for the whole ~60 s extraction, gone the second it
+	// closed). The cure has to be client-side: re-fetch once extraction is done.
+	//
 	// Read + filter rather than ServeFile: ffmpeg's ass→webvtt converter leaks
 	// vector-drawing paths as cue text (see mediainfo.FilterVTTDrawingCues), and
 	// the sign cues have to be dropped before the browser paints them. Losing
