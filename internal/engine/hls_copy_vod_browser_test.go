@@ -55,9 +55,13 @@ func TestCopyVODBrowser(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(dir, "subs"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		// This harness tests A/V; avoid a whole-file subtitle pass competing with it.
+		// By default this harness tests A/V only. UNARR_BROWSER_SUBS=1 keeps the
+		// whole-file subtitle pass running, as production does for a remote source:
+		// on a bandwidth-bound link that pass is what used to starve playback.
 		probeCopy := *probe
-		probeCopy.SubtitleTracks = nil
+		if os.Getenv("UNARR_BROWSER_SUBS") != "1" {
+			probeCopy.SubtitleTracks = nil
+		}
 		s := &HLSSession{cfg: cfg, probe: &probeCopy, tmpDir: dir, durationSec: probe.DurationSec, readyCh: make(chan struct{})}
 		if !startCopyVOD(context.Background(), s) {
 			t.Fatal("exact COPY-VOD unavailable")
