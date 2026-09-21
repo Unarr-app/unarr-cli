@@ -8,7 +8,8 @@ import (
 // subtitleSidecarsComplete reports whether every WebVTT sidecar this session
 // serves under /hls/<id>/subs/ has been fully written.
 //
-//   - COPY-VOD remote: the whole-file extractor exited (subsDone closed).
+//   - COPY-VOD remote: every segment's window was extracted (subsDone closed),
+//     which only happens once the whole file was watched.
 //   - EVENT copy: the sidecars are extra outputs of the single remux pass, so
 //     they are final once that ffmpeg exited.
 //   - no extractor at all (no text tracks): vacuously complete.
@@ -42,8 +43,12 @@ func (s *HLSSession) subtitleSidecarsComplete() bool {
 // are still loading while the playhead sits outside them. COPY-VOD only ever
 // extracts what is watched, so `complete` may stay false for a whole session.
 // Without `progress` the client may re-fetch as the playhead outruns its cues.
+//
+// Deliberately no s.Touch(): this is polled for as long as the page is open, and
+// `complete` may never turn true, so counting it as activity kept a paused,
+// forgotten tab's session — ffmpeg, source proxy, debrid link — alive forever.
+// Watching is what keeps a session alive: segment and sidecar requests.
 func (s *HLSSession) ServeSubtitleStatus(w http.ResponseWriter, _ *http.Request) {
-	s.Touch()
 	status := struct {
 		Complete bool         `json:"complete"`
 		Progress *int         `json:"progress,omitempty"`
