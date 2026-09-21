@@ -107,6 +107,40 @@ func TestManager_KeepsStoreEntryOnShutdown(t *testing.T) {
 	}
 }
 
+// TestManager_ShutdownDoesNotFailInFlightDownloads: stopping the daemon is not a
+// download failure. The interrupted task must not turn FAILED nor be queued for
+// the server as failed — before, every restart left the in-flight downloads on
+// the dashboard as "failed: context canceled" while the resume store quietly
+// re-ran them on the next start (seen in a 177-episode debrid run).
+func TestManager_ShutdownDoesNotFailInFlightDownloads(t *testing.T) {
+	p := newFakePersister()
+	mgr, ctx, cancel := newResumeManager(t, p)
+	defer cancel()
+
+	task := dlTask("s2")
+	mgr.Submit(ctx, task)
+	running := mgr.GetTask(task.ID)
+	if running == nil {
+		t.Fatal("task not active after submit")
+	}
+
+	shutCtx, sc := context.WithTimeout(context.Background(), 5*time.Second)
+	defer sc()
+	mgr.Shutdown(shutCtx)
+
+	if s := running.GetStatus(); s == StatusFailed {
+		t.Errorf("in-flight download marked %s by a shutdown — it is only interrupted", s)
+	}
+	for _, st := range mgr.TaskStates() {
+		if st.TaskID == task.ID && st.Status == string(StatusFailed) {
+			t.Errorf("shutdown queued the interrupted task for the server as failed: %+v", st)
+		}
+	}
+	if !p.has(task.ID) {
+		t.Error("task removed from resume store on shutdown — it would not resume")
+	}
+}
+
 func TestManager_DoesNotPersistStreamTasks(t *testing.T) {
 	p := newFakePersister()
 	mgr, ctx, cancel := newResumeManager(t, p)
