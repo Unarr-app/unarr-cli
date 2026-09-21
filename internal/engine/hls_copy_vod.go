@@ -8,17 +8,12 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
-	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
-	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // copyVODTargetSec is the nominal segment length for COPY-VOD. Larger than the
@@ -179,69 +174,30 @@ func planCopyVOD(ctx context.Context, s *HLSSession) (starts []float64, ok bool)
 	return starts, true
 }
 
-// startCopyVODSubtitles spawns a background ffmpeg that reads the remote source
-// ONCE and writes a WebVTT sidecar per TEXT subtitle track (subs/s<idx>.vtt),
-// mirroring the EVENT copy path's in-pass sidecars — needed because COPY-VOD's
-// on-demand segments never read the whole file. `-flush_packets 1` streams each
-// cue to disk so the sidecar fills progressively (ServeSubtitleVTT serves what's
-// read so far). Its cancel is stored on s.cancel so Close() kills it. No-op when
-// the source has no text subtitles.
+// startCopyVODSubtitles starts extracting a WebVTT sidecar per TEXT subtitle
+// track (served as subs/s<idx>.vtt), mirroring the EVENT copy path's in-pass
+// sidecars — needed because COPY-VOD's on-demand segments never read the whole
+// file. Extraction goes window by window from the viewer's position; see
+// hls_subtitle_timeslices.go. No-op when the source has no text subtitles.
 //
-// This pass downloads the WHOLE file (MKV interleaves cues with the video, so
-// mapping fewer tracks saves no bytes), which on a bandwidth-bound link used to
-// starve segment generation outright: 19 s of video played per 80 s of wall
-// clock. It therefore reads through the proxy's background lane, which only
-// hands it bytes while no segment is being fetched.
+// Between them the windows still download the WHOLE file (MKV interleaves cues
+// with the video, so mapping fewer tracks saves no bytes), which on a
+// bandwidth-bound link used to starve segment generation outright: 19 s of
+// video played per 80 s of wall clock. They therefore read through the proxy's
+// background lane, which only hands out bytes while no segment is being fetched.
+//
+// Caller must have set copyCtx and must not have published the session yet.
 func startCopyVODSubtitles(s *HLSSession) {
-	var outs []string
-	for _, sb := range s.probe.SubtitleTracks {
-		if !sb.IsTextSubtitle() {
-			continue
-		}
-		outs = append(outs,
-			"-map", fmt.Sprintf("0:s:%d?", sb.Index),
-			"-c:s", "webvtt",
-			"-flush_packets", "1",
-			"-f", "webvtt",
-			filepath.Join(s.tmpDir, "subs", fmt.Sprintf("s%d.vtt", sb.Index)),
-		)
-	}
-	if len(outs) == 0 {
+	if len(s.textSubtitleTracks()) == 0 {
 		return
 	}
-	args := []string{
-		"-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-		"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-		"-rw_timeout", "30000000",
-		"-i", s.copyBulkSource(),
-	}
-	args = append(args, outs...)
-
-	ffCtx, cancel := context.WithCancel(context.Background())
-	s.mu.Lock()
-	s.cancel = cancel
-	s.mu.Unlock()
-	s.subsDone = make(chan struct{}) // session not published yet: no reader can race this
-
+	tag := fmt.Sprintf("[hls %s]", shortHLSID(s.cfg.SessionID))
+	s.subWin = newSubtitleWindows(tag, s.durationSec, s.extractSubtitleWindow)
+	s.subsDone = make(chan struct{})
+	s.copyWG.Add(1)
 	go func() {
+		defer s.copyWG.Done()
 		defer close(s.subsDone)
-		// Yield the panel to the first video segment before opening a second read.
-		select {
-		case <-ffCtx.Done():
-			return
-		case <-time.After(3 * time.Second):
-		}
-		cmd := exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
-		winproc.HideWindow(cmd)
-		var errBuf bytes.Buffer
-		cmd.Stderr = &errBuf
-		if err := cmd.Run(); err != nil && ffCtx.Err() == nil {
-			log.Printf("[hls %s] copy-vod subtitle extractor: %v (%s)",
-				shortHLSID(s.cfg.SessionID), err, strings.TrimSpace(errBuf.String()))
-			return
-		}
-		if ffCtx.Err() == nil {
-			log.Printf("[hls %s] copy-vod subtitle sidecars complete", shortHLSID(s.cfg.SessionID))
-		}
+		s.subWin.run(s.copyCtx)
 	}()
 }

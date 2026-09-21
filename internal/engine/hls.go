@@ -394,8 +394,9 @@ type HLSSession struct {
 	copyGenerate func(ctx context.Context, idx int) error
 	// copyProxy fronts a REMOTE source with a range cache (hls_copy_vod_source.go).
 	copyProxy *srcproxy.Proxy
-	// subsDone is closed when the whole-file subtitle extractor exits (any
-	// reason); nil when the session has none. Feeds subs/status.json.
+	// subWin extracts the COPY-VOD subtitle sidecars window by window; subsDone
+	// is closed when it exits (any reason). Both nil when the session has none.
+	subWin   *subtitleWindows
 	subsDone chan struct{}
 	// Exact COPY-VOD sessions produce only requested segments. Legacy pass
 	// sessions (constructed by older callers/tests) still use readyMax.
@@ -1844,6 +1845,10 @@ func (s *HLSSession) ServeInit(w http.ResponseWriter, r *http.Request) {
 // (mirroring ServeInit) so the initial fetch resolves to a 200 with real cues.
 func (s *HLSSession) ServeSubtitleVTT(w http.ResponseWriter, r *http.Request, idx int) {
 	s.Touch()
+	if s.subWin != nil {
+		s.serveWindowedSubtitleVTT(w, r, idx)
+		return
+	}
 	path := filepath.Join(s.tmpDir, "subs", fmt.Sprintf("s%d.vtt", idx))
 	// Wait up to 15s for the extractor to write the first cue bytes. Bail early
 	// if the session closes or the client goes away.
