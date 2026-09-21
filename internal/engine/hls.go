@@ -394,6 +394,9 @@ type HLSSession struct {
 	copyGenerate func(ctx context.Context, idx int) error
 	// copyProxy fronts a REMOTE source with a range cache (hls_copy_vod_source.go).
 	copyProxy *srcproxy.Proxy
+	// subsDone is closed when the whole-file subtitle extractor exits (any
+	// reason); nil when the session has none. Feeds subs/status.json.
+	subsDone chan struct{}
 	// Exact COPY-VOD sessions produce only requested segments. Legacy pass
 	// sessions (constructed by older callers/tests) still use readyMax.
 	copyLazy     bool

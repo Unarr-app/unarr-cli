@@ -81,10 +81,16 @@ type Proxy struct {
 	url  string
 	size atomic.Int64 // total upstream size, -1 until the first response
 
-	foreground atomic.Int32
-	stats      counters
-	closeOnce  sync.Once
+	stats     counters
+	closeOnce sync.Once
 }
+
+// foreground counts in-flight Foreground requests across EVERY proxy in the
+// process. Process-wide on purpose: all sessions share one uplink, and when the
+// player re-creates a session the old one's bulk extractor otherwise keeps
+// saturating the link while the new session starts (seen in the field: the new
+// session's seek index took 10.8 s instead of 0.8 s).
+var foreground atomic.Int32
 
 // Start listens on 127.0.0.1 and serves opts.URL through the cache.
 func Start(opts Options) (*Proxy, error) {

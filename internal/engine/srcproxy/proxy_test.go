@@ -219,7 +219,7 @@ func TestProxyBackgroundYieldsToForeground(t *testing.T) {
 	u := newUpstream(t, data)
 	p := startProxy(t, Options{URL: u.srv.URL + "/m.mkv", PinHead: blockSize, PinTail: blockSize})
 
-	p.foreground.Add(1) // a segment is being generated
+	foreground.Add(1) // a segment is being generated
 	done := make(chan []byte, 1)
 	go func() {
 		_, b := fetchRange(t, p.BackgroundURL(), fmt.Sprintf("bytes=%d-", 2*blockSize))
@@ -229,7 +229,7 @@ func TestProxyBackgroundYieldsToForeground(t *testing.T) {
 	if held := p.Stats().UpstreamBytes; held > blockSize {
 		t.Fatalf("background pulled %d bytes while foreground was active", held)
 	}
-	p.foreground.Add(-1)
+	foreground.Add(-1)
 	select {
 	case got := <-done:
 		if !bytes.Equal(got, data[2*blockSize:]) {
