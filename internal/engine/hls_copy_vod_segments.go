@@ -99,81 +99,15 @@ func buildCopyVODSegmentArgs(cfg HLSSessionConfig, probe *StreamProbe, outPath s
 	return args
 }
 
-// ensureCopySegment single-flights each fragment and bounds parallel FFmpeg
-// processes. Both waiting and generation stop on request/session cancellation.
-func (s *HLSSession) ensureCopySegment(ctx context.Context, idx int) error {
-	if idx < 0 || idx >= s.segmentCount {
-		return fmt.Errorf("hls: segment out of range")
-	}
-	if !s.copyLazy {
-		return s.waitForSegment(ctx, idx)
-	}
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return context.Canceled
-	}
-	s.copyWG.Add(1)
-	s.mu.Unlock()
-	defer s.copyWG.Done()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	if s.copyCtx != nil {
-		stop := context.AfterFunc(s.copyCtx, cancel)
-		defer stop()
-	}
-	path := s.copySegPath(idx)
-	if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
-		return nil
-	}
-	gate := s.copyGenGate(idx)
-	select {
-	case gate <- struct{}{}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	defer func() { <-gate }()
-	// Re-check under the gate: a racer may have produced it while we waited.
-	if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
-		return nil
-	}
-	if s.copySlots != nil {
-		select {
-		case s.copySlots <- struct{}{}:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		defer func() { <-s.copySlots }()
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return s.generateCopySegment(ctx, idx)
-}
-
 // copySegPath is the on-disk path of COPY-VOD segment idx.
 func (s *HLSSession) copySegPath(idx int) string {
 	return filepath.Join(s.tmpDir, "video", fmt.Sprintf("seg-%d%s", idx, copyVODSegExt))
 }
 
-// copyGenGate returns the cancellable per-index generation gate.
-func (s *HLSSession) copyGenGate(idx int) chan struct{} {
-	s.copyGenMu.Lock()
-	defer s.copyGenMu.Unlock()
-	if s.copyGen == nil {
-		s.copyGen = make(map[int]chan struct{})
-	}
-	g := s.copyGen[idx]
-	if g == nil {
-		g = make(chan struct{}, 1)
-		s.copyGen[idx] = g
-	}
-	return g
-}
-
 // generateCopySegment runs ffmpeg to produce seg-idx.ts (written to a .tmp then
 // atomically renamed, so a concurrent reader never sees a half-written file).
-// Caller holds the per-index gate. Bounds: idx in [0, segmentCount).
+// Caller is the single-flight run for idx (hls_copy_vod_pipeline.go). Bounds:
+// idx in [0, segmentCount).
 func (s *HLSSession) generateCopySegment(ctx context.Context, idx int) error {
 	if idx < 0 || idx >= s.segmentCount {
 		return fmt.Errorf("hls: copy-vod segment %d out of range [0,%d)", idx, s.segmentCount)
@@ -184,7 +118,12 @@ func (s *HLSSession) generateCopySegment(ctx context.Context, idx int) error {
 	tmp := final + ".tmp"
 	defer os.Remove(tmp) //nolint:errcheck // Best-effort cleanup of a stale temp.
 
-	args := buildCopyVODSegmentArgs(s.cfg, s.probe, tmp, start, end)
+	// A remote source is read through the session's range-caching proxy.
+	cfg := s.cfg
+	if cfg.SourceURL != "" {
+		cfg.SourceURL = s.copySource()
+	}
+	args := buildCopyVODSegmentArgs(cfg, s.probe, tmp, start, end)
 	genCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(genCtx, s.cfg.Transcode.FFmpegPath, args...)

@@ -34,6 +34,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/engine/srcproxy"
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
@@ -382,11 +383,17 @@ type HLSSession struct {
 	copyNeedsEncode bool // open-GOP/non-IDR copy would need previous pictures
 	copySegStarts   []float64
 	copyGenMu       sync.Mutex
-	copyGen         map[int]chan struct{} // cancellable per-index gate
+	copyGen         map[int]*copyGenCall // in-flight single-flight generations (hls_copy_vod_pipeline.go)
+	copyHead        int                  // last segment the viewer asked for; guarded by copyGenMu
+	copyWake        chan struct{}        // cap 1: playhead moved, prefetcher should look again
 	copyCtx         context.Context
 	copyCancel      context.CancelFunc
 	copySlots       chan struct{}
 	copyWG          sync.WaitGroup // Add under mu; Close sets closed before Wait
+	// copyGenerate replaces generateCopySegment in tests (no ffmpeg needed).
+	copyGenerate func(ctx context.Context, idx int) error
+	// copyProxy fronts a REMOTE source with a range cache (hls_copy_vod_source.go).
+	copyProxy *srcproxy.Proxy
 	// Exact COPY-VOD sessions produce only requested segments. Legacy pass
 	// sessions (constructed by older callers/tests) still use readyMax.
 	copyLazy     bool
@@ -1248,6 +1255,8 @@ func (s *HLSSession) Close() error {
 		s.copyCancel()
 		s.copyWG.Wait()
 	}
+	// After every reader is gone, and before the session dir is removed below.
+	s.stopCopySourceProxy()
 	// Unblock any handler waiting on readyCh.
 	s.readyMu.Lock()
 	if s.readyCh != nil {
