@@ -76,6 +76,19 @@ func runUp(authKey string, force bool) error {
 	// nothing to do, fall through to start.
 	hasKey := strings.HasPrefix(cfg.Auth.APIKey, "tc_")
 	if authKey == "" {
+		// A key without an identity is what a revocation leaves behind: the
+		// daemon wiped api_key + agent.id from config.toml, and UNARR_API_KEY
+		// put the key back. Minting a fresh id here lets the daemon register
+		// as a new machine — the one recovery a container user can perform,
+		// since "restart" is the only button a NAS GUI has. `start` still
+		// refuses this state on purpose; it is `up`, the unattended entry
+		// point, that provisions.
+		if hasKey && cfg.Agent.ID == "" {
+			if _, err := ensureAgentID(&cfg); err != nil {
+				return err
+			}
+			color.New(color.FgHiBlack).Println("  No agent identity on disk — registering this machine as a new agent.")
+		}
 		return nil
 	}
 	if hasKey && !force {
@@ -208,18 +221,31 @@ func authKeyExchangeError(err error) error {
 	}
 
 	// HTTPError.Message carries the parsed JSON `error` token for 4xx bodies.
+	renew := authKeyRenewHint(agent.RunningInDocker())
 	switch authKeyErrorToken(he.Message) {
 	case "expired":
-		return fmt.Errorf("auth-key expired — generate a new one in unarr.app")
+		return fmt.Errorf("auth-key expired — %s", renew)
 	case "used":
-		return fmt.Errorf("auth-key already used (single-use) — generate a new one in unarr.app")
+		return fmt.Errorf("auth-key already used (single-use) — %s", renew)
 	case "revoked":
-		return fmt.Errorf("auth-key was revoked — generate a new one in unarr.app")
+		return fmt.Errorf("auth-key was revoked — %s", renew)
 	case "invalid":
-		return fmt.Errorf("auth-key is invalid — check it and generate a new one in unarr.app if needed")
+		return fmt.Errorf("auth-key is invalid — check it, or %s", renew)
 	default:
 		return fmt.Errorf("auth-key exchange failed (HTTP %d): %s", he.StatusCode, he.Message)
 	}
+}
+
+// authKeyRenewHint says where a new auth-key comes from and where it goes. A
+// dead auth-key in a container is the state a dashboard delete leaves behind
+// (the container restarts with the key that already provisioned it), and the
+// user's only tools are the NAS GUI's environment editor and its restart
+// button — so the hint names those, not a shell command.
+func authKeyRenewHint(inDocker bool) string {
+	if inDocker {
+		return "generate a new one in unarr.app (Profile → Agents), replace UNARR_AUTHKEY in the container's environment, and restart the container"
+	}
+	return "generate a new one in unarr.app"
 }
 
 // authKeyErrorToken extracts the canonical error token from an HTTPError

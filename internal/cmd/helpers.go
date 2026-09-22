@@ -74,7 +74,12 @@ func setupHintFor(apiURL string, inDocker, interactive bool) string {
 	}
 	where := "get a one-time key at " + apiURL + "/profile?tab=agents"
 	if inDocker {
-		return "recreate the container with -e UNARR_AUTHKEY=… (" + where + ")"
+		// A container user edits environment variables in a GUI and restarts;
+		// "recreate with -e" described a shell they do not have. Both ways in
+		// are named, because UNARR_API_KEY is what docker-compose.yml asks for
+		// and the auth-key is what the web hands out.
+		return "add UNARR_AUTHKEY=<key> to the container's environment and restart it (" + where +
+			"; each key is single-use), or set UNARR_API_KEY to an account API key"
 	}
 	if !interactive {
 		return "run `unarr up --auth-key=…` (" + where + ")"

@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -324,6 +326,41 @@ func TestSyncClient_Run_CancelStopsLoop(t *testing.T) {
 	err := sc.Run(ctx)
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
+	}
+}
+
+// A tombstoned agent must not keep syncing: the loop ends with ErrRevoked so
+// the daemon can go back to registration and park. It ends AFTER OnRevoked,
+// which is where cmd wipes the dead credential.
+func TestSyncClient_Run_ReturnsErrRevokedOnTombstone(t *testing.T) {
+	var syncs atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/sync") {
+			syncs.Add(1)
+		}
+		w.WriteHeader(http.StatusGone)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "agent_revoked"})
+	}))
+	defer srv.Close()
+
+	sc, _ := newTestSyncClient(srv.URL)
+	var revoked atomic.Int32
+	sc.OnRevoked = func(error) { revoked.Add(1) }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := sc.Run(ctx); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("Run() = %v, want ErrRevoked", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("Run only ended because the test timed out - it kept syncing a revoked agent")
+	}
+	if n := revoked.Load(); n != 1 {
+		t.Errorf("OnRevoked fired %d times, want 1", n)
+	}
+	if n := syncs.Load(); n != 1 {
+		t.Errorf("%d syncs after the tombstone, want exactly 1: the server will reject every one", n)
 	}
 }
 

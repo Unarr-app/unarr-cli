@@ -40,6 +40,8 @@ services:
 
     environment:
       # --- Required ---
+      # Removed the agent from Profile → Agents on the web? Just restart the
+      # container: with this key set it registers again as a new machine.
       - UNARR_API_KEY=${UNARR_API_KEY:?Set UNARR_API_KEY in .env or export it}
 
       # --- Optional ---

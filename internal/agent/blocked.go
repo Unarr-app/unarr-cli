@@ -275,12 +275,20 @@ func Classify(err error) (*Blocked, bool) {
 
 	switch {
 	case IsRevoked(err):
+		const removed = "This machine was removed from your unarr account."
+		msg := serverSaid(he, removed)
+		// The server's sentence ends in "run `unarr login`" — it answers from
+		// the auth layer, which has no idea this agent lives in a container
+		// with no shell. Next to the container remedy that is a contradiction,
+		// so in Docker the client's own wording wins.
+		if RunningInDocker() {
+			msg = removed
+		}
 		return &Blocked{
-			Reason: BlockRevoked,
-			Status: he.StatusCode,
-			Message: serverSaid(he,
-				"This machine was removed from your unarr account."),
-			Remedy: "Sign in again to reconnect this machine.",
+			Reason:  BlockRevoked,
+			Status:  he.StatusCode,
+			Message: msg,
+			Remedy:  RevokedRemedy(),
 		}, true
 
 	case he.StatusCode == http.StatusPreconditionFailed || code == "agent_version_too_old":
@@ -330,6 +338,23 @@ func Classify(err error) (*Blocked, bool) {
 		}, true
 	}
 	return nil, false
+}
+
+// RevokedRemedy is the next step after a dashboard delete, which depends on
+// where the agent runs. On a desktop or a shell host it is a sign-in. In a
+// container there is no shell and no tray: the only lever the user has is the
+// container itself, so the remedy names that lever — and the auth-key
+// footgun, because a UNARR_AUTHKEY that already provisioned this container is
+// spent, and a restart with the same one fails in a way that looks like the
+// restart did nothing.
+func RevokedRemedy() string {
+	if RunningInDocker() {
+		return "Restart the container to reconnect it as a new machine." +
+			" If it was provisioned with UNARR_AUTHKEY, set a fresh one-time key" +
+			" first (Profile → Agents on the web) — auth-keys are single-use." +
+			" To keep this machine disconnected, stop the container instead."
+	}
+	return "Sign in again to reconnect this machine."
 }
 
 // serverSaid prefers the server's own sentence. The server knows the specifics —
