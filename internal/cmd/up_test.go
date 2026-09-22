@@ -99,6 +99,21 @@ func TestAuthKeyErrorToken(t *testing.T) {
 	}
 }
 
+// A spent auth-key inside a container is what a dashboard delete leaves
+// behind (the container restarts with the key that provisioned it). The hint
+// must describe the GUI path — edit the variable, restart — not a shell.
+func TestAuthKeyRenewHintDescribesTheContainerPath(t *testing.T) {
+	hint := authKeyRenewHint(true)
+	for _, want := range []string{"UNARR_AUTHKEY", "restart the container", "unarr.app"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("docker hint %q should mention %q", hint, want)
+		}
+	}
+	if host := authKeyRenewHint(false); strings.Contains(host, "container") {
+		t.Errorf("host hint %q talks about a container", host)
+	}
+}
+
 // TestAuthKeyExchangeError verifies each of the 4 documented server error
 // tokens maps to a distinct, actionable user-facing message, and that a
 // transport (non-HTTP) error is surfaced verbatim.

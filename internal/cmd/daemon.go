@@ -1385,11 +1385,13 @@ func runDaemonStart() error {
 	go reporter.Run(ctx)
 
 	// Credential revoked mid-run (agent deleted from the dashboard): wipe the
-	// stored key + agentId so a supervisor restart can't loop on a rejected
-	// identity, then stop the daemon. Reconnecting needs a fresh `unarr login`.
+	// stored key + agentId so nothing restarts against a rejected identity. The
+	// daemon does NOT stop — agent.Daemon.Run goes back to registration, which
+	// parks it and reports the block (message + remedy) through OnBlocked, so
+	// nothing is said here: one notification per revocation, not two.
 	d.SyncClient().OnRevoked = func(err error) {
-		reportAgentRevoked(creds, err)
-		cancel()
+		log.Printf("[agent] credential revoked by server (%v) - this machine was removed from your account", err)
+		creds.wipe()
 	}
 
 	// Legacy bootstrap: if register hands back a per-machine key, persist it so
@@ -1470,6 +1472,11 @@ func runDaemonStart() error {
 		cancelAllPlayerSessions()
 		streamSrv.Shutdown(context.Background())
 		cancel()
+		if err == nil {
+			// Run only returns nil on a cancelled context, and the shutdown
+			// paths that cancel it report their own exit — nothing to add.
+			return nil
+		}
 		// Registration was rejected because this agent's credential is revoked
 		// (deleted from the dashboard). Wipe it and exit cleanly so the service
 		// supervisor doesn't restart-loop against a 410; user must re-login.
@@ -1512,19 +1519,21 @@ func reportBlocked(b *agent.Blocked) {
 }
 
 // reportAgentRevoked tells the user their agent was removed and wipes the
-// stored credential (api key + agentId) so the next start requires a fresh
-// `unarr login` (which mints a new per-machine key bound to a new agentId)
-// instead of looping against a server that keeps rejecting the old identity.
+// stored credential (api key + agentId) so the next start mints a new
+// per-machine key bound to a new agentId instead of looping against a server
+// that keeps rejecting the old identity. The remedy depends on where the agent
+// runs (a sign-in, or a container restart) — see agent.RevokedRemedy.
 func reportAgentRevoked(creds *credentialStore, err error) {
 	log.Printf("[agent] credential revoked by server (%v) - this machine was removed from your account", err)
 	creds.wipe()
+	remedy := agent.RevokedRemedy()
 	fmt.Println()
 	fmt.Println("  This agent was removed from your account.")
-	fmt.Println("  Run `unarr login` on this machine to reconnect it.")
+	fmt.Println("  " + remedy)
 	fmt.Println()
 	// Same reason as reportBlocked: under a tray nobody reads stdout.
 	notify.SendUrgent("unarr agent disconnected",
-		"This machine was removed from your unarr account.\n\nSign in again to reconnect it.")
+		"This machine was removed from your unarr account.\n\n"+remedy)
 }
 
 // isAllowedStreamPath checks that filePath is within one of the directories

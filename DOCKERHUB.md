@@ -190,6 +190,25 @@ The image ships the NVIDIA runtime env, so GPU transcode works out of the box:
 - **NVIDIA:** add `--gpus all`
 - **Intel QSV / VA-API:** pass `--device /dev/dri`
 
+## Reconnecting after removing the agent from the dashboard
+
+Deleting the agent under **Profile → Agents** revokes this container's
+credential for good: the daemon logs
+`This agent was removed from your account` (`agent_revoked`), forgets the dead
+credential, and stays up doing nothing — it does not reconnect on its own,
+because you just asked it not to. There is no `unarr login` in a container;
+the container itself is the switch:
+
+- **Provisioned with `UNARR_API_KEY`:** restart the container. It registers
+  as a new machine under a new name.
+- **Provisioned with `UNARR_AUTHKEY`:** auth-keys are single-use, so the one
+  in the container is spent. Generate a new one under **Profile → Agents**,
+  replace `UNARR_AUTHKEY` in the container's environment (Docker GUI, compose
+  file, or `docker run -e`), and restart. With the old key the container
+  restarts into `auth-key already used`.
+- **To keep the machine disconnected:** stop the container. A running one
+  that gets restarted (host reboot, `restart: unless-stopped`) reconnects.
+
 ## Running commands
 
 Use `docker exec` for one-off commands while the daemon is running:

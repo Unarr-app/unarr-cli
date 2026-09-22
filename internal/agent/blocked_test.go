@@ -243,6 +243,41 @@ func TestWaitOutBlockRecoversWhenTheUserSignsIn(t *testing.T) {
 	}
 }
 
+// A container has no shell to run `unarr login` in and no tray to sign in
+// from. Telling its user to "sign in again" is a dead end; the remedy has to
+// name the one lever they have (restart) and the auth-key trap (single-use).
+func TestRevokedRemedyNamesTheContainerLever(t *testing.T) {
+	t.Setenv("UNARR_DOCKER", "1")
+	b, ok := Classify(&HTTPError{StatusCode: 410, Message: "agent_revoked"})
+	if !ok {
+		t.Fatal("410 agent_revoked must be terminal")
+	}
+	for _, want := range []string{"Restart the container", "UNARR_AUTHKEY", "single-use", "stop the container"} {
+		if !strings.Contains(b.Remedy, want) {
+			t.Errorf("docker remedy %q should mention %q", b.Remedy, want)
+		}
+	}
+	if strings.Contains(strings.ToLower(b.Remedy), "sign in") {
+		t.Errorf("docker remedy %q sends the user to a sign-in they cannot perform", b.Remedy)
+	}
+	// The server's own sentence says "run `unarr login`" — next to the container
+	// remedy that is a contradiction, so in Docker it must not be shown.
+	b, _ = Classify(&HTTPError{StatusCode: 410, Message: "agent_revoked",
+		Detail: "This agent was removed from your account. Run `unarr login` to reconnect this machine."})
+	if strings.Contains(b.Message, "unarr login") {
+		t.Errorf("docker message %q repeats the server's shell instruction", b.Message)
+	}
+
+	t.Setenv("UNARR_DOCKER", "0")
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		t.Skip("running inside a container; the host branch cannot be observed")
+	}
+	b, _ = Classify(&HTTPError{StatusCode: 410, Message: "agent_revoked"})
+	if !strings.Contains(b.Remedy, "Sign in") {
+		t.Errorf("host remedy %q should be a sign-in", b.Remedy)
+	}
+}
+
 func TestRevocationStillWipesTheDeadCredential(t *testing.T) {
 	// Parking replaced an exit that used to wipe a tombstoned credential. The
 	// wipe has to survive that change: a 410 identity is never accepted again,
@@ -262,6 +297,76 @@ func TestRevocationStillWipesTheDeadCredential(t *testing.T) {
 
 	if got := wiped.Load(); got != 1 {
 		t.Errorf("credential wiped %d times, want exactly 1", got)
+	}
+}
+
+// A dashboard delete while the agent is syncing used to stop the process,
+// which under Docker or systemd meant a restart loop against a wiped
+// credential. Now Run goes back to registration and parks there: the process
+// stays up, the credential is wiped, the block is recorded for the tray, and
+// the server is not hammered.
+func TestRunParksInsteadOfExitingWhenRevokedMidRun(t *testing.T) {
+	withTempStateDir(t)
+	prev := blockedRetry
+	blockedRetry = time.Hour
+	t.Cleanup(func() { blockedRetry = prev })
+
+	var registers atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/register"):
+			// Accepted once; tombstoned by the time the daemon comes back.
+			if registers.Add(1) == 1 {
+				json.NewEncoder(w).Encode(RegisterResponse{})
+				return
+			}
+			fallthrough
+		default:
+			w.WriteHeader(http.StatusGone)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "agent_revoked"})
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := NewClient(srv.URL, "k", "test")
+	d := NewDaemon(DaemonConfig{AgentID: "a", DownloadDir: t.TempDir(), Downlink: "sse"}, client)
+	var wiped, blocked atomic.Int32
+	d.OnCredentialRejected = func() { wiped.Add(1) }
+	d.OnBlocked = func(b *Blocked) {
+		if b.Reason == BlockRevoked {
+			blocked.Add(1)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx) }()
+
+	deadline := time.After(5 * time.Second)
+	for blocked.Load() == 0 {
+		select {
+		case err := <-done:
+			t.Fatalf("Run returned (%v) - a revoked daemon must park, not exit", err)
+		case <-deadline:
+			t.Fatal("daemon never parked after the mid-run revocation")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if got := ReadBlocked(); got == nil || got.Reason != BlockRevoked {
+		t.Errorf("blocked record = %+v, want %s for the tray", got, BlockRevoked)
+	}
+	if n := wiped.Load(); n == 0 {
+		t.Error("tombstoned credential was not wiped")
+	}
+	if n := registers.Load(); n != 2 {
+		t.Errorf("%d register calls, want 2 (the accepted one, then the 410 that parks)", n)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("parked daemon ignored shutdown")
 	}
 }
 
