@@ -342,17 +342,18 @@ func Classify(err error) (*Blocked, bool) {
 
 // RevokedRemedy is the next step after a dashboard delete, which depends on
 // where the agent runs. On a desktop or a shell host it is a sign-in. In a
-// container there is no shell and no tray: the only lever the user has is the
-// container itself, so the remedy names that lever — and the auth-key
-// footgun, because a UNARR_AUTHKEY that already provisioned this container is
-// spent, and a restart with the same one fails in a way that looks like the
-// restart did nothing.
+// container there is no shell and no tray: the only levers the user has are
+// the container's environment and its restart button, so the remedy names
+// those. A plain restart deliberately does NOT reconnect (cmd records the
+// delete and `up` honors it), and an auth-key that already provisioned this
+// container is spent — both are said, because a restart that looks like it
+// did nothing is the dead end this text exists to prevent.
 func RevokedRemedy() string {
 	if RunningInDocker() {
-		return "Restart the container to reconnect it as a new machine." +
-			" If it was provisioned with UNARR_AUTHKEY, set a fresh one-time key" +
-			" first (Profile → Agents on the web) — auth-keys are single-use." +
-			" To keep this machine disconnected, stop the container instead."
+		return "To reconnect it as a new machine, add UNARR_RECONNECT=1 to the" +
+			" container's environment and restart it (remove the variable" +
+			" afterwards), or set a fresh UNARR_AUTHKEY (Profile → Agents on the" +
+			" web; auth-keys are single-use). A plain restart keeps it disconnected."
 	}
 	return "Sign in again to reconnect this machine."
 }

@@ -309,6 +309,8 @@ func runInit(apiURLOverride string) error {
 		return fmt.Errorf("save config: %w", err)
 	}
 	appCfg = cfg // update cached config so subsequent calls see the new values
+	// Same as login: a wizard run that minted an identity ends any recorded delete.
+	clearRevokedMarker()
 
 	// ── Install daemon (if requested) ───────────────────────────────
 

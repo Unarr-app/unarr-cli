@@ -67,6 +67,7 @@ func (s *credentialStore) adoptKey(newKey string) {
 // a fresh identity instead of re-offering one that will never be accepted again.
 func (s *credentialStore) wipe() {
 	s.mu.Lock()
+	revoked := s.agentID
 	s.key = ""
 	s.agentID = ""
 	s.mu.Unlock()
@@ -74,6 +75,9 @@ func (s *credentialStore) wipe() {
 		c.Auth.APIKey = ""
 		c.Agent.ID = ""
 	})
+	// The delete must survive a restart on a host whose key comes from the
+	// environment — see revoked_marker.go.
+	writeRevokedMarker(revoked)
 }
 
 // reload re-reads the credential from disk and reports whether it changed.
