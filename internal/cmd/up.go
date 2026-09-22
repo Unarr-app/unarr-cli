@@ -79,11 +79,20 @@ func runUp(authKey string, force bool) error {
 		// A key without an identity is what a revocation leaves behind: the
 		// daemon wiped api_key + agent.id from config.toml, and UNARR_API_KEY
 		// put the key back. Minting a fresh id here lets the daemon register
-		// as a new machine — the one recovery a container user can perform,
-		// since "restart" is the only button a NAS GUI has. `start` still
-		// refuses this state on purpose; it is `up`, the unattended entry
-		// point, that provisions.
+		// as a new machine. `start` still refuses this state on purpose; it is
+		// `up`, the unattended entry point, that provisions.
+		//
+		// But not behind the user's back: a recorded dashboard delete holds
+		// until they say otherwise, or a NAS reboot would undo the delete.
 		if hasKey && cfg.Agent.ID == "" {
+			if m := readRevokedMarker(); m != nil {
+				if !reconnectRequested() {
+					return revokedRefusal(m, cfg.Auth.APIURL)
+				}
+				clearRevokedMarker()
+				color.New(color.FgYellow).Println("  UNARR_RECONNECT=1: reconnecting a machine that was removed from your account." +
+					" Unset it once the agent is back — while it is set, a dashboard delete is undone by the next restart.")
+			}
 			if _, err := ensureAgentID(&cfg); err != nil {
 				return err
 			}
@@ -134,6 +143,10 @@ func runUp(authKey string, force bool) error {
 	}
 
 	color.New(color.FgGreen).Println("OK")
+
+	// A redeemed auth-key is a deliberate reconnect: whatever delete was
+	// recorded before it is over.
+	clearRevokedMarker()
 
 	// Persist the durable credential. The minted apiKey + (optional) apiUrl are
 	// written to config.toml so the daemon — and every future run — uses them
@@ -234,6 +247,24 @@ func authKeyExchangeError(err error) error {
 	default:
 		return fmt.Errorf("auth-key exchange failed (HTTP %d): %s", he.StatusCode, he.Message)
 	}
+}
+
+// revokedRefusal is why `up` will not mint a new identity: this machine was
+// deleted from the account, and honoring that is the point. It names every
+// way back in, because the user reading it may well want one.
+func revokedRefusal(m *revokedMarker, apiURL string) error {
+	if apiURL == "" {
+		apiURL = defaultAPIURL()
+	}
+	when := m.At.Local().Format("2006-01-02 15:04")
+	if agent.RunningInDocker() {
+		return fmt.Errorf("this container was removed from your unarr account on %s and will not reconnect on its own.\n"+
+			"  To reconnect it as a new machine, add UNARR_RECONNECT=1 to the container's environment and restart it"+
+			" (remove the variable afterwards), or set a fresh UNARR_AUTHKEY (%s/profile?tab=agents).\n"+
+			"  To keep it disconnected, stop the container", when, apiURL)
+	}
+	return fmt.Errorf("this machine was removed from your unarr account on %s and will not reconnect on its own.\n"+
+		"  To reconnect it as a new machine, run `unarr login`, or `UNARR_RECONNECT=1 unarr up`", when)
 }
 
 // authKeyRenewHint says where a new auth-key comes from and where it goes. A

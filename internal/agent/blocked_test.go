@@ -252,7 +252,7 @@ func TestRevokedRemedyNamesTheContainerLever(t *testing.T) {
 	if !ok {
 		t.Fatal("410 agent_revoked must be terminal")
 	}
-	for _, want := range []string{"Restart the container", "UNARR_AUTHKEY", "single-use", "stop the container"} {
+	for _, want := range []string{"UNARR_RECONNECT=1", "restart it", "UNARR_AUTHKEY", "single-use", "plain restart keeps it disconnected"} {
 		if !strings.Contains(b.Remedy, want) {
 			t.Errorf("docker remedy %q should mention %q", b.Remedy, want)
 		}
