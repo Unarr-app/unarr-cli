@@ -5,12 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.6] - 2026-09-22
+
+
+### Fixed
+
+- **docker**: reconnect a revoked agent by restarting the container
 ## [1.14.5] - 2026-09-21
 
 
 ### Fixed
 
 - **hls**: subtitle sidecars — delta fetches, truncated reads, 404 for unknown tracks
+
+### Other
+
+- **release**: 1.14.5
 ## [1.14.4] - 2026-09-21
 
 
@@ -1866,6 +1876,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.14.6]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.5...v1.14.6
 [1.14.5]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.4...v1.14.5
 [1.14.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.3...v1.14.4
 [1.14.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.2...v1.14.3
