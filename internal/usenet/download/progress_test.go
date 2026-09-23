@@ -249,6 +249,7 @@ func TestProgressTracker_Remove(t *testing.T) {
 	// Write a fake NZB cache file
 	nzbPath := filepath.Join(dir, "test-task-6.nzb")
 	os.WriteFile(nzbPath, []byte("<nzb/>"), 0o644)
+	os.WriteFile(nzbPath+".id", []byte("nzb-1"), 0o644)
 
 	// Both should exist
 	if _, err := os.Stat(tracker.progressPath()); err != nil {
@@ -265,6 +266,9 @@ func TestProgressTracker_Remove(t *testing.T) {
 	}
 	if _, err := os.Stat(nzbPath); !os.IsNotExist(err) {
 		t.Error("nzb cache should be removed")
+	}
+	if _, err := os.Stat(nzbPath + ".id"); !os.IsNotExist(err) {
+		t.Error("nzb cache id sidecar should be removed")
 	}
 }
 
