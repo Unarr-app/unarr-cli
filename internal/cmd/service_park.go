@@ -150,7 +150,11 @@ func parkService() {
 	if !underInstalledService() {
 		return
 	}
-	if err := os.WriteFile(parkedMarkerPath(), []byte("parked until sign-in\n"), 0o644); err != nil {
+	err := os.MkdirAll(filepath.Dir(parkedMarkerPath()), 0o755)
+	if err == nil {
+		err = os.WriteFile(parkedMarkerPath(), []byte("parked until sign-in\n"), 0o644)
+	}
+	if err != nil {
 		// Without the marker a sign-in will not bring the service back; the
 		// user can still start it, so this is worth a line, not a failure.
 		fmt.Fprintf(os.Stderr, "  could not record the parked service at %s: %v\n", parkedMarkerPath(), err)
@@ -257,29 +261,18 @@ func resumeInstalledService() {
 		clearParkedMarker()
 		return
 	}
-	var out string
-	var err error
-	switch runtime.GOOS {
-	case "linux":
-		if out, err = svcOutput("systemctl", "--user", "start", service.SystemdUnitName); err == nil {
-			// Type=simple returns as soon as the fork succeeds; give the daemon
-			// the same window `daemon install` gives it before calling it up.
-			time.Sleep(unitSettleDelay)
-			if state, _ := svcOutput("systemctl", "--user", "is-active", service.SystemdUnitName); state != "active" {
-				out, err = "", fmt.Errorf("the service did not stay up (is-active: %s); check: journalctl --user -u unarr -n 50", state)
-			}
-		}
-	case "darwin":
-		home, _ := os.UserHomeDir()
-		var a *launchdAgent
-		if a, err = newLaunchdAgent(home); err == nil {
-			err = a.start() // waits until the job has stayed running
-		}
-	case "windows":
-		_, err = startWindowsDaemon()
-	default:
+	// Without a download dir the daemon cannot start either, and bringing the
+	// service back would only restart the loop parking ended. `unarr init`,
+	// which login points the user to, reinstalls and starts it.
+	if loadConfig().Download.Dir == "" {
 		return
 	}
+	// Uninstalled (or disabled) since it parked: not a sign-in's to undo.
+	if !parkedServiceStillInstalled() {
+		clearParkedMarker()
+		return
+	}
+	out, err := startParkedService()
 	if err != nil {
 		// launchctl errors carry the command's whole output after a newline.
 		color.New(color.FgYellow).Printf("  Could not start the background service (%s)\n",
@@ -291,4 +284,51 @@ func resumeInstalledService() {
 	clearParkedMarker()
 	color.New(color.FgGreen).Println("  ✓ Background service started")
 	fmt.Println()
+}
+
+// parkedServiceStillInstalled reports whether the service that parked is still
+// there to resume: the unit (enabled), the launchd plist, the scheduled task.
+func parkedServiceStillInstalled() bool {
+	switch runtime.GOOS {
+	case "linux":
+		state, _ := svcOutput("systemctl", "--user", "is-enabled", service.SystemdUnitName)
+		return service.Respawns() && state == "enabled"
+	case "darwin":
+		return service.Respawns()
+	case "windows":
+		return windowsTaskInstalled()
+	}
+	return false
+}
+
+// startParkedService starts the installed service and reports failure with the
+// service manager's own output when it has some.
+func startParkedService() (string, error) {
+	switch runtime.GOOS {
+	case "linux":
+		out, err := svcOutput("systemctl", "--user", "start", service.SystemdUnitName)
+		if err != nil {
+			return out, err
+		}
+		// Type=simple returns as soon as the fork succeeds; give the daemon the
+		// same window `daemon install` gives it before calling it up.
+		time.Sleep(unitSettleDelay)
+		if state, _ := svcOutput("systemctl", "--user", "is-active", service.SystemdUnitName); state != "active" {
+			return "", fmt.Errorf("the service did not stay up (is-active: %s); check: journalctl --user -u unarr -n 50", state)
+		}
+		return "", nil
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		a, err := newLaunchdAgent(home)
+		if err != nil {
+			return "", err
+		}
+		return "", a.start() // waits until the job has stayed running
+	case "windows":
+		// The task itself, never startWindowsDaemon's detached fallback: a task
+		// that will not run was disabled, and that is the user's call.
+		agent.WriteStartRequest()
+		return svcOutput("schtasks", "/run", "/tn", "unarr")
+	}
+	return "", fmt.Errorf("service control not supported on %s", runtime.GOOS)
 }
