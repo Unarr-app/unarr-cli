@@ -66,6 +66,11 @@ type Daemon struct {
 	OnControlAction   func(action, taskID string, deleteFiles bool)
 	OnIptvHold        func(held bool) // server's IPTV playback hold, every sync
 	GetActiveCount    func() int      // returns number of active downloads (wired from manager)
+
+	// OnStreamSessionsClosed receives ids of sessions the web closed
+	// (sync `closedStreamSessions`). Runs on the sync loop, before new sessions.
+	OnStreamSessionsClosed func(ids []string)
+
 	// GetActiveStreamCount returns the number of live stream sessions (player +
 	// HLS transcode). Wired from cmd. The graceful AUTO-upgrade path defers
 	// while this is > 0 so it never cuts a viewer mid-playback; a MANUAL
@@ -534,6 +539,11 @@ func (d *Daemon) wireTaskCallbacks() {
 	d.sync.OnStreamSession = func(sess StreamSession) {
 		if d.OnStreamSession != nil {
 			d.OnStreamSession(sess)
+		}
+	}
+	d.sync.OnStreamSessionsClosed = func(ids []string) {
+		if d.OnStreamSessionsClosed != nil {
+			d.OnStreamSessionsClosed(ids)
 		}
 	}
 	d.sync.OnUpgrade = func(version string) {

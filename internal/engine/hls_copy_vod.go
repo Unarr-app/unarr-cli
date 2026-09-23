@@ -120,6 +120,14 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	// Proxy first: the index + IDR reads below warm the very header/seek-index
 	// blocks every later segment spawn would otherwise re-download.
 	s.startCopySourceProxy()
+	if s.cfg.SingleConnection && s.copyProxy == nil {
+		// One-connection source (IPTV): only the proxy's single upstream link
+		// keeps the index, IDR probe, segment spawns and subtitle windows on ONE
+		// provider connection. Without it they would each open their own.
+		log.Printf("[hls %s] copy-vod skipped: single-connection source without the source proxy - using EVENT copy",
+			shortHLSID(s.cfg.SessionID))
+		return false
+	}
 	starts, ok := planCopyVOD(ctx, s)
 	if !ok {
 		s.stopCopySourceProxy() // the fallback paths read the source directly
@@ -136,7 +144,14 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	// ahead never waits for a linear pass or consumes a film's worth of disk.
 	s.copyLazy = true
 	s.copyCtx, s.copyCancel = context.WithCancel(context.Background())
-	s.copySlots = make(chan struct{}, 2)
+	// Two segment spawns may run at once — except on a one-connection source,
+	// where they would only fight over the single upstream link (each jump
+	// between their offsets reopens it); there one runs at a time.
+	slots := 2
+	if s.cfg.SingleConnection {
+		slots = 1
+	}
+	s.copySlots = make(chan struct{}, slots)
 	s.copyWake = make(chan struct{}, 1)
 	s.copyWG.Add(1) // session not published yet: no Close can race this Add
 	go s.runCopyPrefetch()

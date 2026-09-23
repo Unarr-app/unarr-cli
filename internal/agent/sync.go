@@ -62,6 +62,12 @@ type SyncClient struct {
 	OnWatchingChange func(watching bool)
 	OnIptvHold       func(held bool) // every successful sync: is IPTV playing right now?
 	OnSyncSuccess    func()          // called after each successful sync (e.g. to update state file)
+
+	// OnStreamSessionsClosed receives the ids the web reports as closed.
+	// Called BEFORE OnStreamSession so a closed id is never (re)started by the
+	// same sync response.
+	OnStreamSessionsClosed func(ids []string)
+
 	// OnSyncAttempt is called after EVERY sync attempt, successful or not. It
 	// carries liveness, not connectivity: readers of the state file use it to
 	// tell a daemon that is alive-but-offline from one that died and left its
@@ -412,6 +418,22 @@ func (sc *SyncClient) processResponse(resp *SyncResponse) {
 		}
 	}
 
+	// IPTV playback hold — reported every sync so the agent's lease stays fresh.
+	// Applied BEFORE any stream session of this response starts, so an IPTV
+	// stream never opens the provider while a download still holds the account's
+	// one connection. A release here does not resume downloads under a stream
+	// still being torn down: the daemon pins the hold for each single-connection
+	// session until its teardown has finished (IptvDownloader.HoldForStream).
+	if sc.OnIptvHold != nil {
+		sc.OnIptvHold(resp.IptvHold)
+	}
+
+	// Sessions the web already closed — torn down before new ones start so a
+	// closed id in the same response can never be (re)started.
+	if len(resp.ClosedStreamSessions) > 0 && sc.OnStreamSessionsClosed != nil {
+		sc.OnStreamSessionsClosed(resp.ClosedStreamSessions)
+	}
+
 	// HLS streaming sessions.
 	for _, ws := range resp.StreamSessions {
 		if sc.OnStreamSession != nil {
@@ -427,11 +449,6 @@ func (sc *SyncClient) processResponse(resp *SyncResponse) {
 	// Scan
 	if resp.Scan && sc.OnScan != nil {
 		sc.OnScan()
-	}
-
-	// IPTV playback hold — reported every sync so the agent's lease stays fresh.
-	if sc.OnIptvHold != nil {
-		sc.OnIptvHold(resp.IptvHold)
 	}
 
 	// File deletions requested by the server — deduplicate against in-flight items

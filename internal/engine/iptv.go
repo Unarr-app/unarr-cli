@@ -25,6 +25,10 @@ type IptvDownloader struct {
 	http *DebridDownloader
 	hold *PlaybackHold
 	turn chan struct{} // capacity 1: the single IPTV connection
+	// conn is held by an attempt for exactly as long as its transfer may have
+	// the provider connection open. HoldForStream waits on it so a stream opens
+	// the account only after the paused download has let go of it.
+	conn chan struct{}
 
 	// dests maps each task this downloader has started to its final path. The
 	// HTTP downloader forgets a task once its attempt returns, and the manager
@@ -43,6 +47,7 @@ func NewIptvDownloader(hold *PlaybackHold) *IptvDownloader {
 		http:  NewDebridDownloader(),
 		hold:  hold,
 		turn:  make(chan struct{}, 1),
+		conn:  make(chan struct{}, 1),
 		dests: make(map[string]string),
 	}
 }
@@ -101,6 +106,22 @@ func (d *IptvDownloader) takeTurn(ctx context.Context, task *Task) error {
 	}
 }
 
+// HoldForStream is called before a single-connection (IPTV) stream first opens
+// the provider: it pins the playback hold — so any running transfer stops and
+// none starts — and waits, bounded by ctx, until a transfer that was mid-flight
+// has returned and so closed its connection. The release unpins; it is
+// idempotent and must run once the stream no longer reads the provider.
+func (d *IptvDownloader) HoldForStream(ctx context.Context) (release func()) {
+	release = d.hold.Pin()
+	select {
+	case d.conn <- struct{}{}:
+		<-d.conn
+	case <-ctx.Done():
+		// Waited long enough: the stream goes ahead rather than never playing.
+	}
+	return release
+}
+
 // waitPlayback waits, off the download slot, while IPTV is playing.
 func (d *IptvDownloader) waitPlayback(ctx context.Context, task *Task) error {
 	if !d.hold.Held() {
@@ -118,6 +139,17 @@ func (d *IptvDownloader) waitPlayback(ctx context.Context, task *Task) error {
 
 // attempt runs one transfer, cut short (interrupted=true) when playback starts.
 func (d *IptvDownloader) attempt(ctx context.Context, task *Task, outputDir string, progressCh chan<- Progress) (*Result, bool, error) {
+	select {
+	case d.conn <- struct{}{}:
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	}
+	defer func() { <-d.conn }()
+	// Re-checked under conn: a stream that pinned the hold and then took conn
+	// before us must never see this attempt open the account behind its back.
+	if d.hold.Held() {
+		return nil, true, nil
+	}
 	attemptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var interrupted atomic.Bool
