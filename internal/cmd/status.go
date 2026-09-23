@@ -48,6 +48,9 @@ func runStatus() error {
 	// ── Configuration ──
 	if cfg.Auth.APIKey == "" {
 		yellow.Println("  ⚠  Not configured. Run 'unarr init' first.")
+		if parkedMarkerExists() {
+			fmt.Println("     The background service is waiting for a sign-in: 'unarr login' starts it again.")
+		}
 		fmt.Println()
 		return nil
 	}

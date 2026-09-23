@@ -30,6 +30,8 @@ Type=simple
 ExecStart={{.BinPath}} start
 Restart=always
 RestartSec=10
+SuccessExitStatus=78
+RestartPreventExitStatus=78
 Environment=HOME={{.Home}}
 
 [Install]
