@@ -5,12 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.9] - 2026-09-23
+
+
+### Fixed
+
+- **daemon**: download queue never blocks startup or sync
 ## [1.14.8] - 2026-09-23
 
 
 ### Fixed
 
 - **transcode**: keep the GPU render group in Docker and fall back to libx264
+
+### Other
+
+- **release**: 1.14.8
 ## [1.14.7] - 2026-09-22
 
 
@@ -1896,6 +1906,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.14.9]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.8...v1.14.9
 [1.14.8]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.7...v1.14.8
 [1.14.7]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.6...v1.14.7
 [1.14.6]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.5...v1.14.6
