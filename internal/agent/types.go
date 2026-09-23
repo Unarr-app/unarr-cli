@@ -644,6 +644,10 @@ type SyncRequest struct {
 	// Omitted entirely when telemetry is disabled. See internal/agent/telemetry.go.
 	ExitReason string `json:"exitReason,omitempty"`
 	ExitDetail string `json:"exitDetail,omitempty"`
+	// Capabilities — task kinds this build can run beyond the classic methods
+	// ("iptv"). The server gates claims on these rather than on a version
+	// number, so two features racing for the same release can't mislabel one.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // ControlAction represents a server-side control signal for a task.

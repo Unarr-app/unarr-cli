@@ -509,6 +509,10 @@ func runDaemonStart() error {
 	// hold is a lease renewed by every sync (idle interval 10 s), so it lapses on
 	// its own if the server stops reporting.
 	iptvHold := engine.NewPlaybackHold(30 * time.Second)
+	// Unknown until the first sync: start held, so an IPTV download resumed from
+	// the task store can't grab the account's connection from a stream that is
+	// already playing. The first sync settles it; offline, it lapses in 30 s.
+	iptvHold.Set(true)
 	iptvDl := engine.NewIptvDownloader(iptvHold)
 	d.OnIptvHold = iptvHold.Set
 	usenetDl := engine.NewUsenetDownloader(agentClient)

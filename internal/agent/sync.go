@@ -292,6 +292,17 @@ func (sc *SyncClient) doSync(ctx context.Context) {
 	}
 }
 
+// capabilities lists the extra task kinds this daemon runs. IPTV is advertised
+// only when the daemon wired the playback hold — the IPTV downloader and the
+// hold ship together, and a server must never hand an IPTV task to an agent
+// that can't pause it for playback.
+func (sc *SyncClient) capabilities() []string {
+	if sc.OnIptvHold == nil {
+		return nil
+	}
+	return []string{"iptv"}
+}
+
 func (sc *SyncClient) buildRequest() SyncRequest {
 	httpsPort, agentHash := directTLSWire(sc.cfg.HTTPSStreamPort, sc.cfg.AgentHash)
 	req := SyncRequest{
@@ -308,6 +319,7 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 		TailscaleIP:     sc.cfg.TailscaleIP,
 		CanDelete:       sc.canDelete.Load(),
 		IsDocker:        RunningInDocker(),
+		Capabilities:    sc.capabilities(),
 	}
 	if sc.GetTaskStates != nil {
 		req.Tasks = sc.GetTaskStates()

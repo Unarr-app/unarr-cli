@@ -165,7 +165,8 @@ func (s *ActiveTaskStore) flushLocked() {
 		return
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// 0600: tasks carry resolved source URLs (debrid tokens, IPTV user/pass).
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
 	_ = os.Rename(tmp, path)

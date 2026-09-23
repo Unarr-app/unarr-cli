@@ -26,20 +26,24 @@ type IptvDownloader struct {
 	hold *PlaybackHold
 	turn chan struct{} // capacity 1: the single IPTV connection
 
-	// parked maps a task waiting between attempts (playback hold) to its final
-	// path. The HTTP downloader forgets a task once its attempt returns, so
-	// without this a cancel-and-delete during a hold would leave the partial.
-	parkedMu sync.Mutex
-	parked   map[string]string
+	// dests maps each task this downloader has started to its final path. The
+	// HTTP downloader forgets a task once its attempt returns, and the manager
+	// cancels a task's context BEFORE calling Cancel — so a cancel-and-delete
+	// during a playback hold (or right as an attempt unwinds) would find nothing
+	// to delete. The entry therefore outlives the Download call when that ended
+	// by cancellation (pause, cancel, shutdown), and is dropped only on a
+	// terminal outcome or by Cancel itself.
+	destsMu sync.Mutex
+	dests   map[string]string
 }
 
 // NewIptvDownloader returns an IPTV downloader driven by the given hold.
 func NewIptvDownloader(hold *PlaybackHold) *IptvDownloader {
 	return &IptvDownloader{
-		http:   NewDebridDownloader(),
-		hold:   hold,
-		turn:   make(chan struct{}, 1),
-		parked: make(map[string]string),
+		http:  NewDebridDownloader(),
+		hold:  hold,
+		turn:  make(chan struct{}, 1),
+		dests: make(map[string]string),
 	}
 }
 
@@ -60,19 +64,21 @@ func (d *IptvDownloader) Download(ctx context.Context, task *Task, outputDir str
 		return nil, err
 	}
 	defer func() { <-d.turn }()
-	defer d.unpark(task.ID)
+	d.track(task, outputDir)
 	for {
 		if err := d.waitPlayback(ctx, task); err != nil {
-			return nil, err
+			return nil, err // cancelled: keep the dest for a following Cancel
 		}
 		res, interrupted, err := d.attempt(ctx, task, outputDir, progressCh)
 		if !interrupted {
+			if ctx.Err() == nil {
+				d.untrack(task.ID)
+			}
 			if res != nil {
 				res.Method = MethodIPTV // the shared HTTP transfer stamps debrid
 			}
-			return res, err
+			return res, redactURL(err, task.DirectURL)
 		}
-		d.park(task, outputDir)
 		log.Printf("[%s] iptv: playback started - download paused, it resumes when playback ends", task.ShortID())
 	}
 }
@@ -128,31 +134,32 @@ func (d *IptvDownloader) attempt(ctx context.Context, task *Task, outputDir stri
 	return nil, true, err
 }
 
-func (d *IptvDownloader) park(task *Task, outputDir string) {
+func (d *IptvDownloader) track(task *Task, outputDir string) {
 	dest, err := safePath(outputDir, debridFileName(task))
 	if err != nil {
 		return
 	}
-	d.parkedMu.Lock()
-	d.parked[task.ID] = dest
-	d.parkedMu.Unlock()
+	d.destsMu.Lock()
+	d.dests[task.ID] = dest
+	d.destsMu.Unlock()
 }
 
-func (d *IptvDownloader) unpark(taskID string) string {
-	d.parkedMu.Lock()
-	defer d.parkedMu.Unlock()
-	dest := d.parked[taskID]
-	delete(d.parked, taskID)
+func (d *IptvDownloader) untrack(taskID string) string {
+	d.destsMu.Lock()
+	defer d.destsMu.Unlock()
+	dest := d.dests[taskID]
+	delete(d.dests, taskID)
 	return dest
 }
 
 // Pause stops the transfer and keeps the partial for a later resume.
 func (d *IptvDownloader) Pause(taskID string) error { return d.http.Pause(taskID) }
 
-// Cancel aborts and removes the partial — including one parked by a hold.
+// Cancel aborts and removes the partial — including one parked by a hold, and
+// one whose attempt already unwound when the manager cancelled its context.
 func (d *IptvDownloader) Cancel(taskID string) error {
 	err := d.http.Cancel(taskID)
-	if dest := d.unpark(taskID); dest != "" {
+	if dest := d.untrack(taskID); dest != "" {
 		removePartialArtifacts(agent.ShortID(taskID), dest)
 	}
 	return err

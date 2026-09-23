@@ -216,6 +216,29 @@ func TestIptvDownloadsRunOneAtATime(t *testing.T) {
 	}
 }
 
+func TestIptvPauseKeepsThePartialForAResume(t *testing.T) {
+	srv := &iptvServer{body: iptvBody(), half: 700 * 1024, stallFirst: true, stalled: make(chan struct{})}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	d := NewIptvDownloader(NewPlaybackHold(time.Minute))
+	outputDir := t.TempDir()
+	task := iptvTask("pause", ts.URL+"/4.mkv")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.Download(ctx, task, outputDir, make(chan Progress, 100))
+		done <- err
+	}()
+	<-srv.stalled
+	dest, _ := safePath(outputDir, debridFileName(task))
+	waitPartialSize(t, partialPath(dest), int64(srv.half))
+	cancel() // pause / shutdown: the context ends, nobody asks to delete
+	<-done
+	if !fileExists(partialPath(dest)) {
+		t.Fatal("a paused IPTV download must keep its partial")
+	}
+}
+
 func TestIptvCancelDuringPlaybackRemovesThePartial(t *testing.T) {
 	srv := &iptvServer{body: iptvBody(), half: 700 * 1024, stallFirst: true, stalled: make(chan struct{})}
 	ts := httptest.NewServer(srv)
@@ -239,11 +262,13 @@ func TestIptvCancelDuringPlaybackRemovesThePartial(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond) // let the attempt unwind into the parked wait
 
+	// The manager's order: cancel the task's context first, THEN ask the
+	// downloader to delete — by then Download has already returned.
+	cancel()
+	<-done
 	if err := d.Cancel(task.ID); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
-	cancel()
-	<-done
 	if fileExists(partialPath(dest)) || fileExists(partMetaPath(dest)) {
 		t.Fatal("cancel-and-delete during playback left the partial behind")
 	}
