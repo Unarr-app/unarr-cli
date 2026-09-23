@@ -60,7 +60,8 @@ type SyncClient struct {
 	OnUpgrade        func(version string)
 	OnScan           func()
 	OnWatchingChange func(watching bool)
-	OnSyncSuccess    func() // called after each successful sync (e.g. to update state file)
+	OnIptvHold       func(held bool) // every successful sync: is IPTV playing right now?
+	OnSyncSuccess    func()          // called after each successful sync (e.g. to update state file)
 	// OnSyncAttempt is called after EVERY sync attempt, successful or not. It
 	// carries liveness, not connectivity: readers of the state file use it to
 	// tell a daemon that is alive-but-offline from one that died and left its
@@ -414,6 +415,11 @@ func (sc *SyncClient) processResponse(resp *SyncResponse) {
 	// Scan
 	if resp.Scan && sc.OnScan != nil {
 		sc.OnScan()
+	}
+
+	// IPTV playback hold — reported every sync so the agent's lease stays fresh.
+	if sc.OnIptvHold != nil {
+		sc.OnIptvHold(resp.IptvHold)
 	}
 
 	// File deletions requested by the server — deduplicate against in-flight items

@@ -505,6 +505,12 @@ func runDaemonStart() error {
 
 	// Create debrid downloader
 	debridDl := engine.NewDebridDownloader()
+	// IPTV VOD downloads: one at a time, paused while the user plays IPTV. The
+	// hold is a lease renewed by every sync (idle interval 10 s), so it lapses on
+	// its own if the server stops reporting.
+	iptvHold := engine.NewPlaybackHold(30 * time.Second)
+	iptvDl := engine.NewIptvDownloader(iptvHold)
+	d.OnIptvHold = iptvHold.Set
 	usenetDl := engine.NewUsenetDownloader(agentClient)
 	usenetDl.SetPreferredQuality(cfg.Download.PreferredQuality)
 	// Enable usenet when the user explicitly lists it in preferred_methods — the
@@ -532,6 +538,7 @@ func runDaemonStart() error {
 	minFreeBytes := int64(cfg.Download.MinFreeDiskMB) << 20
 	torrentDl.SetMinFreeBytes(minFreeBytes)
 	debridDl.SetMinFreeBytes(minFreeBytes)
+	iptvDl.SetMinFreeBytes(minFreeBytes)
 	usenetDl.SetMinFreeBytes(minFreeBytes)
 	log.Printf("[disk] download free-space reserve: %d MiB", cfg.Download.MinFreeDiskMB)
 
@@ -552,7 +559,7 @@ func runDaemonStart() error {
 			TVShowsDir: cfg.Organize.TVShowsDir,
 			OutputDir:  cfg.Download.Dir,
 		},
-	}, reporter, torrentDl, debridDl, usenetDl)
+	}, reporter, torrentDl, debridDl, usenetDl, iptvDl)
 
 	// Resume store: persist in-flight downloads so a daemon restart can re-submit
 	// them (the downloaders resume the partial data). Wire it before any Submit.

@@ -754,6 +754,9 @@ type SyncResponse struct {
 	Scan            bool                   `json:"scan,omitempty"`
 	FilesToDelete   []LibraryDeleteRequest `json:"filesToDelete,omitempty"`
 	SubtitleFetches []SubtitleFetchRequest `json:"subtitleFetches,omitempty"`
+	// IptvHold is true while the user plays IPTV somewhere: IPTV accounts allow
+	// one connection, so IPTV downloads pause until it turns false (or lapses).
+	IptvHold bool `json:"iptvHold,omitempty"`
 }
 
 // SubtitleFetchRequest is a server-side request to download a subtitle (from our
