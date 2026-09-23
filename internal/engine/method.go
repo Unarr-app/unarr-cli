@@ -9,6 +9,9 @@ const (
 	MethodTorrent DownloadMethod = "torrent"
 	MethodDebrid  DownloadMethod = "debrid"
 	MethodUsenet  DownloadMethod = "usenet"
+	// MethodIPTV downloads an IPTV (Xtream) VOD file from the URL the server
+	// minted at claim time. Never part of "auto": only IPTV tasks use it.
+	MethodIPTV DownloadMethod = "iptv"
 )
 
 // Progress is emitted by downloaders during a download.

@@ -16,6 +16,11 @@ import (
 // preference the web sent: a specific method runs alone; "auto" tries all three
 // torrent-first (the historical default).
 func effectiveOrder(task *Task, configMethods []string) []DownloadMethod {
+	// An IPTV task has no torrent, NZB or debrid source: the local method
+	// preference is about those, so it neither gates nor reorders IPTV.
+	if task.PreferredMethod == string(MethodIPTV) {
+		return []DownloadMethod{MethodIPTV}
+	}
 	if len(configMethods) > 0 {
 		order := make([]DownloadMethod, 0, len(configMethods))
 		for _, m := range configMethods {

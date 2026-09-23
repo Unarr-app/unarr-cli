@@ -644,6 +644,10 @@ type SyncRequest struct {
 	// Omitted entirely when telemetry is disabled. See internal/agent/telemetry.go.
 	ExitReason string `json:"exitReason,omitempty"`
 	ExitDetail string `json:"exitDetail,omitempty"`
+	// Capabilities — task kinds this build can run beyond the classic methods
+	// ("iptv"). The server gates claims on these rather than on a version
+	// number, so two features racing for the same release can't mislabel one.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // ControlAction represents a server-side control signal for a task.
@@ -754,6 +758,9 @@ type SyncResponse struct {
 	Scan            bool                   `json:"scan,omitempty"`
 	FilesToDelete   []LibraryDeleteRequest `json:"filesToDelete,omitempty"`
 	SubtitleFetches []SubtitleFetchRequest `json:"subtitleFetches,omitempty"`
+	// IptvHold is true while the user plays IPTV somewhere: IPTV accounts allow
+	// one connection, so IPTV downloads pause until it turns false (or lapses).
+	IptvHold bool `json:"iptvHold,omitempty"`
 }
 
 // SubtitleFetchRequest is a server-side request to download a subtitle (from our

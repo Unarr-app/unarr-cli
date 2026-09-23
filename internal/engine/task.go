@@ -57,7 +57,7 @@ type Task struct {
 	Title           string
 	ContentID       *int
 	IMDbID          string
-	PreferredMethod string           // auto | torrent | debrid | usenet
+	PreferredMethod string           // auto | torrent | debrid | usenet | iptv
 	DirectURL       string           // HTTPS download URL (debrid, etc.)
 	DirectFileName  string           // Original filename from direct URL
 	DirectFileSize  int64            // Exact provider-listed byte size of that file (0 = unknown)

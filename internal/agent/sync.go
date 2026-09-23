@@ -60,7 +60,8 @@ type SyncClient struct {
 	OnUpgrade        func(version string)
 	OnScan           func()
 	OnWatchingChange func(watching bool)
-	OnSyncSuccess    func() // called after each successful sync (e.g. to update state file)
+	OnIptvHold       func(held bool) // every successful sync: is IPTV playing right now?
+	OnSyncSuccess    func()          // called after each successful sync (e.g. to update state file)
 	// OnSyncAttempt is called after EVERY sync attempt, successful or not. It
 	// carries liveness, not connectivity: readers of the state file use it to
 	// tell a daemon that is alive-but-offline from one that died and left its
@@ -291,6 +292,17 @@ func (sc *SyncClient) doSync(ctx context.Context) {
 	}
 }
 
+// capabilities lists the extra task kinds this daemon runs. IPTV is advertised
+// only when the daemon wired the playback hold — the IPTV downloader and the
+// hold ship together, and a server must never hand an IPTV task to an agent
+// that can't pause it for playback.
+func (sc *SyncClient) capabilities() []string {
+	if sc.OnIptvHold == nil {
+		return nil
+	}
+	return []string{"iptv"}
+}
+
 func (sc *SyncClient) buildRequest() SyncRequest {
 	httpsPort, agentHash := directTLSWire(sc.cfg.HTTPSStreamPort, sc.cfg.AgentHash)
 	req := SyncRequest{
@@ -307,6 +319,7 @@ func (sc *SyncClient) buildRequest() SyncRequest {
 		TailscaleIP:     sc.cfg.TailscaleIP,
 		CanDelete:       sc.canDelete.Load(),
 		IsDocker:        RunningInDocker(),
+		Capabilities:    sc.capabilities(),
 	}
 	if sc.GetTaskStates != nil {
 		req.Tasks = sc.GetTaskStates()
@@ -414,6 +427,11 @@ func (sc *SyncClient) processResponse(resp *SyncResponse) {
 	// Scan
 	if resp.Scan && sc.OnScan != nil {
 		sc.OnScan()
+	}
+
+	// IPTV playback hold — reported every sync so the agent's lease stays fresh.
+	if sc.OnIptvHold != nil {
+		sc.OnIptvHold(resp.IptvHold)
 	}
 
 	// File deletions requested by the server — deduplicate against in-flight items

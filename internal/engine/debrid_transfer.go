@@ -395,7 +395,8 @@ func (x *debridTransfer) persistMeta() {
 	b, err := json.Marshal(x.meta)
 	if err == nil {
 		tmp := x.metaPath + ".tmp"
-		if err = os.WriteFile(tmp, b, 0o644); err == nil {
+		// 0600: the recorded URL is a credential (debrid token, IPTV user/pass).
+		if err = os.WriteFile(tmp, b, 0o600); err == nil {
 			err = os.Rename(tmp, x.metaPath)
 		}
 	}
