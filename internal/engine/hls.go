@@ -317,6 +317,12 @@ type HLSSession struct {
 	// after that the run is an ordinary transcode using the normal auto-restart
 	// machinery, never flipping back to copy (no copy↔transcode loop).
 	copyFellBack bool
+	// encoderInitFailed is set when ffmpeg stderr reports that the video encoder
+	// could not open; hwFellBack latches the ONE hardware → libx264 relaunch that
+	// follows (see hls_hwfallback.go). Once set, restartFromSegment builds every
+	// later run with Transcode.withoutHW(). Both guarded by s.mu.
+	encoderInitFailed bool
+	hwFellBack        bool
 	// gaveUp latches when the auto-restart supervisor has exhausted maxRestarts
 	// and will NOT relaunch ffmpeg again — the session is permanently dead. Read
 	// via Failed() by the daemon's ready-watcher so a broken encoder is reported
@@ -1393,6 +1399,12 @@ func (s *HLSSession) waitFFmpeg() {
 		return
 	}
 
+	// A HW encoder that could not open fails the same way on every relaunch, so
+	// switch to libx264 once instead of spending the restart budget on it.
+	if s.fallbackToSoftwareEncode(readyMax) {
+		return
+	}
+
 	// Decide whether to attempt an auto-restart. We don't restart when:
 	//   - the session was closed externally (kill on quality change etc.)
 	//   - we've already retried 3 times within the last 60 s (broken file)
@@ -2039,6 +2051,9 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 	cfg := s.cfg
 	s.mu.Lock()
 	cfg.SourceURL = s.liveURL // "" for local-file sessions — no-op, sourceRef falls back to SourcePath
+	if s.hwFellBack {
+		cfg.Transcode = cfg.Transcode.withoutHW()
+	}
 	s.mu.Unlock()
 	args := buildHLSFFmpegArgsAt(cfg, s.probe, s.tmpDir, targetIdx, startSec)
 
@@ -2918,6 +2933,9 @@ func (c *hlsStderrCapture) Write(p []byte) (int, error) {
 		}
 		if isInputBoundLine(line) {
 			c.owner.markInputBound()
+		}
+		if isEncoderInitFailureLine(line) {
+			c.owner.markEncoderInitFailed()
 		}
 		log.Printf("[hls %s] ffmpeg: %s", shortHLSID(c.owner.cfg.SessionID), line)
 	}
