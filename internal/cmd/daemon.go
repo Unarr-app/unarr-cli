@@ -795,25 +795,10 @@ func runDaemonStart() error {
 		}
 	}
 
-	// Resume downloads interrupted by the previous shutdown/crash. Re-submit
-	// each persisted task; its downloader picks up the partial data (torrent via
-	// the piece-completion DB, debrid via Range, usenet via its tracker). Done
-	// before the sync loop starts; a later web re-dispatch of the same id is
-	// deduped by the manager.
-	//
-	// Re-submission is unconditional on purpose (the server may be unreachable
-	// at boot, and a resumable download must not depend on that), but it is no
-	// longer unaccountable: a task the server has forgotten gets reaped after
-	// unknownTaskThreshold status reports (see ProgressReporter), and
-	// `unarr downloads purge` drops the whole queue by hand.
-	if resume := taskStore.Load(); len(resume) > 0 {
-		log.Printf("[resume] re-submitting %d interrupted download(s) - any the server no longer knows about will be dropped after a few status reports", len(resume))
-		for _, t := range resume {
-			t.ForceStart = false // respect MaxConcurrent on bulk auto-resume
-			log.Printf("[resume] %s - %s", agent.ShortID(t.ID), t.Title)
-			manager.Submit(ctx, t)
-		}
-	}
+	// Resume downloads interrupted by the previous shutdown/crash, before the
+	// sync loop starts; a later web re-dispatch of the same id is deduped by the
+	// manager. See resumeInterrupted.
+	resumeInterrupted(taskStore.Load(), func(t agent.Task) { manager.Submit(ctx, t) }, manager.RestorePaused)
 
 	// The single owner of pause/resume/cancel/retry, whatever asked for it —
 	// the web (sync controls or status flags) or this machine (`unarr

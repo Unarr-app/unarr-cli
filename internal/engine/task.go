@@ -46,6 +46,11 @@ var validTransitions = map[TaskStatus][]TaskStatus{
 type Task struct {
 	mu sync.RWMutex
 
+	// slot is the download-slot lease the task runs under; nil for a
+	// force-started task, which never took one. Guarded by mu. See
+	// manager_queue.go (YieldSlot / ReclaimSlot).
+	slot *slotLease
+
 	// From server
 	ID              string
 	InfoHash        string
@@ -168,8 +173,11 @@ func (t *Task) Transition(to TaskStatus) error {
 			return nil
 		}
 	}
+	// Read the status while still holding the lock: a concurrent Transition
+	// (CancelTask racing the task's own unwind through fail) writes it.
+	from := t.Status
 	t.mu.Unlock()
-	return fmt.Errorf("invalid transition: %s -> %s", t.Status, to)
+	return fmt.Errorf("invalid transition: %s -> %s", from, to)
 }
 
 // SetOnChange wires the post-transition hook. Call before the task starts

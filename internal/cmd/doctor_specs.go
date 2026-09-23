@@ -292,34 +292,3 @@ func doctorDownloadSpecs(cfg *config.Config, features featureFn) []doctor.Spec {
 		},
 	}
 }
-
-// doctorDaemonSpec reports whether the daemon this machine is supposed to be
-// running is alive. It reads the state file and checks the PID — no network.
-//
-// It is the reason `--quick` exists. A container whose daemon has died keeps
-// reporting "running" to Docker forever without this: the entrypoint process
-// is still up, and nothing else looks at whether the thing it supervises is.
-//
-// A daemon that was never installed is a PASS, not a failure: `unarr` is a CLI
-// too, and someone running one-off commands has no daemon by design. Only a
-// registered-then-vanished daemon is a fault, and that is what a stale state
-// file with a dead PID means.
-func doctorDaemonSpec() doctor.Spec {
-	return doctor.Spec{
-		Group: "Daemon",
-		Name:  "Daemon process",
-		Quick: true,
-		Fn: func() (string, error) {
-			state := agent.ReadState()
-			if state == nil {
-				return "not running (no daemon installed on this machine)", nil
-			}
-			if isDaemonAlive(state) {
-				return fmt.Sprintf("running (pid %d, up %s)", state.PID,
-					time.Since(state.StartedAt).Round(time.Second)), nil
-			}
-			return fmt.Sprintf("state file says pid %d, but that process is gone", state.PID),
-				fmt.Errorf("daemon died")
-		},
-	}
-}

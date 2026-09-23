@@ -52,10 +52,17 @@ type Manager struct {
 	active   map[string]*Task
 	cancels  map[string]context.CancelFunc // per-task cancel functions
 
-	sem chan struct{}
-	wg  sync.WaitGroup
+	// Download slots (see manager_queue.go): running counts tasks holding one
+	// of cfg.MaxConcurrent slots, queue holds submitted tasks waiting for one,
+	// oldest first. Force-started tasks bypass both. Lock order: queueMu before
+	// activeMu, never the reverse.
+	queueMu sync.Mutex
+	running int
+	queue   []*queuedTask
+	wg      sync.WaitGroup
 
-	// OnTaskDone is called after a task completes or fails (slot freed).
+	// OnTaskDone is called whenever a download slot frees: a task completes or
+	// fails, or a stalled torrent yields its slot (see slotLease).
 	// Used by the daemon to trigger an immediate sync.
 	OnTaskDone func()
 
@@ -112,6 +119,7 @@ const storageFailCooldown = 60 * time.Second
 type taskPersister interface {
 	Add(agent.Task)
 	Remove(taskID string)
+	SetPaused(taskID string, paused bool)
 }
 
 // SetTaskStore wires the resume store. Call once before Submit. Optional —
@@ -135,7 +143,6 @@ func NewManager(cfg ManagerConfig, reporter *ProgressReporter, downloaders ...Do
 		downloaders:     dlMap,
 		active:          make(map[string]*Task),
 		cancels:         make(map[string]context.CancelFunc),
-		sem:             make(chan struct{}, cfg.MaxConcurrent),
 		storageFailedAt: make(map[string]time.Time),
 		pausedTasks:     make(map[string]struct{}),
 	}
@@ -143,7 +150,19 @@ func NewManager(cfg ManagerConfig, reporter *ProgressReporter, downloaders ...Do
 
 // markPaused / clearPaused / isPaused guard the deliberate-pause set. See the
 // pausedTasks field comment for why a pause must not drop the resume entry.
+// markPaused also flags the resume entry, so the pause survives a restart.
 func (m *Manager) markPaused(taskID string) {
+	m.RestorePaused(taskID)
+	if m.taskStore != nil {
+		m.taskStore.SetPaused(taskID, true)
+	}
+}
+
+// RestorePaused puts a task back in the deliberate-pause set without starting
+// it. The boot resume calls it for store entries flagged paused, so `unarr
+// downloads` shows them as paused and a local resume re-runs them from the
+// stored payload.
+func (m *Manager) RestorePaused(taskID string) {
 	m.pausedMu.Lock()
 	m.pausedTasks[taskID] = struct{}{}
 	m.pausedMu.Unlock()
@@ -186,8 +205,19 @@ func (m *Manager) DropResume(taskID string) {
 	m.clearPaused(taskID)
 }
 
-// Submit queues a task for download. Non-blocking if capacity available.
+// Submit queues a task for download and returns at once: it starts now if a
+// slot is free, or waits in the FIFO line (see manager_queue.go) otherwise.
+// It never blocks the caller — the daemon's resume and sync loops call it.
 func (m *Manager) Submit(ctx context.Context, at agent.Task) {
+	// The sync loop outlives Shutdown's first step, and slots freed while it
+	// drains would otherwise hand a just-claimed task a live context that
+	// Shutdown already walked past. Nothing is recorded: the server still holds
+	// it, and a resubmitted resume entry is still on disk.
+	if m.shuttingDown.Load() {
+		log.Printf("[%s] ignoring submit during shutdown", agent.ShortID(at.ID))
+		return
+	}
+
 	// Storage-failure cooldown: refuse to re-run a task that just failed writing
 	// to its destination. Between the agent reporting `failed` and the server
 	// persisting it, an in-flight sync can re-claim the still-"pending" row and
@@ -232,6 +262,9 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 	// (ReplacePath set) are excluded too: re-running one after an interrupted
 	// organize could double-download or replace the wrong target.
 	if m.taskStore != nil && (at.Mode == "" || at.Mode == "download") && at.ReplacePath == "" {
+		// A submit is a run, never a pause — including a local resume, whose
+		// payload comes straight from a paused store entry.
+		at.ResumePaused = false
 		m.taskStore.Add(at)
 	}
 
@@ -249,36 +282,22 @@ func (m *Manager) Submit(ctx context.Context, at agent.Task) {
 		return
 	}
 
-	// Acquire semaphore slot
-	select {
-	case m.sem <- struct{}{}:
-	case <-ctx.Done():
-		taskCancel()
-		return
-	}
-
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
-		defer func() {
-			<-m.sem
-			if m.OnTaskDone != nil {
-				m.OnTaskDone()
-			}
-		}()
-		defer taskCancel()
-		m.processTask(taskCtx, task)
-	}()
+	// Never wait for a slot on the caller's goroutine — see manager_queue.go.
+	m.enqueue(&queuedTask{task: task, ctx: taskCtx, cancel: taskCancel})
 }
 
 // HasCapacity returns true if there's room for more downloads.
 func (m *Manager) HasCapacity() bool {
-	return len(m.sem) < cap(m.sem)
+	return m.FreeSlots() > 0
 }
 
-// FreeSlots returns the number of available download slots.
+// FreeSlots returns the number of download slots nobody is running in or
+// waiting for. Queued tasks count as taken: the sync loop sizes its claim on
+// this, and a slot a queued task is about to take is not free.
 func (m *Manager) FreeSlots() int {
-	return cap(m.sem) - len(m.sem)
+	m.queueMu.Lock()
+	defer m.queueMu.Unlock()
+	return max(0, m.cfg.MaxConcurrent-m.running-len(m.queue))
 }
 
 // ActiveCount returns the number of in-progress downloads.
@@ -380,7 +399,6 @@ func (m *Manager) CancelTask(taskID string) bool {
 	if !ok {
 		return false
 	}
-
 	// A cancel is terminal: the resume entry must go BEFORE the goroutine
 	// unwinds, or a shutdown racing the cancel (shuttingDown gates the removal
 	// in recordFinished) would leave the entry behind and the daemon would
@@ -390,8 +408,14 @@ func (m *Manager) CancelTask(taskID string) bool {
 		m.taskStore.Remove(taskID)
 	}
 
+	// Then out of the line, synchronously: a dispatch must not start it, and a
+	// Retry right after this must not be swallowed by Submit's dedup. After the
+	// store, never before: dequeue forgets the task as active, so a resubmit may
+	// land from here on, and its fresh resume entry must not be the one removed.
+	queued := m.dequeue(taskID)
+
 	// Cancel the task's context first — this unblocks the goroutine
-	// (e.g. stuck waiting for metadata) so it exits and releases the semaphore slot.
+	// (e.g. stuck waiting for metadata) so it exits and releases its slot.
 	if cancel != nil {
 		cancel()
 	}
@@ -402,6 +426,10 @@ func (m *Manager) CancelTask(taskID string) bool {
 
 	task.SetError("cancelled by user")
 	task.Transition(StatusCancelled)
+	if queued {
+		m.finishQueued(task, "cancelled")
+		return true
+	}
 
 	log.Printf("[%s] cancelled: %s", agent.ShortID(taskID), task.Title)
 	return true
@@ -418,10 +446,10 @@ func (m *Manager) PauseTask(taskID string) bool {
 	if !ok {
 		return false
 	}
-
 	// Mark BEFORE cancelling the context: the goroutine unwinds through fail(),
 	// and recordFinished consults this set to keep the resume entry.
 	m.markPaused(taskID)
+	queued := m.dequeue(taskID) // after the store, see CancelTask
 
 	if cancel != nil {
 		cancel()
@@ -432,6 +460,10 @@ func (m *Manager) PauseTask(taskID string) bool {
 	}
 
 	task.Transition(StatusCancelled) // will be re-created as pending by server
+	if queued {
+		m.finishQueued(task, "paused")
+		return true
+	}
 	log.Printf("[%s] paused: %s", agent.ShortID(taskID), task.Title)
 	return true
 }
@@ -447,12 +479,12 @@ func (m *Manager) CancelAndDeleteFiles(taskID string) bool {
 	if !ok {
 		return false
 	}
-
 	// Terminal — drop the resume entry up front, same reasoning as CancelTask.
 	m.clearPaused(taskID)
 	if m.taskStore != nil {
 		m.taskStore.Remove(taskID)
 	}
+	queued := m.dequeue(taskID) // after the store, see CancelTask
 
 	if cancel != nil {
 		cancel()
@@ -464,6 +496,10 @@ func (m *Manager) CancelAndDeleteFiles(taskID string) bool {
 
 	task.SetError("cancelled by user")
 	task.Transition(StatusCancelled)
+	if queued {
+		m.finishQueued(task, "cancelled + files deleted")
+		return true
+	}
 
 	log.Printf("[%s] cancelled + files deleted: %s", agent.ShortID(taskID), task.Title)
 	return true
@@ -480,6 +516,10 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	// shutdown then keep their resume-store entry (recordFinished skips the
 	// removal) so the daemon re-submits and resumes them on the next start.
 	m.shuttingDown.Store(true)
+
+	// Queued tasks never started: drop them from the line (resume entries
+	// kept) before any running task frees a slot a dispatch could hand them.
+	m.drainQueue()
 
 	// Cancel every task context NOW (before waiting). Downloads block on their
 	// context, so this is what actually unblocks them — and because shuttingDown

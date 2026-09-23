@@ -199,6 +199,16 @@ type Task struct {
 	// arbitrary file to wrap as a single-file torrent for browser
 	// streaming; populated by the server from libraryItem.filePath.
 	FilePath string `json:"filePath,omitempty"`
+
+	// Agent-local resume-store bookkeeping. The server never sends these; they
+	// only live in active-tasks.json (older files without them load as zero).
+	//
+	// ResumePaused marks a download the user paused, so a daemon restart keeps
+	// it paused instead of re-running it: on 2026-09-23 three paused torrents
+	// took three of five download slots after every restart. QueuedAt orders
+	// the boot resume (oldest first) instead of map order.
+	ResumePaused bool      `json:"resumePaused,omitempty"`
+	QueuedAt     time.Time `json:"queuedAt,omitzero"`
 }
 
 // StreamRequest is a request to stream a completed download from disk.

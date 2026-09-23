@@ -12,14 +12,43 @@ import (
 // fakePersister is an in-memory taskPersister for asserting manager↔store calls
 // without touching disk.
 type fakePersister struct {
-	mu    sync.Mutex
-	tasks map[string]bool
+	mu     sync.Mutex
+	tasks  map[string]bool
+	paused map[string]bool
 }
 
-func newFakePersister() *fakePersister      { return &fakePersister{tasks: map[string]bool{}} }
-func (f *fakePersister) Add(t agent.Task)   { f.mu.Lock(); f.tasks[t.ID] = true; f.mu.Unlock() }
-func (f *fakePersister) Remove(id string)   { f.mu.Lock(); delete(f.tasks, id); f.mu.Unlock() }
+func newFakePersister() *fakePersister {
+	return &fakePersister{tasks: map[string]bool{}, paused: map[string]bool{}}
+}
+
+func (f *fakePersister) Add(t agent.Task) {
+	f.mu.Lock()
+	f.tasks[t.ID] = true
+	f.paused[t.ID] = t.ResumePaused
+	f.mu.Unlock()
+}
+
+func (f *fakePersister) Remove(id string) {
+	f.mu.Lock()
+	delete(f.tasks, id)
+	delete(f.paused, id)
+	f.mu.Unlock()
+}
+
+func (f *fakePersister) SetPaused(id string, paused bool) {
+	f.mu.Lock()
+	if f.tasks[id] {
+		f.paused[id] = paused
+	}
+	f.mu.Unlock()
+}
+
 func (f *fakePersister) has(id string) bool { f.mu.Lock(); defer f.mu.Unlock(); return f.tasks[id] }
+func (f *fakePersister) isPaused(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.paused[id]
+}
 
 func newResumeManager(t *testing.T, p taskPersister) (*Manager, context.Context, context.CancelFunc) {
 	t.Helper()

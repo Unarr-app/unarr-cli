@@ -95,8 +95,8 @@ func TestManagerDefaultConcurrency(t *testing.T) {
 		1*time.Second,
 	)
 	mgr := NewManager(ManagerConfig{MaxConcurrent: 0}, reporter)
-	if cap(mgr.sem) != 3 {
-		t.Errorf("default MaxConcurrent should be 3, got %d", cap(mgr.sem))
+	if got := mgr.FreeSlots(); got != 3 {
+		t.Errorf("default MaxConcurrent should be 3, got %d free slots", got)
 	}
 }
 
