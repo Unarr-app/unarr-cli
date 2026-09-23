@@ -232,6 +232,9 @@ func startWindowsDaemon() (started bool, err error) {
 
 func runDaemonSvcStop() error {
 	fmt.Println()
+	// A deliberate stop outranks an earlier park: the next sign-in must not
+	// start what the user just stopped (service_park.go).
+	clearParkedMarker()
 	switch runtime.GOOS {
 	case "linux":
 		if err := svcExec("systemctl", "--user", "stop", "unarr"); err != nil {

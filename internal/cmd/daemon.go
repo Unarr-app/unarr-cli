@@ -127,8 +127,16 @@ func runDaemonStart() error {
 	// Validate config. A missing API key / agent ID means we have no credential
 	// to authenticate a telemetry post with, so these two can't be reported —
 	// they're the one blind spot, and inherently so.
+	//
+	// A missing key is a sign-in away, not a crash: Execute parks the installed
+	// service instead of letting its supervisor restart-loop (service_park.go).
+	// An unreadable config only LOOKS keyless, and a key without an agent ID is
+	// fixed by `doctor --fix`; both keep the plain error and the restart.
 	if cfg.Auth.APIKey == "" {
-		return fmt.Errorf("no API key configured — %s", setupHint(cfg.Auth.APIURL))
+		if errCfgLoad != nil { // an env key (UNARR_API_KEY) still runs without it
+			return fmt.Errorf("config could not be loaded: %w", errCfgLoad)
+		}
+		return needsSignIn("no API key configured — %s", signInHint(cfg.Auth.APIURL))
 	}
 	if cfg.Agent.ID == "" {
 		return fmt.Errorf("no agent ID — %s", setupHint(cfg.Auth.APIURL))
@@ -197,8 +205,12 @@ func runDaemonStart() error {
 	//
 	// The start-now request is consumed here for the same reason: it has been
 	// served, and it must not cut short the backoff after some LATER crash.
+	// A parked-service marker is spent the same way: whatever brought the
+	// agent up signed it in, and a later sign-in must not restart a service
+	// the user has stopped since.
 	agent.ClearStopIntent()
 	agent.ClearStartRequest()
+	clearParkedMarker()
 
 	// Take ownership of the log file the launcher named — AFTER the flock, so a
 	// daemon that lost the race cannot rename the live log of the one already
@@ -1476,6 +1488,10 @@ func runDaemonStart() error {
 			agent.WriteStopIntent()
 			telemetry.EmitSync(agent.EventExitNormal, "credential revoked")
 			reportAgentRevoked(creds, err)
+			// systemd and launchd have no such marker: park the service there,
+			// or they restart it into a start that cannot succeed. The exit
+			// stays 0 — a container's on-failure policy must keep it down.
+			parkService()
 			return nil
 		}
 		// The daemon's own run loop returned an error (not a signal, not a

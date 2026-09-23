@@ -30,6 +30,8 @@ Type=simple
 ExecStart={{.BinPath}} start
 Restart=always
 RestartSec=10
+SuccessExitStatus=78
+RestartPreventExitStatus=78
 Environment=HOME={{.Home}}
 
 [Install]
@@ -426,6 +428,8 @@ func runDaemonUninstall() error {
 	fmt.Println()
 	bold.Println("  unarr daemon uninstall")
 	fmt.Println()
+	// A removed service has nothing left for a sign-in to resume.
+	clearParkedMarker()
 
 	switch runtime.GOOS {
 	case "linux":
