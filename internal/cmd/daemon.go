@@ -494,6 +494,7 @@ func runDaemonStart() error {
 	// Create debrid downloader
 	debridDl := engine.NewDebridDownloader()
 	usenetDl := engine.NewUsenetDownloader(agentClient)
+	usenetDl.SetPreferredQuality(cfg.Download.PreferredQuality)
 	// Enable usenet when the user explicitly lists it in preferred_methods — the
 	// downloader gates on this flag, so without it a "usenet" preference would
 	// resolve to nothing. (Auto users keep the historical behaviour.)

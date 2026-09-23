@@ -75,9 +75,18 @@ func resolveMethod(ctx context.Context, task *Task, downloaders map[DownloadMeth
 
 		available, err := dl.Available(ctx, task)
 		if err != nil {
-			log.Printf("[%s] %s availability check failed: %v", task.ShortID(), method, err)
-			if errors.Is(err, ErrVPNRequired) {
+			// A deliberate "not this release" (usenet found only other versions)
+			// is a reason like a safety gate, and already logged by its method.
+			switch {
+			case errors.Is(err, ErrNoMatchingNzb):
+				if gateReason == nil {
+					gateReason = err
+				}
+			case errors.Is(err, ErrVPNRequired):
+				log.Printf("[%s] %s availability check failed: %v", task.ShortID(), method, err)
 				gateReason = err
+			default:
+				log.Printf("[%s] %s availability check failed: %v", task.ShortID(), method, err)
 			}
 			continue
 		}

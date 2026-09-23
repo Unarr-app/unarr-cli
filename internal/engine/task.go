@@ -61,6 +61,7 @@ type Task struct {
 	DirectURL       string           // HTTPS download URL (debrid, etc.)
 	DirectFileName  string           // Original filename from direct URL
 	DirectFileSize  int64            // Exact provider-listed byte size of that file (0 = unknown)
+	ReleaseSize     int64            // Server-known size of the release (0 = unknown); see nzbTargetFor
 	NzbID           string           // Pre-resolved NZB ID (usenet)
 	NzbPassword     string           // Password for encrypted NZB archives
 	ReplacePath     string           // File to replace after download (upgrade mode)
@@ -117,6 +118,7 @@ func NewTaskFromAgent(at agent.Task) *Task {
 		DirectURL:       at.DirectURL,
 		DirectFileName:  at.DirectFileName,
 		DirectFileSize:  at.DirectFileSize,
+		ReleaseSize:     at.ReleaseSize,
 		NzbID:           at.NzbID,
 		NzbPassword:     at.NzbPassword,
 		ReplacePath:     at.ReplacePath,

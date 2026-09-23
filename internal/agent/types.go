@@ -181,6 +181,7 @@ type Task struct {
 	DirectURL       string     `json:"directUrl,omitempty"`      // HTTPS download URL (debrid, etc.)
 	DirectFileName  string     `json:"directFileName,omitempty"` // Original filename from direct URL
 	DirectFileSize  int64      `json:"directFileSize,omitempty"` // Exact provider-listed byte size of that file (0 = unknown)
+	ReleaseSize     int64      `json:"releaseSize,omitempty"`    // Bytes of the release this task downloads, from the server's torrent row (0 = unknown)
 	NzbID           string     `json:"nzbId,omitempty"`          // Pre-resolved NZB ID from server
 	NzbPassword     string     `json:"nzbPassword,omitempty"`    // Password for encrypted NZB archives
 	ReplacePath     string     `json:"replacePath,omitempty"`    // File to replace after download (upgrade mode)
@@ -432,6 +433,11 @@ type NzbSearchResult struct {
 	Group       string            `json:"group"`
 	Poster      string            `json:"poster"`
 	Attributes  map[string]string `json:"attributes"`
+	// Parsed is the server's parse of Title (parse-torrent-title), sturdier than
+	// a local regex; Resolution is e.g. "1080p", "" when the title has none.
+	Parsed struct {
+		Resolution string `json:"resolution,omitempty"`
+	} `json:"parsed"`
 }
 
 // NzbSearchResponse wraps search results.
