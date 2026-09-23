@@ -1197,6 +1197,18 @@ func (m *Manager) finalizeVerified(ctx context.Context, task *Task, result *Resu
 }
 
 func (m *Manager) fail(ctx context.Context, task *Task, msg string) {
+	if m.interruptedByShutdown(ctx) {
+		// Not a failure: the daemon is stopping and cancelled this download's
+		// context. Shutdown already keeps the resume-store entry, so the next
+		// start re-submits and resumes it — yet unwinding through here used to
+		// mark it FAILED, report that to the server and pop a "Download failed"
+		// notification, so every agent restart (an update, a reboot, Windows
+		// Fast Startup) left the in-flight downloads showing as failed with
+		// "context canceled". Leave it non-terminal: the server keeps it in
+		// progress and the resumed run reports from where it stopped.
+		log.Printf("[%s] interrupted by shutdown: %s - will resume on next start", agent.ShortID(task.ID), task.Title)
+		return
+	}
 	task.SetError(msg)
 	task.Transition(StatusFailed)
 	log.Printf("[%s] FAILED: %s - %s", agent.ShortID(task.ID), task.Title, msg)
@@ -1205,6 +1217,13 @@ func (m *Manager) fail(ctx context.Context, task *Task, msg string) {
 	}
 	m.recordFinished(task.ToStatusUpdate())
 	m.reporter.ReportFinal(ctx, task)
+}
+
+// interruptedByShutdown reports whether a task is unwinding because Shutdown
+// cancelled its context — as opposed to a real error, a user cancel or a pause,
+// none of which set shuttingDown.
+func (m *Manager) interruptedByShutdown(ctx context.Context) bool {
+	return m.shuttingDown.Load() && ctx.Err() != nil
 }
 
 // pauseForVPN handles a mid-download tunnel loss on a task with no safe fallback

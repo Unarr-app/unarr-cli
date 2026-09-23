@@ -126,6 +126,6 @@ func copySourceHasIDR(ctx context.Context, s *HLSSession, starts []float64) bool
 			at = p
 		}
 	}
-	p, n, err := firstCopyVideoPacket(ctx, s.cfg.Transcode.FFprobePath, s.cfg.sourceRef(), fmt.Sprintf("%.6f%%+#1", at))
+	p, n, err := firstCopyVideoPacket(ctx, s.cfg.Transcode.FFprobePath, s.copySource(), fmt.Sprintf("%.6f%%+#1", at))
 	return err == nil && copyPacketHasIDR(p.Data, n)
 }

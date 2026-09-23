@@ -209,6 +209,8 @@ func runLogin(apiURLOverride string, browserOnly bool) error {
 		return fmt.Errorf("save config: %w", err)
 	}
 	appCfg = cfg
+	// A sign-in is the deliberate reconnect a recorded dashboard delete waits for.
+	clearRevokedMarker()
 
 	// Onboarding telemetry: login succeeded, credential minted. First signal in
 	// the agent's lifecycle — lets the server tell "logged in but daemon never

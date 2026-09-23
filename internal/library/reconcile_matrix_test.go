@@ -671,10 +671,11 @@ func TestDropFindingsUnderDirs_SiblingPrefixNotAbsorbed(t *testing.T) {
 	}
 }
 
-// TestReconcileEmptyDirWithPartialNoDoubleCount is the end-to-end assertion the
-// coordinator's fix targets: an empty_dir holding a .part yields ONE finding (the
-// dir) with the .part's bytes counted once, and applying it removes the whole dir.
-func TestReconcileEmptyDirWithPartialNoDoubleCount(t *testing.T) {
+// TestReconcileOrphanPartialDirTwoSweeps: a video-less dir holding an ORPHAN .part
+// is not removed wholesale as empty_dir — the partial is judged by its own
+// category (which knows the active set and the paused-download guard). First sweep
+// reaps the .part (counted once); the dir it leaves empty goes on the next sweep.
+func TestReconcileOrphanPartialDirTwoSweeps(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "DeadRelease")
 	part := filepath.Join(dir, "downloading.part")
@@ -684,20 +685,91 @@ func TestReconcileEmptyDirWithPartialNoDoubleCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Exactly one finding: the empty dir. The .part is absorbed.
-	if len(findings) != 1 {
-		t.Fatalf("expected 1 finding (the dir), got %d: %+v", len(findings), findings)
+	if len(findings) != 1 || findings[0].Kind != KindOrphanPartial {
+		t.Fatalf("expected exactly the orphan partial, got %+v", findings)
 	}
-	if findings[0].Kind != KindEmptyDir {
-		t.Errorf("finding kind = %s, want empty_dir", findings[0].Kind)
-	}
-	// Freed bytes counted once (the dir's size == the .part's size), not doubled.
 	if summary.Freed >= 2*3*mib {
 		t.Errorf("freed=%d looks double-counted (want ~%d)", summary.Freed, 3*mib)
 	}
-	mustGone(t, dir)
 	mustGone(t, part)
+	mustExist(t, dir)
+
+	if _, _, err := ReconcileWithSummary(ReconcilePaths{DownloadDir: root}, nil, applyOpts()); err != nil {
+		t.Fatal(err)
+	}
+	mustGone(t, dir)
+}
+
+// TestReconcileNeverPrunesActiveDownloadDir is the regression for the auto-sweep
+// deleting a live download: a debrid download writes <release>/<file>.mkv.part, so
+// the release dir holds no video until it finishes. With the .part in the active
+// set the sweep must leave the dir — and the .part — exactly where they are.
+// (Found in a 177-episode debrid run: 18 downloads failed as "storage unavailable:
+// could not read back the finished download" after their dir was RemoveAll'd.)
+func TestReconcileNeverPrunesActiveDownloadDir(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "The.Walking.Dead.6x04.HD720p-lat")
+	part := filepath.Join(dir, "The.Walking.Dead.6x04.HD720p-lat.mkv.part")
+	writeSized(t, part, 3*mib)
+	active := map[string]bool{filepath.Clean(part): true}
+
+	findings, err := Reconcile(ReconcilePaths{DownloadDir: root}, active, applyOpts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("a live download's dir must not be touched, got %+v", findings)
+	}
+	mustExist(t, part)
+	mustExist(t, dir)
+}
+
+// TestReconcileKeepsSubdirsOfActiveDownload: a video-less subdir next to an
+// in-progress .part (a release's Extras/ or Sample/). Keeping only the release dir
+// is not enough — the empty_dir pass must not descend and prune its children out
+// from under the download. (Today only debrid writes .part, one file per release
+// dir, so this guards the shape rather than a layout seen in the field.)
+func TestReconcileKeepsSubdirsOfActiveDownload(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "Show.S01.1080p")
+	part := filepath.Join(dir, "Show.S01E01.mkv.part")
+	subs := filepath.Join(dir, "Extras", "readme.txt")
+	writeSized(t, part, 3*mib)
+	writeSized(t, subs, 2048)
+	active := map[string]bool{filepath.Clean(part): true}
+
+	findings, err := Reconcile(ReconcilePaths{DownloadDir: root}, active, applyOpts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if f.Kind == KindEmptyDir {
+			t.Errorf("pruned %s inside a live download", f.Path)
+		}
+	}
+	mustExist(t, subs)
+}
+
+// TestReconcileKeepsPausedDownloadDir: a PAUSED download's .part has a frozen mtime
+// (so it is not in the recent-activity active set) and the daemon switches the
+// orphan-partial category off while any download is pending. The empty_dir pass
+// used to ignore both and RemoveAll the dir — destroying the resume data.
+func TestReconcileKeepsPausedDownloadDir(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "Paused.Release")
+	part := filepath.Join(dir, "Paused.Release.mkv.part")
+	writeSized(t, part, 3*mib)
+	opts := applyOpts()
+	opts.RemoveOrphanPartials = false // what orphanPartialRemovalAllowed does while a download is pending
+
+	findings, err := Reconcile(ReconcilePaths{DownloadDir: root}, nil, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("a paused download's dir must survive, got %+v", findings)
+	}
+	mustExist(t, part)
 }
 
 func applyOpts() ReconcileOptions {

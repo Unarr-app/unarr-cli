@@ -34,6 +34,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Unarr-app/unarr-cli/internal/engine/srcproxy"
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
 	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
@@ -382,11 +383,21 @@ type HLSSession struct {
 	copyNeedsEncode bool // open-GOP/non-IDR copy would need previous pictures
 	copySegStarts   []float64
 	copyGenMu       sync.Mutex
-	copyGen         map[int]chan struct{} // cancellable per-index gate
+	copyGen         map[int]*copyGenCall // in-flight single-flight generations (hls_copy_vod_pipeline.go)
+	copyHead        int                  // last segment the viewer asked for; guarded by copyGenMu
+	copyWake        chan struct{}        // cap 1: playhead moved, prefetcher should look again
 	copyCtx         context.Context
 	copyCancel      context.CancelFunc
 	copySlots       chan struct{}
 	copyWG          sync.WaitGroup // Add under mu; Close sets closed before Wait
+	// copyGenerate replaces generateCopySegment in tests (no ffmpeg needed).
+	copyGenerate func(ctx context.Context, idx int) error
+	// copyProxy fronts a REMOTE source with a range cache (hls_copy_vod_source.go).
+	copyProxy *srcproxy.Proxy
+	// subWin extracts the COPY-VOD subtitle sidecars window by window; subsDone
+	// is closed when it exits (any reason). Both nil when the session has none.
+	subWin   *subtitleWindows
+	subsDone chan struct{}
 	// Exact COPY-VOD sessions produce only requested segments. Legacy pass
 	// sessions (constructed by older callers/tests) still use readyMax.
 	copyLazy     bool
@@ -1248,6 +1259,8 @@ func (s *HLSSession) Close() error {
 		s.copyCancel()
 		s.copyWG.Wait()
 	}
+	// After every reader is gone, and before the session dir is removed below.
+	s.stopCopySourceProxy()
 	// Unblock any handler waiting on readyCh.
 	s.readyMu.Lock()
 	if s.readyCh != nil {
@@ -1832,6 +1845,10 @@ func (s *HLSSession) ServeInit(w http.ResponseWriter, r *http.Request) {
 // (mirroring ServeInit) so the initial fetch resolves to a 200 with real cues.
 func (s *HLSSession) ServeSubtitleVTT(w http.ResponseWriter, r *http.Request, idx int) {
 	s.Touch()
+	if s.subWin != nil {
+		s.serveWindowedSubtitleVTT(w, r, idx)
+		return
+	}
 	path := filepath.Join(s.tmpDir, "subs", fmt.Sprintf("s%d.vtt", idx))
 	// Wait up to 15s for the extractor to write the first cue bytes. Bail early
 	// if the session closes or the client goes away.
@@ -1850,6 +1867,15 @@ func (s *HLSSession) ServeSubtitleVTT(w http.ResponseWriter, r *http.Request, id
 		case <-time.After(150 * time.Millisecond):
 		}
 	}
+	// Served ONE-SHOT even while the extractor is still writing, so a client that
+	// fetches early only ever gets the cues read so far (a browser fetches a
+	// <track> once). Do NOT "fix" that by holding the response open until the
+	// extractor finishes: a media element cannot advance past HAVE_CURRENT_DATA
+	// while a non-disabled text track is still loading, so a long-lived track
+	// response stalls PLAYBACK for as long as it stays open (tried, measured in
+	// the field: micro-stalls for the whole ~60 s extraction, gone the second it
+	// closed). The cure has to be client-side: re-fetch once extraction is done.
+	//
 	// Read + filter rather than ServeFile: ffmpeg's ass→webvtt converter leaks
 	// vector-drawing paths as cue text (see mediainfo.FilterVTTDrawingCues), and
 	// the sign cues have to be dropped before the browser paints them. Losing
@@ -1902,7 +1928,9 @@ func (s *HLSSession) ServeSegment(w http.ResponseWriter, r *http.Request, idx in
 			return
 		}
 		if err := s.ensureCopySegment(r.Context(), idx); err != nil {
-			log.Printf("[hls %s] copy-vod seg-%d gen failed: %v", shortHLSID(s.cfg.SessionID), idx, err)
+			if r.Context().Err() == nil { // a viewer who left (seek, reload) is no failure; generation goes on
+				log.Printf("[hls %s] copy-vod seg-%d gen failed: %v", shortHLSID(s.cfg.SessionID), idx, err)
+			}
 			http.Error(w, "segment unavailable", http.StatusServiceUnavailable)
 			return
 		}

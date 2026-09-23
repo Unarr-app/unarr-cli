@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"runtime"
 	"strings"
@@ -47,6 +48,9 @@ type SyncClient struct {
 	// blocked records that a terminal failure has been written to disk, so the
 	// record is cleared exactly once on recovery instead of on every sync.
 	blocked atomic.Bool
+	// revoked is set by doSync when the server tombstones this agent; Run
+	// checks it after every cycle and returns ErrRevoked.
+	revoked atomic.Bool
 
 	// Callbacks — set by the daemon before calling Run.
 	OnNewTasks       func(tasks []Task)
@@ -97,8 +101,8 @@ type SyncClient struct {
 
 	// OnRevoked is called when a sync is rejected because this agent's credential
 	// was revoked (the user deleted the agent from the dashboard). The daemon
-	// wires this to wipe the stored key + stop — it must NOT keep retrying or the
-	// server will reject every sync forever.
+	// wires this to wipe the stored key. Run returns ErrRevoked right after, so
+	// the loop must NOT keep retrying a sync the server will reject forever.
 	OnRevoked func(err error)
 
 	// SyncNow triggers an immediate sync (e.g., on task completion).
@@ -168,14 +172,34 @@ func (sc *SyncClient) TriggerSync() {
 	}
 }
 
-// Run starts the adaptive sync loop. Blocks until ctx is cancelled.
+// ErrRevoked is what Run returns when the server tombstones this agent
+// mid-run. It is not a failure of the loop: the daemon goes back to
+// registration, which parks it until a new credential exists (see
+// waitOutBlock).
+var ErrRevoked = errors.New("agent credential revoked")
+
+// Run starts the adaptive sync loop. Blocks until ctx is cancelled, or until
+// the server revokes this agent (ErrRevoked).
 func (sc *SyncClient) Run(ctx context.Context) error {
+	// Own context for the downlink so that a revocation stops it along with
+	// the loop: an SSE stream reconnecting every two seconds with a dead key is
+	// the same server-side noise this early return exists to end.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+
+	// A fresh run after a recovery starts unblocked, otherwise the next
+	// terminal failure would never be recorded (the flag is set-once per run).
+	sc.blocked.Store(false)
+	sc.revoked.Store(false)
+
 	// Start the realtime downlink in background — pushes immediate syncs +
 	// typed control commands on demand (SSE-first, long-poll fallback).
 	go sc.runDownlink(ctx)
 
 	// Initial sync immediately
-	sc.doSync(ctx)
+	if sc.doSync(ctx); sc.revoked.Load() {
+		return ErrRevoked
+	}
 
 	ticker := time.NewTicker(sc.currentInterval())
 	defer ticker.Stop()
@@ -196,6 +220,9 @@ func (sc *SyncClient) Run(ctx context.Context) error {
 		case <-sc.SyncNow:
 			sc.doSync(ctx)
 			ticker.Reset(sc.currentInterval())
+		}
+		if sc.revoked.Load() {
+			return ErrRevoked
 		}
 	}
 }
@@ -218,9 +245,16 @@ func (sc *SyncClient) doSync(ctx context.Context) {
 	if err != nil {
 		if ctx.Err() == nil {
 			// Credential revoked (agent deleted from the dashboard) → stop; don't
-			// spam a sync the server will reject forever.
-			if IsRevoked(err) && sc.OnRevoked != nil {
-				sc.OnRevoked(err)
+			// spam a sync the server will reject forever. Run picks the flag up
+			// and returns ErrRevoked. Not recorded here: the registration the
+			// daemon falls back to classifies the same 410, records it and
+			// tells the user — doing it here too would mean two notifications
+			// for one event.
+			if IsRevoked(err) {
+				if sc.OnRevoked != nil {
+					sc.OnRevoked(err)
+				}
+				sc.revoked.Store(true)
 				return
 			}
 			// A sync the server will keep rejecting is not a hiccup: the agent

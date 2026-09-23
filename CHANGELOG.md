@@ -5,12 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.7] - 2026-09-22
+
+
+### Fixed
+
+- **docker**: a dashboard delete survives a container restart
+## [1.14.6] - 2026-09-22
+
+
+### Fixed
+
+- **docker**: reconnect a revoked agent by restarting the container
+
+### Other
+
+- **release**: 1.14.6
+## [1.14.5] - 2026-09-21
+
+
+### Fixed
+
+- **hls**: subtitle sidecars — delta fetches, truncated reads, 404 for unknown tracks
+
+### Other
+
+- **release**: 1.14.5
+## [1.14.4] - 2026-09-21
+
+
+### Fixed
+
+- **hls**: subtitle windows — seek priority, spaced retries, idle-safe status
+
+### Other
+
+- **release**: 1.14.4
+## [1.14.3] - 2026-09-21
+
+
+### Added
+
+- **hls**: extract remote subtitles in windows, the viewer's position first
+- **hls**: expose subtitle extraction status; make bulk yielding process-wide
+
+### Fixed
+
+- **downloads**: keep in-flight downloads on reconcile and shutdown
+- **hls**: don't log an abandoned segment request as a generation failure
+- **hls**: serve subtitle sidecars one-shot again; streaming stalled playback
+- **hls**: stream growing subtitle sidecars so tracks never freeze partial
+- **hls**: stop remote copy playback stalling on bandwidth-bound links
+
+### Other
+
+- **release**: 1.14.3
+
+### Performance
+
+- **hls**: extract remote subtitles alongside each segment, not the whole file
 ## [1.14.2] - 2026-09-18
 
 
 ### Fixed
 
 - **diagnostics**: keep report delivery available
+- **hls**: preserve segment continuity for remote copy playback
+
+### Other
+
+- **release**: 1.14.2
 ## [1.14.1] - 2026-09-18
 
 
@@ -1822,6 +1886,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.14.7]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.6...v1.14.7
+[1.14.6]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.5...v1.14.6
+[1.14.5]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.4...v1.14.5
+[1.14.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.3...v1.14.4
+[1.14.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.2...v1.14.3
 [1.14.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.1...v1.14.2
 [1.14.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.0...v1.14.1
 [1.14.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.13.0...v1.14.0

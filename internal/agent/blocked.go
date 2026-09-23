@@ -275,12 +275,20 @@ func Classify(err error) (*Blocked, bool) {
 
 	switch {
 	case IsRevoked(err):
+		const removed = "This machine was removed from your unarr account."
+		msg := serverSaid(he, removed)
+		// The server's sentence ends in "run `unarr login`" — it answers from
+		// the auth layer, which has no idea this agent lives in a container
+		// with no shell. Next to the container remedy that is a contradiction,
+		// so in Docker the client's own wording wins.
+		if RunningInDocker() {
+			msg = removed
+		}
 		return &Blocked{
-			Reason: BlockRevoked,
-			Status: he.StatusCode,
-			Message: serverSaid(he,
-				"This machine was removed from your unarr account."),
-			Remedy: "Sign in again to reconnect this machine.",
+			Reason:  BlockRevoked,
+			Status:  he.StatusCode,
+			Message: msg,
+			Remedy:  RevokedRemedy(),
 		}, true
 
 	case he.StatusCode == http.StatusPreconditionFailed || code == "agent_version_too_old":
@@ -330,6 +338,24 @@ func Classify(err error) (*Blocked, bool) {
 		}, true
 	}
 	return nil, false
+}
+
+// RevokedRemedy is the next step after a dashboard delete, which depends on
+// where the agent runs. On a desktop or a shell host it is a sign-in. In a
+// container there is no shell and no tray: the only levers the user has are
+// the container's environment and its restart button, so the remedy names
+// those. A plain restart deliberately does NOT reconnect (cmd records the
+// delete and `up` honors it), and an auth-key that already provisioned this
+// container is spent — both are said, because a restart that looks like it
+// did nothing is the dead end this text exists to prevent.
+func RevokedRemedy() string {
+	if RunningInDocker() {
+		return "To reconnect it as a new machine, add UNARR_RECONNECT=1 to the" +
+			" container's environment and restart it (remove the variable" +
+			" afterwards), or set a fresh UNARR_AUTHKEY (Profile → Agents on the" +
+			" web; auth-keys are single-use). A plain restart keeps it disconnected."
+	}
+	return "Sign in again to reconnect this machine."
 }
 
 // serverSaid prefers the server's own sentence. The server knows the specifics —

@@ -939,6 +939,9 @@ func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		session.ServeSegment(w, r, idx)
+	case resource == "subs/status.json":
+		// Whether the sidecars below are final yet (they are served while growing).
+		session.ServeSubtitleStatus(w, r)
 	case strings.HasPrefix(resource, "subs/s") && strings.HasSuffix(resource, ".vtt"):
 		// WebVTT sidecar produced in-pass by buildHLSCopyArgs (remote/EVENT-copy
 		// sources). The HLS path token was already verified above, so this needs

@@ -8,17 +8,12 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
-	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
-	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
 
 // copyVODTargetSec is the nominal segment length for COPY-VOD. Larger than the
@@ -122,19 +117,13 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	if s.durationSec <= 0 || s.cfg.sourceRef() == "" {
 		return false
 	}
-	starts, _, ok := indexKeyframesFast(ctx, s, s.cfg.sourceRef())
+	// Proxy first: the index + IDR reads below warm the very header/seek-index
+	// blocks every later segment spawn would otherwise re-download.
+	s.startCopySourceProxy()
+	starts, ok := planCopyVOD(ctx, s)
 	if !ok {
-		return false
-	}
-
-	if len(starts) < 2 {
-		log.Printf("[hls %s] copy-vod planning yielded no segments - using EVENT copy",
-			shortHLSID(s.cfg.SessionID))
-		return false
-	}
-	if !copySourceHasIDR(ctx, s, starts) {
-		log.Printf("[hls %s] copy-vod requires IDR cuts; using seekable video encode", shortHLSID(s.cfg.SessionID))
-		s.copyNeedsEncode = true
+		s.stopCopySourceProxy() // the fallback paths read the source directly
+		s.copyProxy = nil
 		return false
 	}
 	s.copyVOD = true
@@ -148,6 +137,9 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	s.copyLazy = true
 	s.copyCtx, s.copyCancel = context.WithCancel(context.Background())
 	s.copySlots = make(chan struct{}, 2)
+	s.copyWake = make(chan struct{}, 1)
+	s.copyWG.Add(1) // session not published yet: no Close can race this Add
+	go s.runCopyPrefetch()
 	s.readyMu.Lock()
 	s.readyMax = s.segmentCount
 	s.exited = true
@@ -162,62 +154,50 @@ func startCopyVOD(ctx context.Context, s *HLSSession) bool {
 	return true
 }
 
-// startCopyVODSubtitles spawns a background ffmpeg that reads the remote source
-// ONCE and writes a WebVTT sidecar per TEXT subtitle track (subs/s<idx>.vtt),
-// mirroring the EVENT copy path's in-pass sidecars — needed because COPY-VOD's
-// on-demand segments never read the whole file. `-flush_packets 1` streams each
-// cue to disk so the sidecar fills progressively (ServeSubtitleVTT serves what's
-// read so far). The extractor starts a few seconds late so the first video
-// segment isn't contended on a single-line panel, and its cancel is stored on
-// s.cancel so Close() kills it. No-op when the source has no text subtitles.
-func startCopyVODSubtitles(s *HLSSession) {
-	var outs []string
-	for _, sb := range s.probe.SubtitleTracks {
-		if !sb.IsTextSubtitle() {
-			continue
-		}
-		outs = append(outs,
-			"-map", fmt.Sprintf("0:s:%d?", sb.Index),
-			"-c:s", "webvtt",
-			"-flush_packets", "1",
-			"-f", "webvtt",
-			filepath.Join(s.tmpDir, "subs", fmt.Sprintf("s%d.vtt", sb.Index)),
-		)
+// planCopyVOD builds the exact segment table and checks every cut is an IDR.
+// ok=false means COPY-VOD must be declined (s.copyNeedsEncode says why).
+func planCopyVOD(ctx context.Context, s *HLSSession) (starts []float64, ok bool) {
+	starts, _, ok = indexKeyframesFast(ctx, s, s.copySource())
+	if !ok {
+		return nil, false
 	}
-	if len(outs) == 0 {
+	if len(starts) < 2 {
+		log.Printf("[hls %s] copy-vod planning yielded no segments - using EVENT copy",
+			shortHLSID(s.cfg.SessionID))
+		return nil, false
+	}
+	if !copySourceHasIDR(ctx, s, starts) {
+		log.Printf("[hls %s] copy-vod requires IDR cuts; using seekable video encode", shortHLSID(s.cfg.SessionID))
+		s.copyNeedsEncode = true
+		return nil, false
+	}
+	return starts, true
+}
+
+// startCopyVODSubtitles starts extracting a WebVTT sidecar per TEXT subtitle
+// track (served as subs/s<idx>.vtt), mirroring the EVENT copy path's in-pass
+// sidecars — needed because COPY-VOD's on-demand segments never read the whole
+// file. Each generated segment's cues are extracted right after it, from the
+// bytes the source proxy still has cached; see hls_subtitle_timeslices.go. No-op
+// when the source has no text subtitles.
+//
+// This used to be a second download of the WHOLE file next to playback (MKV
+// interleaves cues with the video, so mapping fewer tracks saves no bytes),
+// which on a bandwidth-bound link starved segment generation outright: 19 s of
+// video played per 80 s of wall clock.
+//
+// Caller must have set copyCtx + copySegStarts and not published the session.
+func startCopyVODSubtitles(s *HLSSession) {
+	if len(s.textSubtitleTracks()) == 0 {
 		return
 	}
-	args := []string{
-		"-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-		"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-		"-rw_timeout", "30000000",
-		"-i", s.cfg.sourceRef(),
-	}
-	args = append(args, outs...)
-
-	ffCtx, cancel := context.WithCancel(context.Background())
-	s.mu.Lock()
-	s.cancel = cancel
-	s.mu.Unlock()
-
+	tag := fmt.Sprintf("[hls %s]", shortHLSID(s.cfg.SessionID))
+	s.subWin = newSubtitleWindows(tag, s.copySegStarts, s.extractSubtitleWindow)
+	s.subsDone = make(chan struct{})
+	s.copyWG.Add(1)
 	go func() {
-		// Yield the panel to the first video segment before opening a second read.
-		select {
-		case <-ffCtx.Done():
-			return
-		case <-time.After(3 * time.Second):
-		}
-		cmd := exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
-		winproc.HideWindow(cmd)
-		var errBuf bytes.Buffer
-		cmd.Stderr = &errBuf
-		if err := cmd.Run(); err != nil && ffCtx.Err() == nil {
-			log.Printf("[hls %s] copy-vod subtitle extractor: %v (%s)",
-				shortHLSID(s.cfg.SessionID), err, strings.TrimSpace(errBuf.String()))
-			return
-		}
-		if ffCtx.Err() == nil {
-			log.Printf("[hls %s] copy-vod subtitle sidecars complete", shortHLSID(s.cfg.SessionID))
-		}
+		defer s.copyWG.Done()
+		defer close(s.subsDone)
+		s.subWin.run(s.copyCtx)
 	}()
 }

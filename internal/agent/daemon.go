@@ -449,7 +449,27 @@ func (d *Daemon) register(ctx context.Context, park bool) error {
 
 // Run registers the agent and starts the sync loop.
 // Blocks until ctx is cancelled.
+//
+// A revocation mid-run (the agent deleted from the dashboard while syncing)
+// does not end Run: the loop goes back to Register, which classifies the 410
+// and parks the daemon until a new credential is on disk — exactly what a
+// revocation at startup already did. Exiting instead handed the problem to the
+// supervisor: systemd and Docker both bring the process straight back, `start`
+// refuses a wiped credential, and the user gets a restart loop whose only
+// explanation scrolls past in a log nobody reads.
 func (d *Daemon) Run(ctx context.Context) error {
+	for {
+		err := d.runOnce(ctx)
+		if !errors.Is(err, ErrRevoked) {
+			return err
+		}
+		log.Printf("[agent] credential revoked mid-run - back to registration")
+	}
+}
+
+// runOnce is one register + sync cycle. It returns ErrRevoked when the server
+// tombstoned this agent while it was syncing.
+func (d *Daemon) runOnce(ctx context.Context) error {
 	// Register
 	if err := d.Register(ctx); err != nil {
 		return err
@@ -458,6 +478,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 	log.Printf("Agent registered: %s (%s) [%s]", d.User.Name, d.User.Email, d.User.Plan)
 	log.Printf("Features: torrent=%v debrid=%v usenet=%v", d.Features.Torrent, d.Features.Debrid, d.Features.Usenet)
 
+	d.warnMissingTools()
+	d.wireTaskCallbacks()
+	d.wireStateCallbacks()
+
+	// Start sync loop (blocks)
+	return d.sync.Run(ctx)
+}
+
+// warnMissingTools logs, once per registration, the external binaries whose
+// absence only shows up much later as a broken download.
+func (d *Daemon) warnMissingTools() {
 	// par2 is usenet-only: without it a single bad segment corrupts the file
 	// silently.
 	if d.Features.Usenet {
@@ -475,8 +506,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if unrarErr != nil && sevenZErr != nil {
 		log.Printf("WARNING: no archive extractor (unrar or 7z) found in PATH - packed releases (.rar/.r00 sets) will be left unpacked. Install unrar or 7z (apt install unrar / brew install unrar).")
 	}
+}
 
-	// Wire sync callbacks
+// wireTaskCallbacks forwards the server's work (tasks, control actions,
+// streams, upgrades, scans) from the sync loop to the handlers cmd installed.
+func (d *Daemon) wireTaskCallbacks() {
 	d.sync.OnNewTasks = func(tasks []Task) {
 		if d.OnTasksClaimed != nil {
 			d.OnTasksClaimed(tasks)
@@ -520,6 +554,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		default:
 		}
 	}
+}
+
+// wireStateCallbacks gives the sync loop the daemon's live state to report
+// (VPN, funnel, reachability, lifecycle) and lets it stamp liveness back.
+func (d *Daemon) wireStateCallbacks() {
 	d.sync.OnWatchingChange = func(watching bool) {
 		d.Watching.Store(watching)
 	}
@@ -558,9 +597,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.sync.OnSyncAttempt = func() {
 		d.mutateState(func(st *DaemonState) { st.LastAlive = time.Now() })
 	}
-
-	// Start sync loop (blocks)
-	return d.sync.Run(ctx)
 }
 
 // TriggerSync requests an immediate sync cycle.

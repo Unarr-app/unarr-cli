@@ -190,6 +190,28 @@ The image ships the NVIDIA runtime env, so GPU transcode works out of the box:
 - **NVIDIA:** add `--gpus all`
 - **Intel QSV / VA-API:** pass `--device /dev/dri`
 
+## Reconnecting after removing the agent from the dashboard
+
+Deleting the agent under **Profile → Agents** revokes this container's
+credential for good: the daemon logs
+`This agent was removed from your account` (`agent_revoked`), forgets the dead
+credential, records the delete in `/config/revoked.json`, and stays up doing
+nothing. **A plain restart keeps it disconnected** — a NAS reboot or an image
+update must not undo a delete you made on purpose. There is no `unarr login`
+in a container; reconnecting is one environment variable plus a restart:
+
+- **Provisioned with `UNARR_API_KEY`:** add `UNARR_RECONNECT=1` to the
+  container's environment (Docker GUI, compose file, or `docker run -e`) and
+  restart. It registers as a new machine under a new name. Remove the
+  variable afterwards: while it is set, the next restart reconnects again
+  after any future delete.
+- **Provisioned with `UNARR_AUTHKEY`:** auth-keys are single-use, so the one
+  in the container is spent. Generate a new one under **Profile → Agents**,
+  replace `UNARR_AUTHKEY`, and restart. A fresh key counts as a deliberate
+  reconnect on its own — no `UNARR_RECONNECT` needed. With the old key the
+  container restarts into `auth-key already used`.
+- Deleting `/config/revoked.json` by hand does the same as `UNARR_RECONNECT=1`.
+
 ## Running commands
 
 Use `docker exec` for one-off commands while the daemon is running:

@@ -187,9 +187,12 @@ func TestSyncRecordsARejectionOnceNotEveryTick(t *testing.T) {
 	// be worse.
 	withTempStateDir(t)
 
+	// A plan limit, not a revocation: a revoked sync ends the loop and the
+	// block is recorded by the registration it falls back to (see
+	// TestRunParksInsteadOfExitingWhenRevokedMidRun).
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusGone)
-		json.NewEncoder(w).Encode(ErrorResponse{Error: "agent_revoked"})
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "agent_limit_reached"})
 	}))
 	defer srv.Close()
 
@@ -216,8 +219,8 @@ func TestSyncClearsTheBlockWhenItRecovers(t *testing.T) {
 	fail.Store(true)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if fail.Load() {
-			w.WriteHeader(http.StatusGone)
-			json.NewEncoder(w).Encode(ErrorResponse{Error: "agent_revoked"})
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: "agent_limit_reached"})
 			return
 		}
 		json.NewEncoder(w).Encode(SyncResponse{})
