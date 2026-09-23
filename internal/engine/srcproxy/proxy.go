@@ -38,6 +38,14 @@ const (
 	// backgroundDrip is the longest a Background reader is held back in one go.
 	// A trickle keeps its upstream connection and ffmpeg's -rw_timeout alive.
 	backgroundDrip = 5 * time.Second
+	// defaultLinkStall is how long the single-upstream link waits without a
+	// byte before giving up on an operation (headers or block) and releasing
+	// the link. Well above a slow panel's gaps, well below "wedged forever".
+	defaultLinkStall = 20 * time.Second
+	// departedStall replaces it once the client that asked for the block has
+	// gone away: finish a block that is still flowing (the next reader may
+	// reuse it), but don't hold everyone else behind one that is not.
+	departedStall = 2 * time.Second
 	// Same UA the seek-index reader uses; some debrid CDNs reject Go's default.
 	userAgent = "VLC/3.0.20 LibVLC/3.0.20"
 )
@@ -53,6 +61,16 @@ type Options struct {
 	PinHead    int64
 	PinTail    int64
 	Client     *http.Client
+	// SingleUpstream funnels every client through ONE upstream reader, so the
+	// source never sees two connections at once however many local readers
+	// (segment spawns, index, subtitles) the proxy serves — for a provider that
+	// allows a single connection per account (IPTV). Reads are serialized block
+	// by block; a reader continuing where the last one stopped reuses the open
+	// response, a jump elsewhere closes it before opening the next.
+	SingleUpstream bool
+	// StallTimeout bounds how long the single-upstream link waits with no byte
+	// arriving before it abandons the operation (default defaultLinkStall).
+	StallTimeout time.Duration
 }
 
 // Stats is a point-in-time snapshot of proxy traffic.
@@ -83,6 +101,15 @@ type Proxy struct {
 
 	stats     counters
 	closeOnce sync.Once
+
+	// Single-upstream mode (Options.SingleUpstream): link is the one upstream
+	// reader, owned by whoever holds linkSem; ctx bounds its requests to the
+	// proxy's life (a client that goes away mid-block does not abort the block
+	// another client may be about to reuse).
+	link    *reader
+	linkSem chan struct{}
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 // foreground counts in-flight Foreground requests across EVERY proxy in the
@@ -116,6 +143,11 @@ func Start(opts Options) (*Proxy, error) {
 		return nil, err
 	}
 	p.ln = ln
+	p.ctx, p.cancel = context.WithCancel(context.Background()) //nolint:gosec // G118: released by Close (p.cancel).
+	if opts.SingleUpstream {
+		p.link = &reader{p: p, ctx: p.ctx, stall: opts.StallTimeout}
+		p.linkSem = make(chan struct{}, 1)
+	}
 	p.srv = &http.Server{Handler: http.HandlerFunc(p.handle), ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = p.srv.Serve(ln) }()
 	return p, nil
@@ -130,6 +162,9 @@ func applyDefaults(o *Options) {
 	}
 	if o.PinTail <= 0 {
 		o.PinTail = defaultPinTail
+	}
+	if o.StallTimeout <= 0 {
+		o.StallTimeout = defaultLinkStall
 	}
 	// Pinned blocks are never evicted: keep LRU room beyond them.
 	if floor := o.PinHead + o.PinTail + 32*blockSize; o.CacheBytes < floor {
@@ -183,9 +218,69 @@ func (p *Proxy) Close() error {
 	var err error
 	p.closeOnce.Do(func() {
 		_ = p.srv.Close()
+		p.cancel()
+		if p.link != nil {
+			// The cancel aborts a block in flight; taking the link then closes
+			// the idle upstream response, so the source connection is gone when
+			// Close returns (the next reader of the account may open right after).
+			p.linkSem <- struct{}{}
+			p.link.close()
+			<-p.linkSem
+		}
+		// A fully read response parks its keep-alive connection in the pool.
+		p.client.CloseIdleConnections()
 		err = p.store.close()
 	})
 	return err
+}
+
+// withLink runs fn holding the single upstream link, or returns ctx's error if
+// the caller gives up waiting for it first. fn runs under the link watchdog
+// (reader.guarded), so a provider that stops sending cannot keep the link —
+// and every reader queued behind it — past the stall limit.
+func (p *Proxy) withLink(ctx context.Context, fn func(*reader) error) error {
+	select {
+	case p.linkSem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-p.linkSem }()
+	if err := p.ctx.Err(); err != nil {
+		return err
+	}
+	return p.link.guarded(ctx, func() error { return fn(p.link) })
+}
+
+// fetchBlock reads block idx from upstream: through the request's own reader,
+// or — single-upstream — through the shared link.
+func (p *Proxy) fetchBlock(rd *reader, idx int64, buf []byte) (int, error) {
+	if p.link == nil {
+		return rd.fetch(idx, buf)
+	}
+	var n int
+	err := p.withLink(rd.ctx, func(link *reader) error {
+		// The link holder we queued behind may have just stored this very
+		// block (a retried segment, a seek-back): serve it instead of
+		// reopening the provider for bytes we already have.
+		if hn, hit := p.store.get(idx, buf); hit {
+			n = hn
+			return nil
+		}
+		var ferr error
+		n, ferr = link.fetch(idx, buf)
+		return ferr
+	})
+	return n, err
+}
+
+// learnSize opens upstream at off just to learn the total size (the first
+// response carries it); single-upstream it uses the shared link, which then
+// sits positioned at off for the block read that follows.
+func (p *Proxy) learnSize(rd *reader, off int64) error {
+	if p.link == nil {
+		return rd.seek(off)
+	}
+	return p.withLink(rd.ctx, func(link *reader) error { return link.seek(off) })
 }
 
 func (p *Proxy) liveURL() string {

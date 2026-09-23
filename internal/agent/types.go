@@ -715,6 +715,18 @@ type StreamSession struct {
 	// works on a GPU-less NAS), but in the segmented transport every player
 	// handles. Set by webs that know this agent supports it (gate: HLS_COPY_MIN_VERSION web-side).
 	VideoCopy bool `json:"videoCopy,omitempty"`
+	// CopyVideoCodecs lists the video codecs the requesting browser decodes
+	// natively (e.g. ["h264"] or ["h264","hevc"]). When non-empty and VideoCopy
+	// is set, the daemon copies the video ONLY if the probed source video codec
+	// is in the list (and, for h264, only at bit depth <= 8); otherwise it
+	// transcodes. Empty = copy unconditionally (older webs). Sent by webs only to
+	// agents >= 1.15.1.
+	CopyVideoCodecs []string `json:"copyVideoCodecs,omitempty"`
+	// SingleConnection marks a provider (IPTV) URL session: the account usually
+	// allows ONE connection, so the daemon must read the source through a single
+	// upstream connection (no parallel segment copies, no prefetch, no second
+	// subtitle reader) and park IPTV downloads while the session is live.
+	SingleConnection bool `json:"singleConnection,omitempty"`
 	// Fmp4Only forces fMP4 HLS segments (skips the on-demand MPEG-TS copy-vod
 	// path) so the session is Google-Cast-compatible — the Default Media Receiver
 	// plays fMP4 HLS but not mpegts HLS. Set by the web for cast sessions. No
@@ -758,6 +770,15 @@ type SyncResponse struct {
 	Scan            bool                   `json:"scan,omitempty"`
 	FilesToDelete   []LibraryDeleteRequest `json:"filesToDelete,omitempty"`
 	SubtitleFetches []SubtitleFetchRequest `json:"subtitleFetches,omitempty"`
+
+	// ClosedStreamSessions lists ids of THIS agent's streaming sessions the web
+	// explicitly closed recently (player unmount / Retry / displacement; ~35 min
+	// window, prewarm excluded, newest first). Merely expired rows are NOT listed:
+	// an external player may still be reading them. The same id repeats on every
+	// sync of that window, so handling must be idempotent. Absent on older webs →
+	// empty.
+	ClosedStreamSessions []string `json:"closedStreamSessions,omitempty"`
+
 	// IptvHold is true while the user plays IPTV somewhere: IPTV accounts allow
 	// one connection, so IPTV downloads pause until it turns false (or lapses).
 	IptvHold bool `json:"iptvHold,omitempty"`

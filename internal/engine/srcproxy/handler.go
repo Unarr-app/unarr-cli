@@ -31,7 +31,7 @@ func (p *Proxy) handle(w http.ResponseWriter, r *http.Request) {
 	// The total size is needed for Content-Range; learn it from the upstream
 	// answer to this very request so no extra round trip is spent on it.
 	if p.size.Load() < 0 {
-		if err := rd.seek(first / blockSize * blockSize); err != nil {
+		if err := p.learnSize(rd, first/blockSize*blockSize); err != nil {
 			http.Error(w, "upstream unavailable", http.StatusBadGateway)
 			return
 		}
@@ -123,7 +123,7 @@ func (p *Proxy) fill(rd *reader, idx int64, buf []byte, background bool) (int, e
 			return 0, err
 		}
 	}
-	n, err := rd.fetch(idx, buf)
+	n, err := p.fetchBlock(rd, idx, buf)
 	if err != nil {
 		return 0, err
 	}

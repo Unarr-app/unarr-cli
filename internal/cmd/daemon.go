@@ -835,9 +835,7 @@ func runDaemonStart() error {
 		submit:  func(t agent.Task) { manager.Submit(ctx, t) },
 		stopStream: func(taskID string) {
 			cancelStreamTask(taskID)
-			if streamSrv.CurrentTaskID() == taskID {
-				streamSrv.ClearFile()
-			}
+			clearTaskStream(streamSrv, taskID)
 		},
 		triggerSync: d.TriggerSync,
 	}
@@ -875,7 +873,7 @@ func runDaemonStart() error {
 			}
 			// Displace the prior stream (served OR still probing), not other tasks' work.
 			displacePriorStreams(taskID)
-			streamSrv.SetFile(provider, taskID)
+			setTaskStreamGen(taskID, streamSrv.SetFile(provider, taskID))
 			task.SetStreamURL(streamSrv.URLsJSON())
 			log.Printf("[%s] streaming: %s", agent.ShortID(taskID), provider.FileName())
 
@@ -886,9 +884,7 @@ func runDaemonStart() error {
 			go engine.NewWatchReporter(agentClient, streamSrv, taskID).Run(watchCtx)
 		case "stop-stream": //nolint:goconst // action names are literals across three call sites
 			cancelStreamTask(taskID)
-			if streamSrv.CurrentTaskID() == taskID {
-				streamSrv.ClearFile()
-			}
+			clearTaskStream(streamSrv, taskID)
 		}
 	}
 
@@ -993,7 +989,7 @@ func runDaemonStart() error {
 
 		// Displace the prior stream (served OR still probing), not other tasks' work.
 		displacePriorStreams(sr.TaskID)
-		streamSrv.SetFile(engine.NewDiskFileProvider(filePath), sr.TaskID)
+		setTaskStreamGen(sr.TaskID, streamSrv.SetFile(engine.NewDiskFileProvider(filePath), sr.TaskID))
 		log.Printf("[%s] streaming from disk: %s -> %s", agent.ShortID(sr.TaskID), filepath.Base(filePath), streamSrv.URL())
 
 		watchCtx, watchCancel := context.WithCancel(ctx) //nolint:gosec // G118
@@ -1012,14 +1008,28 @@ func runDaemonStart() error {
 		}()
 	}
 
+	// Wire: sessions the web closed (player gone). Tear them down now
+	// instead of letting ffmpeg read the source until the 30-min idle sweep.
+	d.OnStreamSessionsClosed = func(ids []string) {
+		closePlayerSessionsByWeb(ids, streamSrv.HLS())
+	}
+
+	// One IPTV stream per provider account at a time: a newer session preempts
+	// the older through the same teardown a web close runs (the web displaces
+	// the older row anyway), then waits until its ffmpeg is reaped.
+	iptvStreamSlots := newProviderStreamSlots(func(id string) {
+		closePlayerSessionsByWeb([]string{id}, streamSrv.HLS())
+	})
+
 	// Wire: sync receives HLS streaming session requests. Each session spawns
 	// one ffmpeg process and registers its HLS playlist with the StreamServer.
 	// Validate FilePath against allowed dirs to prevent path traversal abuse
 	// from a compromised server.
 	d.OnStreamSession = func(sess agent.StreamSession) {
-		if playerSessionRegistry.has(sess.SessionID) {
+		if playerSessionRegistry.has(sess.SessionID) || sessionClosedByWeb(sess.SessionID) {
 			// Silent on purpose (unlike every other early return below): this
-			// is the SAME sessionID already in flight, so its own watcher owns
+			// is the SAME sessionID already in flight (or already closed by the
+			// web — never restart it), so its own watcher owns
 			// the outcome. Reporting here would either duplicate that verdict
 			// or overwrite a healthy session with a failure.
 			return // already running
@@ -1115,6 +1125,15 @@ func runDaemonStart() error {
 					}
 				}
 				hsess, err := engine.StartHLSSession(hlsCtx, hlsCfg)
+				if sessionClosedByWeb(hlsCfg.SessionID) {
+					// Closed by web while probing: never serve it, no verdict to report.
+					if hsess != nil {
+						_ = hsess.Close()
+					}
+					playerSessionRegistry.remove(hlsCfg.SessionID)
+					hlsCancel()
+					return
+				}
 				if err != nil {
 					playerSessionRegistry.remove(hlsCfg.SessionID)
 					hlsCancel()
@@ -1134,10 +1153,16 @@ func runDaemonStart() error {
 					// REAL session still evicts this one via Register — by
 					// then the encode is usually sealed in the segment cache.
 					streamSrv.HLS().RegisterKeep(hsess)
+				} else {
+					streamSrv.HLS().Register(hsess)
+				}
+				if unregisterIfClosedByWeb(streamSrv.HLS(), hsess, hlsCfg.SessionID, hlsCancel) {
+					return
+				}
+				if prewarm {
 					log.Printf("[hls %s] prewarm encoding: %s", agent.ShortID(hlsCfg.SessionID), hlsCfg.FileName)
 					return // no viewer waiting → no ready-watcher
 				}
-				streamSrv.HLS().Register(hsess)
 				go watchSessionReady(hlsCtx, agentClient, hsess, hlsCfg.SessionID, failSession)
 			}()
 		}
@@ -1176,8 +1201,14 @@ func runDaemonStart() error {
 		// actions; register the
 		// session up front so a duplicate sync within the setup window is a
 		// no-op (matches the HLS branch's handoff rationale).
-		if sess.DirectURL != "" && sess.PlayMethod != "hls" {
-			playerSessionRegistry.add(sess.SessionID, func() { streamSrv.ClearFile() })
+		// A single-connection (IPTV) source never takes the raw path: every
+		// browser Range request would open its own provider connection. The HLS
+		// branch below reads it through one ffmpeg.
+		if sess.DirectURL != "" && sess.PlayMethod != "hls" && !sess.SingleConnection {
+			// Until SetFile the registered cancel only aborts the probe: this
+			// session does not own /stream yet, so a close must not clear it.
+			bctx, cancelProbe := context.WithTimeout(ctx, 15*time.Second)
+			playerSessionRegistry.add(sess.SessionID, cancelProbe)
 			// refresh re-resolves a fresh debrid link when this one expires
 			// mid-stream (hueco #2 / 2c). Bound to the daemon ctx so a shutdown
 			// cancels an in-flight refresh.
@@ -1185,9 +1216,14 @@ func runDaemonStart() error {
 				return agentClient.RefreshStreamURL(rctx, sess.SessionID)
 			}
 			go func() {
-				bctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-				defer cancel()
+				defer cancelProbe()
 				provider, perr := engine.NewDebridFileProvider(bctx, sess.DirectURL, sess.FileName, sess.FileSize, refresh)
+				if sessionClosedByWeb(sess.SessionID) {
+					// Closed by web during the probe (which that close aborted):
+					// never serve it, no verdict to report.
+					playerSessionRegistry.remove(sess.SessionID)
+					return
+				}
 				if perr != nil {
 					playerSessionRegistry.remove(sess.SessionID)
 					// Provider setup probes the debrid link for its size (HEAD,
@@ -1195,10 +1231,14 @@ func runDaemonStart() error {
 					// failure here means all of those came up empty: the remote
 					// source is unreachable (expired link / dead CDN node), not a
 					// local agent fault.
-					failSession(sess.SessionID, sessErrSourceUnreachable, fmt.Sprintf("debrid provider: %v", perr))
+					failSession(sess.SessionID, sessErrSourceUnreachable,
+						engine.RedactSourceText(fmt.Sprintf("debrid provider: %v", perr), sess.DirectURL))
 					return
 				}
-				streamSrv.SetFile(provider, sess.TaskID)
+				gen := streamSrv.SetFile(provider, sess.TaskID)
+				if !serveSlotSession(streamSrv, sess.SessionID, gen, nil) {
+					return
+				}
 				log.Printf("[stream %s] debrid direct-play: %s (%d bytes)",
 					agent.ShortID(sess.SessionID), provider.FileName(), provider.FileSize())
 				markReady(sess.SessionID)
@@ -1218,15 +1258,36 @@ func runDaemonStart() error {
 				return
 			}
 			hlsCtx, hlsCancel := context.WithCancel(ctx)
+			// 2c: refresh the debrid link if it expires mid-transcode; the
+			// auto-restart supervisor calls this before relaunching ffmpeg. A
+			// provider (IPTV) URL has no info_hash to re-resolve from — the web
+			// answers 409 — so it keeps retrying its own stable URL instead.
+			var refreshURL func(context.Context) (string, error)
+			if sess.InfoHash != "" {
+				refreshURL = func(rctx context.Context) (string, error) {
+					return agentClient.RefreshStreamURL(rctx, sess.SessionID)
+				}
+			}
+			var acquireSource func(context.Context) (func(), error)
+			if sess.SingleConnection {
+				slot := iptvStreamSlots.forURL(sess.DirectURL)
+				sessionID := sess.SessionID
+				acquireSource = func(actx context.Context) (func(), error) {
+					return holdIptvForStream(actx, iptvDl, slot, sessionID)
+				}
+			}
 			startHLSPlayback(engine.HLSSessionConfig{
-				SessionID: sess.SessionID,
-				SourceURL: sess.DirectURL,
-				CacheID:   sess.InfoHash,
+				SessionID:        sess.SessionID,
+				SourceURL:        sess.DirectURL,
+				CacheID:          streamCacheID(sess),
+				SingleConnection: sess.SingleConnection,
+				AcquireSource:    acquireSource,
 				// HLS-copy (-c:v copy) when the web flagged the source as copyable
 				// (h264 in a non-native container / non-aac audio). The HLS engine
 				// already supports VideoCopy + SourceURL; this branch just never
 				// passed the flag, so every debrid HLS session re-encoded video.
 				VideoCopy:         sess.VideoCopy,
+				CopyVideoCodecs:   sess.CopyVideoCodecs,
 				Fmp4Only:          sess.Fmp4Only,
 				FileName:          sess.FileName,
 				Quality:           sess.Quality,
@@ -1236,11 +1297,7 @@ func runDaemonStart() error {
 				Prewarm:           sess.Prewarm,
 				Transcode:         tcRuntime,
 				Cache:             hlsCache,
-				// 2c: refresh the debrid link if it expires mid-transcode; the
-				// auto-restart supervisor calls this before relaunching ffmpeg.
-				RefreshURL: func(rctx context.Context) (string, error) {
-					return agentClient.RefreshStreamURL(rctx, sess.SessionID)
-				},
+				RefreshURL:        refreshURL,
 			}, hlsCtx, hlsCancel)
 			log.Printf("[hls %s] debrid HLS-from-URL: %s", agent.ShortID(sess.SessionID), sess.FileName)
 			return
@@ -1271,10 +1328,12 @@ func runDaemonStart() error {
 		// Runs BEFORE the ffmpeg-availability check on purpose: direct-play
 		// needs no ffmpeg, so it must work even when transcode is disabled.
 		if sess.PlayMethod == "direct" {
-			streamSrv.SetFile(engine.NewDiskFileProvider(filePath), sess.TaskID)
-			// cancel just clears the served file so daemon shutdown / drain
-			// stops exposing it on /stream. There's no ffmpeg child to kill.
-			playerSessionRegistry.add(sess.SessionID, func() { streamSrv.ClearFile() })
+			gen := streamSrv.SetFile(engine.NewDiskFileProvider(filePath), sess.TaskID)
+			// cancel just clears the served file (while still ours) so daemon
+			// shutdown / drain stops exposing it on /stream. No ffmpeg child to kill.
+			if !serveSlotSession(streamSrv, sess.SessionID, gen, nil) {
+				return // closed by web meanwhile — torn down, nothing to report
+			}
 			log.Printf("[stream %s] direct-play: %s", agent.ShortID(sess.SessionID), filepath.Base(filePath))
 			// File is on disk → ready immediately. Tell the web so the player
 			// attaches <video src> without burning its HEAD-probe retry budget.
@@ -1309,10 +1368,18 @@ func runDaemonStart() error {
 				failSession(sess.SessionID, sessErrStartFailed, fmt.Sprintf("remux start: %v", serr))
 				return
 			}
-			streamSrv.SetGrowingFile(src, sess.TaskID)
-			// cancel stops the ffmpeg copy; SetGrowingFile/ClearFile also Close()
-			// the source, so the temp file is always cleaned up.
-			playerSessionRegistry.add(sess.SessionID, func() { remuxCancel(); streamSrv.ClearFile() })
+			if sessionClosedByWeb(sess.SessionID) {
+				remuxCancel() // closed by web during the probe: never serve it
+				_ = src.Close()
+				return
+			}
+			gen := streamSrv.SetGrowingFile(src, sess.TaskID)
+			// cancel always stops this session's ffmpeg copy; the slot (whose
+			// ClearFileIf also Close()s the source) only while still ours. A newer
+			// SetFile/SetGrowingFile Close()s it too, so the temp file never leaks.
+			if !serveSlotSession(streamSrv, sess.SessionID, gen, remuxCancel) {
+				return
+			}
 			// Startup timing (TTFF diagnosis): probe = ffprobe on the source;
 			// spawn = ffmpeg launch + tmp setup. First-fMP4-byte is logged by the
 			// source itself; serveGrowing logs any client read that blocks waiting
@@ -1339,6 +1406,7 @@ func runDaemonStart() error {
 			StartSec:          sess.StartSec,
 			Prewarm:           sess.Prewarm,
 			VideoCopy:         sess.VideoCopy,
+			CopyVideoCodecs:   sess.CopyVideoCodecs,
 			Fmp4Only:          sess.Fmp4Only,
 			Transcode:         tcRuntime,
 			Cache:             hlsCache,
@@ -2246,7 +2314,10 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 			// that would never exist. Report it only when nothing was served
 			// yet: after the ready flip the session did its job and a later
 			// teardown is the normal end of playback, not a failure.
-			if !readyPosted {
+			// Not when the web itself closed it (Retry / unmount while
+			// "Preparando"): nobody is waiting, and a start_timeout would
+			// pollute the playback KPI for a session that did not fail.
+			if !readyPosted && !sessionClosedByWeb(sessionID) {
 				failSession(sessionID, sessErrStartTimeout,
 					"session was closed before serving its first segment")
 			}

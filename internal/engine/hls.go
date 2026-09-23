@@ -225,6 +225,33 @@ type HLSSessionConfig struct {
 	// path instead (Cast Default Media Receiver plays fMP4 HLS, not mpegts). See
 	// startCopyVOD.
 	Fmp4Only bool
+	// CopyVideoCodecs lists the video codecs the requesting browser decodes
+	// natively (normalized ffprobe names: "h264", "hevc", …). When non-empty, a
+	// VideoCopy session copies only if the probed source codec is listed (h264
+	// only at <= 8-bit) and transcodes otherwise. Empty = copy unconditionally.
+	CopyVideoCodecs []string
+	// SingleConnection: the source (an IPTV provider) allows ONE upstream
+	// connection. Every reader of the session shares one: COPY-VOD reads through
+	// the source proxy's single upstream link (index, IDR probe, one segment
+	// spawn at a time, subtitle windows) and keeps its full manifest, seek and
+	// resume; the EVENT copy / encode fallbacks run one ffmpeg. Close waits for
+	// that ffmpeg to be reaped before releasing AcquireSource, so the next
+	// session of the account never overlaps it.
+	SingleConnection bool
+	// AcquireSource, when set, is called before the first read of the source
+	// (the probe) and may block until the source is free to open — the IPTV
+	// account's one connection held by a download. The release it returns runs
+	// once, when the session stops reading: start failure or Close. An error
+	// (the session was superseded or cancelled while waiting) fails the start
+	// before any read. nil = no gate.
+	AcquireSource func(ctx context.Context) (release func(), err error)
+}
+
+// hasCacheIdentity reports whether the session has something stable to key a
+// persistent cache entry on: an explicit CacheID, or a local SourcePath. A URL
+// session with neither must not cache — its key would be the same for every title.
+func (cfg HLSSessionConfig) hasCacheIdentity() bool {
+	return cfg.CacheID != "" || (cfg.SourceURL == "" && cfg.SourcePath != "")
 }
 
 // copyPlaylistName is the on-disk media playlist ffmpeg owns in VideoCopy
@@ -282,6 +309,10 @@ type HLSSession struct {
 	segmentCount  int
 	manifestVideo string // pre-rendered video media playlist
 	manifestRoot  string // pre-rendered master playlist
+
+	// releaseSource gives back the source gate (cfg.AcquireSource) — idempotent,
+	// called by Close once every reader of the source has been told to stop.
+	releaseSource func()
 
 	mu             sync.Mutex
 	cmd            *exec.Cmd
@@ -348,6 +379,11 @@ type HLSSession struct {
 	exitErr  error
 	exited   bool
 	readyCh  chan struct{} // closed + replaced each time readyMax advances
+	// liveProcs counts continuous ffmpeg processes of this session that have
+	// started and not yet been reaped (cmd.Wait returned). Unlike `exited`,
+	// which Close sets itself, it only drops when the OS process is gone — and
+	// with it its provider socket. A single-connection Close waits on it.
+	liveProcs int
 
 	// Persistent cache state. cache==nil means caching disabled for this session.
 	// fromCache=true means the session is replaying a completed encode and no
@@ -652,6 +688,22 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	if cfg.Transcode.FFmpegPath == "" || cfg.Transcode.FFprobePath == "" {
 		return nil, errors.New("hls: ffmpeg/ffprobe not available")
 	}
+	releaseSource := func() {}
+	if cfg.AcquireSource != nil {
+		rel, err := cfg.AcquireSource(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("hls: source gate: %w", err)
+		}
+		if rel != nil {
+			releaseSource = sync.OnceFunc(rel)
+		}
+	}
+	sourceHandedOff := false
+	defer func() {
+		if !sourceHandedOff {
+			releaseSource() // every start failure: the session never read on
+		}
+	}()
 
 	// Probe gets a deadline so ffprobe can't hang the session-start goroutine
 	// forever (else the player sticks on "Preparando sesión"). A REMOTE source
@@ -676,7 +728,10 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		// found") get the same tag — distinguishing them would need brittle
 		// stderr string-matching, and the error message keeps the detail.
 		if cfg.SourceURL != "" {
-			return nil, fmt.Errorf("hls: probe: %w: %w", ErrSourceUnreachable, err)
+			// ffprobe echoes its input verbatim and the daemon logs + reports this
+			// error to the web (error_message, support reports): mask the URL's
+			// secrets (IPTV credentials, debrid tokens) first.
+			return nil, fmt.Errorf("hls: probe: %w: %w", ErrSourceUnreachable, redactURL(err, cfg.SourceURL))
 		}
 		return nil, fmt.Errorf("hls: probe: %w", err)
 	}
@@ -704,6 +759,13 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 	// allowed to cache; deciding after cfg.Cache was already nil'd would make it
 	// the one transcode in the codebase structurally unable to seal its cache, so
 	// every replay would re-encode from scratch.
+	if cfg.VideoCopy && !copyVideoCodecAllowed(cfg.CopyVideoCodecs, probe.VideoCodec, probe.BitDepth) {
+		// The web asked for copy but the browser can't decode this source's video
+		// (e.g. HEVC on a Chrome without it): copying would play audio over black.
+		log.Printf("[hls %s] source video %s not in browser codecs %v - transcoding",
+			shortHLSID(cfg.SessionID), copyVideoCodecLabel(probe.VideoCodec, probe.BitDepth), cfg.CopyVideoCodecs)
+		cfg.VideoCopy = false
+	}
 	if cfg.VideoCopy && !copyVODViable(cfg, probe) && shouldTranscodeForResume(cfg, probe) {
 		log.Printf("[hls %s] resume=%.0fs with no COPY-VOD path - transcoding (EVENT copy cannot seek)",
 			shortHLSID(cfg.SessionID), cfg.StartSec)
@@ -713,6 +775,12 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		// HLS-copy never caches: re-generating costs no encode (I/O-bound), so
 		// persisting segments would only burn cache budget that real transcodes
 		// need. Private per-session tmpdir, deleted on Close.
+		cfg.Cache = nil
+	}
+	if cfg.Cache != nil && !cfg.hasCacheIdentity() {
+		// No identity to key on (a URL session without CacheID): the key would
+		// collapse to the daemon's cwd and every such title would share ONE
+		// cache entry — the next episode replaying the previous one's segments.
 		cfg.Cache = nil
 	}
 	if cfg.Cache != nil {
@@ -803,6 +871,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		fromCache:      fromCache,
 		writerLockHeld: writerLockHeld,
 		liveURL:        cfg.SourceURL, // mutable copy; cfg stays immutable
+		releaseSource:  releaseSource,
 	}
 	if cfg.VideoCopy {
 		// COPY-VOD (preferred for local files): keyframe-index the source, render
@@ -810,6 +879,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		// demand — known total duration + seek-anywhere, no continuous ffmpeg.
 		// startCopyVOD sets the manifest + segment table + readyMax itself.
 		if startCopyVOD(ctx, s) {
+			sourceHandedOff = true // Close releases it
 			return s, nil
 		}
 		// COPY-VOD declined for a reason only discoverable here (a failed keyframe
@@ -859,7 +929,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		log.Printf("[hls %s] cache HIT %s: %s, %.1fs, %d segs (quality=%s)",
 			shortHLSID(cfg.SessionID), cacheKey, cfg.logName(),
 			probe.DurationSec, segCount, coalesce(cfg.Quality, "auto"))
-		return s, nil
+		return s, nil // never reads the source again: the deferred release frees it now
 	}
 
 	// Resume-aware first spawn: when the session carries a StartSec (resume
@@ -952,6 +1022,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		return nil, fmt.Errorf("hls: start ffmpeg: %w", err)
 	}
 	s.cmd = cmd
+	s.liveProcs = 1 // construction: no other goroutine sees s yet
 
 	//nolint:gosec // G118: waitFFmpeg owns the ffmpeg process lifecycle (Wait+cleanup); it must outlive ffCtx, not be cancelled by it. ffCtx is already wired into the process via CommandContext above.
 	go s.waitFFmpeg()
@@ -1007,6 +1078,7 @@ func StartHLSSession(ctx context.Context, cfg HLSSessionConfig) (*HLSSession, er
 		shortHLSID(cfg.SessionID), cfg.logName(),
 		probe.DurationSec, segCount, coalesce(cfg.Quality, "auto"),
 		encoderNote, cachedNote, startNote)
+	sourceHandedOff = true // Close releases it
 	return s, nil
 }
 
@@ -1267,6 +1339,17 @@ func (s *HLSSession) Close() error {
 	}
 	// After every reader is gone, and before the session dir is removed below.
 	s.stopCopySourceProxy()
+	if s.cfg.SingleConnection {
+		// cancel() only SIGKILLs ffmpeg; its provider socket lives until the
+		// process is reaped. The source gate is what lets the NEXT reader of a
+		// one-connection account in, so it must not open while this one's
+		// connection is still up (Retry / next episode / takeover all close the
+		// old session and start the new one back to back).
+		s.waitProcsReaped(singleConnectionReapWait)
+	}
+	if s.releaseSource != nil {
+		s.releaseSource()
+	}
 	// Unblock any handler waiting on readyCh.
 	s.readyMu.Lock()
 	if s.readyCh != nil {
@@ -1361,6 +1444,7 @@ func (s *HLSSession) allSegmentsPresent() bool {
 func (s *HLSSession) waitFFmpeg() {
 	err := s.cmd.Wait()
 	s.readyMu.Lock()
+	s.liveProcs--
 	s.exitErr = err
 	s.exited = true
 	if s.readyCh != nil {
@@ -2061,14 +2145,27 @@ func (s *HLSSession) restartFromSegment(targetIdx int) error {
 	cmd := exec.CommandContext(ffCtx, s.cfg.Transcode.FFmpegPath, args...)
 	winproc.HideWindow(cmd)
 	cmd.Stderr = &hlsStderrCapture{owner: s}
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return fmt.Errorf("hls: restart ffmpeg: %w", err)
-	}
 
 	// Reset session state so the poll + wait machinery picks up the new run.
 	s.resetTranscodeStats() // new ffmpeg = new cold ramp; don't poison the EWMA
+	// The closed re-check, the spawn and the cmd/cancel hand-over share ONE
+	// critical section with Close's `closed = true; cancel := s.cancel`: a
+	// restart racing Close (the wait above can take seconds) either sees closed
+	// and spawns nothing, or its process is the one Close cancels and waits for.
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		cancel()
+		return errors.New("hls: session closed")
+	}
+	if err := cmd.Start(); err != nil {
+		s.mu.Unlock()
+		cancel()
+		return fmt.Errorf("hls: restart ffmpeg: %w", err)
+	}
+	s.readyMu.Lock()
+	s.liveProcs++
+	s.readyMu.Unlock()
 	s.cmd = cmd
 	s.cancel = cancel
 	s.ffmpegSegStart = targetIdx
@@ -2937,7 +3034,8 @@ func (c *hlsStderrCapture) Write(p []byte) (int, error) {
 		if isEncoderInitFailureLine(line) {
 			c.owner.markEncoderInitFailed()
 		}
-		log.Printf("[hls %s] ffmpeg: %s", shortHLSID(c.owner.cfg.SessionID), line)
+		log.Printf("[hls %s] ffmpeg: %s", shortHLSID(c.owner.cfg.SessionID),
+			RedactSourceText(line, c.owner.cfg.SourceURL))
 	}
 	return len(p), nil
 }

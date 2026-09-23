@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
+	"time"
 )
 
 // errUpstream is returned for any unusable upstream answer (no range support,
@@ -17,14 +19,32 @@ var errUpstream = errors.New("srcproxy: upstream unusable")
 // instead of failing its whole ffmpeg run.
 const fetchAttempts = 3
 
+// errStalled ends a single-upstream link operation the watchdog gave up on, so
+// the link is released for the next reader instead of wedging behind it.
+var errStalled = errors.New("srcproxy: upstream stalled")
+
 // reader is ONE client request's view of the upstream: a lazily opened,
 // sequential ranged GET that is reused while the client keeps reading forward
 // and reopened on a gap or a transport error.
+//
+// The single-upstream link (stall > 0) additionally runs every operation under
+// a no-progress watchdog (see guarded): its reads are bound to the proxy's
+// life, not to the requesting client's, so without one a block the provider
+// never delivers would hold the link — and every other reader — until Close.
 type reader struct {
-	p    *Proxy
-	ctx  context.Context
-	body io.ReadCloser
-	off  int64 // upstream offset of the next byte body yields
+	p     *Proxy
+	ctx   context.Context
+	body  io.ReadCloser
+	off   int64         // upstream offset of the next byte body yields
+	stall time.Duration // link only: no-progress limit per operation
+
+	mu         sync.Mutex
+	cancelBody context.CancelFunc // aborts the open request / body read
+	gen        uint64             // current guarded operation
+	busy       bool               // a guarded operation is running
+	aborted    bool               // the watchdog fired for the current operation
+	watch      *time.Timer
+	limit      time.Duration // current no-progress limit (shrinks once the requester left)
 }
 
 func (rd *reader) close() {
@@ -32,6 +52,12 @@ func (rd *reader) close() {
 		_ = rd.body.Close()
 		rd.body = nil
 	}
+	rd.mu.Lock()
+	if rd.cancelBody != nil {
+		rd.cancelBody()
+		rd.cancelBody = nil
+	}
+	rd.mu.Unlock()
 }
 
 // fetch reads block idx from upstream into buf and returns its length.
@@ -41,6 +67,9 @@ func (rd *reader) fetch(idx int64, buf []byte) (int, error) {
 		if cerr := rd.ctx.Err(); cerr != nil {
 			return 0, cerr
 		}
+		if rd.isAborted() {
+			return 0, errStalled
+		}
 		if err = rd.seek(idx * blockSize); err != nil {
 			continue
 		}
@@ -48,14 +77,43 @@ func (rd *reader) fetch(idx int64, buf []byte) (int, error) {
 		if want <= 0 {
 			return 0, io.EOF
 		}
-		if _, err = io.ReadFull(rd.body, buf[:want]); err == nil {
+		if err = rd.readFull(buf[:want]); err == nil {
 			rd.off += int64(want)
 			rd.p.stats.upstreamBytes.Add(int64(want))
 			return want, nil
 		}
 		rd.close()
 	}
+	if rd.isAborted() {
+		return 0, errStalled
+	}
 	return 0, err
+}
+
+// readFull fills buf from the body, feeding the watchdog on every byte that
+// arrives (a slow but moving source is never cut).
+func (rd *reader) readFull(buf []byte) error {
+	if rd.stall <= 0 {
+		_, err := io.ReadFull(rd.body, buf)
+		return err
+	}
+	for got := 0; got < len(buf); {
+		n, err := rd.body.Read(buf[got:])
+		got += n
+		if n > 0 {
+			rd.kick()
+		}
+		if got == len(buf) {
+			return nil
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return io.ErrUnexpectedEOF
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func (rd *reader) seek(off int64) error {
@@ -63,12 +121,91 @@ func (rd *reader) seek(off int64) error {
 		return nil
 	}
 	rd.close()
-	body, err := rd.p.open(rd.ctx, off)
+	// The body lives under its own cancel, so the watchdog can abort a hung
+	// open or read without cancelling the reader's context.
+	bctx, cancel := context.WithCancel(rd.ctx)
+	rd.mu.Lock()
+	if rd.aborted {
+		rd.mu.Unlock()
+		cancel()
+		return errStalled
+	}
+	rd.cancelBody = cancel
+	rd.mu.Unlock()
+	body, err := rd.p.open(bctx, off)
 	if err != nil {
+		rd.close()
 		return err
 	}
 	rd.body, rd.off = body, off
 	return nil
+}
+
+// guarded runs one link operation under the watchdog: it is aborted (the body
+// cancelled, errStalled returned) when no byte arrives for rd.stall, or for
+// departedStall once the requesting client (trigger) has gone away. A block
+// that keeps flowing after its requester left still completes, so the next
+// reader continuing from there reuses the open response.
+func (rd *reader) guarded(trigger context.Context, fn func() error) error {
+	rd.mu.Lock()
+	rd.gen++
+	g := rd.gen
+	rd.busy, rd.aborted, rd.limit = true, false, rd.stall
+	rd.watch = time.AfterFunc(rd.limit, func() { rd.interrupt(g) })
+	rd.mu.Unlock()
+	stop := context.AfterFunc(trigger, func() { rd.shorten(g) })
+
+	err := fn()
+
+	stop()
+	rd.mu.Lock()
+	rd.busy = false
+	rd.watch.Stop()
+	rd.watch = nil
+	rd.aborted = false
+	rd.mu.Unlock()
+	return err
+}
+
+// kick restarts the no-progress countdown of the running operation.
+func (rd *reader) kick() {
+	rd.mu.Lock()
+	if rd.watch != nil {
+		rd.watch.Reset(rd.limit)
+	}
+	rd.mu.Unlock()
+}
+
+// shorten: the requester left — give the operation departedStall more of
+// silence before it is abandoned.
+func (rd *reader) shorten(g uint64) {
+	rd.mu.Lock()
+	defer rd.mu.Unlock()
+	if !rd.busy || rd.gen != g || rd.limit <= departedStall {
+		return
+	}
+	rd.limit = departedStall
+	rd.watch.Reset(departedStall)
+}
+
+// interrupt aborts operation g if it is still the one running (a timer that
+// fires late, after the operation ended, is a no-op).
+func (rd *reader) interrupt(g uint64) {
+	rd.mu.Lock()
+	defer rd.mu.Unlock()
+	if !rd.busy || rd.gen != g {
+		return
+	}
+	rd.aborted = true
+	if rd.cancelBody != nil {
+		rd.cancelBody()
+	}
+}
+
+func (rd *reader) isAborted() bool {
+	rd.mu.Lock()
+	defer rd.mu.Unlock()
+	return rd.aborted
 }
 
 // open issues `Range: bytes=off-` and validates the answer. An expired signed

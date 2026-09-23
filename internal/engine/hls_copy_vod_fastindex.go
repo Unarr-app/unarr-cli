@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"math"
+	"os"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/library/mediainfo"
@@ -21,6 +22,13 @@ import (
 func copyVODViable(cfg HLSSessionConfig, probe *StreamProbe) bool {
 	if cfg.Fmp4Only {
 		return false // Cast: Default Media Receiver plays fMP4, not mpegts
+	}
+	if cfg.SingleConnection && os.Getenv(copyVODDirectEnv) == "1" {
+		// A one-connection provider is only COPY-VOD'd through the source
+		// proxy's single upstream link (index, IDR probe, segment spawns and
+		// subtitle windows all share it). With the proxy switched off every
+		// reader would open its own connection: use the linear EVENT copy.
+		return false
 	}
 	if probe == nil {
 		return false
