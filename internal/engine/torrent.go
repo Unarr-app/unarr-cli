@@ -88,7 +88,8 @@ type TorrentConfig struct {
 	// DB — fsynced per completed piece, integrity-checked at open — never lands
 	// on NFS/SMB volumes where file locking times out.
 	PieceCompletionDir string
-	MetadataTimeout    time.Duration // how long to wait for torrent metadata (default 15m, 0 = unlimited)
+	MetadataTimeout    time.Duration // how long to wait for torrent metadata (0 = unlimited; daemon default 0, one-shot download 15m)
+	MetadataStallAfter time.Duration // waiting this long for metadata yields the download slot (0 = 30m default, <0 = never)
 	StallTimeout       time.Duration // no progress during download for this long = stall (default 10m)
 	MaxTimeout         time.Duration // absolute maximum per torrent (default 0 = unlimited)
 	MaxDownloadRate    int64         // bytes/s, 0 = unlimited
@@ -439,26 +440,16 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 		log.Printf("[%s] waiting for metadata (no timeout, trackers: %d)...", task.ShortID(), len(defaultTrackers))
 	}
 
-	if d.cfg.MetadataTimeout > 0 {
-		metaCtx, metaCancel := context.WithTimeout(ctx, d.cfg.MetadataTimeout)
-		defer metaCancel()
-		select {
-		case <-t.GotInfo():
-			log.Printf("[%s] metadata received: %s (%d files)", task.ShortID(), t.Name(), len(t.Files()))
-		case <-metaCtx.Done():
-			stats := t.Stats()
-			cleanup()
-			return nil, fmt.Errorf("metadata timeout after %s (peers: %d)", d.cfg.MetadataTimeout, stats.ActivePeers)
-		}
-	} else {
-		// Unlimited — wait until metadata arrives or context is cancelled
-		select {
-		case <-t.GotInfo():
-			log.Printf("[%s] metadata received: %s (%d files)", task.ShortID(), t.Name(), len(t.Files()))
-		case <-ctx.Done():
-			cleanup()
-			return nil, fmt.Errorf("cancelled while waiting for metadata")
-		}
+	switch err := d.awaitMetadata(ctx, t.GotInfo(), task); {
+	case err == nil:
+		log.Printf("[%s] metadata received: %s (%d files)", task.ShortID(), t.Name(), len(t.Files()))
+	case errors.Is(err, errMetadataTimeout):
+		stats := t.Stats()
+		cleanup()
+		return nil, fmt.Errorf("metadata timeout after %s (peers: %d)", d.cfg.MetadataTimeout, stats.ActivePeers)
+	default:
+		cleanup()
+		return nil, err
 	}
 
 	// 1.5 Guard against stale piece-completion state. The completion DB survives

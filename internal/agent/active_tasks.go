@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/config"
 )
@@ -35,11 +38,33 @@ func NewActiveTaskStore() *ActiveTaskStore {
 	return &ActiveTaskStore{tasks: make(map[string]Task)}
 }
 
-// Add records (or replaces) a task and persists the set.
+// Add records (or replaces) a task and persists the set. A replaced entry keeps
+// its original QueuedAt, so a resumed or retried task keeps its place in the
+// boot-resume order; a new one is stamped now.
 func (s *ActiveTaskStore) Add(t Task) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if prev, ok := s.tasks[t.ID]; ok && !prev.QueuedAt.IsZero() {
+		t.QueuedAt = prev.QueuedAt
+	} else if t.QueuedAt.IsZero() {
+		t.QueuedAt = time.Now()
+	}
 	s.tasks[t.ID] = t
+	s.flushLocked()
+}
+
+// SetPaused flags or unflags a persisted task as paused on purpose, so the next
+// daemon start leaves it paused. No-op when the task is not persisted (a stream,
+// or a task whose entry is already gone).
+func (s *ActiveTaskStore) SetPaused(taskID string, paused bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.tasks[taskID]
+	if !ok || t.ResumePaused == paused {
+		return
+	}
+	t.ResumePaused = paused
+	s.tasks[taskID] = t
 	s.flushLocked()
 }
 
@@ -88,7 +113,9 @@ func (s *ActiveTaskStore) Clear() int {
 	return n
 }
 
-// Load reads the persisted tasks from disk into the store and returns them.
+// Load reads the persisted tasks from disk into the store and returns them,
+// oldest first (QueuedAt, then ID for entries written before QueuedAt existed),
+// so the boot resume queues them in a stable order instead of map order.
 // Returns nil on a missing or unreadable file (a fresh daemon has nothing to
 // resume). Safe to call once at startup before any Add/Remove.
 func (s *ActiveTaskStore) Load() []Task {
@@ -112,6 +139,12 @@ func (s *ActiveTaskStore) Load() []Task {
 	for _, t := range s.tasks {
 		out = append(out, t)
 	}
+	slices.SortFunc(out, func(a, b Task) int {
+		if c := a.QueuedAt.Compare(b.QueuedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
 	return out
 }
 
