@@ -131,9 +131,10 @@ func TestStalledTorrentsDoNotBlockTheQueue(t *testing.T) {
 		mgr.Submit(ctx, agent.Task{ID: queueTaskID(i), InfoHash: fmt.Sprintf("%040d", i), Title: "T", PreferredMethod: "torrent"})
 	}
 	waitUntil(t, "all three healthy tasks running despite 4 dead ones", func() bool { return dl.running.Load() == 3 })
-	if got := mgr.FreeSlots(); got != 2 {
-		t.Errorf("FreeSlots = %d, want 2 (3 healthy running, 4 stalled not counted)", got)
-	}
+	// The last dead task may still be on its way to YieldSlot when the third
+	// healthy one starts (macOS CI saw FreeSlots = 1 there), so wait for the
+	// slot count to settle instead of reading it once.
+	waitUntil(t, "FreeSlots = 2 (3 healthy running, 4 stalled not counted)", func() bool { return mgr.FreeSlots() == 2 })
 	for range 3 {
 		dl.release <- struct{}{}
 	}
