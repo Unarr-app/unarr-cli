@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
 	"time"
 )
@@ -237,6 +239,12 @@ func (p *Proxy) get(ctx context.Context, off int64) (*http.Response, error) {
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-", off))
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("User-Agent", userAgent)
+	var conn net.Conn
+	if p.link != nil {
+		req = req.WithContext(httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) { conn = info.Conn },
+		}))
+	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -244,7 +252,27 @@ func (p *Proxy) get(ctx context.Context, off int64) (*http.Response, error) {
 		}
 		return nil, errUpstream // url.Error would embed the signed link
 	}
+	if conn != nil {
+		resp.Body = &connBody{ReadCloser: resp.Body, conn: conn}
+	}
 	return resp, nil
+}
+
+// connBody closes the response's own connection, synchronously, when the body
+// is closed. Single-upstream only: abandoning a body mid-read otherwise leaves
+// the socket to the transport's read loop, which closes it on another
+// goroutine — so the next request could dial while the provider still sees
+// the previous connection open (a one-connection account counts both; seen on
+// macOS CI).
+type connBody struct {
+	io.ReadCloser
+	conn net.Conn
+}
+
+func (b *connBody) Close() error {
+	err := b.ReadCloser.Close()
+	_ = b.conn.Close()
+	return err
 }
 
 // accept checks the response really starts at off and pins the total size.
