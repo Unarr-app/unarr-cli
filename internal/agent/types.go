@@ -720,7 +720,7 @@ type StreamSession struct {
 	// is set, the daemon copies the video ONLY if the probed source video codec
 	// is in the list (and, for h264, only at bit depth <= 8); otherwise it
 	// transcodes. Empty = copy unconditionally (older webs). Sent by webs only to
-	// agents >= 1.15.1.
+	// agents >= 1.15.2.
 	CopyVideoCodecs []string `json:"copyVideoCodecs,omitempty"`
 	// SingleConnection marks a provider (IPTV) URL session: the account usually
 	// allows ONE connection, so the daemon must read the source through a single
