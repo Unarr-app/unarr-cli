@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **library**: read 3-4 digit episode numbers and drop {id} tags from titles
+
+### Other
+
+- **release**: 1.16.0
 ## [1.15.4] - 2026-10-05
 
 
