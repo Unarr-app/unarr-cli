@@ -73,6 +73,8 @@ type Tunnel struct {
 	bindMu  sync.Mutex
 	connsMu sync.Mutex
 	conns   map[*tunnelPacketConn]struct{}
+	// closed is set by Close: no new tunnel sockets after that.
+	closed atomic.Bool
 }
 
 // Up parses a WireGuard .conf and brings up the tunnel in userspace.
@@ -143,6 +145,8 @@ func (t *Tunnel) Close() {
 	if t == nil {
 		return
 	}
+	t.closed.Store(true)
+	t.closeSockets()
 	if in := t.swapInner(nil); in != nil && in.dev != nil {
 		in.dev.Close()
 	}
@@ -208,6 +212,9 @@ func (t *Tunnel) Reconnect(confText string) error {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.closed.Load() {
+		return errors.New("tunnel closed")
+	}
 
 	inner, endpoint, err := bringUp(confText)
 	if err != nil {
