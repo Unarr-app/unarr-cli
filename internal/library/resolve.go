@@ -9,8 +9,15 @@ import (
 
 var (
 	seasonRegex = regexp.MustCompile(`(?i)S(\d{1,2})E(\d{1,2})`)
-	seasonOnly  = regexp.MustCompile(`(?i)S(\d{1,2})(?:\b|$)`)
-	altEpRegex  = regexp.MustCompile(`(?i)(\d{1,2})x(\d{2})`)
+	// longEpisodeRegex re-reads, AT the SxxEyy seasonRegex found, an episode of
+	// up to 4 digits: long-running anime (One Piece E1071) and absolute-padded
+	// templates ("S01E0001") were cut to their first two digits (E1071 → E10).
+	// It only applies when the digit run ends there (Go's RE2 has no
+	// lookahead); otherwise — "S01E01720p", a 5-digit run — the 2-digit reading
+	// stands, exactly as before.
+	longEpisodeRegex = regexp.MustCompile(`^(?i)S(\d{1,2})E(\d{1,4})(?:\D|$)`)
+	seasonOnly       = regexp.MustCompile(`(?i)S(\d{1,2})(?:\b|$)`)
+	altEpRegex       = regexp.MustCompile(`(?i)(\d{1,2})x(\d{2})`)
 )
 
 // ResolveResolution maps video dimensions to a standard resolution label.
@@ -82,8 +89,12 @@ func DeriveContentType(item LibraryItem) string {
 
 // ParseSeasonEpisode extracts season and episode numbers from a filename.
 func ParseSeasonEpisode(filename string) (season, episode int) {
-	// S01E05
-	if m := seasonRegex.FindStringSubmatch(filename); len(m) > 2 {
+	// S01E05 (S01E1071)
+	if loc := seasonRegex.FindStringSubmatchIndex(filename); loc != nil {
+		m := longEpisodeRegex.FindStringSubmatch(filename[loc[0]:])
+		if m == nil {
+			m = []string{"", filename[loc[2]:loc[3]], filename[loc[4]:loc[5]]}
+		}
 		season = atoi(m[1])
 		episode = atoi(m[2])
 		return
@@ -146,6 +157,10 @@ func CleanTitle(filename string) string {
 
 	// Remove brackets
 	name = regexp.MustCompile(`[\[\(].*?[\]\)]`).ReplaceAllString(name, "")
+	// …and curly ones, so a media-server ID tag written by a naming template
+	// ("{imdb-tt0388629}", "{tmdb-37854}") never leaks into the title the way
+	// "[imdbid-…]" already doesn't. Separate pass: only "{" pairs with "}".
+	name = regexp.MustCompile(`\{.*?\}`).ReplaceAllString(name, "")
 
 	// Remove web domains BEFORE replacing separators (dots are still dots here)
 	name = regexp.MustCompile(`(?i)[a-z0-9]+\.(com|org|net|mx|io|to|cc|se)`).ReplaceAllString(name, "")
