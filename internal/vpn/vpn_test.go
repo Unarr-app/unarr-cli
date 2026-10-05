@@ -3,6 +3,7 @@ package vpn
 import (
 	"context"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 )
@@ -26,8 +27,15 @@ func TestTunnelDialsFailClosedWhenDown(t *testing.T) {
 	if _, err := down.DialContext(context.Background(), "tcp", "1.2.3.4:80"); err == nil {
 		t.Error("DialContext on a down tunnel must error (fail-closed)")
 	}
-	if _, err := down.ListenPacket("udp", ":0"); err == nil {
-		t.Error("ListenPacket on a down tunnel must error (fail-closed)")
+	// ListenPacket hands out a socket that survives a later Reconnect, but while
+	// the tunnel is down nothing can leave through it.
+	pc, err := down.ListenPacket("udp", ":0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	defer pc.Close()
+	if _, err := pc.WriteTo([]byte("x"), &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 80}); err == nil {
+		t.Error("a tracker socket on a down tunnel must not write (fail-closed)")
 	}
 }
 

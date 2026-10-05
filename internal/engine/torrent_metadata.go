@@ -10,10 +10,15 @@ import (
 // defaultMetadataStallAfter is how long a torrent may wait for its metadata
 // while holding a download slot. Past it, the task yields the slot (see
 // slotLease) and keeps waiting — the metadata timeout, 0 = unlimited by
-// default, still decides when it gives up. 30 min is Transmission's
-// queue-stalled-minutes default: long enough for a slow swarm to answer, short
-// enough that a dead magnet cannot hold the queue for days.
-const defaultMetadataStallAfter = 30 * time.Minute
+// default, still decides when it gives up.
+//
+// It was 30 min (Transmission's queue-stalled-minutes). PROD 2026-10-04: five
+// torrents with no metadata held all five slots for 25 min while a season of
+// debrid-cached episodes — seconds each — queued behind them. A live swarm hands
+// over metadata in a minute or two, and yielding costs the torrent nothing (it
+// keeps looking for peers and reclaims a slot when metadata lands), so 10 min
+// keeps the queue moving without giving up on a slow swarm.
+const defaultMetadataStallAfter = 10 * time.Minute
 
 var (
 	errMetadataTimeout   = errors.New("metadata timeout")

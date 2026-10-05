@@ -92,8 +92,8 @@ func TestAwaitMetadataTimeoutAndCancel(t *testing.T) {
 }
 
 func TestDefaultMetadataStallAfter(t *testing.T) {
-	if got := (&TorrentDownloader{}).metadataStallAfter(); got != 30*time.Minute {
-		t.Errorf("default stall threshold = %s, want 30m", got)
+	if got := (&TorrentDownloader{}).metadataStallAfter(); got != 10*time.Minute {
+		t.Errorf("default stall threshold = %s, want 10m", got)
 	}
 }
 

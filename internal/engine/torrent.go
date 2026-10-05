@@ -89,7 +89,7 @@ type TorrentConfig struct {
 	// on NFS/SMB volumes where file locking times out.
 	PieceCompletionDir string
 	MetadataTimeout    time.Duration // how long to wait for torrent metadata (0 = unlimited; daemon default 0, one-shot download 15m)
-	MetadataStallAfter time.Duration // waiting this long for metadata yields the download slot (0 = 30m default, <0 = never)
+	MetadataStallAfter time.Duration // waiting this long for metadata yields the download slot (0 = 10m default, <0 = never)
 	StallTimeout       time.Duration // no progress during download for this long = stall (default 10m)
 	MaxTimeout         time.Duration // absolute maximum per torrent (default 0 = unlimited)
 	MaxDownloadRate    int64         // bytes/s, 0 = unlimited

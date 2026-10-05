@@ -68,6 +68,13 @@ type Tunnel struct {
 	Endpoint string
 	// mu serializes Reconnect (the bring-up + atomic swap + close-old sequence).
 	mu sync.Mutex
+	// bindMu orders a device swap against opening a tunnel socket, and conns
+	// holds the live sockets a swap must move (see packetconn.go).
+	bindMu  sync.Mutex
+	connsMu sync.Mutex
+	conns   map[*tunnelPacketConn]struct{}
+	// closed is set by Close: no new tunnel sockets after that.
+	closed atomic.Bool
 }
 
 // Up parses a WireGuard .conf and brings up the tunnel in userspace.
@@ -133,22 +140,14 @@ func (t *Tunnel) DialContext(ctx context.Context, network, address string) (net.
 	return in.net.DialContext(ctx, network, address)
 }
 
-// ListenPacket adapts the tunnel's UDP for anacrolix TrackerListenPacket so UDP
-// tracker announces also go through the VPN (no IP leak to trackers).
-func (t *Tunnel) ListenPacket(_ string, _ string) (net.PacketConn, error) {
-	in := t.load()
-	if in == nil {
-		return nil, errors.New("vpn tunnel is down")
-	}
-	return in.net.ListenUDP(&net.UDPAddr{IP: net.IPv4zero, Port: 0})
-}
-
 // Close tears the tunnel down. Idempotent and nil-safe.
 func (t *Tunnel) Close() {
 	if t == nil {
 		return
 	}
-	if in := t.inner.Swap(nil); in != nil {
+	t.closed.Store(true)
+	t.closeSockets()
+	if in := t.swapInner(nil); in != nil && in.dev != nil {
 		in.dev.Close()
 	}
 }
@@ -213,6 +212,9 @@ func (t *Tunnel) Reconnect(confText string) error {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.closed.Load() {
+		return errors.New("tunnel closed")
+	}
 
 	inner, endpoint, err := bringUp(confText)
 	if err != nil {
@@ -221,7 +223,9 @@ func (t *Tunnel) Reconnect(confText string) error {
 	if t.Endpoint == "" {
 		t.Endpoint = endpoint
 	}
-	if old := t.inner.Swap(inner); old != nil {
+	// Tracker sockets move to the new device BEFORE the old one closes, so the
+	// long-lived torrent client's cached UDP tracker clients keep announcing.
+	if old := t.swapInner(inner); old != nil && old.dev != nil {
 		old.dev.Close()
 	}
 	return nil
