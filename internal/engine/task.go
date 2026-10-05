@@ -57,22 +57,26 @@ type Task struct {
 	Title           string
 	ContentID       *int
 	IMDbID          string
-	PreferredMethod string           // auto | torrent | debrid | usenet | iptv
-	DirectURL       string           // HTTPS download URL (debrid, etc.)
-	DirectFileName  string           // Original filename from direct URL
-	DirectFileSize  int64            // Exact provider-listed byte size of that file (0 = unknown)
-	ReleaseSize     int64            // Server-known size of the release (0 = unknown); see nzbTargetFor
-	NzbID           string           // Pre-resolved NZB ID (usenet)
-	NzbPassword     string           // Password for encrypted NZB archives
-	ReplacePath     string           // File to replace after download (upgrade mode)
-	LibraryItemID   int              // Library item being upgraded
-	ContentType     string           // "movie" | "show" — from server metadata
-	ContentTitle    string           // Clean title from TMDB
-	Season          *int             // Season number
-	Episode         *int             // Episode number
-	ContentYear     *int             // Year from TMDB (avoids regex on torrent title)
-	CollectionName  string           // Collection name (e.g., "Harry Potter Collection")
-	SourceSet       *agent.SourceSet // Versioned release sources retained for future repair/failover
+	PreferredMethod string            // auto | torrent | debrid | usenet | iptv
+	DirectURL       string            // HTTPS download URL (debrid, etc.)
+	DirectFileName  string            // Original filename from direct URL
+	DirectFileSize  int64             // Exact provider-listed byte size of that file (0 = unknown)
+	ReleaseSize     int64             // Server-known size of the release (0 = unknown); see nzbTargetFor
+	NzbID           string            // Pre-resolved NZB ID (usenet)
+	NzbPassword     string            // Password for encrypted NZB archives
+	ReplacePath     string            // File to replace after download (upgrade mode)
+	LibraryItemID   int               // Library item being upgraded
+	ContentType     string            // "movie" | "show" — from server metadata
+	ContentTitle    string            // Clean title from TMDB
+	Season          *int              // Season number
+	Episode         *int              // Episode number
+	ContentYear     *int              // Year from TMDB (avoids regex on torrent title)
+	CollectionName  string            // Collection name (e.g., "Harry Potter Collection")
+	TmdbID          int               // TMDB id (0 = unknown) — naming templates
+	TvdbID          int               // TheTVDB id, shows only (0 = unknown) — naming templates
+	EpisodeTitle    string            // Title of this task's episode — naming templates
+	EpisodeTitles   map[string]string // Season pack: episode number → title — naming templates
+	SourceSet       *agent.SourceSet  // Versioned release sources retained for future repair/failover
 	triedSourceIDs  map[string]struct{}
 
 	// Runtime state
@@ -129,6 +133,10 @@ func NewTaskFromAgent(at agent.Task) *Task {
 		Season:          at.Season,
 		Episode:         at.Episode,
 		CollectionName:  at.CollectionName,
+		TmdbID:          at.TmdbID,
+		TvdbID:          at.TvdbID,
+		EpisodeTitle:    at.EpisodeTitle,
+		EpisodeTitles:   at.EpisodeTitles,
 		SourceSet:       at.SourceSet,
 		Mode:            mode,
 		Status:          StatusClaimed,

@@ -562,6 +562,7 @@ func runDaemonStart() error {
 			MoviesDir:  cfg.Organize.MoviesDir,
 			TVShowsDir: cfg.Organize.TVShowsDir,
 			OutputDir:  cfg.Download.Dir,
+			Naming:     organizeNaming(cfg),
 		},
 	}, reporter, torrentDl, debridDl, usenetDl, iptvDl)
 

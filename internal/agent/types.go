@@ -195,6 +195,13 @@ type Task struct {
 	CollectionName  string     `json:"collectionName,omitempty"` // Collection name (e.g., "Harry Potter Collection")
 	SourceSet       *SourceSet `json:"sourceSet,omitempty"`      // Versioned release sources; flat fields stay during migration
 
+	// Naming-template metadata ({tmdbid}, {tvdbid}, {t}). All optional: an older
+	// server sends none of them and the template drops the segments using them.
+	TmdbID        int               `json:"tmdbId,omitempty"`
+	TvdbID        int               `json:"tvdbId,omitempty"`
+	EpisodeTitle  string            `json:"episodeTitle,omitempty"`  // Title of this task's episode
+	EpisodeTitles map[string]string `json:"episodeTitles,omitempty"` // Season pack: episode number → title
+
 	// FilePath is the on-disk path of the file the agent is being asked
 	// to operate on. Currently used by mode=seed_file to know which
 	// arbitrary file to wrap as a single-file torrent for browser

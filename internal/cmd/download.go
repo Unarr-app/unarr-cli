@@ -156,6 +156,7 @@ func runDownloadWithDeps(input, method string, deps downloadDeps) error {
 			MoviesDir:  cfg.Organize.MoviesDir,
 			TVShowsDir: cfg.Organize.TVShowsDir,
 			OutputDir:  outputDir,
+			Naming:     organizeNaming(cfg),
 		},
 	}, reporter, torrentDl, debridDl)
 

@@ -198,6 +198,7 @@ recovery path, and how these interact with the website.
 | `unarr scan <path>` | Scan a folder, analyze video files with ffprobe, sync quality data |
 | `unarr library clean` | Sweep download & library dirs for orphaned files (dry-run by default) |
 | `unarr library stats` | Report library health, composition & quality — read-only (`--json` for scripts) |
+| `unarr organize preview` | Show the folders/file names new downloads get with your naming layout (or try `--naming plex`, `--series-format …`) — touches nothing |
 
 ### Daemon Management
 
@@ -752,6 +753,20 @@ webdav_enabled = false
 enabled = true
 movies_dir = "~/Media/Movies"
 tv_shows_dir = "~/Media/TV Shows"
+# Folder/file layout for NEW downloads (existing files are never moved):
+#   "default"  Movie (2000)/Movie (2000).mkv · Show/Season 01/Show - S01E01.mkv
+#   "plex"     adds {imdb-tt…}, the show's year and episode titles — best for
+#              Plex, Infuse and Emby (aliases: "infuse", "emby"), keeps
+#              same-titled shows apart: One Piece (1999) {imdb-tt0388629}
+#   "jellyfin" same, with [imdbid-tt…]
+naming = "default"
+# Optional FileBot-style templates overriding the preset. Tokens: {n} title,
+# {y} year, {imdbid} {tmdbid} {tvdbid}, {collection}, {s00e00} {sxe} {s} {e}
+# {s00} {e00} {e.pad(4)}, {t} episode title, {vf} 1080p. "/" = folder,
+# <…> = dropped when a value inside is missing, other braces are literal.
+# Preview with `unarr organize preview`; restart the daemon after changing.
+# movie_format = "{n}< ({y})>< {imdb-{imdbid}}>/{n}< ({y})>< {imdb-{imdbid}}>"
+# series_format = "{n}< ({y})>< {tvdb-{tvdbid}}>/Season {s00}/{n} - {s00e00}< - {t}>"
 
 # Library-hygiene sweep — runs automatically after each auto-scan, and manually
 # via `unarr library clean`. Removes only deterministic junk; a valid video

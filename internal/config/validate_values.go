@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/naming"
 )
 
 // ValueIssues reports configured values that are outside their accepted range
@@ -20,7 +22,30 @@ func (c *Config) ValueIssues() []Issue {
 	var l issueList
 	l = append(l, c.downloadValueIssues()...)
 	l = append(l, c.libraryValueIssues()...)
+	l = append(l, c.organizeValueIssues()...)
 	l = append(l, c.miscValueIssues()...)
+	return l
+}
+
+// organizeValueIssues flags an unknown naming preset or a template that would
+// not render a safe, scannable path. organize falls back to the default layout
+// when they're invalid, so without this the setting is silently ignored.
+func (c *Config) organizeValueIssues() issueList {
+	var l issueList
+	o := c.Organize
+	if _, err := naming.Resolve(o.Naming, "", ""); err != nil {
+		l.add("organize.naming", err.Error())
+	}
+	if strings.TrimSpace(o.MovieFormat) != "" {
+		if _, err := naming.Parse(o.MovieFormat, false); err != nil {
+			l.add("organize.movie_format", err.Error())
+		}
+	}
+	if strings.TrimSpace(o.SeriesFormat) != "" {
+		if _, err := naming.Parse(o.SeriesFormat, true); err != nil {
+			l.add("organize.series_format", err.Error())
+		}
+	}
 	return l
 }
 

@@ -6,11 +6,14 @@ import (
 	"log"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/anacrolix/torrent"
 
 	"github.com/Unarr-app/unarr-cli/internal/library"
+	"github.com/Unarr-app/unarr-cli/internal/naming"
 )
 
 // Season packs: a task that names a show (or a season) but NO episode is a
@@ -174,7 +177,7 @@ func pickEpisodeVideo(files []*torrent.File, task *Task) *torrent.File {
 // fewer than two episode videos — so the caller keeps the single-video path.
 // The returned path is the season folder, or the show folder when the pack spans
 // several seasons.
-func organizeShowPack(result *Result, task *Task, showDir, showName string, cfg OrganizeConfig) (string, bool, error) {
+func organizeShowPack(result *Result, task *Task, show naming.Vars, cfg OrganizeConfig) (string, bool, error) {
 	cands, err := scanVideos(result.FilePath)
 	if err != nil {
 		return "", false, fmt.Errorf("scan pack dir: %w", err)
@@ -188,7 +191,7 @@ func organizeShowPack(result *Result, task *Task, showDir, showName string, cfg 
 	landed := map[string]bool{}
 	for _, i := range episodes {
 		src := cands[i].path
-		destDir, destName := packEpisodeDest(src, showDir, showName, wantSeason)
+		destDir, destName := packEpisodeDest(src, cfg, show, task.EpisodeTitles, wantSeason)
 		file := &Result{FilePath: src, FileName: filepath.Base(src), Method: result.Method, Size: cands[i].size}
 		finalPath, err := moveToDir(file, task, destDir, destName, cfg)
 		if err != nil {
@@ -200,30 +203,48 @@ func organizeShowPack(result *Result, task *Task, showDir, showName string, cfg 
 	// The episodes and their subs are out; what is left is samples/nfo/screens.
 	cleanupReleaseDir(result.FilePath, cfg.OutputDir)
 
-	if len(landed) == 1 {
-		for dir := range landed {
-			return dir, true, nil
-		}
+	// The season folder, or — for a pack spanning several seasons — the folder
+	// they all share (the show folder in every built-in layout).
+	dirs := make([]string, 0, len(landed))
+	for dir := range landed {
+		dirs = append(dirs, dir)
 	}
-	return showDir, true, nil
+	sort.Strings(dirs)
+	final := commonDir(dirs)
+	// A custom season-first layout ("Season {s00}/{n}/…") shares no folder
+	// below the library root. Never report the root itself as this task's
+	// path — the server matches library files under it — report the first
+	// season folder instead.
+	if !strings.HasPrefix(final, filepath.Clean(cfg.TVShowsDir)+string(filepath.Separator)) {
+		final = dirs[0]
+	}
+	return final, true, nil
 }
 
-// packEpisodeDest is where one pack episode lands: its season folder, renamed
-// "Show - SxxEyy.ext". Unnumbered files keep their own name — inventing an
-// episode number would mislabel them in the media player.
-func packEpisodeDest(src, showDir, showName string, fallbackSeason int) (dir, name string) {
+// packEpisodeDest is where one pack episode lands: its season folder, named by
+// the series template ("Show - SxxEyy.ext" by default), with the episode's title
+// from the server's per-season map when the template uses {t}. Unnumbered files
+// keep their own name — inventing an episode number would mislabel them in the
+// media player.
+func packEpisodeDest(src string, cfg OrganizeConfig, show naming.Vars, titles map[string]string, fallbackSeason int) (dir, name string) {
 	season, episode := library.ParseSeasonEpisode(filepath.Base(src))
 	if season == 0 {
 		season = fallbackSeason
 	}
-	if season <= 0 {
-		return showDir, ""
+	v := show
+	v.Season, v.Episode, v.EpisodeTitle = nil, nil, ""
+	if season > 0 {
+		v.Season = &season
+		if episode > 0 {
+			v.Episode = &episode
+			// The server's map covers the task's season only: a stray file of
+			// another season must not borrow a title from it.
+			if season == fallbackSeason {
+				v.EpisodeTitle = titles[strconv.Itoa(episode)]
+			}
+		}
 	}
-	dir = filepath.Join(showDir, fmt.Sprintf("Season %02d", season))
-	if episode > 0 {
-		name = fmt.Sprintf("%s - S%02dE%02d%s", sanitizePath(showName), season, episode, filepath.Ext(src))
-	}
-	return dir, name
+	return renderDest(cfg.scheme().Series, cfg.TVShowsDir, v, filepath.Ext(src))
 }
 
 // scanVideos lists every video file under dir, recursively: some packs keep
