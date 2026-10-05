@@ -75,6 +75,13 @@ func organize(result *Result, task *Task, cfg OrganizeConfig) (string, error) {
 			showName = cleanTitle(task.Title) // fallback
 		}
 		destDir = filepath.Join(cfg.TVShowsDir, sanitizePath(showName))
+		// A finished season pack is a directory of episodes: file each one.
+		if fi, err := os.Stat(result.FilePath); err == nil && fi.IsDir() && wantsWholePack(task) {
+			finalPath, ok, err := organizeShowPack(result, task, destDir, showName, cfg)
+			if ok || err != nil {
+				return finalPath, err
+			}
+		}
 		if task.Season != nil {
 			destDir = filepath.Join(destDir, fmt.Sprintf("Season %02d", *task.Season))
 			// Rename: "ShowName - S01E03.mkv" so media players identify it

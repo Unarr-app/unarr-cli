@@ -473,8 +473,8 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 		}
 	}
 
-	// 2. Select files to download (prefer largest video + matching subs)
-	sel := d.selectFiles(t, task.ID)
+	// 2. Select files to download (a whole season pack, else one video + its subs)
+	sel := d.selectFiles(t, task)
 	totalBytes, fileName := sel.totalBytes, sel.fileName
 
 	log.Printf("[%s] downloading %s (%s)", task.ShortID(), fileName, formatBytes(totalBytes))
@@ -978,13 +978,7 @@ func (d *TorrentDownloader) GetStreamProvider(taskID string) (FileProvider, erro
 
 	// Select largest video file
 	files := t.Files()
-	var video *torrent.File
-	for _, f := range files {
-		ext := strings.ToLower(filepath.Ext(f.DisplayPath()))
-		if VideoExts[ext] && (video == nil || f.Length() > video.Length()) {
-			video = f
-		}
-	}
+	video := largestVideo(files)
 	if video == nil {
 		// No video — use largest file
 		for _, f := range files {
@@ -1010,17 +1004,34 @@ var VideoExts = map[string]bool{
 	".mpg": true, ".mpeg": true, ".vob": true, ".flv": true,
 }
 
+// largestVideo returns the biggest file with a video extension, or nil.
+func largestVideo(files []*torrent.File) *torrent.File {
+	var video *torrent.File
+	for _, f := range files {
+		ext := strings.ToLower(filepath.Ext(f.DisplayPath()))
+		if VideoExts[ext] && (video == nil || f.Length() > video.Length()) {
+			video = f
+		}
+	}
+	return video
+}
+
 var subExts = map[string]bool{
 	".srt": true, ".ass": true, ".sub": true, ".ssa": true, ".vtt": true,
 }
 
-// selectFiles picks the largest video file + matching subtitles.
+// selectFiles picks what the task asked for out of a multi-file torrent:
+//   - a season pack, for a task naming no episode → every episode + subtitles
+//     (see selectPack);
+//   - otherwise the task's episode when the files are numbered, else the largest
+//     video — plus its matching subtitles.
+//
 // Falls back to downloading everything if no video file is found.
 // Returns what was selected: total bytes, primary file name, and the files
 // themselves (nil = everything). The file list is what lets the completion
 // guard measure against the SELECTION rather than the whole torrent — see
 // selection.missingBytes.
-func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) selection {
+func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, task *Task) selection {
 	files := t.Files()
 
 	if len(files) <= 1 {
@@ -1028,13 +1039,15 @@ func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) selec
 		return selection{totalBytes: t.Length(), fileName: t.Name()}
 	}
 
-	// Find largest video file
-	var video *torrent.File
-	for _, f := range files {
-		ext := strings.ToLower(filepath.Ext(f.DisplayPath()))
-		if VideoExts[ext] && (video == nil || f.Length() > video.Length()) {
-			video = f
+	if wantsWholePack(task) {
+		if sel, ok := selectPack(t, files, task); ok {
+			return sel
 		}
+	}
+
+	video := pickEpisodeVideo(files, task)
+	if video == nil {
+		video = largestVideo(files)
 	}
 
 	if video == nil {
@@ -1069,7 +1082,7 @@ func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) selec
 	skipped := len(files) - 1 - subCount
 	if skipped > 0 {
 		log.Printf("[%s] selected: %s (%s) + %d subs, skipped %d files",
-			agent.ShortID(taskID), filepath.Base(fileName), formatBytes(video.Length()), subCount, skipped)
+			task.ShortID(), filepath.Base(fileName), formatBytes(video.Length()), subCount, skipped)
 	}
 
 	return selection{totalBytes: totalBytes, fileName: fileName, files: selected}
