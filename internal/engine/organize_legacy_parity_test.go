@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -123,6 +124,21 @@ func TestDefaultNamingPackMatchesLegacyLayout(t *testing.T) {
 	}
 }
 
+// hasWindowsTrailingDotOrSpace reports whether any component of path below
+// root ends in "." or " " — a name Win32 path normalisation can't create.
+func hasWindowsTrailingDotOrSpace(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	for _, c := range strings.Split(rel, string(filepath.Separator)) {
+		if strings.HasSuffix(c, ".") || strings.HasSuffix(c, " ") {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDefaultNamingMatchesLegacyLayout(t *testing.T) {
 	long := strings.Repeat("Long Title ", 22) // 242 bytes: fits a name, must not be cut
 	type tc struct {
@@ -188,6 +204,12 @@ func TestDefaultNamingMatchesLegacyLayout(t *testing.T) {
 				file = c.file
 			}
 			want := filepath.Join(dir, file)
+			if runtime.GOOS == "windows" && hasWindowsTrailingDotOrSpace(want, root) {
+				// Win32 strips a trailing dot/space from a path component, so the
+				// legacy name can't exist there (the old code failed the same way).
+				// Linux and macOS still pin the byte-identical layout.
+				t.Skipf("legacy path %q is not representable on Windows", want)
+			}
 
 			got, err := organize(result, task, cfg)
 			if err != nil {
