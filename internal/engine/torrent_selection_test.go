@@ -137,7 +137,7 @@ func TestSelectionMissingBytesAgainstARealTorrent(t *testing.T) {
 	defer closeClient()
 
 	d := &TorrentDownloader{}
-	sel := d.selectFiles(tor, "selection-test")
+	sel := d.selectFiles(tor, &Task{ID: "selection-test"})
 
 	if len(sel.files) == 0 {
 		t.Fatal("selectFiles picked nothing — the rest of this test would prove nothing")
@@ -199,7 +199,7 @@ func TestSelectionCompletedBytesIsNotTorrentWide(t *testing.T) {
 	defer closeClient()
 
 	d := &TorrentDownloader{}
-	sel := d.selectFiles(tor, "completion-scale")
+	sel := d.selectFiles(tor, &Task{ID: "completion-scale"})
 
 	// The old exit test would already have fired here.
 	if tor.BytesCompleted() < sel.totalBytes {
@@ -256,7 +256,7 @@ func TestSelectionMissingBytesGuardsSingleFileTorrents(t *testing.T) {
 	defer closeClient()
 
 	d := &TorrentDownloader{}
-	sel := d.selectFiles(tor, "single-file")
+	sel := d.selectFiles(tor, &Task{ID: "single-file"})
 	if sel.files != nil {
 		t.Fatalf("a single-file torrent must take the DownloadAll path, got %d selected files", len(sel.files))
 	}
@@ -304,7 +304,7 @@ func TestSelectionMissingBytesCatchesATruncatedSelectedFile(t *testing.T) {
 	defer closeClient()
 
 	d := &TorrentDownloader{}
-	sel := d.selectFiles(tor, "selection-test-damaged")
+	sel := d.selectFiles(tor, &Task{ID: "selection-test-damaged"})
 
 	if got := sel.missingBytes(tor); got != 2*pieceLen {
 		t.Fatalf("selection.missingBytes = %d, want %d (the two corrupted video pieces)", got, 2*pieceLen)
