@@ -132,8 +132,7 @@ remaining system-extension approval requirement.
 On 2026-10-07, regression fixes were verified against the integrated main baseline
 with synthetic loopback HTTP/NNTP and temporary catalogs. They cover command
 validation, receive ceilings, progress/cancellation, strict framing, partial
-revision recovery and stable collision names. See the [protocol fixes report](docs/reviews/remote-mount-protocol-fixes-2026-10-07.md)
-for actual failing probes and subsequent validation. The September performance
+revision recovery and stable collision names. The September performance
 figures above were not remeasured for these changes.
 
 On 2026-09-20, the Windows 11 VM passed the real kernel mount test after automatic
