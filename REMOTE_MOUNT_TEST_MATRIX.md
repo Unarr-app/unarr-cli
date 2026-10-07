@@ -100,3 +100,66 @@ the actual Mac mini.
   supported OS release, all historical driver versions, or managed-device policy.
 - WAN/provider end-to-end behavior and Zurg comparisons remain outside this
   setup matrix; see REMOTE_MOUNT_PERFORMANCE.md for measured data-path results.
+
+## October 7 native feature acceptance harness
+
+The September setup evidence above is preserved. The new opt-in acceptance
+harness exercises the production fake-account → catalog → DAV → ranged CDN
+path, using six deterministic 2 MiB files and exclusively synthetic identities.
+Final native results are recorded separately in
+`docs/reviews/remote-mount-native-validation-2026-10-07.md`; preparing or compiling
+these tests does not establish a native PASS.
+
+- `TestMountNativeKernelIO`: exact names/sizes, spaces/XML/apostrophe/percent/hash/
+  accents/CJK, seek/tail/EOF, eight independent handles, six mutation denials,
+  unchanged file bytes, bounded teardown and remount of the same destination.
+- `TestMountNativeKernelCancelBlockedRead`: actual mounted read stalled at a
+  synthetic CDN, cancellation propagated upstream, listener/process cleanup and
+  a fresh readable mount at the same destination.
+- `TestMountNativeDAVRecovery` and actual CLI `mount serve --config` subprocesses:
+  expired signed URL renewal, short CDN loss/recovery, cancellation, fake free/
+  trial/expired/revoked rejection, normal 30s entitlement watcher, and a fresh
+  allowed identity. These client response fixtures do not prove website billing
+  policy or provider/WAN behavior.
+- Native Windows config Save/Load/Validate preserves a bare drive destination;
+  optional persistent activation uses the disposable user's actual default
+  config/task, then terminal exit, daemon restart and umount. The runner guards,
+  renames and restores earlier account directories intact, with identity/ACL
+  verification; an existing task/process or unsafe rollback is a failure.
+- Linux's actual persistent CLI fixture uses a private Ubuntu/systemd user
+  manager and cgroup2 namespace, with the host unit preserved. Both Linux and
+  Windows persistent cases save a replacement synthetic key, expire old URLs,
+  require fresh accepted resolution and exact mounted bytes within 25s, and
+  retain the same daemon PID. Windows additionally requires a limited token and
+  unchanged firewall-rule fingerprints. Ambient auth/config overrides are
+  rejected by name before CLI subprocesses execute.
+- Both persistent fixtures cover disabled config intent with live mount
+  resources, then actual umount, and a second ordinary enabled-intent cycle.
+  Mount/DAV/rclone must disappear and the ordinary service must become healthy;
+  explicit umount may restart it. The unchanged-PID invariant applies to renewal.
+- Windows and Mac runners execute existing loopback NNTP cancellation/socket
+  recovery, bounded BODY/reply receive and valid complete yEnc decoding tests
+  in native package executables from the same candidate SHA.
+- Mac controller fixtures and foreground CLI/DAV are independent of kernel
+  mounting. Kernel and persistent mounted acceptance remain SKIP while genuine
+  macFUSE approval is pending. No installer, policy change or reboot is implied.
+
+Linux example (use the exact-SHA CLI artifact and prepared official rclone):
+
+```sh
+GOMAXPROCS=2 GOFLAGS=-p=2 UNARR_NATIVE_ACCEPTANCE=1 UNARR_NATIVE_KERNEL=1 \
+  UNARR_NATIVE_CLI=/absolute/task-artifacts/unarr \
+  UNARR_NATIVE_RCLONE=/absolute/task-artifacts/rclone \
+  go test -v -count=1 -timeout=5m ./internal/cmd -run '^TestMountNative'
+```
+
+Windows uses `test/windows/remote-mount-native.ps1` with fresh task/SHA artifact
+paths; deploy the script with UTF-8 BOM and CRLF, execute binaries from its local
+guest directory, quote Go flags and decode UTF-16 result files. The existing VM,
+disk volume/share and older staged binaries/results are preserved. Mac uses
+`test/macos/remote-mount-native.sh`; its adjacent document specifies native build,
+driver approval and controller-versus-mount evidence boundaries.
+Private Linux persistence uses `test/linux/remote-mount-native.sh` and its adjacent
+setup/isolation document; it does not operate the host's existing service. All
+tests are disabled by default. `TestNativePrepareRclone` authorizes only the existing
+official checksum verifier and cannot install or activate a driver.
