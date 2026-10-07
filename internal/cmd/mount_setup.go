@@ -123,7 +123,16 @@ func runMountCommand(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	cfg.Mount.Directory = directory
-	if err := savePreparedMount(ctx, cfg, ensureMountDependencies); err != nil {
+	if err := savePreparedMount(ctx, cfg, func(ctx context.Context) (string, error) {
+		binary, err := ensureMountDependencies(ctx)
+		if err != nil {
+			return "", err
+		}
+		if err := guardMountSystemdPolicy(cfg); err != nil {
+			return "", err
+		}
+		return binary, nil
+	}); err != nil {
 		return err
 	}
 	if err := ensurePersistentMountService(); err != nil {
@@ -185,6 +194,11 @@ func runUmountCommand(_ *cobra.Command, _ []string) error {
 	installed, active, err := umountServiceState()
 	if err != nil {
 		return err
+	}
+	if installed && active {
+		if err := guardMountSystemdPolicy(cfg); err != nil {
+			return err
+		}
 	}
 	if cfg.Mount.Enabled {
 		cfg.Mount.Enabled = false

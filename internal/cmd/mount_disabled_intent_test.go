@@ -11,7 +11,6 @@ import (
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
-	"github.com/Unarr-app/unarr-cli/internal/service"
 )
 
 // The installed service previously read Enabled=true. Saving false does not
@@ -34,15 +33,13 @@ func TestUmountReconcilesSavedIntentWithService(t *testing.T) {
 func verifyUmountSavedIntent(t *testing.T, enabled bool, state string) {
 	t.Helper()
 	cfg := isolatedMountConfig(t)
+	cfg.Mount.Directory = t.TempDir()
 	saveMountFixture(t, cfg) // The service's previous mounted configuration.
-	unit := service.UnitPath()
-	if err := os.MkdirAll(filepath.Dir(unit), 0o700); err != nil {
+	data, err := resolveServiceData()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(unit, []byte("synthetic installed service"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	bin := t.TempDir()
+	writeKnownSystemdPolicyUnit(t, data, false)
 	calls := filepath.Join(t.TempDir(), "calls")
 	live := filepath.Join(t.TempDir(), "synthetic-dav-and-rclone")
 	if state == "active" {
@@ -53,16 +50,7 @@ func verifyUmountSavedIntent(t *testing.T, enabled bool, state string) {
 	t.Setenv("MOUNT_TEST_SERVICE_CALLS", calls)
 	t.Setenv("MOUNT_TEST_SERVICE_STATE", state)
 	t.Setenv("MOUNT_TEST_LIVE_RESOURCES", live)
-	t.Setenv("PATH", bin)
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MOUNT_TEST_SERVICE_CALLS\"\n" +
-		"case \"$*\" in\n" +
-		"'--user is-active unarr')\n" +
-		"  if [ \"$MOUNT_TEST_SERVICE_STATE\" = active ]; then echo active; else echo inactive; exit 3; fi;;\n" +
-		"'--user restart unarr') /bin/rm -f \"$MOUNT_TEST_LIVE_RESOURCES\";;\n" +
-		"*) exit 41;;\nesac\n"
-	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	installSystemdPolicySpy(t, data, calls)
 	if state == "parked" {
 		if err := os.WriteFile(parkedMarkerPath(), []byte("parked"), 0o600); err != nil {
 			t.Fatal(err)

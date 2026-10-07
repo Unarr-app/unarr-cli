@@ -232,6 +232,9 @@ func startWindowsDaemon() (started bool, err error) {
 }
 
 func runDaemonSvcStop() error {
+	if _, err := guardDefaultSystemdMountPolicy(); err != nil {
+		return err
+	}
 	fmt.Println()
 	// A deliberate stop outranks an earlier park: the next sign-in must not
 	// start what the user just stopped (service_park.go).
@@ -262,6 +265,9 @@ func runDaemonSvcStop() error {
 func runDaemonSvcRestart() error {
 	switch runtime.GOOS {
 	case "linux":
+		if _, err := guardDefaultSystemdMountPolicy(); err != nil {
+			return err
+		}
 		fmt.Println()
 		if err := svcExec("systemctl", "--user", "restart", "unarr"); err != nil {
 			return fmt.Errorf("restart service: %w", err)

@@ -28,6 +28,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+KillMode=mixed
 ExecStart={{.BinPath}} start
 Restart=always
 RestartSec=10
@@ -422,6 +423,10 @@ func installLaunchdWithAgent(data serviceData, green *color.Color, a *launchdAge
 
 func runDaemonUninstall() error {
 	home, _ := os.UserHomeDir()
+	strictMountStop, err := guardDefaultSystemdMountPolicy()
+	if err != nil {
+		return err
+	}
 
 	bold := color.New(color.Bold)
 	green := color.New(color.FgGreen)
@@ -436,7 +441,15 @@ func runDaemonUninstall() error {
 	case "linux":
 		stopCmd := exec.Command("systemctl", "--user", "stop", "unarr")
 		winproc.HideWindow(stopCmd)
-		stopCmd.Run()
+		stopErr := stopCmd.Run()
+		if strictMountStop && stopErr != nil {
+			return fmt.Errorf("stop remote mount service before uninstall: %w", stopErr)
+		}
+		if stopErr == nil {
+			if err := removeOwnedSystemdMountPolicy(home); err != nil {
+				return err
+			}
+		}
 		disableCmd := exec.Command("systemctl", "--user", "disable", "unarr")
 		winproc.HideWindow(disableCmd)
 		disableCmd.Run()
