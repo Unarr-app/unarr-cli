@@ -15,7 +15,9 @@ There is no separate local provider configuration or encryption key file.
 
 1. Connect your Real-Debrid, AllDebrid, TorBox or Torrin account in the existing
    Unarr web settings. Configure Usenet there too if you want direct NZB access.
-2. Run `unarr mount`. On first use, enable the optional feature. Missing/expired
+2. Run `unarr init` to configure the normal agent, including its download
+   directory and registered device identity. Then run `unarr mount`. On first
+   use, enable the optional feature. Missing/expired
    device authentication opens the existing browser sign-in flow; a valid
    session is reused.
 3. unarr checks paid access, reuses compatible dependencies and downloads a
@@ -24,17 +26,42 @@ There is no separate local provider configuration or encryption key file.
    needed and any system password, approval or restart, then asks permission.
 4. The default folder is `~/unarr-media` on Linux/macOS; Windows chooses a free
    drive letter. A custom destination is `unarr mount /path/to/remote-media`.
-   The command installs or restarts the normal agent service, which keeps the
-   folder mounted after the terminal closes and restores it after login/reboot.
+   The command saves the enabled intention after validation and dependency
+   setup, then requests installation or restart of the normal agent service.
+   Its success message confirms configuration and that activation was requested;
+   check the folder and agent logs to confirm actual mount readiness. The agent
+   owns the mount after the terminal closes and retries after login/reboot.
    Run `unarr umount` (or `unarr unmount`) to disable it. `unarr config mount`
    remains available for advanced local settings.
 
 On Windows, use an unused drive letter (`unarr mount X:`) or a nonexistent
 directory below an existing parent. Linux/macOS create a missing directory and
-reject nonempty destinations. Existing files are never replaced.
+reject nonempty destinations. Bare ASCII drives `A:` through `Z:` are accepted;
+occupied drives and drive-relative paths such as `X:media` are rejected.
+Existing files are never replaced.
 The agent starts a loopback WebDAV service and rclone. They share the agent's
 lifecycle and are retried after transient failure. Stopping the whole agent also
 stops the mount; starting it again restores an enabled mount.
+
+Persistent `mount` and `umount` use the one default agent service and its default
+config: `~/.config/unarr/config.toml` on Linux,
+`~/Library/Application Support/unarr/config.toml` on macOS, and
+`%APPDATA%/unarr/config.toml` on Windows. A different `--config`,
+`UNARR_CONFIG_DIR`, shell-only `UNARR_API_KEY`, `UNARR_API_URL`,
+`UNARR_DOWNLOAD_DIR`, `UNARR_COUNTRY`, `UNARR_TELEMETRY`, or Linux
+`XDG_CONFIG_HOME`/`XDG_DATA_HOME` override is refused before authentication,
+configuration writes or service operations. Save these settings in the default
+file instead. `mount serve --config /path/to/config.toml` remains available for
+an independently managed process. `umount` preserves stopped and parked service
+intent; it requests a restart only for a running installed service.
+
+Each running mount uses an immutable snapshot of the agent's current key and
+identity. A minted key, revocation or replacement sign-in cancels and joins the
+old DAV, catalog, readers and rclone before starting another session. The agent
+also checks saved identity changes every five seconds while mounting. Removing
+the identity stops mounting until a new identity is available. Daemon exits
+cancel and wait for mount cleanup with a fifteen-second bound; rclone is given
+five seconds to exit before being terminated.
 
 Dependency preparation never runs while disabled. The normal daemon may validate
 or reuse the private rclone binary, but noninteractive sessions cannot approve
@@ -132,6 +159,14 @@ another mirror. Missing files in a direct NZB do not hide healthy siblings;
 partial manifests are retried on later refreshes while retaining known entries.
 The cache defaults to `remote-library/` beside the selected config, honoring
 `--config`. It contains metadata and signed references, not media or API keys.
+
+Mount metadata requests give each mirror attempt three seconds, leaving time
+for a healthy mirror inside the ten-second access watchdog. 403/410 denials
+are terminal. Library pages keep the `entries`/`next` envelope and
+`path`/`key`/`size`/`reference` entry fields; `next` is an opaque signed cursor,
+including when a single release spans pages. The serialized response limit is
+1048576 bytes inclusive; larger responses fail explicitly without including
+their body in the error.
 
 Stat, HEAD, directory listings and seek bookkeeping do not contact the CDN or
 NNTP provider. WebDAV listings have a generation-aware cache bounded to 16 MiB

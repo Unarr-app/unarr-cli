@@ -33,10 +33,7 @@ func configMount(cfg *config.Config) error {
 		return err
 	}
 	if m.Enabled {
-		if _, err := prepareMountDependencies(ctx, cfg); err != nil {
-			return err
-		}
-		fmt.Println("Ready. Run unarr mount to use the default folder, or unarr mount <directory> to choose one.")
+		fmt.Println("Settings prepared. Run unarr mount to validate the destination, set up dependencies and request background activation.")
 	}
 	cfg.Mount = m
 	return nil

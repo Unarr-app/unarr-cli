@@ -1,8 +1,8 @@
 package config
 
 import (
-	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -11,12 +11,10 @@ func TestMountDefaultsAndRoundTrip(t *testing.T) {
 		t.Fatal("mount enabled by default")
 	}
 	f := filepath.Join(t.TempDir(), "config.toml")
-	text := `[mount]
-enabled = true
-directory = "/tmp/unarr-media"
-refresh_interval = "30s"
-`
-	if err := os.WriteFile(f, []byte(text), 0o600); err != nil {
+	initial := Default()
+	directory := filepath.Join(t.TempDir(), "unarr-media")
+	initial.Mount = MountConfig{Enabled: true, Directory: directory, RefreshInterval: "30s"}
+	if err := Save(initial, f); err != nil {
 		t.Fatal(err)
 	}
 	c, err := Load(f)
@@ -39,8 +37,25 @@ refresh_interval = "30s"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Mount.RefreshInterval != "30s" || got.Mount.Directory != "/tmp/unarr-media" {
+	if got.Mount.RefreshInterval != "30s" || got.Mount.Directory != directory {
 		t.Fatal("lost mount settings")
+	}
+}
+
+func TestMountWindowsDriveGrammar(t *testing.T) {
+	for _, dir := range []string{"A:", "Z:", "a:", "z:"} {
+		if !IsWindowsMountDrive(dir) {
+			t.Fatal("bare drive rejected", dir)
+		}
+		m := MountConfig{Enabled: true, Directory: dir}
+		if (m.Validate() == nil) != (runtime.GOOS == "windows") {
+			t.Fatal("platform drive validation mismatch", dir)
+		}
+	}
+	for _, dir := range []string{"X:media", "X:.", "1:", "é:", "[:", "X:\\media", ""} {
+		if IsWindowsMountDrive(dir) {
+			t.Fatal("invalid bare drive accepted", dir)
+		}
 	}
 }
 

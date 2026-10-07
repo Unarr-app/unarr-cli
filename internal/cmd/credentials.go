@@ -30,13 +30,36 @@ type credentialStore struct {
 	mu      sync.Mutex
 	key     string
 	agentID string
+	changed chan struct{}
 	// path is where the credential is persisted. Captured once: the same file
 	// the daemon booted from, whatever --config or UNARR_CONFIG_DIR resolved to.
 	path string
 }
 
 func newCredentialStore(cfg config.Config, path string) *credentialStore {
-	return &credentialStore{key: cfg.Auth.APIKey, agentID: cfg.Agent.ID, path: path}
+	return &credentialStore{key: cfg.Auth.APIKey, agentID: cfg.Agent.ID, path: path, changed: make(chan struct{})}
+}
+
+// A snapshot binds all mount resources to one immutable identity.
+type credentialIdentity struct {
+	key, agentID string
+	changed      <-chan struct{}
+}
+
+func (s *credentialStore) identity() credentialIdentity {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return credentialIdentity{s.key, s.agentID, s.changed}
+}
+
+func (s *credentialStore) setIdentityLocked(key, agentID string) bool {
+	if key == s.key && agentID == s.agentID {
+		return false
+	}
+	s.key, s.agentID = key, agentID
+	close(s.changed)
+	s.changed = make(chan struct{})
+	return true
 }
 
 // apiKey returns the credential currently in force.
@@ -58,8 +81,8 @@ func (s *credentialStore) agent() string {
 // replacing the general/legacy key the daemon registered with.
 func (s *credentialStore) adoptKey(newKey string) {
 	s.mu.Lock()
-	s.key = newKey
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	s.setIdentityLocked(newKey, s.agentID)
 	s.persist(func(c *config.Config) { c.Auth.APIKey = newKey })
 }
 
@@ -67,10 +90,9 @@ func (s *credentialStore) adoptKey(newKey string) {
 // a fresh identity instead of re-offering one that will never be accepted again.
 func (s *credentialStore) wipe() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	revoked := s.agentID
-	s.key = ""
-	s.agentID = ""
-	s.mu.Unlock()
+	s.setIdentityLocked("", "")
 	s.persist(func(c *config.Config) {
 		c.Auth.APIKey = ""
 		c.Agent.ID = ""
@@ -89,26 +111,49 @@ func (s *credentialStore) wipe() {
 // re-registering with the tombstoned id would be refused no matter how good the
 // new key is.
 func (s *credentialStore) reload() (key, agentID string, changed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previousKey, previousID := s.key, s.agentID
+	if !s.refreshIdentityLocked() {
+		return "", "", false
+	}
+	return s.key, s.agentID, previousKey != s.key || previousID != s.agentID
+}
+
+func (s *credentialStore) refreshIdentityLocked() bool {
 	fresh, err := config.Load(s.path)
 	if err != nil {
 		log.Printf("[agent] could not re-read %s: %v", s.path, err)
-		return "", "", false
+		return false
 	}
 	fresh.ApplyEnvOverrides()
-	if fresh.Auth.APIKey == "" {
-		return "", "", false
-	}
+	s.setIdentityLocked(fresh.Auth.APIKey, fresh.Agent.ID)
+	return true
+}
 
+// A response from an older request must not mint over or revoke a newer login,
+// including a login saved just before the background poll notices it.
+func (s *credentialStore) adoptKeyForIdentity(key, id, minted string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if fresh.Auth.APIKey == s.key && fresh.Agent.ID == s.agentID {
-		return s.key, s.agentID, false
+	if !s.refreshIdentityLocked() || s.key != key || s.agentID != id {
+		return false
 	}
-	s.key = fresh.Auth.APIKey
-	if fresh.Agent.ID != "" {
-		s.agentID = fresh.Agent.ID
+	s.setIdentityLocked(minted, id)
+	s.persist(func(c *config.Config) { c.Auth.APIKey = minted })
+	return true
+}
+
+func (s *credentialStore) wipeForIdentity(key, id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.refreshIdentityLocked() || s.key != key || s.agentID != id {
+		return false
 	}
-	return s.key, s.agentID, true
+	s.setIdentityLocked("", "")
+	s.persist(func(c *config.Config) { c.Auth.APIKey, c.Agent.ID = "", "" })
+	writeRevokedMarker(id)
+	return true
 }
 
 // persist applies a change to the config file. It re-reads the file first

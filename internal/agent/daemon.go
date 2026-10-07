@@ -81,6 +81,10 @@ type Daemon struct {
 	// persists it so the next start authenticates with the bound agent key —
 	// migrating legacy agents and stopping the per-restart re-mint.
 	OnAgentKeyMinted func(newKey string)
+	// Identity-aware callbacks reject replies belonging to an older sign-in.
+	OnAgentKeyMintedForIdentity     func(key, agentID, newKey string) bool
+	OnCredentialRejectedForIdentity func(key, agentID string) bool
+	CredentialChanges               func() <-chan struct{}
 	// OnBlocked fires once when a terminal failure parks the daemon, so cmd can
 	// tell the user on a channel they will actually see (a desktop notification
 	// — the daemon usually runs as a service where stdout goes nowhere).
@@ -177,7 +181,12 @@ func (d *Daemon) Client() *Client { return d.client }
 // SetAgentID adopts the identity a fresh sign-in minted, so a daemon parked on
 // a revoked agent re-registers as the new machine rather than the tombstoned
 // one. Only called while parked, before the sync loop exists.
-func (d *Daemon) SetAgentID(id string) { d.cfg.AgentID = id }
+func (d *Daemon) SetAgentID(id string) {
+	d.cfg.AgentID = id
+	if d.sync != nil {
+		d.sync.cfg.AgentID = id
+	}
+}
 
 // SetVPNState + vpnSnapshot — the managed-VPN split-tunnel / P2P kill-switch state
 // accessors — live in daemon_vpn.go to keep this file within the size budget.
@@ -302,7 +311,7 @@ func (d *Daemon) ApplyReloadedConfig(allowDelete bool, methodOrder []string) {
 
 // Register registers the agent and fetches user info + features.
 // Retries with exponential backoff on transient errors (429, 5xx, network).
-func (d *Daemon) Register(ctx context.Context) error { return d.register(ctx, true) }
+func (d *Daemon) Register(ctx context.Context) error { return d.registerCurrentIdentity(ctx, true) }
 
 // RegisterBestEffort registers WITHOUT parking on a terminal failure.
 //
@@ -313,7 +322,9 @@ func (d *Daemon) Register(ctx context.Context) error { return d.register(ctx, tr
 // before the recovery callbacks are set, so it could neither be stopped nor
 // ever recover. Parking belongs to the one call that owns the daemon's
 // lifetime: Register, from Run.
-func (d *Daemon) RegisterBestEffort(ctx context.Context) error { return d.register(ctx, false) }
+func (d *Daemon) RegisterBestEffort(ctx context.Context) error {
+	return d.registerCurrentIdentity(ctx, false)
+}
 
 func (d *Daemon) register(ctx context.Context, park bool) error {
 	vpnActive, vpnRequired, vpnMode, vpnServer := d.vpnSnapshot()
@@ -368,6 +379,9 @@ func (d *Daemon) register(ctx context.Context, park bool) error {
 	var err error
 	for attempt := range maxRetries {
 		resp, err = d.client.Register(ctx, req)
+		if requestIdentityChanged(ctx) {
+			return ErrIdentityChanged
+		}
 		if err == nil {
 			break
 		}
@@ -405,18 +419,20 @@ func (d *Daemon) register(ctx context.Context, park bool) error {
 	if err != nil {
 		return fmt.Errorf("register: %w (after %d retries)", err, maxRetries)
 	}
+	if requestIdentityChanged(ctx) {
+		return ErrIdentityChanged
+	}
 
 	// Registration succeeded, so whatever the user was blocked on is resolved.
 	// Clearing it here — rather than where each block is fixed — means a stale
 	// block can never outlive the problem: a user who signs in again must not
 	// still be told to sign in.
-	ClearBlocked()
-
 	// Registered with a general/legacy key → the server minted a per-machine key.
 	// Persist it (cmd wires the callback) so the next start uses the bound key.
-	if resp.AgentKey != "" && d.OnAgentKeyMinted != nil {
-		d.OnAgentKeyMinted(resp.AgentKey)
+	if err := d.adoptRegistrationKey(resp); err != nil {
+		return err
 	}
+	ClearBlocked()
 
 	d.User = resp.User
 	d.Features = resp.Features
@@ -466,10 +482,13 @@ func (d *Daemon) register(ctx context.Context, park bool) error {
 func (d *Daemon) Run(ctx context.Context) error {
 	for {
 		err := d.runOnce(ctx)
-		if !errors.Is(err, ErrRevoked) {
+		if ctx.Err() != nil {
 			return err
 		}
-		log.Printf("[agent] credential revoked mid-run - back to registration")
+		if !errors.Is(err, ErrRevoked) && !errors.Is(err, ErrIdentityChanged) {
+			return err
+		}
+		log.Printf("[agent] %v - back to registration", err)
 	}
 }
 

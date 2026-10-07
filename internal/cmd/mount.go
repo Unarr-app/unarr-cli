@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -62,6 +63,7 @@ type remoteLibrary struct {
 	cancel              context.CancelFunc
 	done                chan struct{}
 	errors              chan error
+	workers             sync.WaitGroup
 }
 
 func remoteSources(cfg config.Config, nzbDir string) []remotefs.Source {
@@ -118,12 +120,22 @@ func startRemoteLibrary(parent context.Context, cfg config.Config) (*remoteLibra
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	s := &remoteLibrary{URL: "http://" + ln.Addr().String(), user: user, password: pass, server: srv, catalog: cat, ctx: ctx, cancel: cancel, done: make(chan struct{}), errors: make(chan error, 1)}
-	go watchMountAccess(ctx, api.MountAccess, 30*time.Second, s.revokeAccess)
+	s.workers.Add(3)
+	go func() {
+		defer s.workers.Done()
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	go func() {
+		defer s.workers.Done()
+		watchMountAccess(ctx, api.MountAccess, 30*time.Second, s.revokeAccess)
+	}()
 	go func() {
 		defer close(s.done)
 		cat.Run(ctx, cfg.Mount.RefreshEvery(), logMountRefresh)
 	}()
 	go func() {
+		defer s.workers.Done()
 		err := srv.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.errors <- err
@@ -147,6 +159,7 @@ func (s *remoteLibrary) Close() {
 		_ = s.server.Close()
 	}
 	<-s.done
+	s.workers.Wait()
 	_ = s.catalog.Close()
 }
 

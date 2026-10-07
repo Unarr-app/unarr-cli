@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -57,14 +58,25 @@ func (m MountConfig) Validate() error {
 			return fmt.Errorf("mount.refresh_interval must be at least 10s")
 		}
 	}
+	return m.validatePaths()
+}
+
+func (m MountConfig) validatePaths() error {
 	if m.CacheDir != "" && !filepath.IsAbs(m.CacheDir) {
 		return fmt.Errorf("mount.cache_dir must be absolute")
 	}
-	if m.Directory != "" && !filepath.IsAbs(m.Directory) {
+	if m.Directory != "" && !filepath.IsAbs(m.Directory) && !(runtime.GOOS == "windows" && IsWindowsMountDrive(m.Directory)) {
 		return fmt.Errorf("mount.directory must be absolute")
 	}
 	if m.NZBDir != "" && !filepath.IsAbs(m.NZBDir) {
 		return fmt.Errorf("mount.nzb_dir must be absolute")
 	}
 	return nil
+}
+
+// IsWindowsMountDrive accepts only a bare ASCII drive letter. A drive-relative
+// path such as X:media must never be expanded using the process working directory.
+func IsWindowsMountDrive(directory string) bool {
+	return len(directory) == 2 && directory[1] == ':' &&
+		((directory[0] >= 'A' && directory[0] <= 'Z') || (directory[0] >= 'a' && directory[0] <= 'z'))
 }

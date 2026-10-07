@@ -110,7 +110,9 @@ type SyncClient struct {
 	// was revoked (the user deleted the agent from the dashboard). The daemon
 	// wires this to wipe the stored key. Run returns ErrRevoked right after, so
 	// the loop must NOT keep retrying a sync the server will reject forever.
-	OnRevoked func(err error)
+	OnRevoked            func(err error)
+	OnRevokedForIdentity func(err error, key, agentID string)
+	CredentialChanges    func() <-chan struct{}
 
 	// SyncNow triggers an immediate sync (e.g., on task completion).
 	SyncNow chan struct{}
@@ -188,6 +190,12 @@ var ErrRevoked = errors.New("agent credential revoked")
 // Run starts the adaptive sync loop. Blocks until ctx is cancelled, or until
 // the server revokes this agent (ErrRevoked).
 func (sc *SyncClient) Run(ctx context.Context) error {
+	var changes <-chan struct{}
+	if sc.CredentialChanges != nil {
+		changes = sc.CredentialChanges()
+	}
+	ctx, finishIdentity := credentialLifetime(ctx, changes)
+	defer finishIdentity()
 	// Own context for the downlink so that a revocation stops it along with
 	// the loop: an SSE stream reconnecting every two seconds with a dead key is
 	// the same server-side noise this early return exists to end.
@@ -201,7 +209,9 @@ func (sc *SyncClient) Run(ctx context.Context) error {
 
 	// Start the realtime downlink in background — pushes immediate syncs +
 	// typed control commands on demand (SSE-first, long-poll fallback).
-	go sc.runDownlink(ctx)
+	downlinkDone := make(chan struct{})
+	go func() { defer close(downlinkDone); sc.runDownlink(ctx) }()
+	defer func() { stop(); <-downlinkDone }()
 
 	// Initial sync immediately
 	if sc.doSync(ctx); sc.revoked.Load() {
@@ -214,6 +224,9 @@ func (sc *SyncClient) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			if identityChanged(changes) {
+				return ErrIdentityChanged
+			}
 			// Final sync to report latest state
 			finalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -248,7 +261,12 @@ func (sc *SyncClient) doSync(ctx context.Context) {
 		defer sc.OnSyncAttempt()
 	}
 	req := sc.buildRequest()
+	key := sc.client.currentKey()
+	ctx = credentialRequestContext(ctx, key)
 	resp, err := sc.client.Sync(ctx, req)
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			// Credential revoked (agent deleted from the dashboard) → stop; don't
@@ -258,7 +276,9 @@ func (sc *SyncClient) doSync(ctx context.Context) {
 			// tells the user — doing it here too would mean two notifications
 			// for one event.
 			if IsRevoked(err) {
-				if sc.OnRevoked != nil {
+				if sc.OnRevokedForIdentity != nil {
+					sc.OnRevokedForIdentity(err, key, req.AgentID)
+				} else if sc.OnRevoked != nil {
 					sc.OnRevoked(err)
 				}
 				sc.revoked.Store(true)

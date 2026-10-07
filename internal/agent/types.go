@@ -135,7 +135,9 @@ type RegisterRequest struct {
 
 // RegisterResponse is returned by the server after registration.
 type RegisterResponse struct {
-	Success bool `json:"success"`
+	// Local request provenance; never serialized or sent back to the web.
+	credentialKey, agentID string
+	Success                bool `json:"success"`
 	// AgentKey is a freshly-minted per-machine API key, present only when the
 	// CLI registered with the user's general key (manual-paste bootstrap). The
 	// CLI must persist it and authenticate with it from then on, discarding the

@@ -1083,12 +1083,19 @@ and independent of the existing WebDAV export of downloaded files. Enable
 the mount with `unarr mount` and connect providers on the Unarr website. unarr
 prepares rclone automatically, explains missing filesystem drivers before asking
 permission to install them, and creates a default mount folder. The normal agent
-service then keeps the folder active after the command exits and restores it
-automatically after login or reboot. Use `unarr umount` to disable it,
+service owns the mount after the command exits and retries it after transient
+failure or login/reboot. Run `unarr init` first to configure the normal agent.
+The command confirms saved settings and an activation request; check the folder
+and agent logs to verify it is mounted. Use `unarr umount` to disable it,
 `unarr config mount` for advanced local settings, or `unarr mount <directory>`
 to choose a destination. On the website, **Add to local Usenet folder** sends
 only the selected NZB to the agent's managed inbox; manual NZB copies remain
 supported.
+
+Persistent `mount`/`umount` use the single default agent configuration; custom
+`--config` and shell-only overrides are refused before login or service changes.
+Use `unarr mount serve --config /path/to/config.toml` for a separately managed
+WebDAV process. Disabling the mount leaves an intentionally stopped agent stopped.
 
 See [setup, configuration and limitations](REMOTE_MOUNT.md) and the
 [performance report](REMOTE_MOUNT_PERFORMANCE.md).

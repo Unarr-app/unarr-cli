@@ -46,7 +46,13 @@ provider clients, while keeping its durable metadata catalog on the device.
   bound retries, coalesce URL renewal, and propagate cancellation.
 - CLI `mount serve` and `mount <directory>` plus configuration documentation.
   Reuse rclone's OS integration and VFS caching rather than adding a second FUSE
-  implementation. The explicit command owns its processes and shutdown.
+  implementation. Persistent activation uses the single default agent service;
+  alternate config or shell-only overrides are rejected before side effects.
+  Validate the initialized agent and final mount settings before saving enabled
+  intention. Report configuration/activation requests without claiming readiness.
+  The daemon owns joined mount sessions using current immutable credential
+  snapshots; changing or removing identity cancels old resources before retry.
+  `mount serve --config` remains the separately managed WebDAV path.
 
 ## Verification
 

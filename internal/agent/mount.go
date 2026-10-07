@@ -10,7 +10,7 @@ func (c *Client) MountAccess(ctx context.Context) error {
 	var out struct {
 		Allowed bool `json:"allowed"`
 	}
-	if err := c.doGet(ctx, "/api/internal/agent/mount/access", &out); err != nil {
+	if err := c.doGetWith(ctx, c.mountClient, "/api/internal/agent/mount/access", &out); err != nil {
 		return err
 	}
 	if !out.Allowed {
@@ -21,7 +21,7 @@ func (c *Client) MountAccess(ctx context.Context) error {
 
 func (c *Client) MountUsenetCredentials(ctx context.Context) (*UsenetCredentials, error) {
 	var out UsenetCredentials
-	if err := c.doGet(ctx, "/api/internal/agent/mount/usenet-credentials", &out); err != nil {
+	if err := c.doGetWith(ctx, c.mountClient, "/api/internal/agent/mount/usenet-credentials", &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -46,19 +46,19 @@ func (c *Client) MountAccounts(ctx context.Context) ([]MountAccount, error) {
 	var out struct {
 		Accounts []MountAccount `json:"accounts"`
 	}
-	err := c.doGet(ctx, "/api/internal/agent/mount/accounts", &out)
+	err := c.doGetWith(ctx, c.mountClient, "/api/internal/agent/mount/accounts", &out)
 	return out.Accounts, err
 }
 func (c *Client) MountLibrary(ctx context.Context, provider, revision, cursor string) (MountPage, error) {
 	var out MountPage
 	q := url.Values{"provider": {provider}, "revision": {revision}, "cursor": {cursor}}
-	err := c.doGet(ctx, "/api/internal/agent/mount/library?"+q.Encode(), &out)
+	err := c.doGetWith(ctx, c.mountClient, "/api/internal/agent/mount/library?"+q.Encode(), &out)
 	return out, err
 }
 func (c *Client) MountResolve(ctx context.Context, reference string) (string, error) {
 	var out struct {
 		URL string `json:"url"`
 	}
-	err := c.doPost(ctx, "/api/internal/agent/mount/resolve", map[string]string{"reference": reference}, &out)
+	err := c.doPostWith(ctx, c.mountClient, "/api/internal/agent/mount/resolve", map[string]string{"reference": reference}, &out)
 	return out.URL, err
 }

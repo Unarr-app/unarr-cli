@@ -7,22 +7,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
 func validateMountPoint(directory string) (string, error) {
-	if runtime.GOOS == "windows" && len(directory) == 2 && directory[1] == ':' {
-		letter := strings.ToUpper(directory[:1])
-		if letter >= "A" && letter <= "Z" {
-			return letter + ":", nil
-		}
-		return "", errors.New("invalid drive letter")
+	if runtime.GOOS == "windows" {
+		return windowsMountPoint(directory)
 	}
 	dir, err := filepath.Abs(directory)
 	if err != nil {
 		return "", err
-	}
-	if runtime.GOOS == "windows" {
-		return windowsMountDirectory(dir)
 	}
 	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() {
@@ -36,6 +31,27 @@ func validateMountPoint(directory string) (string, error) {
 		return "", errors.New("mount point must be empty")
 	}
 	return dir, nil
+}
+
+func windowsMountPoint(directory string) (string, error) {
+	if config.IsWindowsMountDrive(directory) {
+		return unusedWindowsDrive(strings.ToUpper(directory))
+	}
+	if len(directory) >= 2 && directory[1] == ':' && !filepath.IsAbs(directory) {
+		return "", errors.New("mount point must be an unused drive letter or an absolute directory, not a drive-relative path")
+	}
+	dir, err := filepath.Abs(directory)
+	if err != nil {
+		return "", err
+	}
+	return windowsMountDirectory(dir)
+}
+
+func unusedWindowsDrive(drive string) (string, error) {
+	if _, err := os.Stat(drive + `\`); !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("drive %s is occupied or unavailable; choose an unused drive letter", drive)
+	}
+	return drive, nil
 }
 
 func windowsMountDirectory(dir string) (string, error) {

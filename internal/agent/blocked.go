@@ -205,8 +205,8 @@ func (d *Daemon) waitOutBlock(ctx context.Context, b *Blocked, req RegisterReque
 	// never be accepted again, so it is wiped here as it always was. Parking
 	// afterwards is still right — the retry is what picks up the key a fresh
 	// sign-in mints, turning a dead end into a recovery.
-	if b.Reason == BlockRevoked && d.OnCredentialRejected != nil {
-		d.OnCredentialRejected()
+	if b.Reason == BlockRevoked && !d.rejectCredentialForIdentity(req.AgentID) {
+		return nil, ErrIdentityChanged
 	}
 	// Told once. A user who is blocked does not need the same popup every
 	// minute; the tray carries the state from here on.
@@ -257,6 +257,16 @@ func (d *Daemon) waitOutBlock(ctx context.Context, b *Blocked, req RegisterReque
 		}
 		log.Printf("[agent] blocked (%s); last attempt failed differently: %v", b.Reason, err)
 	}
+}
+
+func (d *Daemon) rejectCredentialForIdentity(id string) bool {
+	if d.OnCredentialRejectedForIdentity != nil {
+		return d.OnCredentialRejectedForIdentity(d.client.currentKey(), id)
+	}
+	if d.OnCredentialRejected != nil {
+		d.OnCredentialRejected()
+	}
+	return true
 }
 
 // Classify maps an error from the server to a terminal failure, or reports that
