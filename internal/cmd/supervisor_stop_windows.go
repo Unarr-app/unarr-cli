@@ -19,15 +19,15 @@ import (
 // daemon keeps running. Measured on real Windows, and now a recurring window
 // rather than a rare one, because the shim relaunches on every crash.
 //
-// Ending the task cuts the whole tree the task owns — wscript.exe running the
-// shim, the cmd.exe wrapper, and unarr.exe underneath it — without consulting
-// the state file at all. That is the property that makes stop reliable: it does
-// not depend on our bookkeeping being accurate.
+// Ending the task stops the launcher without consulting the state file. Real
+// Windows runs show unarr.exe can survive as a grandchild; its stop-intent
+// watcher drains the daemon and owned children, then releases the instance
+// lock that the stopper waits for. /end alone does not acknowledge cleanup.
 //
 // Best-effort by design. A foreground `unarr start` has no task, an agent that
 // was never installed as a service has no task, and `schtasks` reports an error
-// for both — none of which is a failure of "stop". The PID path still runs
-// afterwards and covers exactly those cases.
+// for both — none of which is a failure of "stop". The instance-lock wait still
+// runs afterwards and covers foreground and not-yet-registered daemons.
 //
 // Pairs with the stop-intent marker: the marker is written first, so even if a
 // relaunch is already in flight it sees "stopped on purpose" and stands down.

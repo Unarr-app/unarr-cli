@@ -4,12 +4,8 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"strconv"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
-	"github.com/Unarr-app/unarr-cli/internal/winproc"
 	"github.com/fatih/color"
 )
 
@@ -30,16 +26,8 @@ func sendReloadSignal() error {
 	return nil
 }
 
-// killPID stops the daemon process on Windows using taskkill.
-func killPID(pid int) error {
-	cmd := exec.Command("taskkill", "/pid", strconv.Itoa(pid), "/f")
-	winproc.HideWindow(cmd)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("stop daemon (PID %d): %w", pid, err)
-	}
-	color.New(color.FgGreen).Printf("  ✓ Daemon stopped (PID %d)\n", pid)
-	fmt.Println()
-	return nil
+// Keep the platform signature used by the Unix stop branch, but never signal
+// a Windows PID from a state file. Intent and supervisor shutdown come first.
+func killPID(_ int) error {
+	return stopDaemonByPID()
 }

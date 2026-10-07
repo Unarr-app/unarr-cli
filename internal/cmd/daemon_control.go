@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -275,10 +276,18 @@ func runDaemonSvcRestart() error {
 		return runDaemonSvcStart()
 	default:
 		fmt.Println("  Stopping...")
-		_ = runDaemonSvcStop()
-		fmt.Println("  Starting...")
-		return runDaemonSvcStart()
+		return restartAfterStop(runDaemonSvcStop, func() error {
+			fmt.Println("  Starting...")
+			return runDaemonSvcStart()
+		})
 	}
+}
+
+func restartAfterStop(stop, start func() error) error {
+	if err := stop(); err != nil && !errors.Is(err, agent.ErrDaemonNotRunning) {
+		return err
+	}
+	return start()
 }
 
 func runDaemonSvcStatus() error {

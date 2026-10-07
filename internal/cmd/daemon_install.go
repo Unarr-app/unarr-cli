@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -464,34 +465,13 @@ func runDaemonUninstall() error {
 		green.Printf("  ✓ Removed %s\n", path)
 
 	case "windows":
-		// Stop the running process if any. Mark the stop as deliberate first, so
-		// the launcher shim does not report a failure the (still-present) task
-		// would act on in the window before /delete lands — and reap the state
-		// file after, so the tray does not read the uninstall as a crash and mail
-		// a report for it.
-		if state := agent.ReadState(); state != nil {
-			agent.WriteStopIntent()
-			killCmd := exec.Command("taskkill", "/pid", strconv.Itoa(state.PID), "/f")
-			winproc.HideWindow(killCmd)
-			killCmd.Run()
-			reapStateAfterExit(state.PID)
+		// Even absent/stale state can hide a starting daemon. Retain intent and
+		// the shim if cooperative shutdown cannot acknowledge its cleanup.
+		agent.WriteStopIntent()
+		stopSupervisor()
+		if err := stopDaemonByLock(removeStoppedWindowsTask); err != nil {
+			return err
 		}
-		delCmd := exec.Command("schtasks", "/delete", "/tn", "unarr", "/f")
-		winproc.HideWindow(delCmd)
-		out, err := delCmd.CombinedOutput()
-		if err != nil && !strings.Contains(string(out), "cannot find") {
-			return fmt.Errorf("remove scheduled task: %w\n%s", err, strings.TrimSpace(string(out)))
-		}
-		// Drop the launcher shim the task pointed at, and the stop-intent marker
-		// only it reads. Best-effort: a missing file (never installed, or already
-		// cleaned) is not an uninstall failure. Removed only after the task is
-		// gone, so the shim still sees the marker while it is deciding its exit
-		// code.
-		os.Remove(filepath.Join(config.DataDir(), launcherVBSName))
-		os.Remove(agent.StopIntentPath())
-		// Leave nothing of ours behind in the firewall. Best-effort by design:
-		// the rules may never have been created (non-elevated install).
-		removeWindowsFirewallRules()
 		green.Println("  ✓ Scheduled task removed")
 
 	default:
@@ -499,6 +479,24 @@ func runDaemonUninstall() error {
 	}
 
 	fmt.Println()
+	return nil
+}
+
+func removeStoppedWindowsTask(ctx context.Context) error {
+	delCmd := exec.CommandContext(ctx, "schtasks", "/delete", "/tn", "unarr", "/f")
+	winproc.HideWindow(delCmd)
+	out, err := delCmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return fmt.Errorf("remove scheduled task: %w", ctx.Err())
+	}
+	if err != nil && !strings.Contains(string(out), "cannot find") {
+		return fmt.Errorf("remove scheduled task: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	// The task is gone and the acknowledged daemon no longer owns the lock.
+	// Missing files are fine for a repeated uninstall.
+	os.Remove(filepath.Join(config.DataDir(), launcherVBSName))
+	os.Remove(agent.StopIntentPath())
+	removeWindowsFirewallRules()
 	return nil
 }
 
