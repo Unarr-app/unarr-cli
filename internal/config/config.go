@@ -12,6 +12,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/Unarr-app/unarr-cli/internal/logging"
+	"github.com/Unarr-app/unarr-cli/internal/naming"
 )
 
 // Config holds all persistent CLI configuration.
@@ -259,6 +260,20 @@ type OrganizeConfig struct {
 	Enabled    bool   `toml:"enabled"`
 	MoviesDir  string `toml:"movies_dir"`
 	TVShowsDir string `toml:"tv_shows_dir"`
+	// Naming picks the folder/file layout new downloads are filed under:
+	// "default" (Title (Year) · Show/Season 01/Show - S01E01), "plex" (also
+	// infuse/emby: adds {imdb-tt…}, show year, episode titles) or "jellyfin"
+	// ([imdbid-tt…]). MovieFormat / SeriesFormat, when set, override the
+	// preset's template — see `unarr organize preview` and internal/naming.
+	// Only new downloads are affected; existing files are never moved.
+	Naming       string `toml:"naming"`
+	MovieFormat  string `toml:"movie_format"`
+	SeriesFormat string `toml:"series_format"`
+}
+
+// NamingScheme parses the configured naming preset + format overrides.
+func (o OrganizeConfig) NamingScheme() (naming.Scheme, error) {
+	return naming.Resolve(o.Naming, o.MovieFormat, o.SeriesFormat)
 }
 
 type DaemonConfig struct {
@@ -646,6 +661,7 @@ func Default() Config {
 		},
 		Organize: OrganizeConfig{
 			Enabled: true,
+			Naming:  naming.DefaultPreset,
 		},
 		Notifications: NotificationsConfig{
 			Enabled: true,

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -45,12 +46,19 @@ type UsenetDownloader struct {
 	nzbCacheMu sync.RWMutex
 
 	minFreeBytes int64 // disk reserve for the pre-flight space check (0 = reserve disabled)
+
+	preferredQuality string // config downloads.preferred_quality, the resolution to aim for when the title has none
 }
 
 // SetMinFreeBytes sets the free-space reserve enforced before a download starts.
 // Call once at construction; 0 disables the reserve (the size-vs-free check still
 // runs). See CheckDiskSpace.
 func (u *UsenetDownloader) SetMinFreeBytes(n int64) { u.minFreeBytes = n }
+
+// SetPreferredQuality sets the resolution an NZB search aims for when the task
+// title does not state one ("2160p", "1080p", "720p"; anything else = none).
+// Call once at construction.
+func (u *UsenetDownloader) SetPreferredQuality(q string) { u.preferredQuality = normalizeResolution(q) }
 
 // NewUsenetDownloader creates a usenet downloader.
 // apiClient is used to call the web API for NZB search, download, and credentials.
@@ -95,6 +103,9 @@ func (u *UsenetDownloader) Available(ctx context.Context, task *Task) (bool, err
 
 	// Search NZB indexers
 	result, err := u.searchBestNzb(ctx, task)
+	if errors.Is(err, ErrNoMatchingNzb) {
+		return false, err // the reason reaches the task's error (see resolveMethod)
+	}
 	if err != nil {
 		return false, nil // search failure = not available (don't error out)
 	}
@@ -140,27 +151,21 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 
 	// Step 2: Download NZB file (or use cached version for resume)
 	resumeDir := filepath.Join(config.DataDir(), "resume")
-	nzbCachePath := filepath.Join(resumeDir, task.ID+".nzb")
-
-	nzbData, err := os.ReadFile(nzbCachePath)
+	nzbData, fromCache, err := u.loadOrFetchNzb(dlCtx, shortID, resumeDir, task.ID, nzbID)
 	if err != nil {
-		// Not cached — download from server
-		nzbData, err = u.apiClient.DownloadNzb(dlCtx, nzbID)
-		if err != nil {
-			return nil, fmt.Errorf("download NZB: %w", err)
-		}
-		// Cache for future resume (best-effort — download still works without cache)
-		if mkErr := os.MkdirAll(resumeDir, 0o755); mkErr != nil {
-			log.Printf("[%s] resume dir create failed: %v", shortID, mkErr)
-		} else if wErr := os.WriteFile(nzbCachePath, nzbData, 0o644); wErr != nil {
-			log.Printf("[%s] NZB cache write failed: %v", shortID, wErr)
-		}
-	} else {
-		log.Printf("[%s] using cached NZB", shortID)
+		return nil, err
 	}
 
 	// Step 3: Parse NZB
 	nzbFile, err := nzb.ParseBytes(nzbData)
+	if err != nil && fromCache {
+		log.Printf("[%s] cached NZB unreadable (%v) - fetching it again", shortID, err)
+		dropNzbCache(resumeDir, task.ID)
+		if nzbData, _, err = u.loadOrFetchNzb(dlCtx, shortID, resumeDir, task.ID, nzbID); err != nil {
+			return nil, err
+		}
+		nzbFile, err = nzb.ParseBytes(nzbData)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("parse NZB: %w", err)
 	}
@@ -220,8 +225,11 @@ func (u *UsenetDownloader) Download(ctx context.Context, task *Task, outputDir s
 	log.Printf("[%s] NNTP: %s", shortID, nntpClient.Status())
 
 	// Step 5: Create download directory for this task
-	taskDir := filepath.Join(outputDir, sanitizeDir(task.Title))
+	taskDir := usenetTaskDir(outputDir, task.Title, shortID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		if isNameClash(err, outputDir) {
+			return nil, fmt.Errorf("create usenet folder %s: %w", taskDir, err)
+		}
 		// Download folder gone/read-only/unmounted — a StorageError (retry once,
 		// then pause with a storage message), not a transport failure.
 		return nil, storageErr("mkdir_failed", outputDir, "could not create download folder %s — is your drive/NAS connected and writable? (%v)", taskDir, err)
@@ -480,11 +488,15 @@ func (u *UsenetDownloader) Shutdown(_ context.Context) error {
 
 func (u *UsenetDownloader) searchBestNzb(ctx context.Context, task *Task) (*agent.NzbSearchResult, error) {
 	params := agent.NzbSearchParams{
-		Limit: 10,
+		Limit: nzbSearchLimit,
 	}
 
 	if task.IMDbID != "" {
 		params.IMDbID = task.IMDbID
+		// An episode's IMDb id is usually the SHOW's: without these the search
+		// returns the whole series, and the size rule would pick a season pack.
+		params.Season = task.Season
+		params.Episode = task.Episode
 	} else {
 		params.Query = task.Title
 	}
@@ -494,21 +506,13 @@ func (u *UsenetDownloader) searchBestNzb(ctx context.Context, task *Task) (*agen
 		return nil, err
 	}
 
-	if len(resp.Results) == 0 {
-		return nil, nil
+	target := nzbTargetFor(task, u.preferredQuality)
+	best := pickNzb(resp.Results, target)
+	if best == nil && len(resp.Results) > 0 {
+		err := fmt.Errorf("%w: %d found, none is %s", ErrNoMatchingNzb, len(resp.Results), target)
+		log.Printf("[%s] usenet: %v - not using usenet", task.ShortID(), err)
+		return nil, err
 	}
-
-	// Pick best match: prefer largest size (likely best quality), then most grabs
-	best := &resp.Results[0]
-	for i := 1; i < len(resp.Results); i++ {
-		r := &resp.Results[i]
-		if r.Size > best.Size {
-			best = r
-		} else if r.Size == best.Size && r.Grabs > best.Grabs {
-			best = r
-		}
-	}
-
 	return best, nil
 }
 

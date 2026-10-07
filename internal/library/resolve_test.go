@@ -97,6 +97,19 @@ func TestParseSeasonEpisode(t *testing.T) {
 		{"Show.S01.Complete.mkv", 1, 0},
 		{"Inception.2010.1080p.mkv", 0, 0},
 		{"s3e7.mkv", 3, 7},
+		// Long-running anime and absolute-padded templates: 3-4 digit episodes
+		// must not be cut to their first two digits (E1071 was read as E10).
+		{"One Piece (1999) - S01E1071 - Luffy's Dream.mkv", 1, 1071},
+		{"One Piece (1999) - S01E0001 - I'm Luffy!.mkv", 1, 1},
+		{"Show.S21E892.1080p.mkv", 21, 892},
+		{"Show.S01E01E02.mkv", 1, 1},
+		{"Show S01E05", 1, 5},
+		{"Show.S01E0102.mkv", 1, 102}, // 4-digit padded episode 102, not E01+E02
+		// A run that doesn't end within 4 digits keeps the old 2-digit reading
+		// rather than becoming a movie or jumping to a later marker.
+		{"Show.S01E01720p.mkv", 1, 1},
+		{"Show.S01E12345.mkv", 1, 12},
+		{"Show.S01E99999.S02E03.mkv", 1, 99},
 	}
 
 	for _, tt := range tests {
@@ -147,6 +160,12 @@ func TestCleanTitle(t *testing.T) {
 		{"The.Matrix.1999.2160p.UHD.BluRay.REMUX.mkv", "The Matrix"},
 		{"Movie [YTS.MX].mp4", "Movie"},
 		{"Greenland 4Kremux2160.pctfenix.com.mkv", "Greenland"},
+		// Media-server ID tags written by naming templates never reach the title.
+		{"One Piece - The Movie (2000) {imdb-tt0814243}.mkv", "One Piece The Movie"},
+		{"Dune (2021) {tmdb-438631}.mkv", "Dune"},
+		{"Dune (2021) [imdbid-tt1160419].mkv", "Dune"},
+		// Braces pair only with braces: a stray "}" never closes a "(".
+		{"Weird (Thing} 2010.mkv", "Weird (Thing}"},
 	}
 
 	for _, tt := range tests {

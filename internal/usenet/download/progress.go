@@ -460,6 +460,7 @@ func (p *ProgressTracker) Remove() {
 	p.mu.Unlock()
 	os.Remove(p.progressPath())
 	os.Remove(p.nzbPath())
+	os.Remove(p.nzbPath() + ".id") // which NZB the cache holds, see engine.loadOrFetchNzb
 	os.Remove(p.progressPath() + ".tmp")
 }
 

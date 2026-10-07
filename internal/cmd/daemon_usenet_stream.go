@@ -198,11 +198,17 @@ func handleUsenetStreamSession(sess agent.StreamSession, d usenetStreamDeps) {
 		Fallback: func(reason string) { d.fallbackUsenetToDownload(sess, reason) },
 	}
 
-	// Placeholder cancel so a duplicate sync during setup is deduped by has().
+	// The setup's cancel is the placeholder registered for the session: a
+	// duplicate sync during setup is deduped by has(), and a web close aborts the
+	// NNTP work instead of letting it finish and serve a session nobody watches.
 	// Overwritten by the real (handle-closing) cancel once a transport is wired.
-	playerSessionRegistry.add(sess.SessionID, func() {})
+	// Setup state is not retained by the handle (readers use their own ctx), so
+	// the setup ctx is released once setup returns.
+	setupCtx, setupCancel := context.WithCancel(d.ctx)
+	playerSessionRegistry.add(sess.SessionID, setupCancel)
 	go func() {
-		mode := d.usenetDl.HandleStreamSession(d.ctx, req, d.streamSrv, d.cfg.Download.UsenetStreaming, hooks)
+		defer setupCancel()
+		mode := d.usenetDl.HandleStreamSession(setupCtx, req, d.streamSrv, d.cfg.Download.UsenetStreaming, hooks)
 		if mode == engine.UsenetStreamNone {
 			// Fallback already logged, reported, and (when actionable) queued the
 			// batch download. Drop the placeholder so a later real download task
@@ -214,14 +220,20 @@ func handleUsenetStreamSession(sess agent.StreamSession, d usenetStreamDeps) {
 
 // serveUsenetDirect wires the streamable release's provider onto /stream for
 // direct play (HTTP Range, no ffmpeg) and reports the session ready. The
-// registered cancel unregisters the /usenet source (handle.Close) and clears the
-// served file on session end / daemon drain.
+// registered cancel always unregisters the /usenet source (handle.Close) and
+// clears the served file while it is still this session's, on session end / web
+// close / daemon drain. A session the web closed during setup is never served.
 func (d usenetStreamDeps) serveUsenetDirect(sess agent.StreamSession, h *engine.UsenetStreamHandle) {
-	d.streamSrv.SetFile(h.Provider, sess.TaskID)
-	playerSessionRegistry.add(sess.SessionID, func() {
-		h.Close()
-		d.streamSrv.ClearFile()
-	})
+	release := sync.OnceFunc(h.Close)
+	if sessionClosedByWeb(sess.SessionID) {
+		release()
+		playerSessionRegistry.remove(sess.SessionID)
+		return
+	}
+	gen := d.streamSrv.SetFile(h.Provider, sess.TaskID)
+	if !serveSlotSession(d.streamSrv, sess.SessionID, gen, release) {
+		return
+	}
 	log.Printf("[usenet-stream %s] direct-play: %s", agent.ShortID(sess.SessionID), h.VideoName)
 	d.markReady(sess.SessionID)
 }
@@ -231,6 +243,12 @@ func (d usenetStreamDeps) serveUsenetDirect(sess agent.StreamSession, h *engine.
 // reader's cheap random-access Seek). The cache is keyed by info_hash so a
 // re-play hits the segment cache even though the loopback token rotates.
 func (d usenetStreamDeps) serveUsenetHLS(sess agent.StreamSession, h *engine.UsenetStreamHandle) {
+	if sessionClosedByWeb(sess.SessionID) {
+		// Closed by web during setup: release the source, never start ffmpeg.
+		h.Close()
+		playerSessionRegistry.remove(sess.SessionID)
+		return
+	}
 	tcRuntime := buildTranscodeRuntime(d.ctx, d.cfg)
 	if tcRuntime.FFmpegPath == "" || tcRuntime.FFprobePath == "" {
 		// No ffmpeg → can't remux a tail-index container. Unregister the source and
@@ -243,12 +261,14 @@ func (d usenetStreamDeps) serveUsenetHLS(sess agent.StreamSession, h *engine.Use
 	// Wrap the HLS cancel so the /usenet source is unregistered when the session
 	// ends (startHLS stores THIS cancel in the registry, replacing the placeholder).
 	hlsCtx, baseCancel := context.WithCancel(d.ctx)
-	hlsCancel := func() { baseCancel(); h.Close() }
+	closeHandle := sync.OnceFunc(h.Close)
+	hlsCancel := func() { baseCancel(); closeHandle() }
 	d.startHLS(engine.HLSSessionConfig{
 		SessionID:         sess.SessionID,
 		SourceURL:         h.LoopbackURL,
-		CacheID:           sess.InfoHash,
+		CacheID:           usenetStreamCacheID(sess),
 		VideoCopy:         sess.VideoCopy,
+		CopyVideoCodecs:   sess.CopyVideoCodecs,
 		FileName:          h.VideoName,
 		Quality:           sess.Quality,
 		AudioIndex:        sess.AudioIndex,
@@ -268,6 +288,13 @@ func (d usenetStreamDeps) serveUsenetHLS(sess agent.StreamSession, h *engine.Use
 // degraded with a clear message, never silently broken.
 func (d usenetStreamDeps) fallbackUsenetToDownload(sess agent.StreamSession, reason string) {
 	sid := agent.ShortID(sess.SessionID)
+	if sessionClosedByWeb(sess.SessionID) {
+		// The web closed the session (its close also aborted the setup, which is
+		// usually why we are here): nobody is waiting, so neither report a failure
+		// nor queue a download the user walked away from.
+		log.Printf("[usenet-stream %s] closed by web during setup - no fallback", sid)
+		return
+	}
 	d.failSession(sess.SessionID, sessErrNotStreamable,
 		fmt.Sprintf("usenet not streamable (%s) — downloading, retry playback shortly", reason))
 
@@ -350,11 +377,10 @@ func handleUsenetStreamTask(streamCtx, daemonCtx context.Context, at agent.Task,
 		PlayMethod:  "direct",
 	}
 
-	served := false
+	var servedGen uint64
 	hooks := engine.UsenetStreamHooks{
 		Direct: func(h *engine.UsenetStreamHandle) {
-			served = true
-			srv.SetFile(h.Provider, at.ID)
+			servedGen = srv.SetFile(h.Provider, at.ID)
 			task.FileName = h.VideoName
 			task.TotalBytes = h.VideoSize
 
@@ -414,11 +440,13 @@ func handleUsenetStreamTask(streamCtx, daemonCtx context.Context, at agent.Task,
 	// Fallback (feature off / not streamable / setup fault); the HLS hook is
 	// deliberately unwired and never reached.
 	mode := usenetDl.HandleStreamSession(streamCtx, req, srv, cfg.Download.UsenetStreaming, hooks)
-	if mode == engine.UsenetStreamDirect && served {
-		// Serve until the web stops the stream (or the daemon drains), then send the
-		// final (completed) status and untrack. The caller's deferred registry
-		// cleanup clears the served file.
+	if mode == engine.UsenetStreamDirect && servedGen != 0 {
+		// Serve until the web stops the stream (or the daemon drains), then clear
+		// the served file (only while it is still ours — a newer stream or player
+		// session may own /stream by now), send the final (completed) status and
+		// untrack.
 		<-streamCtx.Done()
+		srv.ClearFileIf(servedGen)
 		log.Printf("[%s] stream (usenet) stopped", agent.ShortID(at.ID))
 		reporter.ReportFinal(context.Background(), task)
 		return

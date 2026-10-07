@@ -57,6 +57,35 @@ var streamRegistry = struct {
 	cancels: make(map[string]context.CancelFunc),
 }
 
+// taskStreamGens remembers the /stream file generation a task-mode stream with no
+// owning goroutine installed (the "stream" control action, a disk stream
+// request), so stopping that task clears only the file IT put there — never a
+// browser player session carrying the same TaskID, nor a newer stream.
+var taskStreamGens = struct {
+	mu   sync.Mutex
+	gens map[string]uint64
+}{gens: make(map[string]uint64)}
+
+// setTaskStreamGen records the generation SetFile returned for taskID.
+func setTaskStreamGen(taskID string, gen uint64) {
+	taskStreamGens.mu.Lock()
+	taskStreamGens.gens[taskID] = gen
+	taskStreamGens.mu.Unlock()
+}
+
+// clearTaskStream clears /stream if it still serves the file taskID's stream
+// installed (see taskStreamGens). A task-goroutine stream (handleStreamTask)
+// clears its own file when its ctx ends; this covers the goroutine-less ones.
+func clearTaskStream(srv *engine.StreamServer, taskID string) {
+	taskStreamGens.mu.Lock()
+	gen, ok := taskStreamGens.gens[taskID]
+	delete(taskStreamGens.gens, taskID)
+	taskStreamGens.mu.Unlock()
+	if ok {
+		srv.ClearFileIf(gen)
+	}
+}
+
 // cancelAllStreamContexts cancels EVERY active stream goroutine (download engines,
 // watch reporters, streamability probes, …). This is a nuke — use it ONLY at
 // daemon shutdown, where tearing everything down is the intent. For displacing or
@@ -153,7 +182,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 
 	// NOTE: we deliberately do NOT cancel prior stream goroutines here. The
 	// persistent StreamServer is last-writer-wins (SetFile replaces the file;
-	// the deferred ClearFile is guarded by CurrentTaskID), so a displaced prior
+	// the deferred clear is guarded by the file generation), so a displaced prior
 	// goroutine simply parks on its own ctx until the 30m idle guard reaps it —
 	// cheap. Cancelling them at entry would abort an in-flight debrid HEAD of a
 	// concurrently-starting task (size resolution), failing that stream.
@@ -162,13 +191,17 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	streamRegistry.mu.Lock()
 	streamRegistry.cancels[at.ID] = cancel
 	streamRegistry.mu.Unlock()
+	// servedGen is the /stream generation THIS goroutine installed (0 = none).
+	var servedGen uint64
 	defer func() {
 		streamRegistry.mu.Lock()
 		delete(streamRegistry.cancels, at.ID)
 		streamRegistry.mu.Unlock()
-		// Clear file from persistent server if we're still the current task
-		if srv.CurrentTaskID() == at.ID {
-			srv.ClearFile()
+		// Clear the file only while it is still the one we installed: matching on
+		// the task id would also cut a browser player session (or a disk stream)
+		// that serves the same task since.
+		if servedGen != 0 {
+			srv.ClearFileIf(servedGen)
 		}
 	}()
 
@@ -187,6 +220,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	// as a batch download; sharing reporter.Track/ReportFinal on one id would
 	// collide), so it returns before the torrent-oriented tracking below.
 	if isUsenetStreamTask(at) {
+		// Clears its own served file (by generation) when serving ends.
 		handleUsenetStreamTask(ctx, parentCtx, at, task, reporter, cfg, agentClient, usenetDl, manager, srv)
 		return
 	}
@@ -221,7 +255,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 			task.Transition(engine.StatusFailed)
 			return
 		}
-		srv.SetFile(provider, at.ID)
+		servedGen = srv.SetFile(provider, at.ID)
 		task.SetFileName(provider.FileName())
 		task.SetTotalBytes(provider.FileSize())
 		task.SetStreamURL(srv.URLsJSON())
@@ -286,7 +320,7 @@ func handleStreamTask(parentCtx context.Context, at agent.Task, reporter *engine
 	}
 
 	// 4. Set file on the persistent stream server (instant, no port binding)
-	srv.SetFile(eng, at.ID)
+	servedGen = srv.SetFile(eng, at.ID)
 	task.SetStreamURL(srv.URLsJSON())
 	log.Printf("[%s] stream ready: %s (url: %s)", agent.ShortID(at.ID), eng.FileName(), srv.URL())
 

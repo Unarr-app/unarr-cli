@@ -26,6 +26,10 @@ var (
 	apiClient    *tc.Client
 	appCfg       config.Config
 	cfgLoaded    bool
+	// errCfgLoad is why config.toml could not be read, when it could not: the
+	// defaults loadConfig falls back to have no key, and a daemon must not
+	// mistake an unreadable key for a missing one (service_park.go).
+	errCfgLoad error
 )
 
 func init() {
@@ -193,6 +197,7 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 		newReportCmd(),
 		logsCmd,
 		libraryCmd,
+		newOrganizeCmd(),
 		mirrorsCmd,
 		selfUpdateCmd,
 		versionCmd,
@@ -220,6 +225,16 @@ func Execute() {
 		if errors.Is(err, errQuietExit) {
 			sentry.Close()
 			os.Exit(1)
+		}
+		// An agent nobody has signed in yet is waiting, not failing: no red
+		// "Error:", no Sentry event, and an exit code the systemd unit's
+		// RestartPreventExitStatus recognises. When this is the installed
+		// service, it also parks it — after the reason is on record.
+		if isNeedsSignIn(err) {
+			sentry.Close()
+			fmt.Fprintln(os.Stderr, color.YellowString("  %s", err))
+			parkService()
+			os.Exit(exitNeedsSignIn)
 		}
 		// Report to Sentry with command context
 		command := ""
@@ -256,6 +271,7 @@ func loadConfig() config.Config {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, color.YellowString("Warning: config load failed: %s", err))
 		appCfg = config.Default()
+		errCfgLoad = err
 	}
 
 	appCfg.ApplyEnvOverrides()

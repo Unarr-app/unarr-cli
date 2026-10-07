@@ -5,12 +5,131 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.0] - 2026-10-05
+
+
+### Added
+
+- **organize**: FileBot-style naming templates for the library layout
+
+### Fixed
+
+- **library**: read 3-4 digit episode numbers and drop {id} tags from titles
+
+### Other
+
+- **release**: 1.16.0
+## [1.15.4] - 2026-10-05
+
+
+### Fixed
+
+- **torrent**: download every episode of a season pack
+
+### Other
+
+- **release**: 1.15.4
+## [1.15.3] - 2026-10-05
+
+
+### Documentation
+
+- **agent**: copyVideoCodecs ships to agents >= 1.15.2
+
+### Fixed
+
+- **torrent**: release a metadata-starved slot after 10 min, not 30
+- **vpn**: harden the reconnect-proof tracker socket
+- **vpn**: keep UDP tracker sockets alive across a tunnel reconnect
+
+### Other
+
+- **release**: 1.15.3
+## [1.15.2] - 2026-09-24
+
+
+### Fixed
+
+- **srcproxy**: close the single-upstream connection before dialing the next
+
+### Other
+
+- **release**: 1.15.2
+## [1.15.1] - 2026-09-23
+
+
+### Added
+
+- **stream**: play IPTV movies and episodes in the browser over one provider connection
+
+### Other
+
+- **release**: 1.15.1
+## [1.15.0] - 2026-09-23
+
+
+### Added
+
+- **engine**: download IPTV VOD, one at a time, paused while IPTV plays
+
+### Fixed
+
+- **engine**: harden IPTV downloads after review
+
+### Other
+
+- **release**: 1.15.0
+## [1.14.11] - 2026-09-23
+
+
+### Fixed
+
+- **service**: a stopped or removed service is not resumed by a later sign-in
+- **service**: park the installed service instead of restart-looping without a credential
+
+### Other
+
+- **release**: 1.14.11
+## [1.14.10] - 2026-09-23
+
+
+### Fixed
+
+- **usenet**: fallback downloads the release the user chose
+
+### Other
+
+- **release**: 1.14.10
+## [1.14.9] - 2026-09-23
+
+
+### Fixed
+
+- **daemon**: download queue never blocks startup or sync
+
+### Other
+
+- **release**: 1.14.9
+## [1.14.8] - 2026-09-23
+
+
+### Fixed
+
+- **transcode**: keep the GPU render group in Docker and fall back to libx264
+
+### Other
+
+- **release**: 1.14.8
 ## [1.14.7] - 2026-09-22
 
 
 ### Fixed
 
 - **docker**: a dashboard delete survives a container restart
+
+### Other
+
+- **release**: 1.14.7
 ## [1.14.6] - 2026-09-22
 
 
@@ -1886,6 +2005,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.16.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.15.4...v1.16.0
+[1.15.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.15.3...v1.15.4
+[1.15.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.15.2...v1.15.3
+[1.15.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.15.1...v1.15.2
+[1.15.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.15.0...v1.15.1
+[1.15.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.11...v1.15.0
+[1.14.11]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.10...v1.14.11
+[1.14.10]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.9...v1.14.10
+[1.14.9]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.8...v1.14.9
+[1.14.8]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.7...v1.14.8
 [1.14.7]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.6...v1.14.7
 [1.14.6]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.5...v1.14.6
 [1.14.5]: https://github.com/Unarr-app/unarr-cli/compare/v1.14.4...v1.14.5

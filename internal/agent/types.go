@@ -181,6 +181,7 @@ type Task struct {
 	DirectURL       string     `json:"directUrl,omitempty"`      // HTTPS download URL (debrid, etc.)
 	DirectFileName  string     `json:"directFileName,omitempty"` // Original filename from direct URL
 	DirectFileSize  int64      `json:"directFileSize,omitempty"` // Exact provider-listed byte size of that file (0 = unknown)
+	ReleaseSize     int64      `json:"releaseSize,omitempty"`    // Bytes of the release this task downloads, from the server's torrent row (0 = unknown)
 	NzbID           string     `json:"nzbId,omitempty"`          // Pre-resolved NZB ID from server
 	NzbPassword     string     `json:"nzbPassword,omitempty"`    // Password for encrypted NZB archives
 	ReplacePath     string     `json:"replacePath,omitempty"`    // File to replace after download (upgrade mode)
@@ -194,11 +195,28 @@ type Task struct {
 	CollectionName  string     `json:"collectionName,omitempty"` // Collection name (e.g., "Harry Potter Collection")
 	SourceSet       *SourceSet `json:"sourceSet,omitempty"`      // Versioned release sources; flat fields stay during migration
 
+	// Naming-template metadata ({tmdbid}, {tvdbid}, {t}). All optional: an older
+	// server sends none of them and the template drops the segments using them.
+	TmdbID        int               `json:"tmdbId,omitempty"`
+	TvdbID        int               `json:"tvdbId,omitempty"`
+	EpisodeTitle  string            `json:"episodeTitle,omitempty"`  // Title of this task's episode
+	EpisodeTitles map[string]string `json:"episodeTitles,omitempty"` // Season pack: episode number → title
+
 	// FilePath is the on-disk path of the file the agent is being asked
 	// to operate on. Currently used by mode=seed_file to know which
 	// arbitrary file to wrap as a single-file torrent for browser
 	// streaming; populated by the server from libraryItem.filePath.
 	FilePath string `json:"filePath,omitempty"`
+
+	// Agent-local resume-store bookkeeping. The server never sends these; they
+	// only live in active-tasks.json (older files without them load as zero).
+	//
+	// ResumePaused marks a download the user paused, so a daemon restart keeps
+	// it paused instead of re-running it: on 2026-09-23 three paused torrents
+	// took three of five download slots after every restart. QueuedAt orders
+	// the boot resume (oldest first) instead of map order.
+	ResumePaused bool      `json:"resumePaused,omitempty"`
+	QueuedAt     time.Time `json:"queuedAt,omitzero"`
 }
 
 // StreamRequest is a request to stream a completed download from disk.
@@ -422,6 +440,11 @@ type NzbSearchResult struct {
 	Group       string            `json:"group"`
 	Poster      string            `json:"poster"`
 	Attributes  map[string]string `json:"attributes"`
+	// Parsed is the server's parse of Title (parse-torrent-title), sturdier than
+	// a local regex; Resolution is e.g. "1080p", "" when the title has none.
+	Parsed struct {
+		Resolution string `json:"resolution,omitempty"`
+	} `json:"parsed"`
 }
 
 // NzbSearchResponse wraps search results.
@@ -628,6 +651,10 @@ type SyncRequest struct {
 	// Omitted entirely when telemetry is disabled. See internal/agent/telemetry.go.
 	ExitReason string `json:"exitReason,omitempty"`
 	ExitDetail string `json:"exitDetail,omitempty"`
+	// Capabilities — task kinds this build can run beyond the classic methods
+	// ("iptv"). The server gates claims on these rather than on a version
+	// number, so two features racing for the same release can't mislabel one.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // ControlAction represents a server-side control signal for a task.
@@ -695,6 +722,18 @@ type StreamSession struct {
 	// works on a GPU-less NAS), but in the segmented transport every player
 	// handles. Set by webs that know this agent supports it (gate: HLS_COPY_MIN_VERSION web-side).
 	VideoCopy bool `json:"videoCopy,omitempty"`
+	// CopyVideoCodecs lists the video codecs the requesting browser decodes
+	// natively (e.g. ["h264"] or ["h264","hevc"]). When non-empty and VideoCopy
+	// is set, the daemon copies the video ONLY if the probed source video codec
+	// is in the list (and, for h264, only at bit depth <= 8); otherwise it
+	// transcodes. Empty = copy unconditionally (older webs). Sent by webs only to
+	// agents >= 1.15.2.
+	CopyVideoCodecs []string `json:"copyVideoCodecs,omitempty"`
+	// SingleConnection marks a provider (IPTV) URL session: the account usually
+	// allows ONE connection, so the daemon must read the source through a single
+	// upstream connection (no parallel segment copies, no prefetch, no second
+	// subtitle reader) and park IPTV downloads while the session is live.
+	SingleConnection bool `json:"singleConnection,omitempty"`
 	// Fmp4Only forces fMP4 HLS segments (skips the on-demand MPEG-TS copy-vod
 	// path) so the session is Google-Cast-compatible — the Default Media Receiver
 	// plays fMP4 HLS but not mpegts HLS. Set by the web for cast sessions. No
@@ -738,6 +777,18 @@ type SyncResponse struct {
 	Scan            bool                   `json:"scan,omitempty"`
 	FilesToDelete   []LibraryDeleteRequest `json:"filesToDelete,omitempty"`
 	SubtitleFetches []SubtitleFetchRequest `json:"subtitleFetches,omitempty"`
+
+	// ClosedStreamSessions lists ids of THIS agent's streaming sessions the web
+	// explicitly closed recently (player unmount / Retry / displacement; ~35 min
+	// window, prewarm excluded, newest first). Merely expired rows are NOT listed:
+	// an external player may still be reading them. The same id repeats on every
+	// sync of that window, so handling must be idempotent. Absent on older webs →
+	// empty.
+	ClosedStreamSessions []string `json:"closedStreamSessions,omitempty"`
+
+	// IptvHold is true while the user plays IPTV somewhere: IPTV accounts allow
+	// one connection, so IPTV downloads pause until it turns false (or lapses).
+	IptvHold bool `json:"iptvHold,omitempty"`
 }
 
 // SubtitleFetchRequest is a server-side request to download a subtitle (from our

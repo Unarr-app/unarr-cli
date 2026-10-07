@@ -64,7 +64,13 @@ type Daemon struct {
 	OnStreamRequested func(req StreamRequest)
 	OnStreamSession   func(sess StreamSession)
 	OnControlAction   func(action, taskID string, deleteFiles bool)
-	GetActiveCount    func() int // returns number of active downloads (wired from manager)
+	OnIptvHold        func(held bool) // server's IPTV playback hold, every sync
+	GetActiveCount    func() int      // returns number of active downloads (wired from manager)
+
+	// OnStreamSessionsClosed receives ids of sessions the web closed
+	// (sync `closedStreamSessions`). Runs on the sync loop, before new sessions.
+	OnStreamSessionsClosed func(ids []string)
+
 	// GetActiveStreamCount returns the number of live stream sessions (player +
 	// HLS transcode). Wired from cmd. The graceful AUTO-upgrade path defers
 	// while this is > 0 so it never cuts a viewer mid-playback; a MANUAL
@@ -535,6 +541,11 @@ func (d *Daemon) wireTaskCallbacks() {
 			d.OnStreamSession(sess)
 		}
 	}
+	d.sync.OnStreamSessionsClosed = func(ids []string) {
+		if d.OnStreamSessionsClosed != nil {
+			d.OnStreamSessionsClosed(ids)
+		}
+	}
 	d.sync.OnUpgrade = func(version string) {
 		if version == d.lastNotifiedVersion {
 			return
@@ -546,6 +557,11 @@ func (d *Daemon) wireTaskCallbacks() {
 		}
 		log.Printf("[upgrade] new version available: %s - applying auto-upgrade", version)
 		go d.deferAutoUpgradeUntilIdle(version)
+	}
+	// Wired only when the daemon runs an IPTV downloader: its presence is what
+	// advertises the "iptv" capability to the server (SyncClient.capabilities).
+	if d.OnIptvHold != nil {
+		d.sync.OnIptvHold = d.OnIptvHold
 	}
 	d.sync.OnScan = func() {
 		log.Printf("Library scan requested by server")

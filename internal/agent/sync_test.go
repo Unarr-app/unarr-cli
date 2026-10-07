@@ -577,3 +577,51 @@ func TestSyncClient_Run_ImmediateSyncOnTrigger(t *testing.T) {
 		t.Errorf("expected at least 3 syncs (initial + 2 triggers), got %d", count)
 	}
 }
+
+func TestSyncClient_ProcessResponse_ClosedStreamSessions(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantClosed []string
+		wantOrder  []string
+	}{
+		{
+			name:      "field absent (older web) never calls the hook",
+			body:      `{"watching":false,"streamSessions":[{"sessionId":"s1"}]}`,
+			wantOrder: []string{"start:s1"},
+		},
+		{
+			name:       "closed ids are handled before pending sessions",
+			body:       `{"watching":false,"streamSessions":[{"sessionId":"s1"}],"closedStreamSessions":["s1","s0"]}`,
+			wantClosed: []string{"s1", "s0"},
+			wantOrder:  []string{"closed", "start:s1"},
+		},
+		{
+			name:      "empty list never calls the hook",
+			body:      `{"watching":false,"closedStreamSessions":[]}`,
+			wantOrder: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var resp SyncResponse
+			if err := json.Unmarshal([]byte(tc.body), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			sc, _ := newTestSyncClient("http://localhost")
+			var order, closed []string
+			sc.OnStreamSessionsClosed = func(ids []string) {
+				order = append(order, "closed")
+				closed = append(closed, ids...)
+			}
+			sc.OnStreamSession = func(s StreamSession) { order = append(order, "start:"+s.SessionID) }
+			sc.processResponse(&resp)
+			if strings.Join(closed, ",") != strings.Join(tc.wantClosed, ",") {
+				t.Errorf("closed = %v, want %v", closed, tc.wantClosed)
+			}
+			if strings.Join(order, ",") != strings.Join(tc.wantOrder, ",") {
+				t.Errorf("order = %v, want %v", order, tc.wantOrder)
+			}
+		})
+	}
+}

@@ -156,18 +156,10 @@ With `runAsUser` set, the container is already unprivileged: the entrypoint
 skips the chown and the privilege drop entirely and execs the agent directly, so
 the mount permissions must be right on the host (or via `fsGroup`).
 
-**Supplementary groups.** In the default (root → drop) path the agent ends up in
-exactly one group, `PGID` — extra groups added with `--group-add` are not
-carried over. If a share depends on a secondary group, start the container
-unprivileged instead, which preserves the runtime's full group list:
-
-```bash
-docker run -d --name unarr \
-  --user 1026:100 --group-add 65539 \
-  -v /volume1/docker/unarr:/config \
-  -v /volume1/media:/downloads \
-  unarr/cli
-```
+**Supplementary groups.** The privilege drop keeps every group the runtime
+granted with `--group-add` / `group_add` (e.g. a NAS "media" gid a share
+depends on), and also adds the owner group of the GPU nodes under `/dev/dri`,
+so hardware transcode works with just `--device /dev/dri`.
 
 ## Networking
 
@@ -188,7 +180,11 @@ ports:
 The image ships the NVIDIA runtime env, so GPU transcode works out of the box:
 
 - **NVIDIA:** add `--gpus all`
-- **Intel QSV / VA-API:** pass `--device /dev/dri`
+- **Intel QSV / VA-API:** pass `--device /dev/dri` (the agent joins the
+  device's render group on its own)
+
+If the hardware encoder is present but can't be opened, the agent logs
+`test encode failed - not using it` at startup and transcodes in software.
 
 ## Reconnecting after removing the agent from the dashboard
 

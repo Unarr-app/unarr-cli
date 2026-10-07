@@ -65,10 +65,12 @@ FROM debian:bookworm-slim
 #         playback hangs forever on init.mp4. All three exist on arm64 too and
 #         are inert there, so they live on the common line; the Intel-only driver
 #         + oneVPL runtime are installed in an amd64-guarded block below.
+# (No gosu: docker-entrypoint.sh drops root with setpriv from util-linux, which
+#  is Essential in Debian and keeps the supplementary groups gosu discarded.)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates tzdata wget xz-utils par2 p7zip-full libvulkan1 \
-      libdrm2 libva2 libva-drm2 gosu && \
+      libdrm2 libva2 libva-drm2 && \
     rm -rf /var/lib/apt/lists/*
 
 # Intel QuickSync (QSV) runtime — amd64 only. The oneVPL dispatcher (libvpl2) +

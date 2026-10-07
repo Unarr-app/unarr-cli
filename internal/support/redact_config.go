@@ -6,6 +6,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/Unarr-app/unarr-cli/internal/config"
+	"github.com/Unarr-app/unarr-cli/internal/naming"
 )
 
 // publishedConfig is the ONLY shape that reaches config.redacted.toml.
@@ -108,9 +109,12 @@ type publishedFunnel struct {
 }
 
 type publishedOrganize struct {
-	Enabled    bool   `toml:"enabled"`
-	MoviesDir  string `toml:"movies_dir"`
-	TVShowsDir string `toml:"tv_shows_dir"`
+	Enabled      bool   `toml:"enabled"`
+	MoviesDir    string `toml:"movies_dir"`
+	TVShowsDir   string `toml:"tv_shows_dir"`
+	Naming       string `toml:"naming"`
+	MovieFormat  string `toml:"movie_format"`
+	SeriesFormat string `toml:"series_format"`
 }
 
 type publishedDaemon struct {
@@ -238,8 +242,12 @@ func redactConfig(c config.Config) publishedConfig {
 			Name: presence(c.Agent.Name),
 			Hash: withheldOrUnset(c.Agent.Hash),
 		},
-		Downloads:     redactDownloads(c.Download),
-		Organize:      publishedOrganize{Enabled: c.Organize.Enabled, MoviesDir: presence(c.Organize.MoviesDir), TVShowsDir: presence(c.Organize.TVShowsDir)},
+		Downloads: redactDownloads(c.Download),
+		Organize: publishedOrganize{
+			Enabled: c.Organize.Enabled, MoviesDir: presence(c.Organize.MoviesDir), TVShowsDir: presence(c.Organize.TVShowsDir),
+			Naming:      pick(c.Organize.Naming, naming.PresetNames()...),
+			MovieFormat: presence(c.Organize.MovieFormat), SeriesFormat: presence(c.Organize.SeriesFormat),
+		},
 		Daemon:        redactDaemon(c.Daemon),
 		Notifications: publishedNotifications{Enabled: c.Notifications.Enabled},
 		General:       publishedGeneral{Country: shaped(c.General.Country, regionShape), Locale: shaped(c.General.Locale, langShape), NoColor: c.General.NoColor},

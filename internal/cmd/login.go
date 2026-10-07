@@ -235,6 +235,9 @@ func runLogin(apiURLOverride string, browserOnly bool) error {
 		fmt.Println("  Run " + bold.Sprint("unarr init") + " to complete the setup (download directory, daemon).")
 		fmt.Println()
 	}
+	// A service that parked itself for lack of a credential (service_park.go)
+	// was waiting for this sign-in. No-op for any other service state.
+	resumeInstalledService()
 
 	return nil
 }

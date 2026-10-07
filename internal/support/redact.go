@@ -107,6 +107,11 @@ var configFields = map[string]Sensitivity{
 	"Organize.Enabled":    Publishable,
 	"Organize.MoviesDir":  Publishable,
 	"Organize.TVShowsDir": Publishable,
+	// The preset is a closed vocabulary; the formats are user-typed templates,
+	// published as presence like any other free-form string.
+	"Organize.Naming":       Publishable,
+	"Organize.MovieFormat":  Publishable,
+	"Organize.SeriesFormat": Publishable,
 
 	// ── Daemon ─────────────────────────────────────────────────────────────
 	"Daemon.StatusInterval": Publishable,

@@ -177,6 +177,11 @@ type StreamServer struct {
 	fileGeneration   atomic.Int64 // bumped on every SetFile/SetGrowingFile/ClearFile so readers of a replaced file don't count as activity for the new one
 	lastReadUnixNano atomic.Int64 // UnixNano of the last byte served for the CURRENT file generation ("is anyone actually consuming this?")
 	speedtestActive  atomic.Bool  // single-flight guard for /speedtest (unauth + public via funnel)
+
+	// servedGen/servedUnixNano: the generation and time of the last byte REALLY
+	// served (never seeded by SetFile, unlike lastReadUnixNano) — SlotInUse.
+	servedGen      atomic.Int64
+	servedUnixNano atomic.Int64
 }
 
 // maxStreamReaders caps concurrent /stream playback connections. This is a
@@ -602,16 +607,14 @@ func (ss *StreamServer) listenTLS(ctx context.Context, mux http.Handler) error {
 }
 
 // SetFile atomically swaps the file being served and resets progress tracking.
-func (ss *StreamServer) SetFile(provider FileProvider, taskID string) {
+// Returns the file generation it installed: pass it to ClearFileIf so a later
+// teardown only clears THIS file, never one a newer SetFile put in its place.
+func (ss *StreamServer) SetFile(provider FileProvider, taskID string) uint64 {
 	ss.mu.Lock()
 	prevGrowing := ss.growing
 	ss.provider = provider
 	ss.growing = nil // a raw-file provider supersedes any in-flight remux
 	ss.taskID = taskID
-	ss.mu.Unlock()
-	if prevGrowing != nil {
-		_ = prevGrowing.Close() // stop the orphan ffmpeg + drop its temp file
-	}
 	ss.totalFileSize.Store(provider.FileSize())
 	ss.lastActivity.Store(time.Now().UnixNano())
 	ss.maxByteOffset.Store(0)
@@ -621,67 +624,106 @@ func (ss *StreamServer) SetFile(provider FileProvider, taskID string) {
 	// New generation: readers of the previous file must stop counting toward
 	// this one's read-activity. Seed the read clock to "now" so a freshly-served
 	// file gets the full idle grace before the download can pause (lets a slow
-	// player attach first).
-	ss.fileGeneration.Add(1)
+	// player attach first). Bumped under ss.mu so ClearFileIf's check-and-clear
+	// is atomic against it.
+	gen := uint64(ss.fileGeneration.Add(1))
 	ss.lastReadUnixNano.Store(time.Now().UnixNano())
+	ss.mu.Unlock()
+	if prevGrowing != nil {
+		_ = prevGrowing.Close() // stop the orphan ffmpeg + drop its temp file
+	}
 
 	// Probe bitrate + duration synchronously so rate-limiting and duration
 	// are available before the first HTTP request arrives.
 	if dp, ok := provider.(*diskFileProvider); ok {
 		pm := probeMediaInfo(dp.path)
-		if pm.bitrateBps > 0 {
-			ss.bitrateBps.Store(pm.bitrateBps)
-			log.Printf("[stream] detected bitrate: %.1f Mbps -> throttle at %.1f Mbps",
-				float64(pm.bitrateBps)/1e6, float64(pm.bitrateBps)*2/1e6)
+		ss.mu.Lock()
+		// Only if the file is still ours: a newer SetFile during the probe owns
+		// the counters now.
+		if uint64(ss.fileGeneration.Load()) == gen {
+			if pm.bitrateBps > 0 {
+				ss.bitrateBps.Store(pm.bitrateBps)
+				log.Printf("[stream] detected bitrate: %.1f Mbps -> throttle at %.1f Mbps",
+					float64(pm.bitrateBps)/1e6, float64(pm.bitrateBps)*2/1e6)
+			}
+			if pm.durationSec > 0 {
+				ss.durationSec.Store(pm.durationSec)
+			}
 		}
-		if pm.durationSec > 0 {
-			ss.durationSec.Store(pm.durationSec)
-		}
+		ss.mu.Unlock()
 	}
+	return gen
 }
 
 // SetGrowingFile serves a progressive-remux source on /stream (hueco #3 / 3b):
 // ffmpeg `-c copy` mkv→fMP4 to a growing temp file, range-served via
 // serveGrowing. Supersedes any prior provider/growing source (single-viewer).
-func (ss *StreamServer) SetGrowingFile(src GrowingSource, taskID string) {
+// Returns the installed file generation (see SetFile / ClearFileIf).
+func (ss *StreamServer) SetGrowingFile(src GrowingSource, taskID string) uint64 {
 	ss.mu.Lock()
 	prevGrowing := ss.growing
 	ss.growing = src
 	ss.provider = nil
 	ss.taskID = taskID
-	ss.mu.Unlock()
-	if prevGrowing != nil {
-		_ = prevGrowing.Close()
-	}
 	ss.totalFileSize.Store(src.EstimatedSize())
 	ss.lastActivity.Store(time.Now().UnixNano())
 	ss.maxByteOffset.Store(0)
 	ss.topReaderID.Store(0)
-	ss.fileGeneration.Add(1)
+	gen := uint64(ss.fileGeneration.Add(1))
 	ss.lastReadUnixNano.Store(time.Now().UnixNano())
 	// Rate-limit + bitrate tracking are for raw-file playback; the remux pump
 	// has its own pacing (ffmpeg copy is I/O-bound), so leave them at zero.
 	ss.bitrateBps.Store(0)
 	ss.durationSec.Store(0)
+	ss.mu.Unlock()
+	if prevGrowing != nil {
+		_ = prevGrowing.Close()
+	}
+	return gen
 }
 
 // ClearFile stops serving any file. Subsequent requests return 404.
 func (ss *StreamServer) ClearFile() {
 	ss.mu.Lock()
-	ss.provider = nil
-	prevGrowing := ss.growing
-	ss.growing = nil
-	ss.taskID = ""
+	prevGrowing := ss.clearLocked()
 	ss.mu.Unlock()
 	if prevGrowing != nil {
 		_ = prevGrowing.Close()
 	}
+}
+
+// ClearFileIf clears /stream only while the file installed with generation gen
+// (SetFile / SetGrowingFile return value) is still the one served. Check and
+// clear happen under ss.mu, so a teardown racing a newer SetFile never wipes the
+// newer file. Reports whether it cleared.
+func (ss *StreamServer) ClearFileIf(gen uint64) bool {
+	ss.mu.Lock()
+	if uint64(ss.fileGeneration.Load()) != gen {
+		ss.mu.Unlock()
+		return false
+	}
+	prevGrowing := ss.clearLocked()
+	ss.mu.Unlock()
+	if prevGrowing != nil {
+		_ = prevGrowing.Close()
+	}
+	return true
+}
+
+// clearLocked drops the served file and resets the counters; returns the
+// growing source the caller must Close outside the lock. Requires ss.mu.
+func (ss *StreamServer) clearLocked() GrowingSource {
+	ss.provider = nil
+	prevGrowing := ss.growing
+	ss.growing = nil
+	ss.taskID = ""
 	ss.totalFileSize.Store(0)
 	ss.maxByteOffset.Store(0)
 	ss.topReaderID.Store(0)
 	ss.fileGeneration.Add(1) // invalidate any lingering reader's activity attribution
 	ss.bitrateBps.Store(0)
 	ss.durationSec.Store(0)
+	return prevGrowing
 }
 
 // CurrentTaskID returns the task ID of the file currently being served.
@@ -2217,7 +2259,10 @@ func (t *trackingReader) Read(p []byte) (int, error) {
 		// replaced must not keep the new file's download alive (generation gate).
 		// Cheap: two atomic loads + a store on the hot path, no mutex.
 		if t.server.fileGeneration.Load() == t.gen {
-			t.server.lastReadUnixNano.Store(time.Now().UnixNano())
+			now := time.Now().UnixNano()
+			t.server.lastReadUnixNano.Store(now)
+			t.server.servedUnixNano.Store(now)
+			t.server.servedGen.Store(t.gen)
 		}
 
 		// Only the reader that has read the most bytes can update progress.

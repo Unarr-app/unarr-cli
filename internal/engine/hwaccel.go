@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"log"
 	"os"
 	"os/exec"
 	"runtime"
@@ -51,32 +52,46 @@ func detectHWAccelFresh(ctx context.Context, ffmpegPath string) HWAccel {
 	if encoders == "" {
 		return HWAccelNone
 	}
+	// A compiled-in encoder plus a device node is only a candidate: the node
+	// can exist yet be unreadable (container without the render group) or the
+	// runtime can be missing, and then every transcode dies at encoder open.
+	// Each candidate must pass a real one-second test encode to be picked.
+	for _, hw := range hwCandidates(encoders) {
+		if err := probeHWEncoder(ctx, ffmpegPath, hw); err != nil {
+			log.Printf("[transcode] %s compiled in but a test encode failed - not using it: %v",
+				hw.FFmpegVideoCodec("h264"), err)
+			continue
+		}
+		return hw
+	}
+	return HWAccelNone
+}
 
+// hwCandidates lists, most capable first, the HW backends whose encoder is
+// compiled into this ffmpeg AND whose device is present on this host.
+func hwCandidates(encoders string) []HWAccel {
+	var out []HWAccel
 	// macOS — VideoToolbox is always available on Apple Silicon + recent Intel.
 	if runtime.GOOS == "darwin" && strings.Contains(encoders, "h264_videotoolbox") {
-		return HWAccelVideoToolbox
+		out = append(out, HWAccelVideoToolbox)
 	}
-
 	// NVIDIA — encoder presence + a CUDA-capable device. We rely on the
 	// existence of the device file rather than running nvidia-smi to keep
 	// startup quick on hosts without nvidia tooling.
 	if strings.Contains(encoders, "h264_nvenc") &&
 		(fileExists("/dev/nvidia0") || hasNvidiaDriver()) {
-		return HWAccelNVENC
+		out = append(out, HWAccelNVENC)
 	}
-
 	// Intel Quick Sync — needs /dev/dri (also used by VA-API). Distinguish by
 	// checking whether the QSV-specific encoder is built in.
 	if strings.Contains(encoders, "h264_qsv") && fileExists("/dev/dri/renderD128") {
-		return HWAccelQSV
+		out = append(out, HWAccelQSV)
 	}
-
 	// Linux generic VA-API — works on Intel + AMD with mesa drivers.
 	if strings.Contains(encoders, "h264_vaapi") && fileExists("/dev/dri/renderD128") {
-		return HWAccelVAAPI
+		out = append(out, HWAccelVAAPI)
 	}
-
-	return HWAccelNone
+	return out
 }
 
 func listFFmpegEncoders(ctx context.Context, ffmpegPath string) string {

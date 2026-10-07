@@ -18,6 +18,20 @@ PGID=${PGID:-1000}
 # otherwise leave HOME=/root).
 export HOME=/home/unarr
 
+# keep_groups prints, comma-separated, the supplementary gids the agent must keep
+# after dropping root: every group the runtime gave this process (--group-add /
+# compose group_add) plus the owner group of each GPU node under /dev/dri, so a
+# GPU passed with `--device /dev/dri` alone is usable without also looking up
+# and adding the host's render gid. gid 0 (root) and PGID itself are left out.
+keep_groups() {
+	{
+		id -G | tr ' ' '\n'
+		for dev in /dev/dri/renderD* /dev/dri/card*; do
+			[ -e "$dev" ] && stat -c %g "$dev"
+		done
+	} | grep -vx -e 0 -e "$PGID" | sort -un | paste -sd, -
+}
+
 if [ "$(id -u)" = "0" ]; then
 	if [ "$PUID" = "0" ]; then
 		# Root by explicit request. Everything unarr writes will be owned by root,
@@ -27,13 +41,13 @@ if [ "$(id -u)" = "0" ]; then
 		exec unarr "$@"
 	fi
 
-	# Without gosu we cannot drop privileges, and running the agent as root
+	# Without setpriv we cannot drop privileges, and running the agent as root
 	# anyway would create root-owned files on mounts the host user must be able
 	# to manage — the exact permission dead end this script exists to prevent
 	# (and what Kubernetes runAsNonRoot admission is protecting against). Refuse
 	# instead of silently doing the wrong thing.
-	if ! command -v gosu >/dev/null 2>&1; then
-		echo "unarr: refusing to run as root — gosu is missing, so privileges cannot be dropped to $PUID:$PGID." >&2
+	if ! command -v setpriv >/dev/null 2>&1; then
+		echo "unarr: refusing to run as root — setpriv is missing, so privileges cannot be dropped to $PUID:$PGID." >&2
 		echo "  Start the container with --user $PUID:$PGID (runAsUser in Kubernetes), or set PUID=0 to run as root deliberately." >&2
 		exit 1
 	fi
@@ -50,20 +64,23 @@ if [ "$(id -u)" = "0" ]; then
 		chown -R "$PUID:$PGID" "$d" 2>/dev/null || true
 	done
 
-	# gosu passes signals straight through and execs, so the daemon stays PID 1's
-	# child and `docker stop` still shuts it down gracefully.
+	# setpriv execs in place, so the daemon stays PID 1 and `docker stop` still
+	# shuts it down gracefully.
 	#
-	# NOTE: a uid:gid spec makes gosu set exactly that one group — supplementary
-	# groups (e.g. a NAS "media" gid granted with --group-add) are NOT carried
-	# over. When you need them, start the container unprivileged instead:
-	# `--user PUID:PGID --group-add <gid>` takes the branch below, which execs
-	# without touching the group list. Documented in DOCKERHUB.md.
+	# Supplementary groups MUST survive the drop. gosu (used here until
+	# 2026-09) sets exactly one group for a uid:gid spec, which silently threw
+	# away the render group granted with `group_add` — /dev/dri/renderD128 became
+	# unreadable and every Intel QSV transcode died at encoder open
+	# ("Error creating a MFX session: -9"). keep_groups carries over what the
+	# runtime granted plus the owner group of the GPU nodes.
 	#
-	# HOME is re-applied through `env` because gosu derives it from the target
-	# uid's passwd entry — and a NAS PUID (1026, 99, …) has none, so it would
-	# land on HOME=/ and scatter dotfiles at the filesystem root. `env` execs, so
-	# signal passthrough is unaffected.
-	exec gosu "$PUID:$PGID" env "HOME=$HOME" unarr "$@"
+	# HOME is re-applied through `env` so a NAS PUID with no passwd entry (1026,
+	# 99, …) doesn't land on HOME=/ and scatter dotfiles at the filesystem root.
+	extra=$(keep_groups)
+	if [ -n "$extra" ]; then
+		exec setpriv --reuid="$PUID" --regid="$PGID" --groups="$extra" env "HOME=$HOME" unarr "$@"
+	fi
+	exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups env "HOME=$HOME" unarr "$@"
 fi
 
 # Already unprivileged (docker run --user … / Kubernetes runAsUser) — nothing to

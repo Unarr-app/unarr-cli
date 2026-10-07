@@ -88,7 +88,8 @@ type TorrentConfig struct {
 	// DB — fsynced per completed piece, integrity-checked at open — never lands
 	// on NFS/SMB volumes where file locking times out.
 	PieceCompletionDir string
-	MetadataTimeout    time.Duration // how long to wait for torrent metadata (default 15m, 0 = unlimited)
+	MetadataTimeout    time.Duration // how long to wait for torrent metadata (0 = unlimited; daemon default 0, one-shot download 15m)
+	MetadataStallAfter time.Duration // waiting this long for metadata yields the download slot (0 = 10m default, <0 = never)
 	StallTimeout       time.Duration // no progress during download for this long = stall (default 10m)
 	MaxTimeout         time.Duration // absolute maximum per torrent (default 0 = unlimited)
 	MaxDownloadRate    int64         // bytes/s, 0 = unlimited
@@ -439,26 +440,16 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 		log.Printf("[%s] waiting for metadata (no timeout, trackers: %d)...", task.ShortID(), len(defaultTrackers))
 	}
 
-	if d.cfg.MetadataTimeout > 0 {
-		metaCtx, metaCancel := context.WithTimeout(ctx, d.cfg.MetadataTimeout)
-		defer metaCancel()
-		select {
-		case <-t.GotInfo():
-			log.Printf("[%s] metadata received: %s (%d files)", task.ShortID(), t.Name(), len(t.Files()))
-		case <-metaCtx.Done():
-			stats := t.Stats()
-			cleanup()
-			return nil, fmt.Errorf("metadata timeout after %s (peers: %d)", d.cfg.MetadataTimeout, stats.ActivePeers)
-		}
-	} else {
-		// Unlimited — wait until metadata arrives or context is cancelled
-		select {
-		case <-t.GotInfo():
-			log.Printf("[%s] metadata received: %s (%d files)", task.ShortID(), t.Name(), len(t.Files()))
-		case <-ctx.Done():
-			cleanup()
-			return nil, fmt.Errorf("cancelled while waiting for metadata")
-		}
+	switch err := d.awaitMetadata(ctx, t.GotInfo(), task); {
+	case err == nil:
+		log.Printf("[%s] metadata received: %s (%d files)", task.ShortID(), t.Name(), len(t.Files()))
+	case errors.Is(err, errMetadataTimeout):
+		stats := t.Stats()
+		cleanup()
+		return nil, fmt.Errorf("metadata timeout after %s (peers: %d)", d.cfg.MetadataTimeout, stats.ActivePeers)
+	default:
+		cleanup()
+		return nil, err
 	}
 
 	// 1.5 Guard against stale piece-completion state. The completion DB survives
@@ -482,8 +473,8 @@ func (d *TorrentDownloader) Download(ctx context.Context, task *Task, outputDir 
 		}
 	}
 
-	// 2. Select files to download (prefer largest video + matching subs)
-	sel := d.selectFiles(t, task.ID)
+	// 2. Select files to download (a whole season pack, else one video + its subs)
+	sel := d.selectFiles(t, task)
 	totalBytes, fileName := sel.totalBytes, sel.fileName
 
 	log.Printf("[%s] downloading %s (%s)", task.ShortID(), fileName, formatBytes(totalBytes))
@@ -987,13 +978,7 @@ func (d *TorrentDownloader) GetStreamProvider(taskID string) (FileProvider, erro
 
 	// Select largest video file
 	files := t.Files()
-	var video *torrent.File
-	for _, f := range files {
-		ext := strings.ToLower(filepath.Ext(f.DisplayPath()))
-		if VideoExts[ext] && (video == nil || f.Length() > video.Length()) {
-			video = f
-		}
-	}
+	video := largestVideo(files)
 	if video == nil {
 		// No video — use largest file
 		for _, f := range files {
@@ -1019,17 +1004,34 @@ var VideoExts = map[string]bool{
 	".mpg": true, ".mpeg": true, ".vob": true, ".flv": true,
 }
 
+// largestVideo returns the biggest file with a video extension, or nil.
+func largestVideo(files []*torrent.File) *torrent.File {
+	var video *torrent.File
+	for _, f := range files {
+		ext := strings.ToLower(filepath.Ext(f.DisplayPath()))
+		if VideoExts[ext] && (video == nil || f.Length() > video.Length()) {
+			video = f
+		}
+	}
+	return video
+}
+
 var subExts = map[string]bool{
 	".srt": true, ".ass": true, ".sub": true, ".ssa": true, ".vtt": true,
 }
 
-// selectFiles picks the largest video file + matching subtitles.
+// selectFiles picks what the task asked for out of a multi-file torrent:
+//   - a season pack, for a task naming no episode → every episode + subtitles
+//     (see selectPack);
+//   - otherwise the task's episode when the files are numbered, else the largest
+//     video — plus its matching subtitles.
+//
 // Falls back to downloading everything if no video file is found.
 // Returns what was selected: total bytes, primary file name, and the files
 // themselves (nil = everything). The file list is what lets the completion
 // guard measure against the SELECTION rather than the whole torrent — see
 // selection.missingBytes.
-func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) selection {
+func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, task *Task) selection {
 	files := t.Files()
 
 	if len(files) <= 1 {
@@ -1037,13 +1039,15 @@ func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) selec
 		return selection{totalBytes: t.Length(), fileName: t.Name()}
 	}
 
-	// Find largest video file
-	var video *torrent.File
-	for _, f := range files {
-		ext := strings.ToLower(filepath.Ext(f.DisplayPath()))
-		if VideoExts[ext] && (video == nil || f.Length() > video.Length()) {
-			video = f
+	if wantsWholePack(task) {
+		if sel, ok := selectPack(t, files, task); ok {
+			return sel
 		}
+	}
+
+	video := pickEpisodeVideo(files, task)
+	if video == nil {
+		video = largestVideo(files)
 	}
 
 	if video == nil {
@@ -1078,7 +1082,7 @@ func (d *TorrentDownloader) selectFiles(t *torrent.Torrent, taskID string) selec
 	skipped := len(files) - 1 - subCount
 	if skipped > 0 {
 		log.Printf("[%s] selected: %s (%s) + %d subs, skipped %d files",
-			agent.ShortID(taskID), filepath.Base(fileName), formatBytes(video.Length()), subCount, skipped)
+			task.ShortID(), filepath.Base(fileName), formatBytes(video.Length()), subCount, skipped)
 	}
 
 	return selection{totalBytes: totalBytes, fileName: fileName, files: selected}

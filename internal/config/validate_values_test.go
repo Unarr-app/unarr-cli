@@ -57,6 +57,30 @@ func TestValueIssues(t *testing.T) {
 			wantKey: "downloads.listen_port",
 		},
 		{
+			name:    "unknown naming preset",
+			mutate:  func(c *Config) { c.Organize.Naming = "kodi" },
+			wantKey: "organize.naming",
+			wantSub: "plex",
+		},
+		{
+			name:    "movie template escaping the library",
+			mutate:  func(c *Config) { c.Organize.MovieFormat = "{n}/../{n}" },
+			wantKey: "organize.movie_format",
+			wantSub: "..",
+		},
+		{
+			name:    "series template without an episode number",
+			mutate:  func(c *Config) { c.Organize.SeriesFormat = "{n}/Season {s00}/{n} - {t}" },
+			wantKey: "organize.series_format",
+			wantSub: "{s00e00}",
+		},
+		{
+			name:    "unknown template token",
+			mutate:  func(c *Config) { c.Organize.MovieFormat = "{n} {imdb}/{n}" },
+			wantKey: "organize.movie_format",
+			wantSub: "{imdbid}",
+		},
+		{
 			name:    "negative concurrency",
 			mutate:  func(c *Config) { c.Download.MaxConcurrent = -3 },
 			wantKey: "downloads.max_concurrent",

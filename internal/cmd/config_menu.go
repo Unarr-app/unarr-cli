@@ -278,12 +278,15 @@ func configOrganization(cfg *config.Config) error {
 				Title("TV Shows directory").
 				Value(&cfg.Organize.TVShowsDir),
 		),
+		namingFormGroup(&cfg.Organize),
 	).Run()
 	if err != nil {
 		return err
 	}
 	cfg.Organize.MoviesDir = expandHome(strings.TrimSpace(cfg.Organize.MoviesDir))
 	cfg.Organize.TVShowsDir = expandHome(strings.TrimSpace(cfg.Organize.TVShowsDir))
+	cfg.Organize.MovieFormat = strings.TrimSpace(cfg.Organize.MovieFormat)
+	cfg.Organize.SeriesFormat = strings.TrimSpace(cfg.Organize.SeriesFormat)
 	return nil
 }
 

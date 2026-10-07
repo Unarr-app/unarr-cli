@@ -16,6 +16,11 @@ import (
 // preference the web sent: a specific method runs alone; "auto" tries all three
 // torrent-first (the historical default).
 func effectiveOrder(task *Task, configMethods []string) []DownloadMethod {
+	// An IPTV task has no torrent, NZB or debrid source: the local method
+	// preference is about those, so it neither gates nor reorders IPTV.
+	if task.PreferredMethod == string(MethodIPTV) {
+		return []DownloadMethod{MethodIPTV}
+	}
 	if len(configMethods) > 0 {
 		order := make([]DownloadMethod, 0, len(configMethods))
 		for _, m := range configMethods {
@@ -75,9 +80,18 @@ func resolveMethod(ctx context.Context, task *Task, downloaders map[DownloadMeth
 
 		available, err := dl.Available(ctx, task)
 		if err != nil {
-			log.Printf("[%s] %s availability check failed: %v", task.ShortID(), method, err)
-			if errors.Is(err, ErrVPNRequired) {
+			// A deliberate "not this release" (usenet found only other versions)
+			// is a reason like a safety gate, and already logged by its method.
+			switch {
+			case errors.Is(err, ErrNoMatchingNzb):
+				if gateReason == nil {
+					gateReason = err
+				}
+			case errors.Is(err, ErrVPNRequired):
+				log.Printf("[%s] %s availability check failed: %v", task.ShortID(), method, err)
 				gateReason = err
+			default:
+				log.Printf("[%s] %s availability check failed: %v", task.ShortID(), method, err)
 			}
 			continue
 		}

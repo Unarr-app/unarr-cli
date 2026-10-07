@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/library"
+	"github.com/Unarr-app/unarr-cli/internal/naming"
 )
 
 // moveMu serializes the "pick a free destination → move onto it" pair in
@@ -26,17 +28,6 @@ var (
 	seasonRegex  = regexp.MustCompile(`(?i)S(\d{2})`)
 	episodeRegex = regexp.MustCompile(`(?i)S(\d{2})E(\d{2})`)
 	altEpRegex   = regexp.MustCompile(`(?i)(\d{1,2})x(\d{2})`) // 1x05 format
-	pathReplacer = strings.NewReplacer(
-		"/", "-",
-		"\\", "-",
-		":", " -",
-		"?", "",
-		"*", "",
-		"\"", "",
-		"<", "",
-		">", "",
-		"|", "-",
-	)
 )
 
 // OrganizeConfig holds file organization settings.
@@ -45,14 +36,18 @@ type OrganizeConfig struct {
 	MoviesDir  string
 	TVShowsDir string
 	OutputDir  string // download directory — used to clean up torrent subdirectories after move
+	// Naming is the folder/file layout under MoviesDir / TVShowsDir (see
+	// internal/naming). Zero value = the default layout.
+	Naming naming.Scheme
 }
 
 // organize moves a downloaded file into the proper directory structure.
 //
-// When server metadata is available (ContentType, ContentTitle, Season, CollectionName):
-//   - Shows:       TVShowsDir/ContentTitle/Season XX/filename.ext
-//   - Collections: MoviesDir/CollectionName/ContentTitle (Year)/filename.ext
-//   - Movies:      MoviesDir/ContentTitle (Year)/filename.ext
+// When server metadata is available (ContentType, ContentTitle, Season, CollectionName)
+// the destination is rendered from cfg.Naming. With the default layout:
+//   - Shows:       TVShowsDir/ContentTitle/Season XX/ContentTitle - SxxEyy.ext
+//   - Collections: MoviesDir/CollectionName/ContentTitle (Year)/ContentTitle (Year).ext
+//   - Movies:      MoviesDir/ContentTitle (Year)/ContentTitle (Year).ext
 //
 // Falls back to legacy regex-based detection when metadata is missing.
 func organize(result *Result, task *Task, cfg OrganizeConfig) (string, error) {
@@ -67,6 +62,11 @@ func organize(result *Result, task *Task, cfg OrganizeConfig) (string, error) {
 	if ext == "" {
 		ext = filepath.Ext(result.FilePath)
 	}
+	// A directory result (multi-file release) has no extension: what Ext finds
+	// is release-name noise (".x265-GRP"). organizeDir appends the real video's.
+	if fi, err := os.Stat(result.FilePath); err == nil && fi.IsDir() {
+		ext = ""
+	}
 
 	if task.ContentType == "show" && cfg.TVShowsDir != "" {
 		// TV show: use clean title from server, group all episodes under one folder
@@ -74,47 +74,40 @@ func organize(result *Result, task *Task, cfg OrganizeConfig) (string, error) {
 		if showName == "" {
 			showName = cleanTitle(task.Title) // fallback
 		}
-		destDir = filepath.Join(cfg.TVShowsDir, sanitizePath(showName))
-		if task.Season != nil {
-			destDir = filepath.Join(destDir, fmt.Sprintf("Season %02d", *task.Season))
-			// Rename: "ShowName - S01E03.mkv" so media players identify it
-			if task.Episode != nil {
-				destFileName = fmt.Sprintf("%s - S%02dE%02d%s", sanitizePath(showName), *task.Season, *task.Episode, ext)
+		// The show's year comes from TMDB only: a year guessed from the release
+		// name ("Show.2024.S01E01", a daily show) varies per episode and would
+		// split the show across "Show (2024)" / "Show (2025)" folders.
+		vars := namingVars(task, showName, contentYear(task))
+		// A finished season pack is a directory of episodes: file each one.
+		if fi, err := os.Stat(result.FilePath); err == nil && fi.IsDir() && wantsWholePack(task) {
+			finalPath, ok, err := organizeShowPack(result, task, vars, cfg)
+			if ok || err != nil {
+				return finalPath, err
 			}
+		}
+		if task.Season != nil {
+			// The file is renamed ("ShowName - S01E03.mkv" by default) only when the
+			// server named the episode: media players identify it by that.
+			vars.Season, vars.Episode = task.Season, task.Episode
 		} else if season := detectSeason(result.FileName); season != "" {
-			destDir = filepath.Join(destDir, fmt.Sprintf("Season %s", season))
+			n, _ := strconv.Atoi(season)
+			vars.Season = &n
 		}
+		if vars.Episode == nil {
+			vars.EpisodeTitle = ""
+		}
+		destDir, destFileName = renderDest(cfg.scheme().Series, cfg.TVShowsDir, vars, ext)
 
-	} else if task.CollectionName != "" && cfg.MoviesDir != "" {
-		// Collection movie: CollectionName/MovieTitle (Year)/file
-		collDir := sanitizePath(task.CollectionName)
+	} else if (task.CollectionName != "" || task.ContentType == "movie") && cfg.MoviesDir != "" {
+		// Movie with server metadata; a collection movie nests under
+		// CollectionName/ in the default layout ({collection} token).
 		movieName := task.ContentTitle
 		if movieName == "" {
 			movieName = cleanTitle(task.Title)
 		}
-		year := resolveYear(task)
-		if year != "" {
-			destDir = filepath.Join(cfg.MoviesDir, collDir, fmt.Sprintf("%s (%s)", sanitizePath(movieName), year))
-			destFileName = fmt.Sprintf("%s (%s)%s", sanitizePath(movieName), year, ext)
-		} else {
-			destDir = filepath.Join(cfg.MoviesDir, collDir, sanitizePath(movieName))
-			destFileName = fmt.Sprintf("%s%s", sanitizePath(movieName), ext)
-		}
-
-	} else if task.ContentType == "movie" && cfg.MoviesDir != "" {
-		// Regular movie with server metadata
-		movieName := task.ContentTitle
-		if movieName == "" {
-			movieName = cleanTitle(task.Title)
-		}
-		year := resolveYear(task)
-		if year != "" {
-			destDir = filepath.Join(cfg.MoviesDir, fmt.Sprintf("%s (%s)", sanitizePath(movieName), year))
-			destFileName = fmt.Sprintf("%s (%s)%s", sanitizePath(movieName), year, ext)
-		} else {
-			destDir = filepath.Join(cfg.MoviesDir, sanitizePath(movieName))
-			destFileName = fmt.Sprintf("%s%s", sanitizePath(movieName), ext)
-		}
+		vars := namingVars(task, movieName, resolveYear(task))
+		vars.EpisodeTitle = ""
+		destDir, destFileName = renderDest(cfg.scheme().Movie, cfg.MoviesDir, vars, ext)
 
 	} else {
 		// No server metadata: fall back to legacy regex-based detection
@@ -285,7 +278,14 @@ func organizeDir(result *Result, destDir, destFileName string, cfg OrganizeConfi
 	videoExt := filepath.Ext(videoPath)
 	var finalName string
 	if destFileName != "" {
-		finalName = strings.TrimSuffix(destFileName, filepath.Ext(destFileName)) + videoExt
+		// A directory result carries no extension, so destFileName may be a bare
+		// stem — strip only a real video extension: filepath.Ext on a dotted stem
+		// ("Mr. Robot - S01E01", an episode title "Vol. 2") would cut it at the dot.
+		stem := destFileName
+		if isVideoFile(stem) {
+			stem = strings.TrimSuffix(stem, filepath.Ext(stem))
+		}
+		finalName = naming.FitFileName(stem, videoExt)
 	} else {
 		finalName = filepath.Base(videoPath)
 	}
@@ -463,9 +463,7 @@ func detectSeason(fileName string) string {
 
 // sanitizePath removes characters that are invalid in file/directory names.
 func sanitizePath(name string) string {
-	s := pathReplacer.Replace(name)
-	s = strings.TrimSpace(s)
-	s = strings.TrimRight(s, ".")
+	s := naming.Sanitize(name)
 	if s == "" {
 		return "Unknown"
 	}

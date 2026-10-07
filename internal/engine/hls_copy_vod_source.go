@@ -18,7 +18,10 @@ func (s *HLSSession) startCopySourceProxy() {
 	if s.cfg.SourceURL == "" || os.Getenv(copyVODDirectEnv) == "1" {
 		return
 	}
-	p, err := srcproxy.Start(srcproxy.Options{URL: s.cfg.SourceURL, Refresh: s.cfg.RefreshURL, Dir: s.tmpDir})
+	p, err := srcproxy.Start(srcproxy.Options{
+		URL: s.cfg.SourceURL, Refresh: s.cfg.RefreshURL, Dir: s.tmpDir,
+		SingleUpstream: s.cfg.SingleConnection,
+	})
 	if err != nil {
 		log.Printf("[hls %s] copy-vod source proxy unavailable, reading direct: %v", shortHLSID(s.cfg.SessionID), err)
 		return
