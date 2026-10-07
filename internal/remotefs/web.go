@@ -112,7 +112,7 @@ func (s *WebSource) Open(ctx context.Context, r Record) (io.ReadSeekCloser, erro
 		l = &Link{Resolve: func(c context.Context) (string, error) {
 			u, err := s.API.MountResolve(c, r.Link)
 			if err != nil {
-				return "", errors.New("web file resolution failed")
+				return "", safeResolutionError(c, err)
 			}
 			return u, nil
 		}}
@@ -120,6 +120,20 @@ func (s *WebSource) Open(ctx context.Context, r Record) (io.ReadSeekCloser, erro
 	}
 	return NewHTTPReader(ctx, s.media, l, r.Size), nil
 }
+
+func safeResolutionError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return errors.New("web file resolution failed")
+}
+
 func previousReleases(records []Record) map[string][]Record {
 	byID := make(map[string][]Record)
 	for _, r := range records {

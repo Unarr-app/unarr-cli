@@ -64,8 +64,18 @@ cold discovery and fetching are excluded.
 
 - XML listing cache: at most 16 MiB of response buffer capacity and 256 entries;
   individual responses above 1 MiB are streamed without retention.
-- GET concurrency: 32; metadata does not consume a media connection.
+- GET concurrency: 32; metadata does not consume a media connection. HTTP media
+  reads now cancel a response after 30 seconds without upstream read progress;
+  DAV writes/flushes have a separate 30-second socket write bound. These are
+  inactivity bounds, so a healthy long stream has no total-file timeout.
 - Usenet warm plans: 16; media articles use the existing shared bounded cache.
+  Each NNTP body has a 16 MiB encoded wire ceiling, including CRLF, dot stuffing
+  and terminator, enforced before appending every fragment. This compatibility
+  ceiling matches the existing stream reservation assumption and is independent
+  of NZB claims. Receive-array capacity is bounded per active connection;
+  transient growth copies, decoder allocations and retained cache coexist, so
+  this is not a global process RSS bound. Oversized/incomplete/cancelled bodies
+  retire their socket; a live caller can reacquire the vacant slot.
 - Provider work now runs on the web backend through the existing provider
   clients and concurrency controls. The mount endpoints permit 240 requests per
   user/minute and propagate provider Retry-After. Unchanged release metadata is
@@ -97,7 +107,7 @@ go test ./internal/remotefs -run '^$' \
 go test -race ./...
 go test -tags e2e -race -count=1 ./test/e2e/...
 golangci-lint run --allow-parallel-runners ./...
-make arch ARCH_BASE=HEAD
+make arch ARCH_BASE=main
 
 # Requires rclone on PATH and working /dev/fuse + fusermount3:
 UNARR_TEST_RCLONE_MOUNT=1 go test ./internal/cmd \
@@ -118,6 +128,13 @@ NNTP framing with synthetic yEnc articles, direct multi-file NZBs and supported
 RAR streaming. See [the platform test matrix](REMOTE_MOUNT_TEST_MATRIX.md) for
 subsequent native setup checks, including macOS installation/upgrade and its
 remaining system-extension approval requirement.
+
+On 2026-10-07, regression fixes were verified against the integrated main baseline
+with synthetic loopback HTTP/NNTP and temporary catalogs. They cover command
+validation, receive ceilings, progress/cancellation, strict framing, partial
+revision recovery and stable collision names. See the [protocol fixes report](docs/reviews/remote-mount-protocol-fixes-2026-10-07.md)
+for actual failing probes and subsequent validation. The September performance
+figures above were not remeasured for these changes.
 
 On 2026-09-20, the Windows 11 VM passed the real kernel mount test after automatic
 installation of checksum-verified WinFsp 2.1.25156 and rclone 1.75.1. The test

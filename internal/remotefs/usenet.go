@@ -152,6 +152,8 @@ func (s *NZBSource) indexManifest(ctx context.Context, n *nzb.NZB, info manifest
 	var records []Record
 	var failures []error
 	known := knownManifestFiles(previous, info.fingerprint)
+	title := strings.TrimSuffix(info.name, filepath.Ext(info.name))
+	paths := memberPaths(n.Files, title, info.id)
 	indices := []int{-1}
 	if !n.HasRars() {
 		indices = nil
@@ -175,9 +177,12 @@ func (s *NZBSource) indexManifest(ctx context.Context, n *nzb.NZB, info manifest
 			failures = append(failures, fmt.Errorf("%w: %s", stream.ErrNotStreamable, plan.Reason))
 			continue
 		}
-		title := strings.TrimSuffix(info.name, filepath.Ext(info.name))
+		memberPath := releasePath(title, info.id, plan.VideoName)
+		if idx >= 0 {
+			memberPath = paths[idx]
+		}
 		records = append(records, Record{Entry: Entry{
-			Path: releasePath(title, info.id, plan.VideoName), Key: info.fingerprint + ":" + strconv.Itoa(idx), Size: plan.VideoSize, Modified: info.modified,
+			Path: memberPath, Key: info.fingerprint + ":" + strconv.Itoa(idx), Size: plan.VideoSize, Modified: info.modified,
 		}, ID: info.id, Manifest: info.name, Fingerprint: info.fingerprint, ManifestStamp: info.stamp, FileIndex: idx})
 		plan.Close()
 	}

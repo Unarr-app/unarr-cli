@@ -51,6 +51,7 @@ func serveDAVRead(w http.ResponseWriter, r *http.Request, dav http.Handler, read
 		select {
 		case reads <- struct{}{}:
 			defer func() { <-reads }()
+			w = progressWriter{ResponseWriter: w, timeout: mediaIdleTimeout}
 		default:
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "too many active reads", http.StatusServiceUnavailable)

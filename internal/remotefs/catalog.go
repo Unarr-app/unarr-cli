@@ -136,8 +136,18 @@ func (c *Catalog) Refresh(ctx context.Context, src Source) error {
 
 func mergePartial(previous, incoming []Record) []Record {
 	byKey := make(map[string]Record, len(previous)+len(incoming))
+	// Paths already include the logical account/provider namespace. A validated
+	// replacement at that path supersedes an obsolete revision key; failed
+	// accounts and paths with no incoming record remain available. commitSource
+	// validates the entire candidate before either persistence or publication.
+	replaced := make(map[string]bool, len(incoming))
+	for _, r := range incoming {
+		replaced[r.Path] = true
+	}
 	for _, r := range previous {
-		byKey[r.Key] = r
+		if !replaced[r.Path] {
+			byKey[r.Key] = r
+		}
 	}
 	for _, r := range incoming {
 		byKey[r.Key] = r

@@ -14,7 +14,7 @@ import (
 )
 
 // HTTPClient uses the standard dialer/proxy/HTTP2 defaults with a pool large
-// enough for concurrent playback. A request context bounds body reads.
+// enough for concurrent playback. HTTPReader bounds body inactivity separately.
 func HTTPClient() *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.MaxIdleConns = 64
@@ -137,10 +137,11 @@ type HTTPReader struct {
 	size, pos, bodyAt, bodyEnd int64
 	body                       io.ReadCloser
 	closed                     bool
+	bodyIdleTimeout            time.Duration
 }
 
 func NewHTTPReader(ctx context.Context, client *http.Client, link *Link, size int64) *HTTPReader {
-	return &HTTPReader{ctx: ctx, client: client, link: link, size: size}
+	return &HTTPReader{ctx: ctx, client: client, link: link, size: size, bodyIdleTimeout: mediaIdleTimeout}
 }
 func (r *HTTPReader) Close() error {
 	r.closed = true
@@ -210,17 +211,21 @@ func (r *HTTPReader) open() error {
 	}
 	end := rangeEnd(r.ctx, r.pos, r.size)
 	for attempt := 0; attempt < 2; attempt++ {
-		req, err := http.NewRequestWithContext(r.ctx, http.MethodGet, u, nil)
+		ctx, cancel := context.WithCancelCause(r.ctx)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
+			cancel(context.Canceled)
 			return errors.New("invalid remote request")
 		}
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", r.pos, end))
 		req.Header.Set("Accept-Encoding", "identity")
 		resp, err := r.client.Do(req)
 		if err != nil {
+			cancel(context.Canceled)
 			return remoteRequestError(r.ctx)
 		}
 		if expiredStatus(resp.StatusCode) && attempt == 0 {
+			cancel(context.Canceled)
 			_ = resp.Body.Close()
 			u, err = r.link.get(r.ctx, u)
 			if err != nil {
@@ -229,10 +234,12 @@ func (r *HTTPReader) open() error {
 			continue
 		}
 		if err = checkRange(resp, r.pos, end, r.size); err != nil {
+			cancel(context.Canceled)
 			_ = resp.Body.Close()
 			return err
 		}
-		r.body, r.bodyAt, r.bodyEnd = resp.Body, r.pos, end
+		r.body = &idleBody{ReadCloser: resp.Body, ctx: ctx, cancel: cancel, timeout: r.bodyIdleTimeout}
+		r.bodyAt, r.bodyEnd = r.pos, end
 		return nil
 	}
 	return errors.New("remote link renewal failed")
