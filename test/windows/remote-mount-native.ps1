@@ -51,6 +51,7 @@ $env:GOMAXPROCS = '2'
 $exitCode = 1
 $originals = @()
 $fixturesPrepared = $false
+$verifiedRclone = ''
 $firewallBefore = ''
 $drivesBefore = @([System.IO.Directory]::GetLogicalDrives())
 function Get-DirectoryIdentity([string]$path) {
@@ -115,7 +116,9 @@ try {
     if ($setupExit -ne 0) { throw 'Verified rclone preparation failed.' }
     $rclone = Get-ChildItem -LiteralPath $env:UNARR_NATIVE_TOOLS_DIR -Filter 'rclone.exe' -Recurse | Select-Object -First 1
     if ($null -eq $rclone) { throw 'No task-local verified rclone binary found.' }
-    $env:UNARR_NATIVE_RCLONE = $rclone.FullName
+    if (-not $rclone.FullName.StartsWith((Join-Path $local 'tools\'), [StringComparison]::OrdinalIgnoreCase)) { throw 'Prepared rclone must belong to the fresh task-local tools directory.' }
+    $verifiedRclone = $rclone.FullName
+    $env:UNARR_NATIVE_RCLONE = $verifiedRclone
     foreach ($line in (& $rclone.FullName version 2>&1)) { $lines.Add($line.ToString()) }
     $output = & (Join-Path $local 'cmd-native.test.exe') '-test.v' '-test.run' '^TestMountNative' '-test.timeout' '5m' 2>&1
     $exitCode = $LASTEXITCODE
@@ -154,6 +157,7 @@ try {
             foreach ($process in @(Get-CimInstance Win32_Process | Where-Object {$_.Name -like 'unarr*' -or $_.Name -eq 'rclone.exe'})) {
                 if (-not $fixturesPrepared) { throw 'Process appeared before fixture activation; backups remain intact.' }
                 $owned = $process.ExecutablePath -eq $env:UNARR_NATIVE_CLI
+                $owned = $owned -or ($process.Name -eq 'rclone.exe' -and $verifiedRclone -and [String]::Equals($process.ExecutablePath, $verifiedRclone, [StringComparison]::OrdinalIgnoreCase))
                 $owned = $owned -or ($process.Name -eq 'rclone.exe' -and $process.ExecutablePath -and $process.ExecutablePath.StartsWith($freshTools, [StringComparison]::OrdinalIgnoreCase))
                 if (-not $owned) { throw 'Unknown process prevents safe rollback; preserved backups remain intact.' }
                 Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
