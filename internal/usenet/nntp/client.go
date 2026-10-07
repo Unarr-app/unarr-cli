@@ -160,8 +160,7 @@ func (c *Client) BodyInto(ctx context.Context, messageID string, buf []byte) ([]
 		return data, err
 	}
 
-	var oversized *BodyTooLargeError
-	if ctx.Err() != nil || errors.As(err, &oversized) {
+	if ctx.Err() != nil || isReceiveLimit(err) {
 		c.retire(cn)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -256,7 +255,7 @@ func (c *Client) dial(ctx context.Context) (*conn, error) {
 	cn := &conn{tp: tp, raw: rawConn}
 
 	// Read welcome banner (200 or 201)
-	code, msg, err := tp.ReadCodeLine(200)
+	code, msg, err := readReply(tp, 200)
 	if err != nil {
 		// Also accept 201 (posting not allowed)
 		if code != 201 {
@@ -297,7 +296,7 @@ func (c *Client) auth(tp *textproto.Conn) error {
 		return err
 	}
 	tp.StartResponse(id)
-	code, msg, err := tp.ReadCodeLine(381)
+	code, msg, err := readReply(tp, 381)
 	tp.EndResponse(id)
 	if err != nil {
 		// 281 means no password required (unlikely but valid)
@@ -312,7 +311,7 @@ func (c *Client) auth(tp *textproto.Conn) error {
 		return err
 	}
 	tp.StartResponse(id)
-	code, msg, err = tp.ReadCodeLine(281)
+	code, msg, err = readReply(tp, 281)
 	tp.EndResponse(id)
 	if err != nil {
 		return fmt.Errorf("AUTHINFO PASS: %d %s: %w", code, msg, err)
@@ -357,7 +356,7 @@ func (c *Client) bodyExchange(ctx context.Context, cn *conn, messageID string, b
 	defer cn.tp.EndResponse(id)
 
 	// Read response code
-	code, msg, err := cn.tp.ReadCodeLine(222)
+	code, msg, err := readReply(cn.tp, 222)
 	if err != nil {
 		// 430 is the RFC 3977 answer for an unknown message-id; 423 is the
 		// by-number code some servers send for it anyway. Both are final.

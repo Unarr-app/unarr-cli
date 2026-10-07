@@ -147,20 +147,11 @@ func parseYBegin(p *Part, line string) {
 
 // getIntParam extracts an integer parameter from a yEnc header line.
 func getIntParam(line, key string) int {
-	prefix := key + "="
-	idx := strings.Index(line, prefix)
-	if idx < 0 {
+	value, present := paramValue(line, key)
+	if !present {
 		return 0
 	}
-	start := idx + len(prefix)
-	end := start
-	for end < len(line) && line[end] >= '0' && line[end] <= '9' {
-		end++
-	}
-	if end == start {
-		return 0
-	}
-	v, _ := strconv.Atoi(line[start:end])
+	v, _ := strconv.Atoi(value)
 	return v
 }
 
