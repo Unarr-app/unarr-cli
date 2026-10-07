@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"strconv"
 	"strings"
@@ -29,12 +28,13 @@ func Decode(r io.Reader) (*Part, error) {
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // up to 10MB per article
 
 	part := &Part{}
+	var env envelope
 
 	// Phase 1: Find and parse =ybegin header
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "=ybegin ") {
-			parseYBegin(part, line)
+			env.begin(part, line)
 			break
 		}
 	}
@@ -47,7 +47,9 @@ func Decode(r io.Reader) (*Part, error) {
 	if scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "=ypart ") {
-			parseYPart(part, line)
+			env.part(part, line)
+		} else if strings.HasPrefix(line, "=yend ") {
+			env.trailer(part, line)
 		} else {
 			// Not a ypart line, decode it as data
 			part.Data = append(part.Data, decodeLine(line)...)
@@ -55,22 +57,15 @@ func Decode(r io.Reader) (*Part, error) {
 	}
 
 	// Phase 3: Decode data lines until =yend
-	hasher := crc32.NewIEEE()
-	// Hash data we already decoded (if any from non-ypart line)
-	if len(part.Data) > 0 {
-		hasher.Write(part.Data)
-	}
-
-	for scanner.Scan() {
+	for !env.ended && scanner.Scan() {
 		line := scanner.Text()
 
-		if strings.HasPrefix(line, "=yend") {
-			parseYEnd(part, line)
+		if strings.HasPrefix(line, "=yend ") {
+			env.trailer(part, line)
 			break
 		}
 
 		decoded := decodeLine(line)
-		hasher.Write(decoded)
 		part.Data = append(part.Data, decoded...)
 	}
 
@@ -78,12 +73,8 @@ func Decode(r io.Reader) (*Part, error) {
 		return nil, fmt.Errorf("yenc: read error: %w", err)
 	}
 
-	// Verify CRC32 if provided
-	if part.CRC32 != 0 {
-		computed := hasher.Sum32()
-		if computed != part.CRC32 {
-			return nil, fmt.Errorf("yenc: CRC32 mismatch: expected %08x, got %08x", part.CRC32, computed)
-		}
+	if err := env.validate(part); err != nil {
+		return nil, err
 	}
 
 	normalizeSinglePart(part)
@@ -151,23 +142,6 @@ func parseYBegin(p *Part, line string) {
 	// Name is special: it's everything after "name=" to end of line
 	if idx := strings.Index(line, "name="); idx >= 0 {
 		p.Name = strings.TrimSpace(line[idx+5:])
-	}
-}
-
-// parseYPart parses "=ypart begin=1 end=768000"
-func parseYPart(p *Part, line string) {
-	p.Begin = int64(getIntParam(line, "begin"))
-	p.End = int64(getIntParam(line, "end"))
-}
-
-// parseYEnd parses "=yend size=768000 part=1 pcrc32=ABCD1234 crc32=ABCD1234"
-func parseYEnd(p *Part, line string) {
-	// pcrc32 is the CRC of this part; crc32 is the CRC of the whole file (only on last part)
-	if hex := getHexParam(line, "pcrc32"); hex != 0 {
-		p.CRC32 = hex
-	} else if hex := getHexParam(line, "crc32"); hex != 0 && p.Total <= 1 {
-		// For single-part files, crc32 is the only CRC
-		p.CRC32 = hex
 	}
 }
 

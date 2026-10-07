@@ -3,6 +3,8 @@ package nntp
 import (
 	"bufio"
 	"bytes"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -120,14 +122,11 @@ func TestReadDotBody(t *testing.T) {
 }
 
 func TestReadDotBodyEOF(t *testing.T) {
-	// No dot terminator — should read until EOF
+	// No dot terminator is incomplete transport framing, even on whole lines.
 	r := bufio.NewReader(bytes.NewBufferString("partial data\r\n"))
-	got, err := readDotBody(r, nil, nil)
-	if err != nil {
-		t.Fatalf("readDotBody EOF: %v", err)
-	}
-	if string(got) != "partial data\n" {
-		t.Errorf("readDotBody EOF = %q", string(got))
+	_, err := readDotBody(r, nil, nil)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("readDotBody EOF: %v, want unexpected EOF", err)
 	}
 }
 
@@ -153,8 +152,8 @@ func TestReadDotBodyLongLinesIntoBuffer(t *testing.T) {
 	}
 
 	partial := bufio.NewReaderSize(strings.NewReader("whole\r\n"+long), 16)
-	if got, err := readDotBody(partial, nil, nil); err != nil || string(got) != "whole\n" {
-		t.Fatalf("partial last line: %q, %v; want the complete lines only", got, err)
+	if _, err := readDotBody(partial, nil, nil); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("partial last line: %v; want unexpected EOF", err)
 	}
 }
 

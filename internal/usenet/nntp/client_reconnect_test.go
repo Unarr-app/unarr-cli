@@ -41,11 +41,21 @@ func TestCancelledCallerReconnectKeepsPoolSlot(t *testing.T) {
 	if s.BodyCalls() == 0 {
 		t.Fatal("the cancelled Body never reached a connection")
 	}
-	if got := c.ActiveConnections(); got != want {
-		t.Fatalf("ActiveConnections = %d after a cancelled reconnect, want %d", got, want)
+	if got := c.ActiveConnections(); got > want {
+		t.Fatalf("ActiveConnections = %d after cancellation, exceeds %d slots", got, want)
 	}
 	if _, err := c.Body(context.Background(), "a@test"); err != nil {
 		t.Fatalf("Body after cancelled reconnect: %v", err)
+	}
+	// Cancellation now retires promptly; the next live owner can redial the
+	// vacated slot rather than forcing the cancelled owner through a handshake.
+	for range want {
+		if _, err := c.Body(context.Background(), "a@test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := c.ActiveConnections(); got < 1 || got > want {
+		t.Fatalf("usable pool after cancellation = %d", got)
 	}
 }
 
