@@ -24,6 +24,17 @@ func TestMountNativeLinuxPersistent(t *testing.T) {
 	if os.Getenv("UNARR_NATIVE_LINUX_SERVICE") != "1" {
 		t.Skip("private container/user-manager opt-in required")
 	}
+	for _, legacy := range []bool{false, true} {
+		name := "new-install"
+		if legacy {
+			name = "recognized-legacy"
+		}
+		t.Run(name, func(t *testing.T) { nativeLinuxPersistentLifecycle(t, legacy) })
+	}
+}
+
+func nativeLinuxPersistentLifecycle(t *testing.T, legacy bool) {
+	t.Helper()
 	if _, err := os.Stat("/.dockerenv"); err != nil || os.Getuid() == 0 {
 		t.Fatal("refusing host/root service fixture; disposable non-root Docker user required")
 	}
@@ -48,6 +59,7 @@ func TestMountNativeLinuxPersistent(t *testing.T) {
 			t.Fatalf("refusing existing private fixture path: %s", path)
 		}
 	}
+	policy := newNativeLinuxSystemdPolicy(t, unit, legacy)
 	f := newNativeMountFixture(t)
 	f.cfg.Download.Dir = filepath.Join(t.TempDir(), "downloads")
 	if err := os.MkdirAll(f.cfg.Download.Dir, 0700); err != nil {
@@ -73,6 +85,7 @@ func TestMountNativeLinuxPersistent(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		nativePersistentFailureDiagnostics(t, f, directory)
+		policy.beforeUninstall(t)
 		p := startNativeCLI(t, "daemon", "uninstall")
 		select {
 		case <-p.done:
@@ -95,6 +108,9 @@ func TestMountNativeLinuxPersistent(t *testing.T) {
 		}
 		if _, err := validateMountPoint(directory); err != nil {
 			t.Errorf("private mounted destination survived cleanup: %v", err)
+			return
+		}
+		if !policy.afterUninstall(t, f.cfg.Mount.Listen) {
 			return
 		}
 		_ = os.RemoveAll(config.Dir())
@@ -127,7 +143,10 @@ func TestMountNativeLinuxPersistent(t *testing.T) {
 			t.Fatalf("private CLI %v timed out", args)
 		}
 	}
+	policy.prepare(t)
 	cli("mount", directory)
+	policy.active(t, "after actual mount")
+	policy.preserveSentinel(t)
 	filePath := filepath.Join(directory, "debrid", "torbox", "Release [123]", "space name.mkv")
 	nativeEventually(t, 35*time.Second, "private persistent mount after initiating CLI exits", func() bool { _, err := os.Stat(filePath); return err == nil })
 	read := func() {
@@ -155,11 +174,13 @@ func TestMountNativeLinuxPersistent(t *testing.T) {
 	})
 	nativeEventually(t, 35*time.Second, "private persistent remount after restart", func() bool { _, err := os.Stat(filePath); return err == nil })
 	read()
+	policy.active(t, "after actual restart and mounted read")
 	st = agent.ReadState()
 	if st == nil {
 		t.Fatal("private daemon state disappeared before renewal")
 	}
 	nativeRenewPersistentIdentity(t, f, filePath, st.PID)
+	policy.active(t, "after actual K1-to-K2 renewal")
 	for _, disableIntent := range []bool{true, false} {
 		if !disableIntent {
 			// The first umount saved disabled intent. Declare a new opt-in in
@@ -228,6 +249,7 @@ func TestMountNativeLinuxPersistent(t *testing.T) {
 			st = agent.ReadState()
 			return st != nil && st.Status == "running" && agent.IsProcessAlive(st.PID)
 		})
+		policy.active(t, "after actual umount disabled intent="+strconv.FormatBool(disableIntent))
 		t.Logf("actual private umount disabled intent=%t: destination reusable, DAV closed, rclone PID=%d gone, healthy daemon PID=%d (before=%d; explicit umount may restart)", disableIntent, rclonePID, st.PID, daemonPID)
 	}
 	t.Logf("actual private Linux persistence passed; final daemon PID=%d", st.PID)

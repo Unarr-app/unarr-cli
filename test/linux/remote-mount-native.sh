@@ -92,6 +92,6 @@ docker exec --user ubuntu --env HOME=/home/ubuntu --env XDG_RUNTIME_DIR=/run/use
   --env "UNARR_NATIVE_DIAGNOSTIC=${UNARR_NATIVE_DIAGNOSTIC:-0}" \
   --env UNARR_NATIVE_LINUX_SERVICE=1 --env UNARR_NATIVE_CLI=/fixture/bin/unarr \
   --env UNARR_NATIVE_RCLONE=/fixture/tools/rclone-1.75.1-linux-amd64/rclone \
-  "$name" /fixture/bin/cmd-native.test -test.v -test.run '^TestMountNativeLinuxPersistent$' -test.timeout 4m > "$artifact/result.txt" 2>&1
+  "$name" /fixture/bin/cmd-native.test -test.v -test.run '^TestMountNativeLinuxPersistent$' -test.timeout 8m > "$artifact/result.txt" 2>&1
 docker exec --user ubuntu --env HOME=/home/ubuntu --env XDG_RUNTIME_DIR=/run/user/1000 "$name" \
   /bin/sh -c 'systemctl --user show unarr.service -p LoadState -p ActiveState -p MainPID; pgrep -x rclone || test $? = 1' > "$artifact/user-cleanup.txt"
