@@ -182,19 +182,17 @@ func runUmountCommand(_ *cobra.Command, _ []string) error {
 	if errCfgLoad != nil {
 		return fmt.Errorf("read agent config: %w", errCfgLoad)
 	}
-	if !cfg.Mount.Enabled {
-		fmt.Println("Remote folder is already disabled.")
-		return nil
-	}
 	installed, active, err := umountServiceState()
 	if err != nil {
 		return err
 	}
-	cfg.Mount.Enabled = false
-	if err := config.Save(cfg, resolvedConfigPath()); err != nil {
-		return fmt.Errorf("disable remote folder: %w", err)
+	if cfg.Mount.Enabled {
+		cfg.Mount.Enabled = false
+		if err := config.Save(cfg, resolvedConfigPath()); err != nil {
+			return fmt.Errorf("disable remote folder: %w", err)
+		}
+		appCfg = cfg
 	}
-	appCfg = cfg
 	return finishUmount(installed, active)
 }
 

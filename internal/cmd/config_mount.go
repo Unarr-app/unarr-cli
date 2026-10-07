@@ -32,11 +32,16 @@ func configMount(cfg *config.Config) error {
 	if err := m.Validate(); err != nil {
 		return err
 	}
-	if m.Enabled {
-		fmt.Println("Settings prepared. Run unarr mount to validate the destination, set up dependencies and request background activation.")
-	}
+	fmt.Println("Settings prepared. " + mountApplyGuidance(m.Enabled))
 	cfg.Mount = m
 	return nil
+}
+
+func mountApplyGuidance(enabled bool) string {
+	if enabled {
+		return "Run 'unarr mount' to validate the destination, set up dependencies and request background activation."
+	}
+	return "Run 'unarr umount' to apply the disabled setting and unmount any running remote folder."
 }
 
 func printMountAccountStatus(ctx context.Context, cfg *config.Config, out io.Writer) error {

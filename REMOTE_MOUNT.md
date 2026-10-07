@@ -54,6 +54,8 @@ configuration writes or service operations. Save these settings in the default
 file instead. `mount serve --config /path/to/config.toml` remains available for
 an independently managed process. `umount` preserves stopped and parked service
 intent; it requests a restart only for a running installed service.
+Saving a disabled mount setting does not apply it to an existing mount session.
+Run `unarr umount` to unmount that session even when the saved setting is already off.
 
 Each running mount uses an immutable snapshot of the agent's current key and
 identity. A minted key, revocation or replacement sign-in cancels and joins the
@@ -143,10 +145,12 @@ lazily, retained only in memory, refreshed after five minutes on subsequent
 article access, and never written to the mount configuration or catalog.
 This endpoint retains the existing web-side Usenet entitlement checks. The web
 action **Add to local Usenet folder** dispatches only the selected NZB manifest
-to a compatible online agent (CLI 1.15.0+), which stores it in the managed
-`mount-nzbs` inbox beside `config.toml`. If there is no agent, the web shows the
-install CTA; an older agent gets the update CTA. Copying a complete `.nzb` file
+to a compatible online agent (reserved future CLI floor: 1.17.0), which stores it
+in the managed `mount-nzbs` inbox beside `config.toml`. If there is no agent,
+the web shows the install CTA; an older agent gets the update CTA. Copying a complete `.nzb` file
 into the same inbox manually is also supported.
+Remote mounting is not released; CLI 1.17.0 is reserved and unpublished.
+The published 1.16.0/1.16.1 agents do not support this feature.
 
 ## Continuity and limits
 
@@ -160,8 +164,10 @@ partial manifests are retried on later refreshes while retaining known entries.
 The cache defaults to `remote-library/` beside the selected config, honoring
 `--config`. It contains metadata and signed references, not media or API keys.
 
-Mount metadata requests give each mirror attempt three seconds, leaving time
-for a healthy mirror inside the ten-second access watchdog. 403/410 denials
+Access probes give each mirror attempt three seconds, leaving time for a
+healthy mirror inside the ten-second access watchdog. Metadata and URL resolution
+use a finite thirty-second budget per mirror attempt to cover cold provider
+pacing and queued resolution; caller cancellation can shorten it. 403/410 denials
 are terminal. Library pages keep the `entries`/`next` envelope and
 `path`/`key`/`size`/`reference` entry fields; `next` is an opaque signed cursor,
 including when a single release spans pages. The serialized response limit is
