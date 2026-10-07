@@ -89,6 +89,7 @@ done
 (( ready )) || { echo 'private user-manager readiness timeout' >&2; exit 1; }
 docker exec --user ubuntu --env HOME=/home/ubuntu --env XDG_RUNTIME_DIR=/run/user/1000 \
   --env GOMAXPROCS=2 --env UNARR_NATIVE_ACCEPTANCE=1 --env UNARR_NATIVE_KERNEL=1 \
+  --env "UNARR_NATIVE_DIAGNOSTIC=${UNARR_NATIVE_DIAGNOSTIC:-0}" \
   --env UNARR_NATIVE_LINUX_SERVICE=1 --env UNARR_NATIVE_CLI=/fixture/bin/unarr \
   --env UNARR_NATIVE_RCLONE=/fixture/tools/rclone-1.75.1-linux-amd64/rclone \
   "$name" /fixture/bin/cmd-native.test -test.v -test.run '^TestMountNativeLinuxPersistent$' -test.timeout 4m > "$artifact/result.txt" 2>&1

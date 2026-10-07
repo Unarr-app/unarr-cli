@@ -207,10 +207,16 @@ func TestMountNativeKernelIO(t *testing.T) {
 
 func nativeMountedFiles(t *testing.T, directory string) map[string]int64 {
 	t.Helper()
+	nativeRootDiagnostics(t, directory)
 	got := make(map[string]int64)
-	err := filepath.WalkDir(directory, func(p string, d fs.DirEntry, err error) error {
+	// WinFsp directory mounts are reparse roots. Stat the selected filesystem
+	// root through DirFS while keeping WalkDir's no-follow policy inside it.
+	err := fs.WalkDir(os.DirFS(directory), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("unexpected mounted symlink %q", p)
 		}
 		if d.IsDir() {
 			return nil
@@ -219,11 +225,7 @@ func nativeMountedFiles(t *testing.T, directory string) map[string]int64 {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(directory, p)
-		if err != nil {
-			return err
-		}
-		got[filepath.ToSlash(rel)] = info.Size()
+		got[p] = info.Size()
 		return nil
 	})
 	if err != nil {

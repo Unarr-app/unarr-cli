@@ -72,6 +72,7 @@ func TestMountNativeLinuxPersistent(t *testing.T) {
 		t.Fatal("official task-local Linux rclone artifact required")
 	}
 	t.Cleanup(func() {
+		nativePersistentFailureDiagnostics(t, f, directory)
 		p := startNativeCLI(t, "daemon", "uninstall")
 		select {
 		case <-p.done:
@@ -141,10 +142,11 @@ func TestMountNativeLinuxPersistent(t *testing.T) {
 		}
 	}
 	read()
-	st := agent.ReadState()
-	if st == nil || !agent.IsProcessAlive(st.PID) {
-		t.Fatal("private daemon not live")
-	}
+	var st *agent.DaemonState
+	nativeEventually(t, 35*time.Second, "registered private daemon after mounted read", func() bool {
+		st = agent.ReadState()
+		return st != nil && st.Status == "running" && agent.IsProcessAlive(st.PID)
+	})
 	oldPID := st.PID
 	cli("daemon", "restart")
 	nativeEventually(t, 35*time.Second, "private daemon fresh PID", func() bool {

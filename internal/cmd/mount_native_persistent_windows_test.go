@@ -85,6 +85,7 @@ func TestMountNativeWindowsPersistent(t *testing.T) {
 		t.Fatal("verified native rclone artifact required")
 	}
 	t.Cleanup(func() {
+		nativePersistentFailureDiagnostics(t, f, letter+`\`)
 		if windowsTaskInstalled() {
 			p := startNativeCLI(t, "daemon", "uninstall")
 			select {
@@ -160,12 +161,15 @@ func TestMountNativeWindowsPersistent(t *testing.T) {
 	if err != nil || loaded.Mount.Directory != letter || loaded.Mount.Validate() != nil {
 		t.Fatalf("actual persisted drive config invalid: %v %q", err, loaded.Mount.Directory)
 	}
-	st := agent.ReadState()
-	if st == nil || !agent.IsProcessAlive(st.PID) {
-		t.Fatal("persistent daemon state not live")
-	}
+	var st *agent.DaemonState
+	nativeEventually(t, 35*time.Second, "registered Windows daemon after mounted read", func() bool {
+		st = agent.ReadState()
+		return st != nil && st.Status == "running" && agent.IsProcessAlive(st.PID)
+	})
 	oldPID := st.PID
+	nativeWindowsLifecycleDiagnostic(t, f, letter+`\`, "before restart")
 	cli("daemon", "restart")
+	nativeWindowsLifecycleDiagnostic(t, f, letter+`\`, "restart command exited")
 	nativeEventually(t, 35*time.Second, "daemon restarted with fresh PID", func() bool {
 		st := agent.ReadState()
 		return st != nil && st.PID != oldPID && st.Status == "running" && agent.IsProcessAlive(st.PID)
