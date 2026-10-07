@@ -6,6 +6,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,12 +26,14 @@ import (
 )
 
 type nativeMountedSession struct {
-	s         *remoteLibrary
-	directory string
-	cancel    context.CancelFunc
-	done      chan error
-	pids      []int
-	once      sync.Once
+	s             *remoteLibrary
+	directory     string
+	cancel        context.CancelFunc
+	done          chan error
+	pids          []int
+	once          sync.Once
+	productionURL string
+	observation   *nativeDAVObservation
 }
 
 func startNativeMountedSession(t *testing.T, f *nativeMountFixture, directory string) *nativeMountedSession {
@@ -48,6 +55,14 @@ func startNativeMountedSession(t *testing.T, f *nativeMountFixture, directory st
 	}
 	s.rclone = binary
 	m := &nativeMountedSession{s: s, directory: directory, cancel: cancel, done: make(chan error, 1)}
+	m.productionURL = s.URL
+	if runtime.GOOS == "windows" && t.Name() == "TestMountNativeKernelIO" && os.Getenv("UNARR_NATIVE_DAV_OBSERVE") == "1" {
+		// A separate fixture proxy observes both control and experimental runs;
+		// the production Handler is never swapped while Serve is running.
+		m.observation = nativeObserveDAV(t, s.URL)
+		s.URL = m.observation.server.URL
+		m.cancel = func() { cancel(); m.observation.close() }
+	}
 	go func() { m.done <- runRclone(s.ctx, s, directory) }()
 	t.Cleanup(func() { m.stop(t) })
 	name := filepath.Join(directory, "debrid", "torbox", "Release [123]", "space name.mkv")
@@ -124,6 +139,11 @@ func (m *nativeMountedSession) stop(t *testing.T) {
 			_ = resp.Body.Close()
 			t.Error("DAV listener survived cleanup")
 		}
+		address := strings.TrimPrefix(m.productionURL, "http://")
+		if conn, err := net.DialTimeout("tcp", address, time.Second); err == nil {
+			_ = conn.Close()
+			t.Error("production DAV listener survived cleanup")
+		}
 		if _, err := validateMountPoint(m.directory); err != nil {
 			t.Errorf("destination not reusable after cleanup: %v", err)
 		}
@@ -193,6 +213,9 @@ func TestMountNativeKernelIO(t *testing.T) {
 		}
 	})
 	nativeAssertWriteDenial(t, m.directory, f.files)
+	if m.observation != nil {
+		m.observation.assertMutationReplies(t)
+	}
 	if got := nativeMountedFiles(t, m.directory); !reflect.DeepEqual(got, want) {
 		t.Fatal("mutations changed mounted listing or sizes")
 	}
@@ -203,6 +226,61 @@ func TestMountNativeKernelIO(t *testing.T) {
 		t.Fatal("remount changed listing")
 	}
 	m.stop(t)
+}
+
+// Opt-in observation is common to the permission probe and its unmodified
+// control. It records methods/statuses, never auth headers or media bytes.
+type nativeDAVObservation struct {
+	server  *httptest.Server
+	mu      sync.Mutex
+	methods map[string]int
+	replies map[string]int
+	once    sync.Once
+}
+
+func nativeObserveDAV(t *testing.T, destination string) *nativeDAVObservation {
+	t.Helper()
+	target, err := url.Parse(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := &nativeDAVObservation{methods: make(map[string]int), replies: make(map[string]int)}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ModifyResponse = func(r *http.Response) error {
+		o.mu.Lock()
+		o.replies[fmt.Sprintf("%s:%d", r.Request.Method, r.StatusCode)]++
+		o.mu.Unlock()
+		return nil
+	}
+	o.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		o.mu.Lock()
+		o.methods[r.Method]++
+		o.mu.Unlock()
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(o.close)
+	return o
+}
+
+func (o *nativeDAVObservation) close() {
+	o.once.Do(func() { o.server.CloseClientConnections(); o.server.Close() })
+}
+
+func (o *nativeDAVObservation) assertMutationReplies(t *testing.T) {
+	t.Helper()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	t.Logf("fixture DAV observation methods=%v replies=%v; same route in permission control and experiment", o.methods, o.replies)
+	for _, method := range []string{"PUT", "DELETE", "MOVE", "MKCOL", "PATCH"} {
+		for reply, count := range o.replies {
+			if strings.HasPrefix(reply, method+":") {
+				status, err := strconv.Atoi(strings.TrimPrefix(reply, method+":"))
+				if err != nil || status < 400 {
+					t.Errorf("DAV mutation accepted: %s count=%d", reply, count)
+				}
+			}
+		}
+	}
 }
 
 func nativeMountedFiles(t *testing.T, directory string) map[string]int64 {

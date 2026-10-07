@@ -35,11 +35,16 @@ type nativeMountFixture struct {
 	blockOnce, cancelOnce               sync.Once
 	key                                 atomic.Value
 	renewedResolves                     atomic.Int32
+	startup                             *nativeStartupGates
 }
 
 func newNativeMountFixture(t *testing.T) *nativeMountFixture {
+	return newNativeMountFixtureWithStartup(t, nil)
+}
+
+func newNativeMountFixtureWithStartup(t *testing.T, startup *nativeStartupGates) *nativeMountFixture {
 	t.Helper()
-	f := &nativeMountFixture{t: t, files: make(map[string][]byte), blocked: make(chan struct{}), cancelled: make(chan struct{})}
+	f := &nativeMountFixture{t: t, startup: startup, files: make(map[string][]byte), blocked: make(chan struct{}), cancelled: make(chan struct{})}
 	for i, name := range []string{"space name.mkv", "xml & apostrophe's.mkv", "percent% hash#.mkv", "café 日本語.mkv", "renewal.mkv", "blocked.mkv"} {
 		data := make([]byte, 2<<20)
 		for j := range data {
@@ -66,6 +71,15 @@ func newNativeMountFixture(t *testing.T) *nativeMountFixture {
 
 func (f *nativeMountFixture) serveAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	// Production mirror discovery is public. Keep it on the fixture instead of
+	// accidentally introducing a ten-second external fallback into readiness.
+	if r.URL.Path == "/api/v1/mirrors" {
+		if f.startup != nil && !f.startup.waitMirror(r) {
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"mirrors": []map[string]any{{"url": f.web.URL, "primary": true}}})
+		return
+	}
 	if f.apiOutage.Load() != 0 {
 		http.Error(w, "synthetic outage", http.StatusServiceUnavailable)
 		return
@@ -86,6 +100,9 @@ func (f *nativeMountFixture) serveAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/api/internal/agent/mount/access":
+		if f.startup != nil && !f.startup.waitAccess(r) {
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]bool{"allowed": true})
 	case "/api/internal/agent/mount/accounts":
 		_ = json.NewEncoder(w).Encode(map[string]any{"accounts": []agent.MountAccount{{Provider: "torbox", Revision: "fixture-revision"}}})
@@ -116,6 +133,9 @@ func (f *nativeMountFixture) serveAPI(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"url": f.cdn.URL + "/media?" + q.Encode()})
 	default:
 		if strings.HasSuffix(r.URL.Path, "/register") {
+			if f.startup != nil && !f.startup.waitRegister(r) {
+				return
+			}
 			_, _ = w.Write([]byte(`{"success":true,"user":{"name":"Native Fixture","plan":"pro"},"features":{}}`))
 			return
 		}

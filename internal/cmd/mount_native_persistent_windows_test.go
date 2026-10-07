@@ -21,7 +21,8 @@ import (
 
 // This uses the disposable account's actual default config and scheduled task.
 // The directory guards prevent a fixture from replacing an existing installation.
-func TestMountNativeWindowsPersistent(t *testing.T) {
+func newNativeWindowsPersistentFixture(t *testing.T, gates *nativeStartupGates) *nativeWindowsPersistentFixture {
+	t.Helper()
 	nativeMountOptIn(t, true)
 	if os.Getenv("UNARR_NATIVE_WINDOWS_SERVICE") != "1" {
 		t.Skip("disposable Windows account service opt-in required")
@@ -53,7 +54,7 @@ func TestMountNativeWindowsPersistent(t *testing.T) {
 			t.Skipf("existing account data preserved; default directory must be absent: %s", dir)
 		}
 	}
-	f := newNativeMountFixture(t)
+	f := newNativeMountFixtureWithStartup(t, gates)
 	f.cfg.Download.Dir = filepath.Join(t.TempDir(), "downloads")
 	if err := os.MkdirAll(f.cfg.Download.Dir, 0700); err != nil {
 		t.Fatal(err)
@@ -85,6 +86,9 @@ func TestMountNativeWindowsPersistent(t *testing.T) {
 		t.Fatal("verified native rclone artifact required")
 	}
 	t.Cleanup(func() {
+		if gates != nil {
+			gates.releaseAll()
+		}
 		nativePersistentFailureDiagnostics(t, f, letter+`\`)
 		if windowsTaskInstalled() {
 			p := startNativeCLI(t, "daemon", "uninstall")
@@ -141,6 +145,12 @@ func TestMountNativeWindowsPersistent(t *testing.T) {
 			t.Fatalf("real CLI %v timed out", args)
 		}
 	}
+	return &nativeWindowsPersistentFixture{f: f, letter: letter, cli: cli}
+}
+
+func TestMountNativeWindowsPersistent(t *testing.T) {
+	fixture := newNativeWindowsPersistentFixture(t, nil)
+	f, letter, cli := fixture.f, fixture.letter, fixture.cli
 	cli("mount", letter)
 	// The initiating terminal has exited before this mounted read.
 	filePath := filepath.Join(letter+`\`, "debrid", "torbox", "Release [123]", "space name.mkv")
@@ -167,9 +177,13 @@ func TestMountNativeWindowsPersistent(t *testing.T) {
 		return st != nil && st.Status == "running" && agent.IsProcessAlive(st.PID)
 	})
 	oldPID := st.PID
+	oldDaemon, oldChild := nativeWindowsOwnedPair(t)
+	oldPeer := nativeOpenOldDAVPeer(t, f.cfg.Mount.Listen)
 	nativeWindowsLifecycleDiagnostic(t, f, letter+`\`, "before restart")
 	cli("daemon", "restart")
 	nativeWindowsLifecycleDiagnostic(t, f, letter+`\`, "restart command exited")
+	nativeWindowsAssertOldPairGone(t, oldDaemon, oldChild)
+	oldPeer.assertClosed(t)
 	nativeEventually(t, 35*time.Second, "daemon restarted with fresh PID", func() bool {
 		st := agent.ReadState()
 		return st != nil && st.PID != oldPID && st.Status == "running" && agent.IsProcessAlive(st.PID)
@@ -183,6 +197,15 @@ func TestMountNativeWindowsPersistent(t *testing.T) {
 	nativeRenewPersistentIdentity(t, f, filePath, st.PID)
 	for _, disableIntent := range []bool{true, false} {
 		if !disableIntent {
+			loaded, err = config.Load(config.FilePath())
+			if err != nil || loaded.Mount.Enabled {
+				t.Fatalf("first umount must save disabled intent: %v", err)
+			}
+			loaded.Mount.Enabled = true
+			if err := config.Save(loaded, config.FilePath()); err != nil {
+				t.Fatal(err)
+			}
+			t.Log("synthetic config explicitly opts into second cycle; interactive consent SKIP")
 			cli("mount", letter)
 			nativeEventually(t, 35*time.Second, "second persistent drive", func() bool { _, err := os.Stat(filePath); return err == nil })
 			read()

@@ -162,6 +162,17 @@ func TestMountNativeLinuxPersistent(t *testing.T) {
 	nativeRenewPersistentIdentity(t, f, filePath, st.PID)
 	for _, disableIntent := range []bool{true, false} {
 		if !disableIntent {
+			// The first umount saved disabled intent. Declare a new opt-in in
+			// this synthetic config; this does not exercise interactive consent.
+			loaded, err := config.Load(config.FilePath())
+			if err != nil || loaded.Mount.Enabled {
+				t.Fatalf("first umount must save disabled intent: %v", err)
+			}
+			loaded.Mount.Enabled = true
+			if err := config.Save(loaded, config.FilePath()); err != nil {
+				t.Fatal(err)
+			}
+			t.Log("synthetic config explicitly opts into second cycle; interactive consent SKIP")
 			cli("mount", directory)
 			nativeEventually(t, 35*time.Second, "second private persistent mount", func() bool { _, err := os.Stat(filePath); return err == nil })
 			read()
