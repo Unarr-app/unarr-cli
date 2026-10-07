@@ -25,9 +25,10 @@ type Client struct {
 	keyMu      sync.RWMutex
 	apiKey     string
 	httpClient *http.Client
-	// Each mount metadata attempt leaves time for a mirror inside the 10s
-	// access watchdog. Large library sync and ordinary requests keep their budgets.
-	mountClient *http.Client
+	// Short access attempts leave time for a mirror inside the 10s watchdog.
+	// Mount metadata/resolve use httpClient's finite 30s budget: cold pages
+	// need serial provider pacing, and resolution can queue for up to 5s.
+	mountAccessClient *http.Client
 	// wakeClient has no built-in timeout — used exclusively for the long-poll
 	// wake endpoint where the context controls cancellation.
 	wakeClient *http.Client
@@ -61,7 +62,7 @@ func NewClientWithMirrors(baseURL string, extras []string, apiKey, userAgent str
 		// (hundreds or thousands of items) where ffprobe scanning alone can take
 		// several minutes before the HTTP request is even sent.
 		librarySyncClient: &http.Client{Timeout: 10 * time.Minute},
-		mountClient:       &http.Client{Timeout: 3 * time.Second},
+		mountAccessClient: &http.Client{Timeout: 3 * time.Second},
 		userAgent:         userAgent,
 	}
 }
