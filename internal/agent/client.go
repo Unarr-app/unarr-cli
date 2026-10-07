@@ -603,6 +603,10 @@ func (c *Client) handleResponse(resp *http.Response, dst any) error {
 	const limit = 1 << 20
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
+		if resp.StatusCode >= 400 {
+			// A received API verdict remains authoritative when its body is incomplete.
+			return &HTTPError{StatusCode: resp.StatusCode, Message: "response body could not be read"}
+		}
 		return fmt.Errorf("read body: %w", err)
 	}
 	if len(body) > limit {
