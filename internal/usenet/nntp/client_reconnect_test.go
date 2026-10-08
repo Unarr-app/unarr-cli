@@ -11,15 +11,16 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/usenet/nntptest"
 )
 
-// TestCancelledCallerReconnectKeepsPoolSlot: a Body whose caller has already
-// cancelled (a player closed the range while a read-ahead held a dropped
-// connection) must not lose the pool slot when it reconnects. Before, the dial ran
-// on the cancelled context, failed instantly, and permanently decremented the
-// pool — a long-running daemon's pool shrank to empty.
+// A caller cancelled while holding a stalled connection must retire it and
+// leave its slot available to the next live caller. Wait for the BODY to reach
+// the server before cancelling: an already-cancelled context can close the
+// socket before the command is written, independently of pool acquisition.
 func TestCancelledCallerReconnectKeepsPoolSlot(t *testing.T) {
 	s := nntptest.NewFakeServer(t)
-	s.AddArticle("a@test", []byte("=ybegin part=1 total=1 line=128 size=3 name=x\r\n=ypart begin=1 end=3\r\nabc\r\n=yend size=3 part=1 pcrc32=352441c2\r\n"))
-	c := nntp.NewClient(s.Config())
+	s.AddArticle("a@test", article("a", []byte("recovered")))
+	cfg := s.Config()
+	cfg.MaxConnections = 1 // Recovery must refill the retired slot, not use another.
+	c := nntp.NewClient(cfg)
 	cctx, cancelConnect := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelConnect()
 	if err := c.Connect(cctx); err != nil {
@@ -28,29 +29,41 @@ func TestCancelledCallerReconnectKeepsPoolSlot(t *testing.T) {
 	t.Cleanup(func() { _ = c.Close() })
 	want := c.ActiveConnections()
 
-	s.FailNext(1, 0) // the next BODY finds its connection dropped
-	cancelled, cancel := context.WithCancel(context.Background())
+	s.StallNext(1)
+	cancelled, cancel := context.WithCancel(cctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Body(cancelled, "a@test")
+		done <- err
+	}()
+	waitUntil(t, "the cancelled BODY to reach the server", func() bool { return s.BodyCalls() == 1 })
 	cancel()
-	// acquire() picks at random between a pooled connection and the cancelled
-	// context, so retry until the BODY actually reached the dropped connection.
-	for i := 0; i < 200 && s.BodyCalls() == 0; i++ {
-		if _, err := c.Body(cancelled, "a@test"); err != nil && !errors.Is(err, context.Canceled) {
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("cancelled Body: %v", err)
 		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled Body did not release its connection")
 	}
-	if s.BodyCalls() == 0 {
-		t.Fatal("the cancelled Body never reached a connection")
+	if got := s.BodyCalls(); got != 1 {
+		t.Fatalf("cancelled Body retried: %d commands, want 1", got)
 	}
 	if got := c.ActiveConnections(); got > want {
 		t.Fatalf("ActiveConnections = %d after cancellation, exceeds %d slots", got, want)
 	}
-	if _, err := c.Body(context.Background(), "a@test"); err != nil {
+	gotBody, err := c.Body(cctx, "a@test")
+	if err != nil {
 		t.Fatalf("Body after cancelled reconnect: %v", err)
+	}
+	if got := decoded(t, gotBody); got != "recovered" {
+		t.Fatalf("Body after cancelled reconnect = %q, want recovered", got)
 	}
 	// Cancellation now retires promptly; the next live owner can redial the
 	// vacated slot rather than forcing the cancelled owner through a handshake.
 	for range want {
-		if _, err := c.Body(context.Background(), "a@test"); err != nil {
+		if _, err := c.Body(cctx, "a@test"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -62,6 +75,26 @@ func TestCancelledCallerReconnectKeepsPoolSlot(t *testing.T) {
 type countingProgress struct {
 	lines, restarts, linesAtRestart int
 	last                            []byte
+}
+
+func TestAlreadyCancelledBodyKeepsPoolCapacity(t *testing.T) {
+	s := nntptest.NewFakeServer(t)
+	s.AddArticle("a@test", article("a", []byte("recovered")))
+	c := dialPool(t, s, 1)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.Body(cancelled, "a@test"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("already-cancelled Body: %v", err)
+	}
+	ctx, cancelLive := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelLive()
+	got, err := c.Body(ctx, "a@test")
+	if err != nil {
+		t.Fatalf("Body after already-cancelled caller: %v", err)
+	}
+	if decoded(t, got) != "recovered" || c.ActiveConnections() != 1 {
+		t.Fatalf("already-cancelled caller lost usable capacity: %d connections", c.ActiveConnections())
+	}
 }
 
 func (p *countingProgress) Line(body []byte) { p.lines++; p.last = body }
