@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.0] - 2026-10-08
+
+### Added
+
+- **mount**: Optional read-only remote folders for paid accounts, disabled by default, with provider accounts managed on the web and direct Usenet NZB access.
+- **mount**: Persistent agent-owned activation through `unarr mount`, explicit disabling through `unarr umount`, and a standalone `mount serve` mode.
+- **mount**: Reuse compatible dependencies and prepare checksum-verified rclone; explain and request consent before installing missing filesystem drivers.
+
+### Fixed
+
+- **mount**: Validate destinations and default service configuration, preserve agent identity, and clean up old mount sessions on credential replacement, disabling, restart and shutdown.
+- **mount**: Preserve Linux service cleanup, wait for Windows mount cleanup, enforce Windows read-only owner permissions, and detach owned macOS mounts before stopping rclone.
+- **remotefs**: Retain catalog entries through transient failures, recover partial NZBs and revisions, keep collision names stable, and bound streamed reads and cancellation.
+- **agent**: Honor configured API mirrors and paced metadata requests while keeping paid-access denials terminal, including failures while reading the response body.
+- **usenet**: Bound NNTP article bodies and replies, validate complete yEnc framing and fields, and recover cancelled or invalid article transports safely.
+- **daemon**: Allow safe Windows uninstall when the configuration parent directory is absent.
+
+### Compatibility
+
+- Remote folders require the matching web backend before use; CLI 1.17.0 is the minimum supported agent version for web-dispatched local NZBs.
+- Existing download workflows remain available. Mounts use personal supported provider accounts; real-provider/CDN end-to-end performance and Zurg parity are not established by synthetic validation.
+
 ## [1.16.0] - 2026-10-05
 
 
@@ -2005,6 +2027,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.17.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.16.1...v1.17.0
 [1.16.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.15.4...v1.16.0
 [1.15.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.15.3...v1.15.4
 [1.15.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.15.2...v1.15.3
