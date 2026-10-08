@@ -15,7 +15,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var configCategories = []string{"downloads", "organization", "library", "notifications", "device", "region", "connection", "advanced"}
+var configCategories = []string{"downloads", "organization", "library", "mount", "notifications", "device", "region", "connection", "advanced"}
 
 func newConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -27,6 +27,7 @@ Categories:
   downloads        Download directory, method, speed limits, concurrency
   organization     Auto-sort into Movies / TV Shows folders
   library          Library scan settings and file deletion permissions
+  mount            Local mount settings (accounts are managed on the web)
   notifications    Desktop notifications
   device           Agent name
   region           Country and language
@@ -72,7 +73,10 @@ func runConfigMenu(category string) error {
 	green := color.New(color.FgGreen)
 	dim := color.New(color.FgHiBlack)
 
-	cfg := loadConfig()
+	cfg, err := config.Load(resolvedConfigPath())
+	if err != nil {
+		return err // Never overwrite an unreadable configuration with defaults.
+	}
 	original := cfg // snapshot for change detection
 
 	fmt.Println()
@@ -102,6 +106,7 @@ func runConfigMenu(category string) error {
 						huh.NewOption("Downloads        — directory, method, speed limits", "downloads"),
 						huh.NewOption("Organization     — auto-sort Movies & TV Shows", "organization"),
 						huh.NewOption("Library          — scan settings & file deletion", "library"),
+						huh.NewOption("Mount            — remote folder, debrid & Usenet", "mount"),
 						huh.NewOption("Notifications    — desktop notifications", "notifications"),
 						huh.NewOption("Device           — agent name", "device"),
 						huh.NewOption("Region           — country & language", "region"),
@@ -140,6 +145,8 @@ func runCategory(cfg *config.Config, category string) error {
 		return configOrganization(cfg)
 	case "library":
 		return configLibrary(cfg)
+	case "mount":
+		return configMount(cfg)
 	case "notifications":
 		return configNotifications(cfg)
 	case "device":
@@ -408,6 +415,9 @@ func saveIfChanged(cfg, original config.Config, green, dim *color.Color) error {
 	if err := cfg.ValidatePaths(); err != nil {
 		return fmt.Errorf("unsafe configuration: %w", err)
 	}
+	if err := cfg.Mount.Validate(); err != nil {
+		return fmt.Errorf("invalid mount configuration: %w", err)
+	}
 
 	configPath := config.FilePath()
 	if cfgFile != "" {
@@ -421,6 +431,9 @@ func saveIfChanged(cfg, original config.Config, green, dim *color.Color) error {
 
 	fmt.Println()
 	green.Printf("  ✓ Configuration saved to %s\n", configPath)
+	if !reflect.DeepEqual(cfg.Mount, original.Mount) {
+		dim.Println("  " + mountApplyGuidance(cfg.Mount.Enabled) + " Manage provider accounts on the Unarr website.")
+	}
 
 	// Saving is not applying: the daemon snapshots config at startup. Users
 	// toggled allow_delete / preferred method here, saw "✓ saved", and the daemon

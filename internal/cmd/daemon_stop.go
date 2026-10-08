@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
@@ -32,9 +33,8 @@ func runStop() error {
 	return stopDaemonByPID()
 }
 
-// stopDaemonByPID stops the daemon: intent first, then the supervisor, then the
-// PID. Used on platforms without a service manager — which is Windows, plus a
-// foreground daemon anywhere.
+// stopDaemonByPID records intent, ends the supervisor, then waits for Windows
+// cleanup or signals a Unix PID. Used without a respawning service manager.
 //
 // The first two steps are UNCONDITIONAL, and that ordering is the fix for a
 // window measured on real Windows. `unarr stop` finds its target in the state
@@ -44,7 +44,8 @@ func runStop() error {
 // from that file alone meant taking the "already dead" branch and killing
 // nothing while a live daemon carried on. Recording the intent and ending the
 // supervisor do not depend on the file being right, so they happen first and
-// always; the PID kill is then a best-effort extra, not the load-bearing step.
+// always. Windows then waits for the actual instance lock owner, even before
+// registration has published the new PID.
 func stopDaemonByPID() error {
 	// Record the intent BEFORE anything dies. On Windows this is the only thing
 	// that tells the launcher shim the exit was requested: taskkill /f gives a
@@ -53,11 +54,12 @@ func stopDaemonByPID() error {
 	// the "I pause it and it turns itself back on" bug. The next daemon start
 	// clears the marker, so it can never suppress a respawn after a LATER crash.
 	agent.WriteStopIntent()
-	// Then cut the supervisor. No-op off Windows (a real service manager already
-	// owns this); on Windows it ends the scheduled task, taking the whole
-	// wscript → cmd → unarr.exe tree with it regardless of what the state file
-	// claims. See stopSupervisor.
+	// End the launcher before waiting for its daemon. Windows /end can leave
+	// the daemon grandchild alive; the stop-intent watcher must drain it.
 	stopSupervisor()
+	if runtime.GOOS == "windows" {
+		return stopDaemonByLock(nil)
+	}
 
 	state, err := agent.LoadState()
 	if err != nil {
@@ -84,9 +86,7 @@ func stopDaemonByPID() error {
 
 // reapStoppedState removes the state file once the process it names is gone.
 //
-// Unlike reapStateAfterExit it is not told which PID to expect, because after a
-// supervisor stop we may not know it — the daemon that died can be a respawn the
-// state file had not caught up with. It re-reads the file every tick and only
+// It re-reads the state file instead of trusting an earlier snapshot and only
 // removes it once THAT process is dead, so a daemon the user started again in
 // the meantime keeps its state instead of having it deleted out from under it.
 func reapStoppedState() {
@@ -100,24 +100,5 @@ func reapStoppedState() {
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
-	}
-}
-
-// reapStateAfterExit waits briefly for the signaled daemon to exit, then
-// removes the orphaned state file it may have left behind. A daemon stopped in
-// its first seconds of life (signal handlers not yet installed) — and EVERY
-// Windows stop, where taskkill /f gives it no chance to clean up — dies
-// without RemoveState. The stale "running" state + dead PID would then read as
-// a CRASH to `unarr status` and to the unarr-desktop crash watcher, which
-// would email a false crash report for a user-initiated stop.
-func reapStateAfterExit(pid int) {
-	for i := 0; i < 20; i++ { // up to ~10s for a graceful drain
-		if !agent.IsProcessAlive(pid) {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if st := agent.ReadState(); st != nil && st.PID == pid && !agent.IsProcessAlive(pid) {
-		agent.RemoveState()
 	}
 }

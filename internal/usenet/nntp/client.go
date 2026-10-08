@@ -1,13 +1,10 @@
 package nntp
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/textproto"
 	"sync"
@@ -56,6 +53,8 @@ type Client struct {
 	// handshakeTimeout bounds greeting plus AUTHINFO; 0 means dialTimeout. Only
 	// this package's tests shorten it.
 	handshakeTimeout time.Duration
+	// encodedBodyLimit shortens the receive ceiling in bounded wire tests only.
+	encodedBodyLimit int
 }
 
 // conn is a single NNTP connection. Only its current holder touches it.
@@ -89,6 +88,9 @@ func NewClient(cfg Config) *Client {
 // Connect opens and authenticates all connections in the pool.
 // Safe to call again after a previous Connect failure.
 func (c *Client) Connect(ctx context.Context) error {
+	if err := c.validateCredentials(); err != nil {
+		return err
+	}
 	// Reset done channel if previously closed (allows retry after failure)
 	select {
 	case <-c.done:
@@ -142,6 +144,10 @@ func (c *Client) Body(ctx context.Context, messageID string) ([]byte, error) {
 // pays for one allocation instead of a buffer doubled a dozen times. The result
 // aliases buf when it fit; buf's contents are overwritten either way.
 func (c *Client) BodyInto(ctx context.Context, messageID string, buf []byte) ([]byte, error) {
+	messageID, err := NormalizeMessageID(messageID)
+	if err != nil {
+		return nil, err
+	}
 	cn, err := c.acquire(ctx)
 	if err != nil {
 		return nil, err
@@ -154,19 +160,29 @@ func (c *Client) BodyInto(ctx context.Context, messageID string, buf []byte) ([]
 		return data, err
 	}
 
-	// The dial deliberately ignores the caller's cancellation (it stays bounded
-	// by dialTimeout per phase): the connection being replaced is a POOL slot, not
-	// the caller's, and a reconnect that fails because a player closed its range
-	// would drop that slot for good.
-	cn2, dialErr := c.replace(context.WithoutCancel(ctx), cn)
+	if ctx.Err() != nil || isReceiveLimit(err) {
+		c.retire(cn)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	// A cancelled retry gives its reservation back. acquire can refill a vacant
+	// slot for the next live owner; this caller never waits for unrelated repair.
+	cn2, dialErr := c.replace(ctx, cn)
 	if dialErr != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		// A transport failure, never an article verdict: neither error is wrapped,
 		// so neither a dial timeout nor the dead connection's timeout reads as a stall.
 		return nil, fmt.Errorf("nntp: body failed (%v) and reconnect failed: %v", err, dialErr)
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		// The slot is restored; the caller is gone, so do not issue its BODY.
-		c.release(cn2)
+		// Cancellation may already have closed the new socket. Retire it rather
+		// than returning a closed connection to the next pooled owner.
+		cn2.broken = true
+		c.retire(cn2)
 		return nil, fmt.Errorf("nntp: body cancelled: %w (original: %v)", ctxErr, err)
 	}
 	if p := bodyProgressFrom(ctx); p != nil {
@@ -207,6 +223,9 @@ func (c *Client) Close() error {
 // --- Internal ---
 
 func (c *Client) dial(ctx context.Context) (*conn, error) {
+	if err := c.validateCredentials(); err != nil {
+		return nil, err
+	}
 	addr := fmt.Sprintf("%s:%d", c.cfg.Host, c.cfg.Port)
 
 	dialer := &net.Dialer{Timeout: dialTimeout}
@@ -230,11 +249,13 @@ func (c *Client) dial(ctx context.Context) (*conn, error) {
 	// forever — and with it the Body call and its pool slot, since replace dials
 	// with the caller's cancellation removed.
 	rawConn.SetDeadline(c.handshakeDeadline(ctx))
+	stop := interruptOnCancel(ctx, rawConn)
+	defer stop()
 	tp := textproto.NewConn(rawConn)
 	cn := &conn{tp: tp, raw: rawConn}
 
 	// Read welcome banner (200 or 201)
-	code, msg, err := tp.ReadCodeLine(200)
+	code, msg, err := readReply(tp, 200)
 	if err != nil {
 		// Also accept 201 (posting not allowed)
 		if code != 201 {
@@ -275,7 +296,7 @@ func (c *Client) auth(tp *textproto.Conn) error {
 		return err
 	}
 	tp.StartResponse(id)
-	code, msg, err := tp.ReadCodeLine(381)
+	code, msg, err := readReply(tp, 381)
 	tp.EndResponse(id)
 	if err != nil {
 		// 281 means no password required (unlikely but valid)
@@ -290,7 +311,7 @@ func (c *Client) auth(tp *textproto.Conn) error {
 		return err
 	}
 	tp.StartResponse(id)
-	code, msg, err = tp.ReadCodeLine(281)
+	code, msg, err = readReply(tp, 281)
 	tp.EndResponse(id)
 	if err != nil {
 		return fmt.Errorf("AUTHINFO PASS: %d %s: %w", code, msg, err)
@@ -304,6 +325,9 @@ func (c *Client) auth(tp *textproto.Conn) error {
 // connection's position in its response stream unknown.
 func (c *Client) bodyOnConn(ctx context.Context, cn *conn, messageID string, buf []byte) ([]byte, error) {
 	body, err := c.bodyExchange(ctx, cn, messageID, buf)
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	if err != nil && !IsArticleMissing(err) {
 		cn.broken = true
 	}
@@ -311,6 +335,8 @@ func (c *Client) bodyOnConn(ctx context.Context, cn *conn, messageID string, buf
 }
 
 func (c *Client) bodyExchange(ctx context.Context, cn *conn, messageID string, buf []byte) ([]byte, error) {
+	stop := interruptOnCancel(ctx, cn.raw)
+	defer stop() // joined before the connection can be released to another caller
 	// Set deadline from context
 	deadline, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
@@ -330,7 +356,7 @@ func (c *Client) bodyExchange(ctx context.Context, cn *conn, messageID string, b
 	defer cn.tp.EndResponse(id)
 
 	// Read response code
-	code, msg, err := cn.tp.ReadCodeLine(222)
+	code, msg, err := readReply(cn.tp, 222)
 	if err != nil {
 		// 430 is the RFC 3977 answer for an unknown message-id; 423 is the
 		// by-number code some servers send for it anyway. Both are final.
@@ -346,60 +372,16 @@ func (c *Client) bodyExchange(ctx context.Context, cn *conn, messageID string, b
 	cn.raw.SetDeadline(deadline)
 
 	// Read dot-terminated body
-	body, err := readDotBody(cn.tp.R, buf, bodyProgressFrom(ctx))
+	limit := c.encodedBodyLimit
+	if limit <= 0 {
+		limit = MaxEncodedBodyBytes
+	}
+	body, err := readDotBodyLimit(cn.tp.R, buf, bodyProgressFrom(ctx), limit)
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 
 	return body, nil
-}
-
-// readDotBody reads a dot-terminated text block from the NNTP server, appending
-// it to buf[:0]. Lines beginning with a dot have the dot removed (dot-stuffing),
-// each line is stored with a bare '\n', and the final ".\r\n" line signals the
-// end. Lines are read in place (ReadSlice), so the body costs no allocation
-// beyond growing buf. progress, when not nil, sees each line as it is added.
-func readDotBody(r *bufio.Reader, buf []byte, progress BodyProgress) ([]byte, error) {
-	out := buf[:0]
-	for {
-		start := len(out)
-		var err error
-		if out, err = appendLine(r, out); err != nil {
-			if err == io.EOF {
-				return out, nil
-			}
-			return nil, err
-		}
-
-		line := bytes.TrimRight(out[start:], "\r\n")
-		if len(line) == 1 && line[0] == '.' {
-			return out[:start], nil // terminator
-		}
-		if len(line) > 0 && line[0] == '.' {
-			line = line[1:] // dot-unstuffing
-		}
-		out = append(append(out[:start], line...), '\n')
-		if progress != nil {
-			progress.Line(out)
-		}
-	}
-}
-
-// appendLine appends the next line, '\n' included, to out. A line longer than
-// the reader's buffer arrives in several fragments. On an error the partial line
-// is dropped and the error returned.
-func appendLine(r *bufio.Reader, out []byte) ([]byte, error) {
-	start := len(out)
-	for {
-		frag, err := r.ReadSlice('\n')
-		out = append(out, frag...)
-		if err == nil {
-			return out, nil
-		}
-		if err != bufio.ErrBufferFull {
-			return out[:start], err
-		}
-	}
 }
 
 // ArticleNotFoundError is returned when the server responds with 430 (or 423).

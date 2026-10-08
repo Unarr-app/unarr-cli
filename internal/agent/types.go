@@ -135,7 +135,9 @@ type RegisterRequest struct {
 
 // RegisterResponse is returned by the server after registration.
 type RegisterResponse struct {
-	Success bool `json:"success"`
+	// Local request provenance; never serialized or sent back to the web.
+	credentialKey, agentID string
+	Success                bool `json:"success"`
 	// AgentKey is a freshly-minted per-machine API key, present only when the
 	// CLI registered with the user's general key (manual-paste bootstrap). The
 	// CLI must persist it and authenticate with it from then on, discarding the
@@ -177,7 +179,7 @@ type Task struct {
 	ContentID       *int       `json:"contentId,omitempty"`
 	IMDbID          string     `json:"imdbId,omitempty"`
 	PreferredMethod string     `json:"preferredMethod"`          // auto | debrid | usenet | torrent
-	Mode            string     `json:"mode,omitempty"`           // download | stream
+	Mode            string     `json:"mode,omitempty"`           // download | stream | mount
 	DirectURL       string     `json:"directUrl,omitempty"`      // HTTPS download URL (debrid, etc.)
 	DirectFileName  string     `json:"directFileName,omitempty"` // Original filename from direct URL
 	DirectFileSize  int64      `json:"directFileSize,omitempty"` // Exact provider-listed byte size of that file (0 = unknown)

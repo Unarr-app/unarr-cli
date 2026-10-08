@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/Unarr-app/unarr-cli/internal/usenet/nntp"
 )
 
 // NZB represents a parsed NZB file containing one or more files to download.
@@ -104,12 +106,12 @@ func Parse(r io.Reader) (*NZB, error) {
 			bytes, _ := strconv.ParseInt(rs.Bytes, 10, 64)
 			num, _ := strconv.Atoi(rs.Number)
 			msgID := strings.TrimSpace(rs.MessageID)
-			// Strip angle brackets if present
-			msgID = strings.TrimPrefix(msgID, "<")
-			msgID = strings.TrimSuffix(msgID, ">")
-
 			if msgID == "" {
 				continue
+			}
+			msgID, err := nntp.NormalizeMessageID(msgID)
+			if err != nil {
+				return nil, fmt.Errorf("nzb: invalid message ID in segment %d: %w", num, err)
 			}
 
 			segs = append(segs, Segment{

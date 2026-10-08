@@ -362,25 +362,7 @@ func runDaemonStart() error {
 	// The server tombstoned this agent: the stored credential is dead for good,
 	// so it is cleared and a fresh sign-in mints a new identity. The daemon
 	// stays parked meanwhile — its retry is what picks that new key up.
-	d.OnCredentialRejected = func() { creds.wipe() }
-
-	// While parked, re-read the credential each attempt: signing in from the
-	// tray rewrites config.toml, and the daemon must pick that up on its own —
-	// otherwise a successful sign-in looks like it did nothing, which is exactly
-	// the dead end this whole path exists to remove.
-	d.ReloadCredential = func() {
-		key, agentID, changed := creds.reload()
-		if !changed {
-			return
-		}
-		log.Printf("[agent] blocked: picked up a new credential from %s", creds.path)
-		d.Client().SetAPIKey(key)
-		// A sign-in after a revocation mints a new agent ID too. Without this
-		// the daemon would authenticate with the new key but keep announcing the
-		// tombstoned identity, which the server rejects forever — the recovery
-		// would silently never happen.
-		d.SetAgentID(agentID)
-	}
+	wireDaemonCredentials(d, creds)
 
 	// Start SIGUSR1 reload watcher (unix only, no-op on Windows)
 	startReloadWatcher(&ReloadableConfig{Daemon: d})
@@ -388,6 +370,14 @@ func runDaemonStart() error {
 	// Daemon-scoped context — cancelled on shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if cfg.Mount.Enabled {
+		mount := startRemoteMountSupervisor(ctx, cfg, creds, runPersistentRemoteMount, func() { creds.reload() })
+		defer func() {
+			if err := mount.stop(remoteMountStopTimeout); err != nil {
+				log.Printf("[mount] shutdown: %v", err)
+			}
+		}()
+	}
 
 	// Keep every FOREIGN-HELD daemon log inside its size budget for the whole
 	// run: whoever started us (launchd, the Windows shim, the detached launcher)
@@ -646,7 +636,7 @@ func runDaemonStart() error {
 			// on the first boot; d.Run() registers again later (idempotent upsert).
 			// Best-effort by design (the comment above): must NOT park, or a
 			// rejected credential would strand the daemon here — before the
-			// signal handlers and before the recovery callbacks are wired.
+			// signal handlers are installed.
 			//
 			// The two breadcrumbs around this call are not chatter. This used to be
 			// the ONE stretch of startup that emitted nothing at all, and success
@@ -797,7 +787,9 @@ func runDaemonStart() error {
 	// Wire: sync receives new tasks → submit to manager or handle stream
 	d.OnTasksClaimed = func(tasks []agent.Task) {
 		for _, t := range tasks {
-			if t.Mode == "stream" {
+			if t.Mode == "mount" {
+				go handleMountTask(ctx, t, cfg, agentClient)
+			} else if t.Mode == "stream" {
 				if isStreamingTask(t.ID) {
 					continue
 				}
@@ -1467,18 +1459,8 @@ func runDaemonStart() error {
 	// daemon does NOT stop — agent.Daemon.Run goes back to registration, which
 	// parks it and reports the block (message + remedy) through OnBlocked, so
 	// nothing is said here: one notification per revocation, not two.
-	d.SyncClient().OnRevoked = func(err error) {
-		log.Printf("[agent] credential revoked by server (%v) - this machine was removed from your account", err)
-		creds.wipe()
-	}
-
-	// Legacy bootstrap: if register hands back a per-machine key, persist it so
-	// the next start authenticates with the bound agent key (one-time migration;
-	// also stops the server re-minting on every restart).
-	d.OnAgentKeyMinted = func(newKey string) {
-		creds.adoptKey(newKey)
-		log.Printf("[agent] migrated to a per-machine agent key")
-	}
+	// Identity-bound revocation and bootstrap callbacks were wired together
+	// before any mount supervisor or registration cycle was started.
 
 	// Start daemon (blocks — runs sync loop)
 	errCh := make(chan error, 1)

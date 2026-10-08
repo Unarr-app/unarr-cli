@@ -164,6 +164,7 @@ unarr start
 | `unarr login` | Authenticate with your account (opens browser) |
 | `unarr config` | Edit all settings interactively (speed, organization, etc.) |
 | `unarr config check` | Validate `config.toml` — unknown keys (with suggestions) and out-of-range values; exits non-zero when anything is reported |
+| `unarr config mount` | Configure the optional local mount; provider accounts and credentials are managed on the web |
 | `unarr migrate` | Import settings and wanted list from Sonarr/Radarr/Prowlarr [pre-beta] |
 
 ### Search & Discovery
@@ -187,6 +188,9 @@ unarr start
 | `unarr downloads retry <id>` | Start it over |
 | `unarr downloads purge` | Forget queued downloads that are not running |
 | `unarr stream <hash\|magnet>` | Stream a torrent directly to mpv/vlc/browser |
+| `unarr mount <directory>` | Configure and activate the persistent read-only remote folder (directory is optional) |
+| `unarr umount` | Disable and unmount the remote folder (`unarr unmount` is an alias) |
+| `unarr mount serve` | Serve that remote library over loopback WebDAV without mounting it |
 
 See [Controlling downloads](#controlling-downloads) for the flags, the offline
 recovery path, and how these interact with the website.
@@ -1070,6 +1074,31 @@ UNARR_TELEMETRY=off unarr start
 
 When disabled the agent sends **nothing** — it still registers, syncs, and
 downloads exactly the same. Telemetry is purely additive.
+
+## Remote library as a local folder (optional)
+
+`unarr mount` exposes completed Real-Debrid / AllDebrid / TorBox / Torrin files and compatible
+NZBs as a local folder, reading media on demand. This is **disabled by default**
+and independent of the existing WebDAV export of downloaded files. Enable
+the mount with `unarr mount` and connect providers on the Unarr website. unarr
+prepares rclone automatically, explains missing filesystem drivers before asking
+permission to install them, and creates a default mount folder. The normal agent
+service owns the mount after the command exits and retries it after transient
+failure or login/reboot. Run `unarr init` first to configure the normal agent.
+The command confirms saved settings and an activation request; check the folder
+and agent logs to verify it is mounted. Use `unarr umount` to disable it,
+`unarr config mount` for advanced local settings, or `unarr mount <directory>`
+to choose a destination. On the website, **Add to local Usenet folder** sends
+only the selected NZB to the agent's managed inbox; manual NZB copies remain
+supported.
+
+Persistent `mount`/`umount` use the single default agent configuration; custom
+`--config` and shell-only overrides are refused before login or service changes.
+Use `unarr mount serve --config /path/to/config.toml` for a separately managed
+WebDAV process. Disabling the mount leaves an intentionally stopped agent stopped.
+
+See [setup, configuration and limitations](REMOTE_MOUNT.md) and the
+[performance report](REMOTE_MOUNT_PERFORMANCE.md).
 
 ## Shell Completion
 

@@ -57,6 +57,7 @@ func TestEveryExecCommandHidesWindow(t *testing.T) {
 		// on Windows, so their exec.Command cannot allocate a Windows console.
 		"cmd/unarr-desktop/playersystem_darwin.go:defaultMovieBundleID":    true,
 		"cmd/unarr-desktop/playersystem_linux.go:defaultVideoDesktopEntry": true,
+		"internal/cmd/mount_process_darwin.go:darwinUnmount":               true,
 	}
 
 	fset := token.NewFileSet()

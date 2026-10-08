@@ -3,7 +3,6 @@ package yenc
 import (
 	"bytes"
 	"fmt"
-	"hash/crc32"
 )
 
 // DecodeInPlace decodes the yEnc article body held in buf, writing the decoded
@@ -37,6 +36,7 @@ type InPlaceDecoder struct {
 	pos   int // bytes of the body consumed as whole lines
 	w     int // decoded bytes written at the front of the buffer
 	phase decodePhase
+	env   envelope
 }
 
 type decodePhase int
@@ -94,10 +94,8 @@ func (d *InPlaceDecoder) Finish(body []byte) (*Part, error) {
 	}
 	part := d.part
 	part.Data = body[:d.w]
-	if part.CRC32 != 0 {
-		if computed := crc32.ChecksumIEEE(part.Data); computed != part.CRC32 {
-			return nil, fmt.Errorf("yenc: CRC32 mismatch: expected %08x, got %08x", part.CRC32, computed)
-		}
+	if err := d.env.validate(&part); err != nil {
+		return nil, err
 	}
 	normalizeSinglePart(&part)
 	return &part, nil
@@ -112,7 +110,7 @@ func (d *InPlaceDecoder) line(body []byte, start, end int) {
 	switch d.phase {
 	case seekingBegin:
 		if bytes.HasPrefix(line, []byte("=ybegin ")) {
-			parseYBegin(&d.part, string(line))
+			d.env.begin(&d.part, string(line))
 			d.phase = afterBegin
 			if d.part.Name == "" && d.part.Size == 0 {
 				d.phase = noHeader
@@ -121,13 +119,18 @@ func (d *InPlaceDecoder) line(body []byte, start, end int) {
 	case afterBegin:
 		d.phase = inData
 		if bytes.HasPrefix(line, []byte("=ypart ")) {
-			parseYPart(&d.part, string(line))
+			d.env.part(&d.part, string(line))
+			return
+		}
+		if bytes.HasPrefix(line, []byte("=yend ")) {
+			d.env.trailer(&d.part, string(line))
+			d.phase = ended
 			return
 		}
 		d.w = decodeLineInto(body, d.w, start, end)
 	case inData:
-		if bytes.HasPrefix(line, []byte("=yend")) {
-			parseYEnd(&d.part, string(line))
+		if bytes.HasPrefix(line, []byte("=yend ")) {
+			d.env.trailer(&d.part, string(line))
 			d.phase = ended
 			return
 		}

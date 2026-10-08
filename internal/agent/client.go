@@ -25,6 +25,10 @@ type Client struct {
 	keyMu      sync.RWMutex
 	apiKey     string
 	httpClient *http.Client
+	// Short access attempts leave time for a mirror inside the 10s watchdog.
+	// Mount metadata/resolve use httpClient's finite 30s budget: cold pages
+	// need serial provider pacing, and resolution can queue for up to 5s.
+	mountAccessClient *http.Client
 	// wakeClient has no built-in timeout — used exclusively for the long-poll
 	// wake endpoint where the context controls cancellation.
 	wakeClient *http.Client
@@ -58,6 +62,7 @@ func NewClientWithMirrors(baseURL string, extras []string, apiKey, userAgent str
 		// (hundreds or thousands of items) where ffprobe scanning alone can take
 		// several minutes before the HTTP request is even sent.
 		librarySyncClient: &http.Client{Timeout: 10 * time.Minute},
+		mountAccessClient: &http.Client{Timeout: 3 * time.Second},
 		userAgent:         userAgent,
 	}
 }
@@ -77,9 +82,12 @@ func (c *Client) baseURL() string {
 // Register registers the CLI agent with the server and returns user info + features.
 func (c *Client) Register(ctx context.Context, req RegisterRequest) (*RegisterResponse, error) {
 	var resp RegisterResponse
+	key := c.currentKey()
+	ctx = credentialRequestContext(ctx, key)
 	if err := c.doPost(ctx, "/api/internal/agent/register", req, &resp); err != nil {
 		return nil, fmt.Errorf("register: %w", err)
 	}
+	resp.credentialKey, resp.agentID = key, req.AgentID
 	return &resp, nil
 }
 
@@ -506,6 +514,10 @@ func (c *Client) doPostWith(ctx context.Context, hc *http.Client, path string, b
 
 // doGet sends a GET request and decodes the response.
 func (c *Client) doGet(ctx context.Context, path string, dst any) error {
+	return c.doGetWith(ctx, c.httpClient, path, dst)
+}
+
+func (c *Client) doGetWith(ctx context.Context, client *http.Client, path string, dst any) error {
 	return c.withMirrorFailover(func(base string) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 		if err != nil {
@@ -514,7 +526,7 @@ func (c *Client) doGet(ctx context.Context, path string, dst any) error {
 
 		c.setHeaders(req)
 
-		resp, err := c.httpClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("request failed: %w", err)
 		}
@@ -577,16 +589,32 @@ func (c *Client) currentKey() string {
 }
 
 func (c *Client) setHeaders(req *http.Request) {
-	req.Header.Set("Authorization", "Bearer "+c.currentKey())
+	key, bound := req.Context().Value(requestCredentialKey{}).(string)
+	if !bound {
+		key = c.currentKey()
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
 	}
 }
 
 func (c *Client) handleResponse(resp *http.Response, dst any) error {
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
+	const limit = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
+		if resp.StatusCode >= 400 {
+			// A received API verdict remains authoritative when its body is incomplete.
+			return &HTTPError{StatusCode: resp.StatusCode, Message: "response body could not be read"}
+		}
 		return fmt.Errorf("read body: %w", err)
+	}
+	if len(body) > limit {
+		message := fmt.Sprintf("API response exceeds %d bytes; update the server to use bounded pages", limit)
+		if resp.StatusCode >= 400 {
+			return &HTTPError{StatusCode: resp.StatusCode, Message: message}
+		}
+		return fmt.Errorf("%s", message)
 	}
 
 	if resp.StatusCode >= 400 {

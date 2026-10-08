@@ -38,7 +38,7 @@ func readSource(t *testing.T, name string) string {
 // nothing, recorded nothing, and a live daemon carried on running (measured on
 // real Windows). The two steps that do not depend on that file being correct —
 // recording the intent, and ending the supervisor — must therefore come FIRST
-// and unconditionally; the PID kill is the best-effort extra afterwards.
+// and unconditionally; Windows then acknowledges the actual instance lock.
 func TestStopIsNotDecidedByTheStateFile(t *testing.T) {
 	src := readSource(t, "daemon_stop.go")
 	body := src[strings.Index(src, "func stopDaemonByPID()"):]
@@ -70,6 +70,10 @@ func TestStopIsNotDecidedByTheStateFile(t *testing.T) {
 	if intent > kill {
 		t.Error("the stop intent must be recorded BEFORE the kill: taskkill /f leaves no window to record it after")
 	}
+	ack := strings.Index(body, "stopDaemonByLock(nil)")
+	if ack < supervisor || ack > loadState || !strings.Contains(body[:ack], `runtime.GOOS == "windows"`) {
+		t.Error("Windows must acknowledge cleanup after intent/supervisor and before consulting state")
+	}
 	// Recorded once, unconditionally. Branch-local copies are how the old version
 	// managed to miss a path.
 	if n := strings.Count(body, "agent.WriteStopIntent()"); n != 1 {
@@ -100,16 +104,23 @@ func TestStopSupervisorIsPlatformSplit(t *testing.T) {
 	}
 }
 
-// TestUninstallRecordsIntent: uninstall taskkills the daemon while its scheduled
-// task still exists, so without the marker the shim reports a failure the task
-// can still act on.
+// Uninstall must retain the stop marker/shim until actual cleanup acknowledges.
 func TestUninstallRecordsIntent(t *testing.T) {
 	src := readSource(t, "daemon_install.go")
-	if !strings.Contains(src, "agent.WriteStopIntent()") {
-		t.Error("uninstall no longer records the stop intent before taskkill")
+	intent := strings.Index(src, "agent.WriteStopIntent()")
+	supervisor := strings.Index(src, "stopSupervisor()")
+	ack := strings.Index(src, "stopDaemonByLock(removeStoppedWindowsTask)")
+	if intent < 0 || supervisor < intent || ack < supervisor {
+		t.Error("uninstall must record intent and stop the supervisor before locked cleanup")
 	}
-	if !strings.Contains(src, "reapStateAfterExit(state.PID)") {
-		t.Error("uninstall no longer reaps the state file — the tray would read it as a crash")
+	lock := readSource(t, "daemon_stop_lock.go")
+	if !strings.Contains(lock, "agent.RemoveState()") || !strings.Contains(lock, "!agent.IsProcessAlive(st.PID)") {
+		t.Error("locked cleanup must reap only dead state")
+	}
+	for _, name := range []string{"reload_windows.go", "daemon_install.go"} {
+		if strings.Contains(readSource(t, name), `exec.Command("taskkill"`) {
+			t.Errorf("%s force-kills the daemon before owned child cleanup", name)
+		}
 	}
 }
 
