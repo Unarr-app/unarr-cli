@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +22,19 @@ import (
 // and joining an owned child. They do not install a service or native mount.
 func init() {
 	switch os.Getenv("UNARR_TEST_STOP_ROLE") {
+	case "absent-service-command":
+		receipt, err := os.OpenFile(os.Getenv("UNARR_TEST_STOP_COMMANDS"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			os.Exit(99)
+		}
+		name := strings.TrimSuffix(strings.ToLower(filepath.Base(os.Args[0])), ".exe")
+		fmt.Fprintln(receipt, name, strings.Join(os.Args[1:], " "))
+		_ = receipt.Close()
+		if name == "netsh" {
+			os.Exit(0)
+		}
+		fmt.Fprintln(os.Stderr, "ERROR: The system cannot find the file specified.")
+		os.Exit(1)
 	case "mount":
 		for {
 			time.Sleep(time.Hour)
@@ -286,4 +301,85 @@ func TestDaemonStopLockRepeatedCleanupAndAlreadyStoppedRestart(t *testing.T) {
 	if err != nil || starts != 1 {
 		t.Fatalf("already stopped restart: error=%v starts=%d", err, starts)
 	}
+}
+
+// Exercise the real Windows Cobra entry with private executable stand-ins.
+// Neither Task Scheduler nor the real firewall is reached by this control.
+func TestDaemonStopLockWindowsUninstallMissingConfigParent(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("executes the real Windows uninstall branch")
+	}
+	for _, liveState := range []bool{false, true} {
+		t.Run(fmt.Sprintf("live-state=%v", liveState), func(t *testing.T) {
+			commands := isolateWindowsUninstallCommands(t)
+			if liveState {
+				agent.WriteState(&agent.DaemonState{PID: os.Getpid(), Status: "running"})
+			}
+			if _, err := os.Stat(filepath.Dir(config.LockPath())); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("control requires a genuinely absent config parent", err)
+			}
+			command := newDaemonUninstallCmdReal()
+			command.SetArgs([]string{})
+			err := command.Execute()
+			receipts, readErr := os.ReadFile(commands)
+			if readErr != nil || !strings.HasPrefix(string(receipts), "schtasks /end /tn unarr\n") {
+				t.Fatal("real supervisor entry did not use the private command", readErr, string(receipts))
+			}
+			t.Logf("isolated service commands: %q", receipts)
+			if liveState {
+				if err == nil || !agent.StopIntentExists() || !agent.IsProcessAlive(os.Getpid()) {
+					t.Fatal("missing lock parent acknowledged a known live daemon", err)
+				}
+				if _, err := os.Stat(filepath.Dir(config.LockPath())); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("live state caused a replacement lock namespace", err)
+				}
+				if string(receipts) != "schtasks /end /tn unarr\n" {
+					t.Fatal("refused cleanup removed task or firewall", string(receipts))
+				}
+			} else if err != nil {
+				t.Fatalf("already absent task/config must be idempotent: %v", err)
+			} else {
+				if !strings.Contains(string(receipts), "schtasks /delete /tn unarr /f\n") {
+					t.Fatal("successful uninstall skipped the real task removal entry", string(receipts))
+				}
+				if info, err := os.Stat(config.LockPath()); err != nil || !info.Mode().IsRegular() {
+					t.Fatal("successful uninstall did not acquire a regular instance lock", err)
+				}
+			}
+			if err != nil && !strings.Contains(err.Error(), "cleanup incomplete") {
+				t.Fatal("missing-parent error was not a cleanup failure", err)
+			}
+		})
+	}
+}
+
+func isolateWindowsUninstallCommands(t *testing.T) string {
+	t.Helper()
+	isolatedMountConfig(t)
+	t.Setenv("APPDATA", filepath.Join(t.TempDir(), "absent-roaming"))
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("UNARR_TEST_STOP_ROLE", "absent-service-command")
+	bin := t.TempDir()
+	commands := filepath.Join(t.TempDir(), "commands")
+	t.Setenv("UNARR_TEST_STOP_COMMANDS", commands)
+	t.Setenv("PATH", bin)
+	t.Setenv("PATHEXT", ".EXE")
+	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"schtasks.exe", "netsh.exe"} {
+		if err := os.WriteFile(filepath.Join(bin, name), body, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if resolved, err := exec.LookPath(name); err != nil || resolved != filepath.Join(bin, name) {
+			t.Fatal("private command lookup could reach a real system tool", resolved, err)
+		}
+	}
+	return commands
 }

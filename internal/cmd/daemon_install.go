@@ -482,6 +482,9 @@ func runDaemonUninstall() error {
 		// the shim if cooperative shutdown cannot acknowledge its cleanup.
 		agent.WriteStopIntent()
 		stopSupervisor()
+		if err := prepareMissingWindowsUninstallLockParent(); err != nil {
+			return fmt.Errorf("daemon cleanup incomplete: %w", err)
+		}
 		if err := stopDaemonByLock(removeStoppedWindowsTask); err != nil {
 			return err
 		}
