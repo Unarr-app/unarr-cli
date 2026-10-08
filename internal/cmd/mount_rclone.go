@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/mountsetup"
 	"github.com/Unarr-app/unarr-cli/internal/winproc"
@@ -47,12 +46,15 @@ func runRclone(ctx context.Context, s *remoteLibrary, directory string) error {
 	cmd.Env = rcloneEnvironment(s, strings.TrimSpace(string(password)))
 	winproc.HideWindow(cmd)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	// Give rclone time to unmount before the server goes away. CommandContext
-	// escalates to Kill after WaitDelay if it cannot exit gracefully.
-	cmd.Cancel = func() error { return interruptMountProcess(cmd.Process) }
-	cmd.WaitDelay = 5 * time.Second
+	finish, err := configureRcloneMount(ctx, cmd, directory)
+	if err != nil {
+		return fmt.Errorf("rclone mount preparation failed: %w", err)
+	}
 	log.Printf("[mount] mounting remote library at %s; new files appear as background indexing completes", directory)
 	err = cmd.Run()
+	if cleanupErr := finish(); cleanupErr != nil {
+		return fmt.Errorf("rclone mount cleanup failed: %w", cleanupErr)
+	}
 	if ctx.Err() != nil {
 		return nil
 	}

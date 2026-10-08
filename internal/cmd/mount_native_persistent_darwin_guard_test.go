@@ -5,6 +5,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -114,16 +115,32 @@ func (id nativeMacIdentity) gone() bool {
 }
 
 func (g *nativeMacPersistent) owned() error {
+	info, err := os.Lstat("/usr/bin/sandbox-exec")
+	if err != nil || !info.Mode().IsRegular() || !os.SameFile(info, g.sandboxExecInfo) {
+		return fmt.Errorf("system sandbox-exec identity changed; refuse service mutator: %v", err)
+	}
+	data, err := os.ReadFile("/usr/bin/sandbox-exec")
+	if err != nil || sha256.Sum256(data) != g.sandboxExecHash {
+		return fmt.Errorf("system sandbox-exec content changed; refuse service mutator: %v", err)
+	}
+	info, err = os.Lstat(g.sandbox)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, g.sandboxInfo) {
+		return fmt.Errorf("private sandbox inode replaced; preserve it: %v", err)
+	}
+	data, err = os.ReadFile(g.sandbox)
+	if err != nil || !bytes.Equal(data, g.sandboxDefinition) {
+		return fmt.Errorf("private sandbox definition replaced; preserve it: %v", err)
+	}
 	for _, p := range []string{service.PlistPath(g.realHome), service.LegacyPlistPath(g.realHome)} {
 		if _, err := os.Lstat(p); !os.IsNotExist(err) {
 			return fmt.Errorf("real plist appeared: %s", p)
 		}
 	}
-	info, err := os.Lstat(g.plist)
+	info, err = os.Lstat(g.plist)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, g.definitionInfo) {
 		return fmt.Errorf("private definition inode replaced; preserve it: %v", err)
 	}
-	data, err := os.ReadFile(g.plist)
+	data, err = os.ReadFile(g.plist)
 	if err != nil || !bytes.Equal(data, g.definition) {
 		return fmt.Errorf("private definition absent/replaced; preserve it: %v", err)
 	}
@@ -153,7 +170,11 @@ func (g *nativeMacPersistent) owned() error {
 					fields[k] = v
 				}
 			}
-			if fields["path"] != g.plist || fields["program"] != g.cli || !strings.Contains(out, "HOME => "+g.home+"\n") {
+			program := g.cli
+			if g.sandboxed {
+				program = "/usr/bin/sandbox-exec"
+			}
+			if fields["path"] != g.plist || fields["program"] != program || !strings.Contains(out, "HOME => "+g.home+"\n") {
 				return fmt.Errorf("loaded definition/program/environment not owned: %s %s", fields["path"], fields["program"])
 			}
 			pid := launchdPID(out)

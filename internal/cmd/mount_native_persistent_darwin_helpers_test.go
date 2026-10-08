@@ -6,11 +6,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,12 +26,19 @@ import (
 	"github.com/Unarr-app/unarr-cli/internal/agent"
 	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/Unarr-app/unarr-cli/internal/service"
+	"golang.org/x/sys/unix"
 )
 
 type nativeMacPersistent struct {
 	home, realHome, cli, directory, plist string
 	definition                            []byte
 	definitionInfo                        os.FileInfo
+	sandbox                               string
+	sandboxed                             bool
+	sandboxDefinition                     []byte
+	sandboxInfo                           os.FileInfo
+	sandboxExecInfo                       os.FileInfo
+	sandboxExecHash                       [32]byte
 	pending                               []<-chan error
 	peers                                 []net.Conn
 	uninstallReader                       *bufio.Reader
@@ -56,11 +66,34 @@ func TestNativeMacPersistentEnvironmentHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := nativeMacProcess(os.Getpid(), bin)
-	if err != nil {
-		t.Fatal(err)
+	// /bin/ps is setuid on macOS and deliberately cannot execute inside a
+	// sandbox. Read our native PID/creation time without privilege escalation;
+	// the supervising fixture still uses exact ps identities outside it.
+	proc, err := unix.SysctlKinfoProc("kern.proc.pid", os.Getpid())
+	if err != nil || proc.Proc.P_pid != int32(os.Getpid()) {
+		t.Fatalf("sandboxed native process identity: %v", err)
 	}
-	b, err := json.Marshal(map[string]string{"home": os.Getenv("HOME"), "config": config.FilePath(), "data": config.DataDir(), "state": agent.StateFilePath(), "lock": config.LockPath(), "identity": id.receipt})
+	identity := fmt.Sprintf("PID%d created%d.%06d executable=%s", proc.Proc.P_pid, proc.Proc.P_starttime.Sec, proc.Proc.P_starttime.Usec, bin)
+	if endpoint := os.Getenv("UNARR_NATIVE_MAC_LOOPBACK_PROBE"); endpoint != "" {
+		resp, err := (&http.Client{Timeout: time.Second}).Get(endpoint + "/api/v1/mirrors")
+		if err != nil {
+			t.Fatalf("sandbox loopback denied: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatal("sandbox loopback response invalid")
+		}
+		conn, err := net.DialTimeout("udp", "192.0.2.1:9", time.Second)
+		if err == nil {
+			_, err = conn.Write([]byte("synthetic reserved-address isolation probe"))
+			conn.Close()
+		}
+		if !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
+			t.Fatalf("sandbox did not deny nonloopback syscall: %v", err)
+		}
+		t.Log("sandbox loopback HTTP allowed/nonloopback reserved-address UDP denied by permission before data; no provider")
+	}
+	b, err := json.Marshal(map[string]string{"home": os.Getenv("HOME"), "config": config.FilePath(), "data": config.DataDir(), "state": agent.StateFilePath(), "lock": config.LockPath(), "identity": identity})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +150,26 @@ func newNativeMacPersistent(t *testing.T) *nativeMacPersistent {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "xdg-data"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "xdg-cache"))
 	g := &nativeMacPersistent{home: home, realHome: realHome, cli: nativeCLIPath(t), directory: filepath.Join(home, "mount"), plist: service.PlistPath(home), api: newNativeMountFixture(t)}
+	g.sandboxed = os.Getenv("UNARR_NATIVE_MAC_SANDBOX") == "1"
+	g.sandbox = filepath.Join(home, "loopback-only.sb")
+	g.sandboxDefinition = []byte("(version 1)\n(allow default)\n(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\"))\n")
+	if err := os.WriteFile(g.sandbox, g.sandboxDefinition, 0600); err != nil {
+		t.Fatal(err)
+	}
+	g.sandboxInfo, err = os.Lstat(g.sandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.sandboxExecInfo, err = os.Lstat("/usr/bin/sandbox-exec")
+	if err != nil || !g.sandboxExecInfo.Mode().IsRegular() {
+		t.Fatal("native sandbox-exec must be an existing regular system executable")
+	}
+	sandboxExec, err := os.ReadFile("/usr/bin/sandbox-exec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.sandboxExecHash = sha256.Sum256(sandboxExec)
+	nativeMacPrivatePath(t, home, g.sandbox)
 	a, err := newLaunchdAgent(home)
 	if err != nil {
 		t.Fatal(err)
@@ -174,6 +227,13 @@ func newNativeMacPersistent(t *testing.T) *nativeMacPersistent {
 	envXML += "</dict>\n"
 	// Fixture service env, deliberately different from the production installer.
 	tmpl := strings.Replace(launchdTemplate, "  <key>RunAtLoad</key>", envXML+"  <key>RunAtLoad</key>", 1)
+	// Prepared fixture only: prevent the ordinary daemon's idle torrent/DHT
+	// startup from contacting public peers even though preferred_methods=debrid.
+	var sandboxXML bytes.Buffer
+	_ = xml.EscapeText(&sandboxXML, []byte(g.sandbox))
+	if g.sandboxed {
+		tmpl = strings.Replace(tmpl, "  <array>\n    <string>{{.BinPath | html}}</string>", "  <array>\n    <string>/usr/bin/sandbox-exec</string>\n    <string>-f</string>\n    <string>"+sandboxXML.String()+"</string>\n    <string>{{.BinPath | html}}</string>", 1)
+	}
 	if err := writeServiceFile(g.plist, tmpl, serviceData{BinPath: g.cli, Home: home, LogDir: config.DataDir()}); err != nil {
 		t.Fatal(err)
 	}
@@ -200,10 +260,15 @@ func newNativeMacPersistent(t *testing.T) *nativeMacPersistent {
 	defer cancel()
 	probe := exec.CommandContext(ctx, bin, "-test.run", "^TestNativeMacPersistentEnvironmentHelper$", "-test.v")
 	probe.Env = append(append([]string{}, g.env...), "UNARR_NATIVE_MAC_ENV_PROBE=1")
+	if g.sandboxed {
+		probe = exec.CommandContext(ctx, "/usr/bin/sandbox-exec", "-f", g.sandbox, bin, "-test.run", "^TestNativeMacPersistentEnvironmentHelper$", "-test.v")
+		probe.Env = append(append([]string{}, g.env...), "UNARR_NATIVE_MAC_ENV_PROBE=1", "UNARR_NATIVE_MAC_LOOPBACK_PROBE="+g.api.web.URL)
+	}
 	out, err := probe.CombinedOutput()
 	if err != nil {
 		t.Fatalf("private environment probe: %v %s", err, out)
 	}
+	t.Logf("actual child sandboxed=%t raw environment probe:\n%s", g.sandboxed, out)
 	var paths map[string]string
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.HasPrefix(line, "{") {
@@ -219,7 +284,10 @@ func newNativeMacPersistent(t *testing.T) *nativeMacPersistent {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("native isolated CLI version: %v %s", err, out)
 	}
-	t.Logf("prepared fixture HOME=%s config=%s state=%s tools=%s; actual child environment probe PASS; no bootstrap/load/label mutation", home, config.FilePath(), agent.StateFilePath(), cache)
+	t.Logf("prepared fixture HOME=%s config=%s state=%s tools=%s; actual child environment probe PASS sandboxed=%t; no bootstrap/load/label mutation", home, config.FilePath(), agent.StateFilePath(), cache, g.sandboxed)
+	if !g.sandboxed {
+		t.Log("standard native daemon: synthetic API/CDN/auth only, no real queued torrents/accounts; ordinary DHT initialization is not denied or provider acceptance")
+	}
 	return g
 }
 
@@ -270,6 +338,7 @@ func (g *nativeMacPersistent) cleanup(t *testing.T) {
 		return
 	}
 	if g.launched {
+		g.logReceipt(t)
 		if err := g.cleanupIdentities(); err != nil {
 			t.Errorf("unsafe cleanup identity: %v", err)
 			return
@@ -313,6 +382,9 @@ func (g *nativeMacPersistent) cleanup(t *testing.T) {
 		return
 	}
 	nativeMacAbsent(t, g.realHome)
+	if g.launched {
+		g.logReceipt(t)
+	}
 	if err := os.RemoveAll(g.home); err != nil {
 		t.Error(err)
 		return

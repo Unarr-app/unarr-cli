@@ -62,6 +62,24 @@ paths and blank forbidden configuration overrides. Public mount sees this
 already prepared definition. This covers the actual persistent controller and
 mount lifecycle; it does not validate installer environment propagation.
 
+With explicit `UNARR_NATIVE_MAC_SANDBOX=1`, the private definition launches the actual CLI through the existing system
+`sandbox-exec` with a private profile that allows only loopback outbound network.
+This contains the ordinary daemon's idle torrent/DHT startup as well as its
+children. An actual sandboxed child verifies loopback HTTP succeeds and a UDP
+write to a reserved nonloopback address is denied by permission before bootstrap.
+The system launcher and profile inode/content are pinned alongside the plist;
+native process identity still verifies the actual CLI after exec handoff.
+This process sandbox is fixture preparation, not a global security-policy change
+or public installer behavior. Real-provider acceptance remains outside scope.
+
+The standard fixture launches the actual CLI directly because macOS rejects
+execution of the installed setuid macFUSE helper inside this process sandbox.
+It still uses exclusively synthetic loopback API/CDN/auth fixtures, no real
+accounts or queued torrents, and private state. Ordinary idle torrent/DHT
+initialization is not denied in this mode; it does not prove total network
+isolation. Preserve sandbox failures separately rather than labeling them PASS.
+Bounded private daemon/rclone logs are retained in test output before cleanup.
+
 Before preparation, native id/DirectoryServices corroborate os/user UID and the
 real home. Both canonical/legacy real-home plists and GUI/user registrations
 must be absent; root/inaccessible sessions are refused. A UID lock excludes a

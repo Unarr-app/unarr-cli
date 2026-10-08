@@ -194,7 +194,11 @@ func nativeMacDefinition(t *testing.T, g *nativeMacPersistent) {
 	}
 	out, err = nativeMacCommand("/usr/bin/plutil", "-extract", "ProgramArguments", "json", "-o", "-", g.plist)
 	var argv []string
-	if err != nil || json.Unmarshal(out, &argv) != nil || !reflect.DeepEqual(argv, []string{g.cli, "start", "--log-file", filepath.Join(config.DataDir(), "unarr.log")}) {
+	want := []string{g.cli, "start", "--log-file", filepath.Join(config.DataDir(), "unarr.log")}
+	if g.sandboxed {
+		want = append([]string{"/usr/bin/sandbox-exec", "-f", g.sandbox}, want...)
+	}
+	if err != nil || json.Unmarshal(out, &argv) != nil || !reflect.DeepEqual(argv, want) {
 		t.Fatalf("generated actual CLI argv mismatch: %v %s", err, out)
 	}
 	if err := g.owned(); err != nil {
@@ -302,6 +306,15 @@ func (g *nativeMacPersistent) mountedIdentities(t *testing.T) (nativeMacIdentity
 	}
 	g.identities = append(g.identities, daemon, child)
 	t.Logf("actual daemon identity PID%d %s; child PID%d %s (ps creation time seconds)", daemon.pid, daemon.receipt, child.pid, child.receipt)
+	parentGroup, err := nativeMacCommand("/bin/ps", "-p", strconv.Itoa(daemon.pid), "-o", "pgid=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childGroup, err := nativeMacCommand("/bin/ps", "-p", strconv.Itoa(child.pid), "-o", "pgid=")
+	if err != nil || strings.TrimSpace(string(childGroup)) != strconv.Itoa(child.pid) || strings.TrimSpace(string(childGroup)) == strings.TrimSpace(string(parentGroup)) {
+		t.Fatalf("launchd mount child not isolated from daemon group: daemon=%s child=%s err=%v", parentGroup, childGroup, err)
+	}
+	t.Logf("actual launchd daemon PGID%s; owned rclone PGID%s equals child PID and differs from daemon", strings.TrimSpace(string(parentGroup)), strings.TrimSpace(string(childGroup)))
 	return daemon, child
 }
 
