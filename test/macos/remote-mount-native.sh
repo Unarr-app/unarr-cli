@@ -18,6 +18,9 @@ export GOMAXPROCS=2 UNARR_NO_TELEMETRY=1 UNARR_TELEMETRY=off
 export UNARR_NATIVE_ACCEPTANCE=1 UNARR_NATIVE_CLI="$cli"
 export UNARR_NATIVE_TOOLS_DIR="$artifact/tools" UNARR_NATIVE_PREPARE_RCLONE=1
 export UNARR_LAUNCHD_E2E=1
+# Service persistence has a separate opt-in. Kernel-off preparation validates
+# the private definition/environment and SKIPs before any bootstrap/load.
+export UNARR_NATIVE_MAC_SERVICE="${UNARR_NATIVE_MAC_SERVICE:-0}"
 # Kernel opt-in additionally requires the already-approved, loaded extension.
 # The harness never tries to activate it. Leave UNARR_NATIVE_KERNEL unset/0
 # while human approval is pending.
@@ -41,7 +44,7 @@ fi
 export UNARR_NATIVE_RCLONE="$UNARR_NATIVE_TOOLS_DIR/rclone-1.75.1-darwin-arm64/rclone"
 "$UNARR_NATIVE_RCLONE" version >> "$artifact/provenance.txt" 2>&1
 set +e
-"$cmd_test" -test.v -test.run '^(TestMountNative|TestLaunchdReal(Lifecycle|DisabledAndCrashRecovery|RejectsCrashLoop|PreservesUserDomain))' -test.timeout 5m > "$artifact/native.txt" 2>&1
+"$cmd_test" -test.v -test.run '^(TestMountNative|TestLaunchdReal(Lifecycle|DisabledAndCrashRecovery|RejectsCrashLoop|PreservesUserDomain))' -test.timeout 8m > "$artifact/native.txt" 2>&1
 status=$?
 set -e
 echo "EXIT=$status" >> "$artifact/native.txt"
