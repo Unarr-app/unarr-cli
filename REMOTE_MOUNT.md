@@ -39,6 +39,14 @@ directory below an existing parent. Linux/macOS create a missing directory and
 reject nonempty destinations. Bare ASCII drives `A:` through `Z:` are accepted;
 occupied drives and drive-relative paths such as `X:media` are rejected.
 Existing files are never replaced.
+
+Windows mounts require WinFsp 1.9 or newer. The verified installer provides 2.1;
+existing installations below 1.9 are unsupported and must be updated before
+mounting. The Windows mount uses protected owner read/execute permissions to
+deny creation, writes, renames and deletion while allowing media reads and
+directory listing. This permission behavior was validated with WinFsp 2.1;
+older drivers were not tested.
+
 The agent starts a loopback WebDAV service and rclone. They share the agent's
 lifecycle and are retried after transient failure. Stopping the whole agent also
 stops the mount; starting it again restores an enabled mount.

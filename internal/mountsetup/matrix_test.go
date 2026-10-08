@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +35,12 @@ func fixtureMain() {
 	exe, _ := os.Executable()
 	mode, _ := os.ReadFile(exe + ".mode")
 	switch string(mode) {
+	case "args-receipt":
+		data, err := json.Marshal(os.Args[1:])
+		if err != nil || os.WriteFile(exe+".args", data, 0o600) != nil {
+			os.Exit(2)
+		}
+		fmt.Println("--read-only")
 	case "no-mount":
 		fmt.Println("Install a build with mount support")
 	case "old-incompatible":
@@ -49,6 +56,54 @@ func fixtureMain() {
 	default:
 		fmt.Println("--read-only")
 	}
+}
+
+func TestMountFlagsReadOnlyCapabilityProbe(t *testing.T) {
+	args := capabilityProbeArguments(t)
+	readOnly, security := 0, 0
+	for i, arg := range args {
+		if arg == "--read-only" {
+			readOnly++
+		}
+		if strings.HasPrefix(arg, "FileSecurity=") {
+			security++
+			if i == 0 || args[i-1] != "-o" {
+				t.Fatal("filesystem security was not passed as one mount option", args)
+			}
+		}
+	}
+	if readOnly != 1 {
+		t.Fatal("capability probe lost its read-only requirement", args)
+	}
+	wantSecurity := 0
+	if runtime.GOOS == "windows" {
+		wantSecurity = 1
+	}
+	if security != wantSecurity {
+		t.Fatalf("filesystem security options=%d want=%d: %v", security, wantSecurity, args)
+	}
+}
+
+func capabilityProbeArguments(t *testing.T) []string {
+	t.Helper()
+	probe := nativeFixture(t, t.TempDir(), "args-receipt")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if !mountCapable(ctx, probe) {
+		t.Fatal("private capability probe did not complete")
+	}
+	data, err := os.ReadFile(probe + ".args")
+	if err != nil {
+		t.Fatal("private subprocess did not record actual arguments", err)
+	}
+	var args []string
+	if err := json.Unmarshal(data, &args); err != nil {
+		t.Fatal(err)
+	}
+	if len(args) < 2 || args[0] != "mount" || args[1] != "--help" {
+		t.Fatal("receipt was not from the actual capability entry", args)
+	}
+	return args
 }
 
 func nativeFixture(t *testing.T, dir, mode string) string {
