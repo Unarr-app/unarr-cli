@@ -257,7 +257,9 @@ func TestDaemonStopLockFailurePreservesIntentAndPreventsRestart(t *testing.T) {
 				cancel()
 				want = context.Canceled
 			case "lock-error":
-				name = root // a directory cannot serve as this lock file
+				// Darwin can flock a directory. A regular-file ancestor makes
+				// opening the lock fail on every platform, before cleanup.
+				name = filepath.Join(name, "instance.lock")
 				want = nil
 			case "cleanup-error":
 				if err := owner.Close(); err != nil {
@@ -362,7 +364,9 @@ func isolateWindowsUninstallCommands(t *testing.T) string {
 	bin := t.TempDir()
 	commands := filepath.Join(t.TempDir(), "commands")
 	t.Setenv("UNARR_TEST_STOP_COMMANDS", commands)
-	t.Setenv("PATH", bin)
+	// The copied test binary may use compiler DLLs (CGO). Keep their loader
+	// search path while making the private commands win executable lookup.
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("PATHEXT", ".EXE")
 	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
 	binary, err := os.Executable()
@@ -377,9 +381,29 @@ func isolateWindowsUninstallCommands(t *testing.T) string {
 		if err := os.WriteFile(filepath.Join(bin, name), body, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if resolved, err := exec.LookPath(name); err != nil || resolved != filepath.Join(bin, name) {
-			t.Fatal("private command lookup could reach a real system tool", resolved, err)
+		for _, lookup := range []string{name, strings.TrimSuffix(name, ".exe")} {
+			if resolved, err := exec.LookPath(lookup); err != nil || resolved != filepath.Join(bin, name) {
+				t.Fatal("private command lookup could reach a real system tool", resolved, err)
+			}
 		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		probe := exec.CommandContext(ctx, filepath.Join(bin, name), "fixture-probe")
+		out, err := probe.CombinedOutput()
+		cancel()
+		if name == "schtasks.exe" {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(out), "The system cannot find the file specified.") {
+				t.Fatal("private scheduled-task fixture failed to start", err, string(out))
+			}
+		} else if err != nil {
+			t.Fatal("private firewall fixture failed to start", err, string(out))
+		}
+	}
+	if receipts, err := os.ReadFile(commands); err != nil || string(receipts) != "schtasks fixture-probe\nnetsh fixture-probe\n" {
+		t.Fatal("private command probes did not record exact receipts", err, string(receipts))
+	}
+	if err := os.Remove(commands); err != nil {
+		t.Fatal(err)
 	}
 	return commands
 }
