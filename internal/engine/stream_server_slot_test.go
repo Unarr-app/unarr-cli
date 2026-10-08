@@ -51,12 +51,20 @@ func TestSlotInUseTracksRealReaders(t *testing.T) {
 	for ss.ActiveReaders() > 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
+	if readers := ss.ActiveReaders(); readers != 0 {
+		t.Fatalf("reader connections did not finish: %d still active", readers)
+	}
 	if !ss.SlotInUse(gen, time.Minute) {
 		t.Fatal("bytes served within the grace must keep the slot in use")
 	}
-	if ss.SlotInUse(gen, time.Nanosecond) {
+	// Readers have finished, so nothing can refresh the served timestamp. Age
+	// the real read deterministically instead of relying on clock resolution.
+	served := ss.servedUnixNano.Load()
+	ss.servedUnixNano.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+	if ss.SlotInUse(gen, time.Minute) {
 		t.Fatal("no reader and no recent byte: the slot is free")
 	}
+	ss.servedUnixNano.Store(served)
 	newer := ss.SetFile(&memProvider{data: []byte("y")}, "t2")
 	if ss.SlotInUse(gen, time.Minute) {
 		t.Fatal("a replaced generation is never in use")
