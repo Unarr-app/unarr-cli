@@ -1,5 +1,7 @@
 package arr
 
+import "time"
+
 // SystemStatus is returned by GET /api/v{n}/system/status.
 type SystemStatus struct {
 	AppName     string `json:"appName"`
@@ -116,6 +118,7 @@ type HistoryRecord struct {
 	EventType   string      `json:"eventType"` // "grabbed", "downloadFolderImported", etc.
 	DownloadID  string      `json:"downloadId"`
 	SourceTitle string      `json:"sourceTitle"`
+	Date        time.Time   `json:"date"`
 	Data        HistoryData `json:"data"`
 }
 
@@ -123,6 +126,10 @@ type HistoryRecord struct {
 type HistoryData struct {
 	InfoHash    string `json:"torrentInfoHash"`
 	DownloadURL string `json:"downloadUrl"`
+	// FileID is the episode/movie file a downloadFolderImported event created
+	// (a string in the *arr payload). Indexer is the indexer name on a grab.
+	FileID  string `json:"fileId"`
+	Indexer string `json:"indexer"`
 }
 
 // HistoryResponse wraps the paginated history from *arr.
