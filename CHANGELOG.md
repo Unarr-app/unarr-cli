@@ -5,34 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.17.1] - 2026-10-08
+## [1.18.0] - 2026-10-09
 
-### Fixed
-
-- **tests**: Correct Windows manifest permission expectations and private command fixtures, and make daemon stop lock failure coverage portable to macOS. Runtime behavior is unchanged.
-
-## [1.17.0] - 2026-10-08
 
 ### Added
 
-- **mount**: Optional read-only remote folders for paid accounts, disabled by default, with provider accounts managed on the web and direct Usenet NZB access.
-- **mount**: Persistent agent-owned activation through `unarr mount`, explicit disabling through `unarr umount`, and a standalone `mount serve` mode.
-- **mount**: Reuse compatible dependencies and prepare checksum-verified rclone; explain and request consent before installing missing filesystem drivers.
+- **arr**: add `unarr arr sync` to flag TrueSpec-verified imported files
+## [1.17.1] - 2026-10-08
+
 
 ### Fixed
 
-- **mount**: Validate destinations and default service configuration, preserve agent identity, and clean up old mount sessions on credential replacement, disabling, restart and shutdown.
-- **mount**: Preserve Linux service cleanup, wait for Windows mount cleanup, enforce Windows read-only owner permissions, and detach owned macOS mounts before stopping rclone.
-- **remotefs**: Retain catalog entries through transient failures, recover partial NZBs and revisions, keep collision names stable, and bound streamed reads and cancellation.
-- **agent**: Honor configured API mirrors and paced metadata requests while keeping paid-access denials terminal, including failures while reading the response body.
-- **usenet**: Bound NNTP article bodies and replies, validate complete yEnc framing and fields, and recover cancelled or invalid article transports safely.
-- **daemon**: Allow safe Windows uninstall when the configuration parent directory is absent.
+- **release**: prepare 1.17.1 with portable platform test fixtures
+## [1.17.0] - 2026-10-08
 
-### Compatibility
 
-- Remote folders require the matching web backend before use; CLI 1.17.0 is the minimum supported agent version for web-dispatched local NZBs.
-- Existing download workflows remain available. Mounts use personal supported provider accounts; real-provider/CDN end-to-end performance and Zurg parity are not established by synthetic validation.
+### Documentation
 
+- **mount**: remove link to unpublished review report
+
+### Fixed
+
+- **agent**: retain HTTP denial after body read failure
+- **agent**: allow paced remote mount metadata
+- **daemon**: allow safe Windows uninstall without config parent
+- **daemon**: wait for Windows mount cleanup before restart
+- **mount**: detach owned macOS mounts before stopping rclone
+- **mount**: restrict Windows owner rights on remote folders
+- **mount**: preserve Linux daemon cleanup during service restart
+- **mount**: reconcile disabled live mount sessions
+- **mount**: preserve agent identity and activation ownership
+- **remotefs**: bound reads and preserve catalog recovery
+- **usenet**: bound replies and parse exact yenc fields
+- **usenet**: validate and bound article transport
+
+### Other
+
+- **release**: 1.17.0
+- merge main into remote mount branch
+## [1.16.1] - 2026-10-05
+
+
+### Other
+
+- **release**: 1.16.1
 ## [1.16.0] - 2026-10-05
 
 
@@ -195,6 +211,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **hls**: extract remote subtitles in windows, the viewer's position first
 - **hls**: expose subtitle extraction status; make bulk yielding process-wide
+- **mount**: keep remote folder active
+- **mount**: automate dependency setup with informed installation consent
 
 ### Fixed
 
@@ -203,6 +221,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **hls**: serve subtitle sidecars one-shot again; streaming stalled playback
 - **hls**: stream growing subtitle sidecars so tracks never freeze partial
 - **hls**: stop remote copy playback stalling on bandwidth-bound links
+- **mount**: recover partial NZBs and honor API mirrors
+- **mount**: validate native setup and handle legacy dependencies
 
 ### Other
 
@@ -213,6 +233,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **hls**: extract remote subtitles alongside each segment, not the whole file
 ## [1.14.2] - 2026-09-18
 
+
+### Added
+
+- **mount**: add optional paid remote folders with web-managed accounts
 
 ### Fixed
 
@@ -2033,8 +2057,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.18.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.17.1...v1.18.0
 [1.17.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.17.0...v1.17.1
 [1.17.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.16.1...v1.17.0
+[1.16.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.16.0...v1.16.1
 [1.16.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.15.4...v1.16.0
 [1.15.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.15.3...v1.15.4
 [1.15.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.15.2...v1.15.3
