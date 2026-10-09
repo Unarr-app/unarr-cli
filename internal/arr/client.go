@@ -1,6 +1,7 @@
 package arr
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -153,11 +154,28 @@ func (c *Client) Applications() ([]Application, error) {
 // ── HTTP helper ─────────────────────────────────────────────────────
 
 func (c *Client) get(path string, dst any) error {
-	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+	return c.do(http.MethodGet, path, nil, dst)
+}
+
+// do sends one request; body (when non-nil) is JSON-encoded and dst (when
+// non-nil) receives the decoded response.
+func (c *Client) do(method, path string, body, dst any) error {
+	var rdr io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("encode body: %w", err)
+		}
+		rdr = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, c.baseURL+path, rdr)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("X-Api-Key", c.apiKey)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -165,7 +183,7 @@ func (c *Client) get(path string, dst any) error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50MB limit for large libraries
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50MB limit for large libraries
 	if err != nil {
 		return fmt.Errorf("read body: %w", err)
 	}
@@ -174,14 +192,17 @@ func (c *Client) get(path string, dst any) error {
 		return fmt.Errorf("unauthorized — check your API key")
 	}
 	if resp.StatusCode >= 400 {
-		msg := string(body)
+		msg := string(respBody)
 		if len(msg) > 200 {
 			msg = msg[:200] + "..."
 		}
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, msg)
 	}
+	if dst == nil {
+		return nil
+	}
 
-	if err := json.Unmarshal(body, dst); err != nil {
+	if err := json.Unmarshal(respBody, dst); err != nil {
 		return fmt.Errorf("decode JSON: %w", err)
 	}
 	return nil

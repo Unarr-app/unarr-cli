@@ -94,6 +94,8 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 	configCmd.GroupID = "start"
 	migrateCmd := newMigrateCmd()
 	migrateCmd.GroupID = "start"
+	arrCmd := newArrCmd()
+	arrCmd.GroupID = "start"
 
 	// Search & Discovery
 	searchCmd := newSearchCmd()
@@ -167,6 +169,7 @@ Source:         https://github.com/Unarr-app/unarr-cli`,
 		loginCmd,
 		configCmd,
 		migrateCmd,
+		arrCmd,
 		// Search & Discovery
 		searchCmd,
 		inspectCmd,
