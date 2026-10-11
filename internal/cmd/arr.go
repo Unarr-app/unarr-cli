@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -82,6 +84,7 @@ func runArrSync(ctx context.Context, out io.Writer, o arrSyncOpts) error {
 	}
 
 	ac := agent.NewClient(apiURLOrDefault(cfg), cfg.Auth.APIKey, "unarr/"+Version)
+	arr.SetUserAgent("unarr/" + Version)
 	opts := arr.SyncOptions{TCMatch: o.IndexerMatch, DryRun: o.DryRun}
 	if !o.Backfill {
 		opts.Since = time.Now().AddDate(0, 0, -o.Days)
@@ -90,11 +93,13 @@ func runArrSync(ctx context.Context, out io.Writer, o arrSyncOpts) error {
 	var failed bool
 	for i := range instances {
 		inst := &instances[i]
-		client := arr.NewClient(inst.URL, inst.APIKey)
+		client := arr.NewClient(inst.URL, inst.APIKey).WithTimeout(arrSyncTimeout)
 		rep, err := arr.SyncTrueSpecFlags(ctx, client, inst.App, trueSpecLookup(ac), opts)
 		if err != nil {
 			failed = true
-			fmt.Fprintf(out, "%s: %v\n", inst.App, err)
+			// stderr, so a cron redirecting stdout to a log still shows the failure
+			// and "nothing was changed" is explicit — the sync never writes partially.
+			fmt.Fprintf(os.Stderr, "%s: %v - nothing was changed in %s\n", inst.App, describeSyncError(err), inst.App)
 			continue
 		}
 		printSyncReport(out, rep)
@@ -129,10 +134,33 @@ func selectSyncInstances(o arrSyncOpts) []arr.Instance {
 	return out
 }
 
+// lookupRetries is how many times a 429/5xx from TorrentClaw is retried with
+// a growing pause before the sync gives up (a backfill of a big library sends
+// hundreds of lookups in a row and a single 429 must not void the whole run).
+const lookupRetries = 4
+
+// maxRetryPause caps how long a server's Retry-After can make the sync wait.
+const maxRetryPause = 120 * time.Second
+
+// arrSyncTimeout is the per-request timeout toward Sonarr/Radarr for the sync.
+const arrSyncTimeout = 60 * time.Second
+
+var lookupSleep = time.Sleep // swapped in tests
+
 // trueSpecLookup adapts the API client to the lookup the sync expects.
 func trueSpecLookup(ac *agent.Client) arr.LookupFunc {
 	return func(ctx context.Context, prefixes []string) (map[string]arr.TrueSpecState, error) {
-		res, err := ac.TrueSpecLookup(ctx, prefixes)
+		var res []agent.TrueSpecLookupResult
+		var err error
+		for attempt := 1; ; attempt++ {
+			res, err = ac.TrueSpecLookup(ctx, prefixes)
+			var he *agent.HTTPError
+			retryable := errors.As(err, &he) && (he.StatusCode == 429 || he.StatusCode >= 500)
+			if err == nil || !retryable || attempt > lookupRetries {
+				break
+			}
+			lookupSleep(retryPause(he, attempt))
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -142,6 +170,35 @@ func trueSpecLookup(ac *agent.Client) arr.LookupFunc {
 		}
 		return out, nil
 	}
+}
+
+// retryPause honours the server's Retry-After (capped); without one, it grows
+// with the attempt number.
+func retryPause(he *agent.HTTPError, attempt int) time.Duration {
+	if he.RetryAfter > 0 {
+		return min(he.RetryAfter, maxRetryPause)
+	}
+	return time.Duration(attempt*5) * time.Second
+}
+
+// describeSyncError turns the TorrentClaw-side HTTP verdicts into the sentence
+// a user can act on; anything else is returned as is.
+func describeSyncError(err error) string {
+	var he *agent.HTTPError
+	if errors.As(err, &he) {
+		switch he.StatusCode {
+		case 401:
+			return "TorrentClaw rejected the API key (401) — run `unarr login` again"
+		case 403:
+			return "TorrentClaw denied access (403): key without permission, or a network/Cloudflare block"
+		case 429:
+			return "TorrentClaw rate limit (429) — wait and retry; a FREE key has 120 req/min and 1,000/day shared with Prowlarr"
+		}
+		if he.StatusCode >= 500 {
+			return fmt.Sprintf("TorrentClaw is failing (HTTP %d) — try again in a few minutes", he.StatusCode)
+		}
+	}
+	return err.Error()
 }
 
 func printSyncReport(out io.Writer, rep *arr.SyncReport) {
