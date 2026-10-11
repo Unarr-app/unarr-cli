@@ -26,6 +26,13 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 }
 
+// WithTimeout overrides the per-request timeout. The sync pages through 1000
+// history records at a time, which a slow NAS cannot answer in the default 15 s.
+func (c *Client) WithTimeout(d time.Duration) *Client {
+	c.httpClient.Timeout = d
+	return c
+}
+
 // SystemStatus returns version and app info. Works with all *arr apps.
 func (c *Client) SystemStatus() (*SystemStatus, error) {
 	// Try v3 first (Sonarr/Radarr), then v1 (Prowlarr)
@@ -153,6 +160,22 @@ func (c *Client) Applications() ([]Application, error) {
 
 // ── HTTP helper ─────────────────────────────────────────────────────
 
+// userAgent identifies the CLI to the *arr instance (and to any reverse proxy
+// in front of it); Go's default "Go-http-client/1.1" is what bot filters block.
+var userAgent = "unarr-cli"
+
+// SetUserAgent lets cmd/ stamp the version in without an import cycle.
+func SetUserAgent(ua string) { userAgent = ua }
+
+// httpStatusError is a non-2xx answer from *arr. Callers match on Status to
+// tell "this id does not exist" (404) from a real failure.
+type httpStatusError struct {
+	Status int
+	Body   string
+}
+
+func (e *httpStatusError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body) }
+
 func (c *Client) get(path string, dst any) error {
 	return c.do(http.MethodGet, path, nil, dst)
 }
@@ -173,6 +196,7 @@ func (c *Client) do(method, path string, body, dst any) error {
 		return err
 	}
 	req.Header.Set("X-Api-Key", c.apiKey)
+	req.Header.Set("User-Agent", userAgent)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -196,7 +220,7 @@ func (c *Client) do(method, path string, body, dst any) error {
 		if len(msg) > 200 {
 			msg = msg[:200] + "..."
 		}
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, msg)
+		return &httpStatusError{Status: resp.StatusCode, Body: msg}
 	}
 	if dst == nil {
 		return nil

@@ -327,6 +327,9 @@ type HTTPError struct {
 	// mirror just cannot reach it right now. IsTransient uses this to fail over
 	// instead of failing the call.
 	FromGateway bool
+	// RetryAfter is the server's Retry-After hint (seconds form) on a 429/503;
+	// zero when absent or unparseable.
+	RetryAfter time.Duration
 }
 
 func (e *HTTPError) Error() string {

@@ -1,7 +1,9 @@
 package arr
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 )
 
@@ -48,7 +50,14 @@ func filesPath(app string) (resource, idParam string, err error) {
 	return "", "", fmt.Errorf("%s has no per-file indexer flags", app)
 }
 
-// MediaFiles fetches the current state of the given imported files.
+// MediaFiles fetches the current state of the given imported files. Files the
+// history still names but *arr no longer has (replaced by an upgrade, deleted)
+// are left out: they are not an error, there is simply nothing to flag.
+//
+// Sonarr/Radarr answer 500 to the WHOLE batch GET when a single id does not
+// exist, and a real history is full of such ids. A failed batch is therefore
+// split in halves until the orphans are isolated, and a single id is resolved
+// with GET /{resource}/{id}, which cleanly says 404 for an orphan.
 func (c *Client) MediaFiles(app string, ids []int) ([]MediaFile, error) {
 	resource, idParam, err := filesPath(app)
 	if err != nil {
@@ -57,17 +66,56 @@ func (c *Client) MediaFiles(app string, ids []int) ([]MediaFile, error) {
 	var out []MediaFile
 	for start := 0; start < len(ids); start += fileIDsPerCall {
 		end := min(start+fileIDsPerCall, len(ids))
-		q := url.Values{}
-		for _, id := range ids[start:end] {
-			q.Add(idParam, fmt.Sprint(id))
-		}
-		var batch []MediaFile
-		if err := c.get("/api/v3/"+resource+"?"+q.Encode(), &batch); err != nil {
+		batch, err := c.mediaFilesBatch(resource, idParam, ids[start:end])
+		if err != nil {
 			return nil, fmt.Errorf("%s: %w", resource, err)
 		}
 		out = append(out, batch...)
 	}
 	return out, nil
+}
+
+func (c *Client) mediaFilesBatch(resource, idParam string, ids []int) ([]MediaFile, error) {
+	q := url.Values{}
+	for _, id := range ids {
+		q.Add(idParam, fmt.Sprint(id))
+	}
+	var batch []MediaFile
+	err := c.get("/api/v3/"+resource+"?"+q.Encode(), &batch)
+	if err == nil {
+		return batch, nil
+	}
+	var he *httpStatusError
+	if !errors.As(err, &he) || he.Status != http.StatusInternalServerError {
+		return nil, err // auth, network, proxy HTML…: a real failure
+	}
+	if len(ids) == 1 {
+		return c.mediaFileOne(resource, ids[0])
+	}
+	half := len(ids) / 2
+	a, err := c.mediaFilesBatch(resource, idParam, ids[:half])
+	if err != nil {
+		return nil, err
+	}
+	b, err := c.mediaFilesBatch(resource, idParam, ids[half:])
+	if err != nil {
+		return nil, err
+	}
+	return append(a, b...), nil
+}
+
+// mediaFileOne returns the file, or nothing when *arr says 404 (orphan id).
+func (c *Client) mediaFileOne(resource string, id int) ([]MediaFile, error) {
+	var f MediaFile
+	err := c.get(fmt.Sprintf("/api/v3/%s/%d", resource, id), &f)
+	var he *httpStatusError
+	if errors.As(err, &he) && he.Status == http.StatusNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []MediaFile{f}, nil
 }
 
 // SetIndexerFlags rewrites only the indexerFlags of the given files

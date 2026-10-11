@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -618,7 +620,11 @@ func (c *Client) handleResponse(resp *http.Response, dst any) error {
 	}
 
 	if resp.StatusCode >= 400 {
-		return httpErrorFromBody(resp.StatusCode, body)
+		he := httpErrorFromBody(resp.StatusCode, body)
+		if secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && secs > 0 {
+			he.RetryAfter = time.Duration(secs) * time.Second
+		}
+		return he
 	}
 
 	if dst != nil {
