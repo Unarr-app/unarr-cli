@@ -87,6 +87,17 @@ jobs:
       # reproducible releases. Single source of truth = go.mod's `go` line.
       - name: Pin Go toolchain from go.mod
         run: echo "GOTOOLCHAIN=go$(awk '/^go /{print $2; exit}' go.mod)" >> "$GITHUB_ENV"
+      # The ffmpeg/ffprobe bundle comes from third-party hosts that rate-limit CI
+      # runners (v1.18.1's release failed three times on 429s). The download script
+      # skips files that already exist, so caching its output means a good fetch is
+      # never repeated: only the first release after a script change touches the
+      # network, and that one has several fallback sources. The cache is saved only
+      # when the job succeeds, so a half-populated directory is never stored.
+      - uses: actions/cache@v6
+        with:
+          path: dist-ffbinaries
+          key: ffbin-${{ hashFiles('scripts/download-ffmpeg-static.sh') }}
+          restore-keys: ffbin-
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
