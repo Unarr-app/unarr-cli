@@ -208,7 +208,10 @@ workers = 4
 	if got := back.UnknownKeys(); len(got) != 0 {
 		t.Errorf("reloaded config reports unknown keys %v", got)
 	}
-	cfg.unknownKeys = nil // the only field that legitimately differs
+	// The only fields that legitimately differ: both are load-time diagnostics
+	// (unexported, never serialised), and the reload no longer has either.
+	cfg.unknownKeys = nil
+	cfg.usenetMarkerPending = false
 	if !reflect.DeepEqual(cfg, back) {
 		t.Errorf("round-trip changed the config:\n got %+v\nwant %+v", back, cfg)
 	}

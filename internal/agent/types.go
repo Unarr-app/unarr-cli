@@ -754,8 +754,8 @@ type StreamSession struct {
 	// field they can't serve. Takes priority over FilePath when present.
 	DirectURL string `json:"directUrl,omitempty"`
 	// Usenet marks a stream session whose source is a Usenet (NZB) release rather
-	// than a local file / debrid link. When set — AND the daemon opted into
-	// downloads.usenet_streaming — the daemon tries to serve the release on the
+	// than a local file / debrid link. When set — AND downloads.usenet_streaming
+	// is on (the default) — the daemon tries to serve the release on the
 	// fly from NNTP via NzbID (arranca en segundos); if the release isn't
 	// streamable (compressed/encrypted RAR, password) it falls back CLEANLY to a
 	// normal Usenet download so playback is never blocked. Older daemons ignore

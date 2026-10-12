@@ -321,8 +321,7 @@ max_stream_sessions = 5
 func TestLoadUsenetStreaming(t *testing.T) {
 	tmp := t.TempDir()
 
-	// Absent key → OFF: on-the-fly usenet streaming is strictly opt-in, so a
-	// config predating the feature keeps the safe batch-download behaviour.
+	// Absent key → ON: the web offers Play-from-Usenet, so the agent must serve it.
 	missing := filepath.Join(tmp, "missing.toml")
 	os.WriteFile(missing, []byte(`[auth]
 api_key = "tc_x"
@@ -331,20 +330,53 @@ api_key = "tc_x"
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if cfg.Download.UsenetStreaming {
-		t.Error("UsenetStreaming (key absent) = true, want false (opt-in)")
+	if !cfg.Download.UsenetStreaming {
+		t.Error("UsenetStreaming (key absent) = false, want true (default ON)")
 	}
 
-	// Explicit opt-in is honoured.
-	on := filepath.Join(tmp, "on.toml")
-	os.WriteFile(on, []byte(`[downloads]
-usenet_streaming = true
+	// Legacy file: Save wrote `usenet_streaming = false` nobody chose (no marker)
+	// → migrated to ON.
+	legacy := filepath.Join(tmp, "legacy.toml")
+	os.WriteFile(legacy, []byte(`[downloads]
+usenet_streaming = false
 `), 0o644)
-	if cfg, err = Load(on); err != nil {
+	if cfg, err = Load(legacy); err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
 	if !cfg.Download.UsenetStreaming {
-		t.Error("UsenetStreaming (=true) = false, want true")
+		t.Error("UsenetStreaming (legacy false, no marker) = false, want true (migrated)")
+	}
+	if !cfg.UsenetMarkerPending() {
+		t.Error("migration must flag the marker as pending so the daemon persists it")
+	}
+
+	// Marker present → an explicit false is a real choice and is respected.
+	off := filepath.Join(tmp, "off.toml")
+	os.WriteFile(off, []byte(`[downloads]
+usenet_streaming = false
+usenet_streaming_default_applied = true
+`), 0o644)
+	if cfg, err = Load(off); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Download.UsenetStreaming {
+		t.Error("UsenetStreaming (false + marker) = true, want false (user opt-out)")
+	}
+
+	// Save → Load round-trip keeps the user's opt-out after the migration ran once.
+	if cfg, err = Load(legacy); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	saved := filepath.Join(tmp, "saved.toml")
+	cfg.Download.UsenetStreaming = false // user turns it off after the migration
+	if err := Save(cfg, saved); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	if cfg, err = Load(saved); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Download.UsenetStreaming {
+		t.Error("opt-out after migration was overridden on reload")
 	}
 }
 

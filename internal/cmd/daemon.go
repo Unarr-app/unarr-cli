@@ -230,6 +230,10 @@ func runDaemonStart() error {
 		return fmt.Errorf("create download dir: %w", err)
 	}
 
+	// resolvedConfigPath, not config.FilePath(): with --config the file Load read
+	// is not the default one, and saving there would overwrite another file.
+	persistUsenetStreamingMarker(cfg, resolvedConfigPath())
+
 	// Per-agent direct-TLS: ensure a stable high-entropy hash exists, generated
 	// + persisted once. Distinct from the (enumerable) agent UUID; the cert
 	// broker issues *.<hash>.agent.unarr.app for it.
@@ -518,7 +522,7 @@ func runDaemonStart() error {
 			break
 		}
 	}
-	// On-the-fly Usenet streaming is strictly opt-in (downloads.usenet_streaming).
+	// On-the-fly Usenet streaming is ON by default (downloads.usenet_streaming).
 	// Log its state so the boot line makes clear whether a Usenet stream session
 	// will be served live from NNTP or always fall back to the batch download.
 	if cfg.Download.UsenetStreaming {

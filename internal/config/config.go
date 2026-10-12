@@ -36,6 +36,11 @@ type Config struct {
 	// back into the user's file. Read it through UnknownKeys() / the Issue
 	// helpers in validate.go.
 	unknownKeys []string
+
+	// usenetMarkerPending: Load migrated usenet_streaming in memory and the
+	// marker is not on disk yet (unexported for the same reason as unknownKeys).
+	// Read it through UsenetMarkerPending().
+	usenetMarkerPending bool
 }
 
 // DesktopConfig holds settings for the unarr-desktop tray / unarr:// protocol
@@ -140,11 +145,17 @@ type DownloadConfig struct {
 	// UsenetStreaming opts into on-the-fly Usenet streaming: when the web opens a
 	// stream session for a Usenet (NZB) release, the daemon tries to serve it
 	// straight from NNTP (arranca en segundos + seek) instead of downloading the
-	// whole file first. Strictly OPT-IN and OFF by default — a streamable release
-	// (plain .mkv/.mp4 or a STORE rar) plays instantly, while a non-streamable one
+	// whole file first. ON by default — the web offers "Play from Usenet" to every
+	// PRO agent, so a disabled flag turned each click into a full batch download
+	// behind a player stuck on "Starting stream…". A streamable release (plain
+	// .mkv/.mp4 or a STORE rar) plays instantly, while a non-streamable one
 	// (compressed/encrypted RAR, password) falls back CLEANLY to the batch
-	// download so playback is never blocked. Older daemons ignore the field.
+	// download so playback is never blocked. Set false to always batch-download.
+	// Older daemons ignore the field.
 	UsenetStreaming bool `toml:"usenet_streaming"`
+	// UsenetStreamingDefaultApplied marks that the opt-in → default-ON switch was
+	// applied to this file (see migrateUsenetStreamingDefault). Not a user setting.
+	UsenetStreamingDefaultApplied bool `toml:"usenet_streaming_default_applied"`
 	// RequireStreamToken gates remote (non-loopback) /stream + /hls requests on a
 	// signed, short-lived token embedded in the URLs the agent reports. Default
 	// true (secure by default); loopback callers (local mpv/vlc) are always exempt.
@@ -620,6 +631,9 @@ func Default() Config {
 			RequireStreamToken: true, // secure by default; loopback exempt
 			AutoHTTPSUpnp:      true, // auto-publish the TLS+token HTTPS port for remote direct-TLS
 
+			UsenetStreaming:               true, // the web offers Play-from-Usenet; it must work
+			UsenetStreamingDefaultApplied: true, // fresh config: nothing to migrate
+
 			Transcode: TranscodeConfig{
 				Enabled: true,
 				HWAccel: "auto",
@@ -750,6 +764,7 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	if !meta.IsDefined("auth", "mirrors") {
 		cfg.Auth.Mirrors = []string{"https://torrentclaw.to", "https://torrentclaw.com"}
 	}
+	migrateUsenetStreamingDefault(cfg, meta)
 	if !meta.IsDefined("downloads", "preferred_method") {
 		cfg.Download.PreferredMethod = "auto"
 	}
