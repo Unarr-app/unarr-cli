@@ -753,6 +753,17 @@ webdav_enabled = false
 # automatically and removed on shutdown. Set to false to never touch your router.
 # auto_https_upnp = true
 
+# Play Usenet (NZB) releases live from the news server instead of downloading the
+# whole file first. On by default: "Play from Usenet" starts in seconds and the
+# file is NOT kept in your library. A release that cannot stream (compressed or
+# password-protected RAR…) falls back to a normal download automatically. Set to
+# false to always download first. Configs saved by older versions carry an
+# explicit `false` nobody chose; the first start after upgrading flips it to true
+# once and records that in the file as `usenet_streaming_default_applied = true`
+# (keep that line — it is what makes a later `false` stick). Changing it needs a
+# daemon restart.
+# usenet_streaming = true
+
 [organize]
 enabled = true
 movies_dir = "~/Media/Movies"

@@ -46,32 +46,33 @@ type publishedAgent struct {
 }
 
 type publishedDownloads struct {
-	Dir                string   `toml:"dir"`
-	PreferredMethod    string   `toml:"preferred_method"`
-	PreferredMethods   []string `toml:"preferred_methods"`
-	PreferredQuality   string   `toml:"preferred_quality"`
-	MaxConcurrent      int      `toml:"max_concurrent"`
-	MinFreeDiskMB      int      `toml:"min_free_disk_mb"`
-	MaxDownloadSpeed   string   `toml:"max_download_speed"`
-	MaxUploadSpeed     string   `toml:"max_upload_speed"`
-	SeedEnabled        bool     `toml:"seed_enabled"`
-	SeedRatio          float64  `toml:"seed_ratio"`
-	SeedTime           string   `toml:"seed_time"`
-	MetadataTimeout    string   `toml:"metadata_timeout"`
-	StallTimeout       string   `toml:"stall_timeout"`
-	ListenPort         int      `toml:"listen_port"`
-	StreamPort         int      `toml:"stream_port"`
-	HTTPSStreamPort    int      `toml:"https_stream_port"`
-	EnableUPnP         bool     `toml:"enable_upnp"`
-	AutoHTTPSUpnp      bool     `toml:"auto_https_upnp"`
-	MaxStreamSessions  int      `toml:"max_stream_sessions"`
-	UsenetStreaming    bool     `toml:"usenet_streaming"`
-	RequireStreamToken bool     `toml:"require_stream_token"`
-	CORSExtraOrigins   string   `toml:"cors_extra_origins"`
-	WebDAVEnabled      bool     `toml:"webdav_enabled"`
-	WebDAVAllowWAN     bool     `toml:"webdav_allow_wan"`
-	WebDAVUsername     string   `toml:"webdav_username"`
-	WebDAVPassword     string   `toml:"webdav_password"`
+	Dir                           string   `toml:"dir"`
+	PreferredMethod               string   `toml:"preferred_method"`
+	PreferredMethods              []string `toml:"preferred_methods"`
+	PreferredQuality              string   `toml:"preferred_quality"`
+	MaxConcurrent                 int      `toml:"max_concurrent"`
+	MinFreeDiskMB                 int      `toml:"min_free_disk_mb"`
+	MaxDownloadSpeed              string   `toml:"max_download_speed"`
+	MaxUploadSpeed                string   `toml:"max_upload_speed"`
+	SeedEnabled                   bool     `toml:"seed_enabled"`
+	SeedRatio                     float64  `toml:"seed_ratio"`
+	SeedTime                      string   `toml:"seed_time"`
+	MetadataTimeout               string   `toml:"metadata_timeout"`
+	StallTimeout                  string   `toml:"stall_timeout"`
+	ListenPort                    int      `toml:"listen_port"`
+	StreamPort                    int      `toml:"stream_port"`
+	HTTPSStreamPort               int      `toml:"https_stream_port"`
+	EnableUPnP                    bool     `toml:"enable_upnp"`
+	AutoHTTPSUpnp                 bool     `toml:"auto_https_upnp"`
+	MaxStreamSessions             int      `toml:"max_stream_sessions"`
+	UsenetStreaming               bool     `toml:"usenet_streaming"`
+	UsenetStreamingDefaultApplied bool     `toml:"usenet_streaming_default_applied"`
+	RequireStreamToken            bool     `toml:"require_stream_token"`
+	CORSExtraOrigins              string   `toml:"cors_extra_origins"`
+	WebDAVEnabled                 bool     `toml:"webdav_enabled"`
+	WebDAVAllowWAN                bool     `toml:"webdav_allow_wan"`
+	WebDAVUsername                string   `toml:"webdav_username"`
+	WebDAVPassword                string   `toml:"webdav_password"`
 
 	// Sub-tables come LAST: the TOML encoder writes fields in declaration
 	// order, and a scalar emitted after a table header would be parsed back as
@@ -259,36 +260,37 @@ func redactConfig(c config.Config) publishedConfig {
 
 func redactDownloads(d config.DownloadConfig) publishedDownloads {
 	return publishedDownloads{
-		Dir:                presence(d.Dir),
-		PreferredMethod:    pick(d.PreferredMethod, methodVocab...),
-		PreferredMethods:   picks(d.PreferredMethods, methodVocab...),
-		PreferredQuality:   pick(d.PreferredQuality, qualityVocab...),
-		MaxConcurrent:      d.MaxConcurrent,
-		MinFreeDiskMB:      d.MinFreeDiskMB,
-		MaxDownloadSpeed:   shaped(d.MaxDownloadSpeed, sizeShape),
-		MaxUploadSpeed:     shaped(d.MaxUploadSpeed, sizeShape),
-		SeedEnabled:        d.SeedEnabled,
-		SeedRatio:          d.SeedRatio,
-		SeedTime:           shaped(d.SeedTime, durationShape),
-		MetadataTimeout:    shaped(d.MetadataTimeout, durationShape),
-		StallTimeout:       shaped(d.StallTimeout, durationShape),
-		ListenPort:         d.ListenPort,
-		StreamPort:         d.StreamPort,
-		HTTPSStreamPort:    d.HTTPSStreamPort,
-		EnableUPnP:         d.EnableUPnP,
-		AutoHTTPSUpnp:      d.AutoHTTPSUpnp,
-		MaxStreamSessions:  d.MaxStreamSessions,
-		UsenetStreaming:    d.UsenetStreaming,
-		RequireStreamToken: d.RequireStreamToken,
-		CORSExtraOrigins:   count(d.CORSExtraOrigins),
-		WebDAVEnabled:      d.WebDAVEnabled,
-		WebDAVAllowWAN:     d.WebDAVAllowWAN,
-		WebDAVUsername:     withheldOrUnset(d.WebDAVUsername),
-		WebDAVPassword:     withheldOrUnset(d.WebDAVPassword),
-		Transcode:          redactTranscode(d.Transcode),
-		HLSCache:           publishedHLSCache{Enabled: d.HLSCache.Enabled, SizeGB: d.HLSCache.SizeGB, Dir: presence(d.HLSCache.Dir)},
-		VPN:                publishedVPN{Enabled: d.VPN.Enabled, Required: d.VPN.Required, ConfigFile: presence(d.VPN.ConfigFile)},
-		Funnel:             publishedFunnel{Enabled: d.Funnel.Enabled},
+		Dir:                           presence(d.Dir),
+		PreferredMethod:               pick(d.PreferredMethod, methodVocab...),
+		PreferredMethods:              picks(d.PreferredMethods, methodVocab...),
+		PreferredQuality:              pick(d.PreferredQuality, qualityVocab...),
+		MaxConcurrent:                 d.MaxConcurrent,
+		MinFreeDiskMB:                 d.MinFreeDiskMB,
+		MaxDownloadSpeed:              shaped(d.MaxDownloadSpeed, sizeShape),
+		MaxUploadSpeed:                shaped(d.MaxUploadSpeed, sizeShape),
+		SeedEnabled:                   d.SeedEnabled,
+		SeedRatio:                     d.SeedRatio,
+		SeedTime:                      shaped(d.SeedTime, durationShape),
+		MetadataTimeout:               shaped(d.MetadataTimeout, durationShape),
+		StallTimeout:                  shaped(d.StallTimeout, durationShape),
+		ListenPort:                    d.ListenPort,
+		StreamPort:                    d.StreamPort,
+		HTTPSStreamPort:               d.HTTPSStreamPort,
+		EnableUPnP:                    d.EnableUPnP,
+		AutoHTTPSUpnp:                 d.AutoHTTPSUpnp,
+		MaxStreamSessions:             d.MaxStreamSessions,
+		UsenetStreaming:               d.UsenetStreaming,
+		UsenetStreamingDefaultApplied: d.UsenetStreamingDefaultApplied,
+		RequireStreamToken:            d.RequireStreamToken,
+		CORSExtraOrigins:              count(d.CORSExtraOrigins),
+		WebDAVEnabled:                 d.WebDAVEnabled,
+		WebDAVAllowWAN:                d.WebDAVAllowWAN,
+		WebDAVUsername:                withheldOrUnset(d.WebDAVUsername),
+		WebDAVPassword:                withheldOrUnset(d.WebDAVPassword),
+		Transcode:                     redactTranscode(d.Transcode),
+		HLSCache:                      publishedHLSCache{Enabled: d.HLSCache.Enabled, SizeGB: d.HLSCache.SizeGB, Dir: presence(d.HLSCache.Dir)},
+		VPN:                           publishedVPN{Enabled: d.VPN.Enabled, Required: d.VPN.Required, ConfigFile: presence(d.VPN.ConfigFile)},
+		Funnel:                        publishedFunnel{Enabled: d.Funnel.Enabled},
 	}
 }
 

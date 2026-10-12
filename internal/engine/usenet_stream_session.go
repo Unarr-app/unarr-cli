@@ -5,7 +5,7 @@
 // we fall back to the batch download?" — and NEVER lets the answer break
 // playback.
 //
-// The whole point is opt-in optimisation with a clean floor:
+// The whole point is an optimisation (ON by default) with a clean floor:
 //   - feature OFF (downloads.usenet_streaming=false)          → batch download
 //   - not streamable (compressed/encrypted RAR, password, …)  → batch download
 //   - NZB fetch/parse/NNTP setup fault                         → batch download
@@ -96,7 +96,7 @@ type UsenetStreamHooks struct {
 // on srv and fires Direct or HLS per req.PlayMethod, returning the matching mode.
 //
 // enabled is the downloads.usenet_streaming gate: when false the session falls
-// straight back to the batch download — the feature is strictly opt-in.
+// straight back to the batch download — the user's explicit opt-out.
 func (u *UsenetDownloader) HandleStreamSession(ctx context.Context, req UsenetStreamRequest, srv *StreamServer, enabled bool, hooks UsenetStreamHooks) UsenetStreamMode {
 	// Gate first, BEFORE touching the web API / NNTP: an opted-out daemon must
 	// fall back without resolving an NZB or opening a connection.
