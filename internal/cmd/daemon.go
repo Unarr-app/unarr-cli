@@ -391,6 +391,7 @@ func runDaemonStart() error {
 	// to the journal and no such file exists — and a no-op on every platform by
 	// DEFAULT, since log_max_size_mb is 0 unless the user opted into rotation.
 	startLogJanitors(ctx, logging.DefaultSweepInterval, ownedLogPath())
+	startBackupScheduler(ctx, cfg)
 
 	// Parse speed limits
 	maxDl, _ := config.ParseSpeed(cfg.Download.MaxDownloadSpeed)

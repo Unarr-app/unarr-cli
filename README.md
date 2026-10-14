@@ -227,6 +227,7 @@ recovery path, and how these interact with the website.
 | `unarr mirrors` | Manage mirror failover list (list / update / test) |
 | `unarr logs` | Read the daemon log — `-f`, `--since`, `--level`, `--grep`, `-n` (alias: `unarr daemon logs`) |
 | `unarr clean` | Remove temporary files, logs, and cached data |
+| `unarr backup` | Back up / restore config and the download queue (create / list / restore / prune). See [Backup](#backup) |
 | `unarr upgrade` | Update unarr to the latest version (alias: `unarr self-update`) |
 | `unarr version` | Show version info |
 | `unarr completion <shell>` | Generate shell completion scripts |
@@ -603,6 +604,40 @@ unarr clean --all      # Also remove the data directory
 ```
 
 **Cleans:** log files (including the rotated `unarr.log.1`, `.2`, … copies), daemon state, stale usenet resume files (> 7 days), stale replaced-file backups (> 7 days, kept by library upgrades), stream temp data, upgrade temp files, and stale atomic-write temps. Recent resume files are kept to preserve download progress for paused or interrupted downloads. Never removes your config file, downloaded media, or partial torrent/debrid downloads.
+
+## Backup
+
+Snapshot your local unarr state into one verified zip, and restore it later or on another machine.
+
+```bash
+unarr backup create                    # → <config dir>/backups/unarr-backup-<UTC stamp>.zip
+unarr backup create --out ~/unarr.zip  # a file, or a directory
+unarr backup create --encrypt          # passphrase-encrypted, secrets included
+unarr backup list                      # tags [encrypted] [scheduled] [pre-restore]
+unarr backup restore unarr.zip         # dry-run: verifies and shows what would change
+unarr backup restore unarr.zip --apply # writes (daemon must be stopped)
+unarr backup prune --keep 3            # drop all but the newest 3 manual/scheduled backups
+```
+
+**What is in it:** `config.toml` and `active-tasks.json` (the download resume queue), plus a `manifest.json` (unarr version, schema, OS/arch, date, SHA-256 and size of every file). **What is never in it:** anything ephemeral or machine-bound — `daemon.state.json` (PID and the local control-plane token), `unarr.lock`, the agent TLS private key under `certs/`, logs, caches (including the `library.json` scan cache, rebuilt by a rescan), partial-download progress and your media.
+
+**Secrets — excluded by default.** A plain archive is a file people copy to a NAS or a cloud folder, so it must be safe to lose. `[auth] api_key`, `[agent] agent_hash` and `[downloads] webdav_username` / `webdav_password` are blanked in the copy of `config.toml` (the file stays valid TOML; your comments and layout are untouched) and resolved download URLs / NZB passwords are stripped from the queue. The result is checked by parsing it: if a credential is written in a form unarr cannot blank (a dotted key, an inline table, a multi-line string), the backup is refused rather than written with the secret inside — use `--encrypt` for such a config. Restoring a secret-free archive keeps the credentials already on the machine (the dry-run names any it cannot carry over); on a new machine run `unarr login` afterwards. Debrid downloads in a restored queue have no link of their own and need a fresh one from the server. `--encrypt` is the opt-in for a full copy: the whole archive is sealed with AES-256-GCM using a key derived from your passphrase (PBKDF2-HMAC-SHA256, 600k rounds, random salt and nonce per archive — Go standard library only). The passphrase comes from a prompt, `--passphrase-file`, or `UNARR_BACKUP_PASSPHRASE`; an empty one is refused, and it cannot be recovered. VPN keys live in the `.conf` that `[downloads.vpn] config_file` points to; that file is not backed up.
+
+**Restore is safe by default.** It refuses a bad manifest, a newer schema, any checksum mismatch, an oversized archive, and any archive member that is not one of the two known files (so a crafted `../` path cannot write elsewhere). Without `--apply` nothing is written. With `--apply` it takes the daemon's instance lock for the whole restore — so it refuses to run while the daemon is up (`unarr stop` first) and a daemon cannot start halfway through — saves your current state as `unarr-prerestore-<stamp>.zip` in `<config dir>/backups` (a verbatim copy with your current secrets, 0600, never pruned; it stays beside `config.toml` even when `[backup] dir` points elsewhere — `--dir` overrides), then replaces each file atomically. If a write fails, the files already replaced are put back. A symlinked `config.toml` is updated through the link. `config.toml` carries the agent id: restore it onto a replacement machine, not onto a second one while the original still runs, or both daemons share one identity.
+
+**Scheduled backups** run inside the daemon (restart it after changing them). They are always secret-free, and a backup missed while the daemon was off is taken at its next start. An invalid table is logged at start-up and not scheduled; a failed backup is retried an hour later:
+
+```toml
+[backup]
+enabled = true            # default: false
+frequency = "daily"       # "daily" or "weekly"
+time = "03:00"            # local time, 24h
+# weekday = "sunday"      # weekly only
+retention_count = 3       # scheduled backups to keep
+# dir = "/srv/unarr-backups"   # default: <config dir>/backups
+```
+
+`retention_count` only ever deletes scheduled backups (`unarr-scheduled-<stamp>.zip`): a manual archive — say the encrypted one holding your secrets — is never pruned behind your back. `unarr config check` validates this table. The default folder is next to the `config.toml` in use (so `--config` gets its own) rather than in the data dir, because `unarr clean --all` wipes the data dir on Linux and Windows. On macOS the data dir *is* the config dir, so `unarr clean --all` removes the backups too — point `dir` elsewhere there.
 
 ## Library clean (hygiene sweep)
 
