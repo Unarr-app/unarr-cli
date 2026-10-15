@@ -369,7 +369,7 @@ func runDaemonStart() error {
 	wireDaemonCredentials(d, creds)
 
 	// Start SIGUSR1 reload watcher (unix only, no-op on Windows)
-	startReloadWatcher(&ReloadableConfig{Daemon: d})
+	startReloadWatcher(&ReloadableConfig{Daemon: d, Metrics: cfg.Metrics})
 
 	// Daemon-scoped context — cancelled on shutdown
 	ctx, cancel := context.WithCancel(context.Background())

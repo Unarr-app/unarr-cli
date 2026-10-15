@@ -89,6 +89,16 @@ func startSessionView(ctx context.Context, hub *metrics.Hub, mc config.MetricsCo
 	return srv
 }
 
+// reportMetricsReload is what a config reload does with [metrics]: nothing it
+// can apply (the endpoint is bound once at startup), so a change is reported
+// as needing a restart rather than ignored. The values are not logged — one of
+// them is the scrape token.
+func reportMetricsReload(started, reloaded config.MetricsConfig) {
+	if started != reloaded {
+		log.Printf("[reload] [metrics] changed - RESTART REQUIRED: run 'unarr daemon restart' to apply it")
+	}
+}
+
 func downloadReadings(m *engine.Manager) []metrics.Reading {
 	tasks := m.ActiveTasks()
 	out := make([]metrics.Reading, 0, len(tasks))

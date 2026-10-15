@@ -6,12 +6,15 @@ import (
 	"fmt"
 
 	"github.com/Unarr-app/unarr-cli/internal/agent"
+	"github.com/Unarr-app/unarr-cli/internal/config"
 	"github.com/fatih/color"
 )
 
-// ReloadableConfig holds a reference to the daemon for hot-reload.
+// ReloadableConfig holds a reference to the daemon for hot-reload, and the
+// startup values of the settings a reload can only report on.
 type ReloadableConfig struct {
-	Daemon *agent.Daemon
+	Daemon  *agent.Daemon
+	Metrics config.MetricsConfig
 }
 
 // startReloadWatcher is a no-op on Windows (no SIGUSR1 support).

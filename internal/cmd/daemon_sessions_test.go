@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -140,6 +141,29 @@ func TestHLSReadingMapsHealth(t *testing.T) {
 	failed.Failed = true
 	if r := hlsReading(failed, now); !r.Impaired || r.Reason != "encoder_failed" {
 		t.Fatalf("failed = %+v", r)
+	}
+}
+
+// The endpoint is bound once at startup, so a reload that changed [metrics]
+// must say it needs a restart instead of ignoring it in silence.
+func TestReportMetricsReload(t *testing.T) {
+	var sink bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&sink)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	started := config.MetricsConfig{Enabled: true, Token: "s3cret"}
+	reportMetricsReload(started, started)
+	if sink.Len() != 0 {
+		t.Fatalf("unchanged [metrics] logged %q", sink.String())
+	}
+	reportMetricsReload(started, config.MetricsConfig{Enabled: true, Token: "other"})
+	out := sink.String()
+	if !strings.Contains(out, "[reload] [metrics] changed - RESTART REQUIRED") {
+		t.Fatalf("changed [metrics] logged %q", out)
+	}
+	if strings.Contains(out, "s3cret") || strings.Contains(out, "other") {
+		t.Fatalf("the token must not reach the log: %q", out)
 	}
 }
 
