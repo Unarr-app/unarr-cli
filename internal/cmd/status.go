@@ -17,7 +17,7 @@ import (
 )
 
 func newStatusCmd() *cobra.Command {
-	var sessions, asJSON bool
+	var sessions bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show daemon status, configuration, and update availability",
@@ -27,22 +27,20 @@ disk usage, and whether an update is available.
 When the daemon is running, also displays uptime, active downloads, and stats.
 
 With --sessions, show instead what is moving right now — downloads, HLS
-streams and the mount — with rate, bytes, health and stall count per session.`,
+streams and the mount — with rate, bytes, health and stall count per session;
+add --json for the raw snapshot. Without --sessions, --json is ignored and the
+usual text is printed.`,
 		Example: `  unarr status
   unarr status --sessions
   unarr status --sessions --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if asJSON && !sessions {
-				return fmt.Errorf("--json needs --sessions")
-			}
 			if sessions {
-				return runStatusSessions(cmd.Context(), asJSON)
+				return runStatusSessions(cmd.Context(), jsonOut)
 			}
 			return runStatus()
 		},
 	}
 	cmd.Flags().BoolVar(&sessions, "sessions", false, "Show live sessions (downloads, streams, mount) from the running daemon")
-	cmd.Flags().BoolVar(&asJSON, "json", false, "With --sessions: print the raw JSON snapshot")
 	return cmd
 }
 

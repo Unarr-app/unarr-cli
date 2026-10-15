@@ -421,6 +421,9 @@ unarr status --sessions          # table
 unarr status --sessions --json   # the same snapshot the website reads
 ```
 
+`--json` only changes `--sessions`: a plain `unarr status --json` still prints
+the usual text status.
+
 A session is **degraded** as soon as it is impaired (a download receiving no
 data, a transcode below realtime, a mount read that moves no bytes) and
 **stalled** once that lasts 30 s. Each stall is counted **once**, not once per
