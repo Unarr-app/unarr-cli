@@ -112,6 +112,21 @@ func redactConfig(data []byte) ([]byte, error) {
 	return out, nil
 }
 
+// hasCredentials reports whether config data sets any credential; false when it
+// does not parse.
+func hasCredentials(data []byte) bool {
+	var c config.Config
+	if _, err := toml.Decode(string(data), &c); err != nil {
+		return false
+	}
+	for _, s := range configSecrets {
+		if *s.field(&c) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // mergeConfigSecrets copies the secret values of the CURRENT config into a
 // redacted one being restored, so restoring a redacted archive never signs the
 // user out by blanking the api_key that is already in place. It returns the ids

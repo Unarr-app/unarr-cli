@@ -65,24 +65,37 @@ func (a *Archive) Plan(l Layout) (Plan, error) {
 		p.Warnings = append(p.Warnings, warn...)
 	}
 	if a.Manifest.Secrets == SecretsRedacted {
-		creds := "the credentials already on this machine are kept"
-		if !p.overwrites(nameConfig) {
-			creds = "there is no config here to keep them from, so run `unarr login` after restoring"
+		note := "archive has no secrets: "
+		if creds := p.credentialsNote(); creds != "" {
+			note += creds + "; "
 		}
-		p.Warnings = append(p.Warnings, "archive has no secrets: "+creds+
-			"; debrid downloads in the queue have no link of their own and need a fresh one from the server")
+		p.Warnings = append(p.Warnings, note+
+			"debrid downloads in the queue have no link of their own and need a fresh one from the server")
 	}
 	return p, nil
 }
 
-// overwrites reports whether the plan replaces an existing file named name.
-func (p *Plan) overwrites(name string) bool {
+// credentialsNote says what a secret-free restore does about this machine's
+// credentials: it only promises to keep them when the config it writes still
+// holds some. "" when the archive carries no config.toml, which leaves the
+// local one alone.
+func (p *Plan) credentialsNote() string {
 	for _, it := range p.Items {
-		if it.Name == name {
-			return it.existed
+		if it.Name != nameConfig {
+			continue
+		}
+		switch {
+		case !it.existed:
+			return "there is no config here to keep them from, so run `unarr login` after restoring"
+		case hasCredentials(it.data):
+			return "the credentials already on this machine are kept"
+		case hasCredentials(it.prev):
+			return "the ones on this machine cannot be carried over, so run `unarr login` after restoring"
+		default:
+			return "this machine has none to keep, so run `unarr login` after restoring"
 		}
 	}
-	return false
+	return ""
 }
 
 func (a *Archive) planItem(l Layout, name string) (PlanItem, []string, error) {

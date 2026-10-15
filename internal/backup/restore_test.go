@@ -165,6 +165,41 @@ func TestPlanOnFreshMachineSaysToSignIn(t *testing.T) {
 	}
 }
 
+// The plan only promises to keep this machine's credentials when there are some:
+// a config.toml without any gets the `unarr login` hint instead, and so does
+// one whose credentials cannot be carried over.
+func TestPlanOnlyPromisesCredentialsThatExist(t *testing.T) {
+	l := newLayout(t)
+	res := mustCreate(t, l, CreateOptions{})
+	arc, _ := Open(res.Path, "")
+	for current, kept := range map[string]bool{
+		"[agent]\nid = \"agent-local\"\n[downloads]\ndir = \"/x\"\n": false,
+		"auth.api_key = \"SECRET-DOTTED\"\n":                         false,
+		"[auth]\napi_key = \"SECRET-LOCAL\"\n":                       true,
+	} {
+		write(t, l.ConfigPath, current)
+		plan, err := arc.Plan(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := strings.Join(plan.Warnings, "\n")
+		if strings.Contains(w, "are kept") != kept || strings.Contains(w, "unarr login") == kept {
+			t.Errorf("current config %q: warnings: %v", current, plan.Warnings)
+		}
+	}
+	// An archive without config.toml leaves the local one alone: nothing to say.
+	if err := os.Remove(l.ConfigPath); err != nil {
+		t.Fatal(err)
+	}
+	tasksOnly := mustCreate(t, l, CreateOptions{})
+	write(t, l.ConfigPath, testConfig)
+	arc, _ = Open(tasksOnly.Path, "")
+	plan, err := arc.Plan(l)
+	if w := strings.Join(plan.Warnings, "\n"); err != nil || strings.Contains(w, "config") || strings.Contains(w, "unarr login") {
+		t.Fatalf("tasks-only archive: %v %v", err, plan.Warnings)
+	}
+}
+
 func TestPlanWritesNothing(t *testing.T) {
 	l := newLayout(t)
 	res := mustCreate(t, l, CreateOptions{})
