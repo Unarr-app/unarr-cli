@@ -88,7 +88,7 @@ func TestMonitorRetainKeepsTotals(t *testing.T) {
 	m := NewMonitor(time.Second, time.Second, nil)
 	ob(m, KindHLS, true, "r", 0)
 	ob(m, KindHLS, true, "r", 2)
-	m.Retain(map[string]bool{})
+	m.Retain(map[sessionKey]bool{})
 	if m.Totals()[KindHLS] != 1 {
 		t.Fatal("totals must survive the session (monotonic counter)")
 	}

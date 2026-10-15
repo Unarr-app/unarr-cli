@@ -23,7 +23,7 @@ type Monitor struct {
 	grace, recover time.Duration
 
 	mu      sync.Mutex
-	entries map[string]*episode
+	entries map[sessionKey]*episode
 	// onStall, if set, runs once per stall start (outside the lock).
 	onStall func(StallEvent)
 	totals  map[Kind]int64
@@ -37,6 +37,15 @@ type StallEvent struct {
 	Reason string
 	At     time.Time
 }
+
+// sessionKey identifies a session. The id alone is not unique: a stream being
+// watched while it downloads reports the download's task id.
+type sessionKey struct {
+	kind Kind
+	id   string
+}
+
+func key(kind Kind, id string) sessionKey { return sessionKey{kind: kind, id: id} }
 
 type episode struct {
 	kind         Kind
@@ -59,7 +68,7 @@ func NewMonitor(grace, recover time.Duration, onStall func(StallEvent)) *Monitor
 	}
 	return &Monitor{
 		grace: grace, recover: recover, onStall: onStall,
-		entries: make(map[string]*episode),
+		entries: make(map[sessionKey]*episode),
 		totals:  make(map[Kind]int64),
 	}
 }
@@ -78,11 +87,12 @@ type Tick struct {
 // stall history, and when the session was first seen.
 func (m *Monitor) Observe(tk Tick, now time.Time) (Health, Stall, time.Time) {
 	id, kind, impaired, reason := tk.ID, tk.Kind, tk.Impaired, tk.Reason
+	k := key(kind, id)
 	m.mu.Lock()
-	e, ok := m.entries[id]
+	e, ok := m.entries[k]
 	if !ok {
 		e = &episode{kind: kind, firstSeen: now}
-		m.entries[id] = e
+		m.entries[k] = e
 	}
 	var fire *StallEvent
 	switch {
@@ -135,12 +145,12 @@ func (m *Monitor) Observe(tk Tick, now time.Time) (Health, Stall, time.Time) {
 // Retain forgets every session not in live. Totals survive: they are
 // monotonic counters, and a Prometheus counter that drops on session end would
 // read as a reset.
-func (m *Monitor) Retain(live map[string]bool) {
+func (m *Monitor) Retain(live map[sessionKey]bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for id := range m.entries {
-		if !live[id] {
-			delete(m.entries, id)
+	for k := range m.entries {
+		if !live[k] {
+			delete(m.entries, k)
 		}
 	}
 }

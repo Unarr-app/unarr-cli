@@ -22,7 +22,7 @@ type Hub struct {
 	sources []Source
 	vpn     func() VPN
 	states  func() map[string]int
-	last    map[string]sample
+	last    map[sessionKey]sample
 	bytes   map[Kind]int64
 }
 
@@ -38,7 +38,7 @@ func NewHub(version string, onStall func(StallEvent)) *Hub {
 		version: version,
 		started: time.Now(),
 		mon:     NewMonitor(0, 0, onStall),
-		last:    make(map[string]sample),
+		last:    make(map[sessionKey]sample),
 		bytes:   make(map[Kind]int64),
 	}
 }
@@ -82,15 +82,15 @@ func (h *Hub) Poll(now time.Time) Snapshot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	sessions := make([]Session, 0, len(readings))
-	live := make(map[string]bool, len(readings))
+	live := make(map[sessionKey]bool, len(readings))
 	for _, r := range readings {
-		live[r.ID] = true
+		live[key(r.Kind, r.ID)] = true
 		sessions = append(sessions, h.finish(r, now))
 	}
 	h.mon.Retain(live)
-	for id := range h.last {
-		if !live[id] {
-			delete(h.last, id)
+	for k := range h.last {
+		if !live[k] {
+			delete(h.last, k)
 		}
 	}
 	sort.SliceStable(sessions, func(i, j int) bool {
@@ -135,7 +135,7 @@ func (h *Hub) Run(ctx context.Context, interval time.Duration) {
 // finish completes one reading: derived rate, byte accounting, stall health.
 func (h *Hub) finish(r Reading, now time.Time) Session {
 	s := r.Session
-	prev, seen := h.last[s.ID]
+	prev, seen := h.last[key(s.Kind, s.ID)]
 	s.RateBps = h.account(r, prev, seen, now)
 
 	// A source that cannot yet tell (no previous sample) must not look stalled.
@@ -183,7 +183,7 @@ func (h *Hub) account(r Reading, prev sample, seen bool, now time.Time) int64 {
 	if seen && s.Bytes > prev.bytes {
 		h.bytes[s.Kind] += s.Bytes - prev.bytes
 	}
-	h.last[s.ID] = sample{bytes: s.Bytes, at: now, rate: rate}
+	h.last[key(s.Kind, s.ID)] = sample{bytes: s.Bytes, at: now, rate: rate}
 	return rate
 }
 

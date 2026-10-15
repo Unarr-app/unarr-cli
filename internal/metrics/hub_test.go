@@ -73,6 +73,47 @@ func TestHubStallFromZeroFlowAndTotals(t *testing.T) {
 	}
 }
 
+// A stream being watched while it downloads reports the download's task id:
+// the two sessions share an id and must not share rate samples or stall state.
+func TestHubSameIDAcrossKindsStaysSeparate(t *testing.T) {
+	dl := Reading{
+		Session:    Session{ID: "task-1", Kind: KindDownload, State: "downloading", Bytes: 1_000_000},
+		RateKnown:  true,
+		ExpectFlow: true,
+		Reason:     "no_data",
+	}
+	h := NewHub("v", nil)
+	h.AddSource(func() []Reading { return []Reading{dl} })
+	h.AddSource(func() []Reading {
+		return []Reading{{Session: Session{ID: "task-1", Kind: KindStream, State: "active"}}}
+	})
+
+	var snap Snapshot
+	for sec := 0; sec <= 35; sec += 5 { // impaired from the 2nd poll: 30 s of zero flow
+		snap = h.Poll(at(sec))
+	}
+	if len(snap.Sessions) != 2 {
+		t.Fatalf("sessions = %d, want 2", len(snap.Sessions))
+	}
+	for _, s := range snap.Sessions {
+		switch s.Kind {
+		case KindDownload:
+			if s.Health != HealthStalled || s.Stall.Count != 1 {
+				t.Errorf("download = %s count %d, want stalled count 1", s.Health, s.Stall.Count)
+			}
+		case KindStream:
+			if s.Health != HealthOK || s.RateBps != 0 {
+				t.Errorf("stream = %s rate %d, want ok rate 0", s.Health, s.RateBps)
+			}
+		case KindHLS, KindMount:
+			t.Errorf("unexpected session %+v", s)
+		}
+	}
+	if got := snap.Summary.StallsTotal[KindDownload]; got != 1 {
+		t.Fatalf("stallsTotal[download] = %d, want 1", got)
+	}
+}
+
 // The first poll has no previous sample: zero flow must not read as a stall.
 func TestHubFirstPollIsNotImpaired(t *testing.T) {
 	rs := []Reading{{Session: Session{ID: "m", Kind: KindMount}, ExpectFlow: true}}

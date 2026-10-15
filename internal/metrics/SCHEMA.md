@@ -76,7 +76,7 @@ The same document is printed by `unarr status --sessions --json`.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `id` | string | task id (`download`, `stream`), HLS session id (`hls`), `"mount"` (`mount`). Stable for the life of the session. |
+| `id` | string | task id (`download`, `stream`), HLS session id (`hls`), `"mount"` (`mount`). Stable for the life of the session. **Not unique on its own:** a file streamed while it downloads appears as a `download` and a `stream` row with the same task id. The unique key of a session is the pair (`kind`, `id`). |
 | `kind` | `"download"` \| `"hls"` \| `"stream"` \| `"mount"` | `hls` = in-browser transcode/copy playback; `stream` = direct single-file stream with a reader attached; `mount` = the WebDAV remote folder (one aggregate session, present only while a read is in flight) |
 | `title` | string | display title; may be empty (`stream` without a known task, …) |
 | `state` | string | `download`: the manager status (`resolving`, `downloading`, `verifying`, `organizing`, `seeding`, …). `hls`: `active` (viewer fetched in the last 30 s) or `idle`. `stream`, `mount`: `active`. |
