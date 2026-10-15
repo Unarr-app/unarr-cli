@@ -20,6 +20,17 @@ import (
 // TokenHeader carries the shared secret on every control request.
 const TokenHeader = "X-Unarr-Control-Token" //nolint:gosec // G101: header NAME, not a credential
 
+// HTTP limits of the control plane. Without IdleTimeout an idle keep-alive
+// connection is held forever. No WriteTimeout: an action (cancel with file
+// deletion, purge) may legitimately take longer than any fixed budget.
+// Variables only so a test can shorten the idle wait.
+var (
+	idleTimeout = 30 * time.Second
+	readTimeout = 10 * time.Second
+)
+
+const maxHeaderBytes = 16 << 10
+
 // Server is the daemon's loopback control endpoint.
 type Server struct {
 	ctrl     Controller
@@ -96,6 +107,9 @@ func (s *Server) Listen(ctx context.Context) error {
 	s.srv = &http.Server{
 		Handler:           s.withAuth(mux),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
 	}
 
 	go func() {

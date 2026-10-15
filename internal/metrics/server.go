@@ -16,6 +16,17 @@ import (
 // token (which the control plane takes in this header) works unchanged.
 const TokenHeader = "X-Unarr-Control-Token" //nolint:gosec // G101: header NAME, not a credential
 
+// HTTP limits of the endpoint. Without IdleTimeout/ReadTimeout a keep-alive
+// connection left idle (even after a 401) stays open for good. Variables only so
+// a test can shorten the idle wait.
+var (
+	idleTimeout  = 30 * time.Second
+	readTimeout  = 10 * time.Second
+	writeTimeout = 15 * time.Second
+)
+
+const maxHeaderBytes = 16 << 10
+
 // Server is the opt-in /metrics endpoint. A nil *Server is valid and inert, so
 // a disabled feature costs a nil check, not a branch at every call site.
 type Server struct {
@@ -51,7 +62,14 @@ func Listen(ctx context.Context, addr, token string, hub *Hub) (*Server, error) 
 			log.Printf("[metrics] write response: %v", err)
 		}
 	})
-	s.srv = &http.Server{Handler: s.withAuth(mux), ReadHeaderTimeout: 5 * time.Second}
+	s.srv = &http.Server{
+		Handler:           s.withAuth(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
+	}
 	go func() {
 		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("[metrics] server stopped: %v", err)
@@ -91,6 +109,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		}
 		if subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="unarr-metrics"`)
+			w.Header().Set("Connection", "close") // no keep-alive for a client we refused
 			http.Error(w, "bad metrics token", http.StatusUnauthorized)
 			return
 		}
