@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -342,35 +343,52 @@ func TestFailedRestorePrunesNoSnapshot(t *testing.T) {
 	}
 }
 
-// `prune --pre-restore` applies the same retention on demand, in the folder the
-// snapshots live in (beside config.toml, not [backup] dir), and touches nothing
-// else.
+// Plain `prune` leaves pre-restore snapshots alone even in the folder they share
+// with the manual backups — the default [backup] dir, beside config.toml — and
+// `prune --pre-restore` trims them there, even when [backup] dir points
+// elsewhere, touching nothing else.
 func TestBackupCLIPrunePreRestore(t *testing.T) {
-	nas := t.TempDir()
-	backupEnv(t, "[backup]\ndir = "+tomlQuote(nas)+"\n")
+	cfgPath := backupEnv(t, "")
 	dir := localBackupDir()
+	if d, err := backupDir(""); err != nil || d != dir {
+		t.Fatalf("[backup] dir = %q (%v), want the snapshots' folder %q: plain prune would never see them", d, err, dir)
+	}
 	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := range 5 {
 		writeBackupTestFile(t, filepath.Join(dir, preRestoreName(old.AddDate(0, 0, i))), "x")
 	}
-	manual := filepath.Join(dir, "unarr-backup-20190101T000000Z.zip")
-	writeBackupTestFile(t, manual, "x")
+	// Five manual backups, all newer than every snapshot: past the newest 3 the
+	// snapshots would be the first to go, were plain prune to count them.
+	var manual []string
+	for i := range 5 {
+		p := filepath.Join(dir, "unarr-backup-2026010"+strconv.Itoa(i+1)+"T000000Z.zip")
+		writeBackupTestFile(t, p, "x")
+		manual = append(manual, p)
+	}
 
-	if _, err := runBackup(t, "prune"); err != nil {
-		t.Fatal(err)
+	out, err := runBackup(t, "prune")
+	if err != nil || !strings.Contains(out, "kept the newest 3; removed 2") {
+		t.Fatalf("plain prune: %v\n%s", err, out)
 	}
 	if n := countPreRestore(t, dir); n != 5 {
-		t.Fatalf("plain prune touched pre-restore snapshots: %d left", n)
+		t.Fatalf("plain prune touched pre-restore snapshots: %d left\n%s", n, out)
 	}
-	out, err := runBackup(t, "prune", "--pre-restore")
+
+	nas := t.TempDir()
+	stray := filepath.Join(nas, preRestoreName(old))
+	writeBackupTestFile(t, stray, "x")
+	writeBackupTestFile(t, cfgPath, "[backup]\ndir = "+tomlQuote(nas)+"\n")
+	out, err = runBackup(t, "prune", "--pre-restore")
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	if n := countPreRestore(t, dir); n != 3 {
 		t.Fatalf("pre-restore snapshots left: %d, want 3\n%s", n, out)
 	}
-	if _, err := os.Stat(manual); err != nil {
-		t.Fatalf("prune --pre-restore removed a manual backup: %v", err)
+	for _, p := range append(manual[2:], stray) {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("prune --pre-restore removed %s: %v", p, err)
+		}
 	}
 	if _, err := runBackup(t, "prune", "--pre-restore", "--keep", "1"); err == nil {
 		t.Fatal("--keep accepted with --pre-restore, whose retention is fixed")
