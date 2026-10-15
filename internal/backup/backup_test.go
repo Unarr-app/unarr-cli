@@ -391,7 +391,7 @@ func TestOpenRejectsOversizedArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate(maxArchiveSize + 1); err != nil {
+	if err := f.Truncate(maxArchiveSize() + 1); err != nil {
 		t.Fatal(err)
 	}
 	f.Close()

@@ -4,21 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"strings"
-)
-
-// Size bounds, checked before anything is read into memory. Real archives are a
-// few KB; config.toml and the queue never approach these. maxMemberSize is the
-// zip-bomb guard (decompressed), maxArchiveSize keeps a stray multi-GB file from
-// being slurped, and maxMembers caps the member count (manifest + allowlist,
-// with headroom for a future schema).
-const (
-	maxMemberSize  = 16 << 20
-	maxArchiveSize = 64 << 20
-	maxMembers     = 16
 )
 
 // Archive is a fully verified backup held in memory. Open only returns one
@@ -65,31 +53,38 @@ func Open(file, passphrase string) (*Archive, error) {
 	return &Archive{Manifest: m, Encrypted: enc, files: members}, nil
 }
 
-// readBounded reads the archive file, refusing one over maxArchiveSize.
+// readBounded reads the archive file, refusing one over maxArchiveSize — by its
+// size on disk before reading anything, and while reading if it grows.
 func readBounded(file string) ([]byte, error) {
 	f, err := os.Open(file)
 	if err != nil {
 		return nil, fmt.Errorf("read backup: %w", err)
 	}
 	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, maxArchiveSize+1))
+	if st, err := f.Stat(); err == nil {
+		if err := checkArchiveSize(file, st.Size()); err != nil {
+			return nil, err
+		}
+	}
+	raw, over, err := readLimited(f, maxArchiveSize())
 	if err != nil {
 		return nil, fmt.Errorf("read backup: %w", err)
 	}
-	if len(raw) > maxArchiveSize {
-		return nil, fmt.Errorf("%w: %s is over %d MiB", ErrTooLarge, file, maxArchiveSize>>20)
+	if over {
+		return nil, checkArchiveSize(file, -1)
 	}
 	return raw, nil
 }
 
 // readMembers loads every member, rejecting names that are not a bare file
 // name: that is the zip-slip defence at the archive level (restore adds the
-// allowlist on top).
+// allowlist on top). Together the members must fit maxContentSize.
 func readMembers(zr *zip.Reader) (map[string][]byte, error) {
 	if len(zr.File) > maxMembers {
 		return nil, fmt.Errorf("%w: %d members", ErrTooLarge, len(zr.File))
 	}
 	out := make(map[string][]byte, len(zr.File))
+	budget := newContentBudget()
 	for _, f := range zr.File {
 		if !safeMemberName(f.Name) {
 			return nil, fmt.Errorf("%w: %q", ErrUnsafePath, f.Name)
@@ -97,24 +92,35 @@ func readMembers(zr *zip.Reader) (map[string][]byte, error) {
 		if _, dup := out[f.Name]; dup {
 			return nil, fmt.Errorf("%w: duplicate member %q", ErrBadManifest, f.Name)
 		}
-		if f.UncompressedSize64 > maxMemberSize {
-			return nil, fmt.Errorf("%w: member %q", ErrTooLarge, f.Name)
-		}
-		rc, err := f.Open()
+		data, err := readMember(f, budget)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %q: %v", ErrBadManifest, f.Name, err)
-		}
-		data, err := io.ReadAll(io.LimitReader(rc, maxMemberSize+1))
-		_ = rc.Close()
-		if err != nil {
-			return nil, fmt.Errorf("%w: %q: %v", ErrChecksum, f.Name, err)
-		}
-		if len(data) > maxMemberSize {
-			return nil, fmt.Errorf("%w: member %q", ErrTooLarge, f.Name)
+			return nil, err
 		}
 		out[f.Name] = data
 	}
 	return out, nil
+}
+
+// readMember inflates f within what is left of budget: the size the zip
+// declares is checked before inflating, then the bytes that actually come out,
+// so a member that understates its size cannot get past the bound either.
+func readMember(f *zip.File, budget *contentBudget) ([]byte, error) {
+	if f.UncompressedSize64 > uint64(budget.left) {
+		return nil, errContentTooLarge(f.Name, -1)
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %q: %v", ErrBadManifest, f.Name, err)
+	}
+	data, over, err := readLimited(rc, budget.left)
+	_ = rc.Close()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %q: %v", ErrChecksum, f.Name, err)
+	}
+	if over {
+		return nil, errContentTooLarge(f.Name, -1)
+	}
+	return data, budget.spend(f.Name, int64(len(data)))
 }
 
 // safeMemberName accepts only a plain file name: no directories, no "..",

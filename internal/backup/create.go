@@ -100,14 +100,9 @@ func create(o CreateOptions, k Kind) (Result, error) {
 	for _, f := range files {
 		m.Files = append(m.Files, FileEntry{Name: f.name, Size: int64(len(f.data)), SHA256: sumHex(f.data)})
 	}
-	blob, err := buildZip(m, files)
+	blob, err := pack(m, files, o.Passphrase)
 	if err != nil {
 		return Result{}, err
-	}
-	if o.Passphrase != "" {
-		if blob, err = encrypt(blob, o.Passphrase); err != nil {
-			return Result{}, err
-		}
 	}
 	path := outputPath(o, k)
 	if err := writeFileAtomic(path, blob); err != nil {
@@ -125,12 +120,12 @@ type memFile struct {
 func collect(l Layout, redact bool) ([]memFile, error) {
 	var out []memFile
 	for _, s := range l.sources() {
-		data, err := os.ReadFile(s.path)
+		data, err := readSource(s)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", s.path, err)
+			return nil, err
 		}
 		if redact {
 			if data, err = s.redact(data); err != nil {
@@ -142,15 +137,63 @@ func collect(l Layout, redact bool) ([]memFile, error) {
 	return out, nil
 }
 
-func buildZip(m Manifest, files []memFile) ([]byte, error) {
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
+// readSource reads one allowlisted file, refusing one larger than a backup can
+// hold before reading it into memory.
+func readSource(s source) ([]byte, error) {
+	f, err := os.Open(s.path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", s.path, err)
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err == nil && st.Size() > maxContentSize {
+		return nil, errContentTooLarge(s.name, st.Size())
+	}
+	data, over, err := readLimited(f, maxContentSize)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", s.path, err)
+	}
+	if over {
+		return nil, errContentTooLarge(s.name, -1)
+	}
+	return data, nil
+}
+
+// pack builds the archive in memory — encryption seals the whole zip in one
+// go — and refuses, before anything is written, one that Open would refuse.
+func pack(m Manifest, files []memFile, passphrase string) ([]byte, error) {
 	mj, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	for _, f := range append([]memFile{{ManifestName, mj}}, files...) {
-		w, err := zw.CreateHeader(&zip.FileHeader{Name: f.name, Method: zip.Deflate, Modified: m.CreatedAt})
+	members := append([]memFile{{ManifestName, mj}}, files...)
+	budget := newContentBudget()
+	for _, f := range members {
+		if err := budget.spend(f.name, int64(len(f.data))); err != nil {
+			return nil, err
+		}
+	}
+	blob, err := buildZip(members, m.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if passphrase != "" {
+		if blob, err = encrypt(blob, passphrase); err != nil {
+			return nil, err
+		}
+	}
+	// Cannot trip while archiveFraming covers the framing; it keeps the
+	// promise explicit should that ever change.
+	if err := checkArchiveSize("the archive", int64(len(blob))); err != nil {
+		return nil, err
+	}
+	return blob, nil
+}
+
+func buildZip(members []memFile, modified time.Time) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, f := range members {
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: f.name, Method: zip.Deflate, Modified: modified})
 		if err != nil {
 			return nil, err
 		}
