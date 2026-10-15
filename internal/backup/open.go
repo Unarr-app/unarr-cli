@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"strings"
@@ -78,7 +79,9 @@ func readBounded(file string) ([]byte, error) {
 
 // readMembers loads every member, rejecting names that are not a bare file
 // name: that is the zip-slip defence at the archive level (restore adds the
-// allowlist on top). Together the members must fit maxContentSize.
+// allowlist on top). Every member must be a regular file — a symlink's
+// "content" is its target, which must never become a config — and together
+// they must fit maxContentSize.
 func readMembers(zr *zip.Reader) (map[string][]byte, error) {
 	if len(zr.File) > maxMembers {
 		return nil, fmt.Errorf("%w: %d members", ErrTooLarge, len(zr.File))
@@ -88,6 +91,9 @@ func readMembers(zr *zip.Reader) (map[string][]byte, error) {
 	for _, f := range zr.File {
 		if !safeMemberName(f.Name) {
 			return nil, fmt.Errorf("%w: %q", ErrUnsafePath, f.Name)
+		}
+		if mode := f.Mode(); !mode.IsRegular() {
+			return nil, fmt.Errorf("%w: %q is %s, not a regular file", ErrUnsafePath, f.Name, fileKind(mode))
 		}
 		if _, dup := out[f.Name]; dup {
 			return nil, fmt.Errorf("%w: duplicate member %q", ErrBadManifest, f.Name)
@@ -99,6 +105,18 @@ func readMembers(zr *zip.Reader) (map[string][]byte, error) {
 		out[f.Name] = data
 	}
 	return out, nil
+}
+
+// fileKind words a non-regular member's type for the error.
+func fileKind(mode fs.FileMode) string {
+	switch {
+	case mode&fs.ModeSymlink != 0:
+		return "a symlink"
+	case mode.IsDir():
+		return "a directory"
+	default:
+		return "a special file"
+	}
 }
 
 // readMember inflates f within what is left of budget: the size the zip

@@ -327,6 +327,48 @@ func TestZipSlipRejected(t *testing.T) {
 	}
 }
 
+// A member that is not a regular file — here config.toml stored as a symlink
+// whose "content" is its target — is refused at Open, even with a manifest that
+// matches its bytes: restore must never turn a link target into a config.
+func TestNonRegularMemberRejected(t *testing.T) {
+	for name, mode := range map[string]os.FileMode{
+		"symlink":    os.ModeSymlink | 0o777,
+		"directory":  os.ModeDir | 0o755,
+		"device":     os.ModeDevice | 0o600,
+		"char dev":   os.ModeDevice | os.ModeCharDevice | 0o600,
+		"named pipe": os.ModeNamedPipe | 0o600,
+		"socket":     os.ModeSocket | 0o600,
+	} {
+		t.Run(name, func(t *testing.T) {
+			const target = "/etc/passwd"
+			var buf bytes.Buffer
+			zw := zip.NewWriter(&buf)
+			for _, m := range []struct {
+				name, body string
+				mode       os.FileMode
+			}{{ManifestName, manifestFor(nameConfig, target), 0o600}, {nameConfig, target, mode}} {
+				h := &zip.FileHeader{Name: m.name, Method: zip.Deflate}
+				h.SetMode(m.mode)
+				w, err := zw.CreateHeader(h)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := w.Write([]byte(m.body)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := zw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(t.TempDir(), "x.zip")
+			write(t, p, buf.String())
+			if _, err := Open(p, ""); !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("err = %v, want ErrUnsafePath", err)
+			}
+		})
+	}
+}
+
 func TestUnknownMemberNotRestored(t *testing.T) {
 	l := newLayout(t)
 	p := craft(t, map[string]string{ManifestName: manifestFor("evil.sh", "x=1"), "evil.sh": "x=1"})
