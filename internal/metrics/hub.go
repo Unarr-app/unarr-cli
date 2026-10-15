@@ -30,6 +30,9 @@ type sample struct {
 	bytes int64
 	at    time.Time
 	rate  int64
+	// measured: rate comes from a real window between two samples. The first
+	// sample stores rate 0 only as a placeholder, which must not read as no flow.
+	measured bool
 }
 
 // NewHub builds a hub. onStall (may be nil) receives one event per stall.
@@ -136,10 +139,11 @@ func (h *Hub) Run(ctx context.Context, interval time.Duration) {
 func (h *Hub) finish(r Reading, now time.Time) Session {
 	s := r.Session
 	prev, seen := h.last[key(s.Kind, s.ID)]
-	s.RateBps = h.account(r, prev, seen, now)
+	var measured bool
+	s.RateBps, measured = h.account(r, prev, seen, now)
 
-	// A source that cannot yet tell (no previous sample) must not look stalled.
-	flowStopped := r.ExpectFlow && seen && s.RateBps == 0
+	// A source that cannot yet tell (no measured window) must not look stalled.
+	flowStopped := r.ExpectFlow && measured && s.RateBps == 0
 	reason := r.Reason
 	if reason == "" && flowStopped {
 		reason = "no_data"
@@ -160,17 +164,17 @@ func (h *Hub) finish(r Reading, now time.Time) Session {
 	return s
 }
 
-// account returns the session's current rate and, once per rate window, stores
-// the new sample and credits the byte delta to the kind's monotonic total.
-// Called with h.mu held.
-func (h *Hub) account(r Reading, prev sample, seen bool, now time.Time) int64 {
+// account returns the session's current rate (and whether it was measured over
+// a real window) and, once per rate window, stores the new sample and credits
+// the byte delta to the kind's monotonic total. Called with h.mu held.
+func (h *Hub) account(r Reading, prev sample, seen bool, now time.Time) (int64, bool) {
 	s := r.Session
 	rate := s.RateBps
 	if !r.RateKnown {
 		rate = prev.rate
 	}
 	if seen && now.Sub(prev.at) < minRateWindow {
-		return rate // too soon to re-sample: keep the previous window
+		return rate, prev.measured // too soon to re-sample: keep the previous window
 	}
 	if !r.RateKnown && seen {
 		rate = 0
@@ -183,8 +187,8 @@ func (h *Hub) account(r Reading, prev sample, seen bool, now time.Time) int64 {
 	if seen && s.Bytes > prev.bytes {
 		h.bytes[s.Kind] += s.Bytes - prev.bytes
 	}
-	h.last[key(s.Kind, s.ID)] = sample{bytes: s.Bytes, at: now, rate: rate}
-	return rate
+	h.last[key(s.Kind, s.ID)] = sample{bytes: s.Bytes, at: now, rate: rate, measured: seen}
+	return rate, seen
 }
 
 func (h *Hub) summarize(sessions []Session) Summary {

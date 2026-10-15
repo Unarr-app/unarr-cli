@@ -123,6 +123,26 @@ func TestHubFirstPollIsNotImpaired(t *testing.T) {
 	}
 }
 
+// A second poll inside the first rate window (GET /sessions racing the sampler)
+// has no measured rate yet: it must not read as zero flow while bytes move.
+func TestHubUnmeasuredRateIsNotZeroFlow(t *testing.T) {
+	rs := []Reading{{Session: Session{ID: "mount", Kind: KindMount, State: "active"}, ExpectFlow: true, Reason: "no_data"}}
+	h := hubWith(&rs)
+	h.Poll(at(0))
+	rs[0].Bytes = 500_000
+	if s := h.Poll(at(0).Add(500 * time.Millisecond)).Sessions[0]; s.Health != HealthOK {
+		t.Fatalf("health 500 ms after the first sample = %s, want ok", s.Health)
+	}
+
+	// A real window with nothing moved still counts.
+	rs[0].Bytes = 0
+	h = hubWith(&rs)
+	h.Poll(at(0))
+	if s := h.Poll(at(5)).Sessions[0]; s.Health != HealthDegraded {
+		t.Fatalf("health after 5 s of zero flow = %s, want degraded", s.Health)
+	}
+}
+
 func TestHubSnapshotJSONContract(t *testing.T) {
 	speed := 1.5
 	rs := []Reading{{Session: Session{ID: "h1", Kind: KindHLS, Title: "Movie", State: "active", SpeedX: &speed}}}
