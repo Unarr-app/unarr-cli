@@ -43,6 +43,13 @@ var configFields = map[string]Sensitivity{
 	"Mount.NZBDir":            Publishable,
 	"Mount.RefreshInterval":   Publishable,
 
+	"Backup.Enabled":        Publishable,
+	"Backup.Frequency":      Publishable,
+	"Backup.Time":           Publishable,
+	"Backup.Weekday":        Publishable,
+	"Backup.RetentionCount": Publishable,
+	"Backup.Dir":            Publishable,
+
 	// ── Identity ───────────────────────────────────────────────────────────
 	// Not credentials, but they name the user's machine and account. Published
 	// as presence only; the agent ID a support engineer needs to look the

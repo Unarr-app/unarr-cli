@@ -28,6 +28,7 @@ type Config struct {
 	Telemetry     TelemetryConfig     `toml:"telemetry,omitempty"`
 	Desktop       DesktopConfig       `toml:"desktop,omitempty"`
 	Mount         MountConfig         `toml:"mount,omitempty"`
+	Backup        BackupConfig        `toml:"backup,omitempty"`
 
 	// unknownKeys holds the dotted TOML keys Load could not map onto the schema
 	// (a typo, or a valid key under the wrong section). UNEXPORTED on purpose:
