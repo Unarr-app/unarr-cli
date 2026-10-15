@@ -59,7 +59,8 @@ type Session struct {
 	// Bytes moved by this session (downloaded, or served to the viewer). 0 when
 	// the source does not count them.
 	Bytes int64 `json:"bytes"`
-	// RateBps is the current rate in bytes/s; AvgRateBps is Bytes/ActiveSec.
+	// RateBps is the current rate in bytes/s; AvgRateBps is the bytes moved
+	// during this session (not those a resumed download already held) / ActiveSec.
 	RateBps    int64 `json:"rateBps"`
 	AvgRateBps int64 `json:"avgRateBps"`
 	// SpeedX is the encoder speed in ×realtime (1.0 = exactly realtime). Set
@@ -139,6 +140,10 @@ type Reading struct {
 	ExpectFlow bool
 	// Reason names why the session is impaired, for the stall event.
 	Reason string
+	// CumulativeBytes: Bytes is a process-wide counter, not this session's. The
+	// Hub reports Session.Bytes relative to the value when it first saw the
+	// session (pair it with Hub.SetBytesCounter for the kind's total).
+	CumulativeBytes bool
 }
 
 // Source reports the sessions of one subsystem. Called on every poll, so it

@@ -24,6 +24,10 @@ type Hub struct {
 	states  func() map[string]int
 	last    map[sessionKey]sample
 	bytes   map[Kind]int64
+	// counters / counted: kinds whose total follows a monotonic process-wide
+	// counter instead of the sessions' deltas, and the last value credited.
+	counters map[Kind]func() int64
+	counted  map[Kind]int64
 }
 
 type sample struct {
@@ -33,17 +37,32 @@ type sample struct {
 	// measured: rate comes from a real window between two samples. The first
 	// sample stores rate 0 only as a placeholder, which must not read as no flow.
 	measured bool
+	// base is Bytes when the session was first seen: what it held before this
+	// session moved anything (a resumed download, the mount's process total).
+	base int64
 }
 
 // NewHub builds a hub. onStall (may be nil) receives one event per stall.
 func NewHub(version string, onStall func(StallEvent)) *Hub {
 	return &Hub{
-		version: version,
-		started: time.Now(),
-		mon:     NewMonitor(0, 0, onStall),
-		last:    make(map[sessionKey]sample),
-		bytes:   make(map[Kind]int64),
+		version:  version,
+		started:  time.Now(),
+		mon:      NewMonitor(0, 0, onStall),
+		last:     make(map[sessionKey]sample),
+		bytes:    make(map[Kind]int64),
+		counters: make(map[Kind]func() int64),
+		counted:  make(map[Kind]int64),
 	}
+}
+
+// SetBytesCounter makes kind's BytesTotal follow fn, a counter of bytes moved
+// since the process started that never decreases. Use it for a kind whose
+// sessions come and go between polls (the mount): their deltas would miss
+// whatever was moved while no poll saw a session.
+func (h *Hub) SetBytesCounter(kind Kind, fn func() int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.counters[kind] = fn
 }
 
 // AddSource registers a session source.
@@ -75,15 +94,29 @@ func (h *Hub) SetDownloadStates(fn func() map[string]int) {
 func (h *Hub) Poll(now time.Time) Snapshot {
 	h.mu.Lock()
 	sources, vpn, states := append([]Source(nil), h.sources...), h.vpn, h.states
+	counters := make(map[Kind]func() int64, len(h.counters))
+	for k, fn := range h.counters {
+		counters[k] = fn
+	}
 	h.mu.Unlock()
 
 	var readings []Reading
 	for _, src := range sources {
 		readings = append(readings, src()...)
 	}
+	counts := make(map[Kind]int64, len(counters))
+	for k, fn := range counters {
+		counts[k] = fn()
+	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	for k, v := range counts {
+		if v > h.counted[k] {
+			h.bytes[k] += v - h.counted[k]
+			h.counted[k] = v
+		}
+	}
 	sessions := make([]Session, 0, len(readings))
 	live := make(map[sessionKey]bool, len(readings))
 	for _, r := range readings {
@@ -157,11 +190,27 @@ func (h *Hub) finish(r Reading, now time.Time) Session {
 		s.StartedAt = first
 	}
 	s.StartedAt = s.StartedAt.UTC()
+	own := h.ownBytes(r)
+	if r.CumulativeBytes {
+		s.Bytes = own
+	}
 	if sec := int64(now.Sub(s.StartedAt).Seconds()); sec > 0 {
 		s.ActiveSec = sec
-		s.AvgRateBps = s.Bytes / sec
+		s.AvgRateBps = own / sec
 	}
 	return s
+}
+
+// ownBytes is what this session itself moved. A source that knows when its
+// session started (HLS) counts from that start; otherwise the session began
+// when first seen, and what Bytes held then predates it. Called with h.mu held,
+// after account stored the session's sample.
+func (h *Hub) ownBytes(r Reading) int64 {
+	own := r.Bytes
+	if r.CumulativeBytes || r.StartedAt.IsZero() {
+		own -= h.last[key(r.Kind, r.ID)].base
+	}
+	return max(own, 0)
 }
 
 // account returns the session's current rate (and whether it was measured over
@@ -183,11 +232,16 @@ func (h *Hub) account(r Reading, prev sample, seen bool, now time.Time) (int64, 
 		}
 	}
 	// Deltas only: the bytes a resumed download already held when first seen
-	// were not moved by this daemon run.
-	if seen && s.Bytes > prev.bytes {
+	// were not moved by this daemon run. A kind with its own counter is credited
+	// from that counter in Poll instead.
+	if _, counted := h.counters[s.Kind]; seen && !counted && s.Bytes > prev.bytes {
 		h.bytes[s.Kind] += s.Bytes - prev.bytes
 	}
-	h.last[key(s.Kind, s.ID)] = sample{bytes: s.Bytes, at: now, rate: rate, measured: seen}
+	base := s.Bytes
+	if seen && prev.base <= s.Bytes {
+		base = prev.base // a counter that went backwards (download restarted) rebases
+	}
+	h.last[key(s.Kind, s.ID)] = sample{bytes: s.Bytes, at: now, rate: rate, measured: seen, base: base}
 	return rate, seen
 }
 

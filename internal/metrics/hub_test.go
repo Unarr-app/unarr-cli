@@ -23,11 +23,67 @@ func TestHubDerivesRateAndAverage(t *testing.T) {
 	if s.RateBps != 1000 {
 		t.Fatalf("rate = %d, want 1000 B/s", s.RateBps)
 	}
-	if s.ActiveSec != 5 || s.AvgRateBps != 1200 {
-		t.Fatalf("active=%d avg=%d, want 5 / 1200", s.ActiveSec, s.AvgRateBps)
+	// The 1000 bytes held when first seen predate the session.
+	if s.ActiveSec != 5 || s.AvgRateBps != 1000 {
+		t.Fatalf("active=%d avg=%d, want 5 / 1000", s.ActiveSec, s.AvgRateBps)
 	}
 	if got := snap.Summary.BytesTotal[KindMount]; got != 5000 {
 		t.Fatalf("bytes total = %d, want only the delta 5000", got)
+	}
+}
+
+// The mount reports a process-wide counter and exists only while reads are in
+// flight: the session's bytes start at zero when it opens, and the kind total
+// follows the counter even across bursts no poll saw as a session.
+func TestHubCumulativeCounterBytes(t *testing.T) {
+	const gb, mb = int64(1) << 30, int64(1) << 20
+	var counter int64
+	active := false
+	h := NewHub("v", nil)
+	h.SetBytesCounter(KindMount, func() int64 { return counter })
+	h.AddSource(func() []Reading {
+		if !active {
+			return nil
+		}
+		return []Reading{{Session: Session{ID: "mount", Kind: KindMount, State: "active", Bytes: counter}, CumulativeBytes: true, ExpectFlow: true}}
+	})
+
+	h.Poll(at(0))
+	counter = 50 * gb // served in bursts that started and ended between ticks
+	if got := h.Poll(at(5)).Summary.BytesTotal[KindMount]; got != 50*gb {
+		t.Fatalf("bytes total after unseen bursts = %d, want %d", got, 50*gb)
+	}
+
+	active = true
+	if s := h.Poll(at(10)).Sessions[0]; s.Bytes != 0 {
+		t.Fatalf("bytes of a session that just opened = %d, want 0", s.Bytes)
+	}
+	counter += 10 * mb
+	snap := h.Poll(at(20))
+	s := snap.Sessions[0]
+	if s.Bytes != 10*mb || s.AvgRateBps != mb || s.RateBps != mb {
+		t.Fatalf("bytes=%d avg=%d rate=%d, want %d / %d / %d", s.Bytes, s.AvgRateBps, s.RateBps, 10*mb, mb, mb)
+	}
+	if got := snap.Summary.BytesTotal[KindMount]; got != 50*gb+10*mb {
+		t.Fatalf("bytes total = %d, want %d", got, 50*gb+10*mb)
+	}
+}
+
+// A resumed download already holds bytes from earlier runs: they stay in Bytes
+// (that is the file's progress) but not in this session's average.
+func TestHubResumedDownloadAverage(t *testing.T) {
+	const gb, mb = int64(1) << 30, int64(1) << 20
+	rs := []Reading{{Session: Session{ID: "d", Kind: KindDownload, State: "downloading", Bytes: 50 * gb, RateBps: mb}, RateKnown: true}}
+	h := hubWith(&rs)
+	h.Poll(at(0))
+	rs[0].Bytes += 5 * mb
+	snap := h.Poll(at(5))
+	s := snap.Sessions[0]
+	if s.Bytes != 50*gb+5*mb || s.AvgRateBps != mb {
+		t.Fatalf("bytes=%d avg=%d, want %d / %d", s.Bytes, s.AvgRateBps, 50*gb+5*mb, mb)
+	}
+	if got := snap.Summary.BytesTotal[KindDownload]; got != 5*mb {
+		t.Fatalf("bytes total = %d, want the delta %d", got, 5*mb)
 	}
 }
 

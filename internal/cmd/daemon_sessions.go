@@ -42,6 +42,7 @@ func newSessionHub(d sessionDeps) *metrics.Hub {
 	hub.AddSource(func() []metrics.Reading { return hlsReadings(d.streamSrv.HLS(), time.Now()) })
 	hub.AddSource(func() []metrics.Reading { return streamReadings(d.streamSrv, d.manager) })
 	hub.AddSource(mountReadings)
+	hub.SetBytesCounter(metrics.KindMount, func() int64 { _, b := remotefs.ReadStats(); return b })
 	hub.SetVPN(func() metrics.VPN {
 		vc := d.cfg.Download.VPN
 		return metrics.VPN{
@@ -162,15 +163,17 @@ func streamReadings(srv *engine.StreamServer, m *engine.Manager) []metrics.Readi
 
 // mountReadings reports the WebDAV mount as ONE session while it is serving a
 // read; an idle mount is not a session. A read in flight that moves no bytes is
-// what a stalled NNTP/remote fetch looks like from here.
+// what a stalled NNTP/remote fetch looks like from here. The byte counter is the
+// process total: the hub turns it into the session's own bytes.
 func mountReadings() []metrics.Reading {
 	active, bytes := remotefs.ReadStats()
 	if active == 0 {
 		return nil
 	}
 	return []metrics.Reading{{
-		Session:    metrics.Session{ID: "mount", Kind: metrics.KindMount, Title: "WebDAV mount", State: "active", Bytes: bytes},
-		ExpectFlow: true,
-		Reason:     "no_data",
+		Session:         metrics.Session{ID: "mount", Kind: metrics.KindMount, Title: "WebDAV mount", State: "active", Bytes: bytes},
+		ExpectFlow:      true,
+		Reason:          "no_data",
+		CumulativeBytes: true,
 	}}
 }

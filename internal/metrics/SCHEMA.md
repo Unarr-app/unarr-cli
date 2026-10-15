@@ -83,9 +83,9 @@ The same document is printed by `unarr status --sessions --json`.
 | `health` | `"ok"` \| `"degraded"` \| `"stalled"` | `degraded` = impaired for less than 30 s; `stalled` = impaired for ≥ 30 s; back to `ok` after 10 s of healthy flow |
 | `startedAt` | RFC 3339 UTC | session start; when the source does not know it, the first time the daemon sampled it (≤ 5 s late) |
 | `activeSec` | int | seconds since `startedAt` |
-| `bytes` | int | bytes moved by the session: downloaded (`download`), written to viewers (`hls`, `mount` — mount is the process-wide total). `0` when not counted (`stream`) |
+| `bytes` | int | bytes moved by the session: downloaded (`download` — the file's total, including what an earlier run already fetched), written to viewers (`hls`; `mount` — counted from when the session opened). `0` when not counted (`stream`) |
 | `rateBps` | int | current rate, bytes/s (the torrent/debrid speed for downloads; delta between samples otherwise) |
-| `avgRateBps` | int | `bytes / activeSec` |
+| `avgRateBps` | int | bytes moved during this session / `activeSec` (a resumed download's earlier bytes are not counted) |
 | `speedX` | number, optional | encoder speed in ×realtime (1.0 = realtime). Only `hls` with live transcode telemetry; absent for copy/cache replays |
 | `progress` | int 0–100, optional | `download` only |
 | `stall` | `Stall` | |
@@ -114,7 +114,7 @@ The same document is printed by `unarr status --sessions --json`.
 |-------|------|-------|
 | `active` | `{kind: int}` | sessions per kind; every kind present |
 | `stalled` | int | sessions with `health == "stalled"` now |
-| `bytesTotal` | `{kind: int}` | monotonic since daemon start; keeps counting after sessions end |
+| `bytesTotal` | `{kind: int}` | monotonic since daemon start; keeps counting after sessions end (`mount` follows the mount's own byte counter, so reads that start and end between two samples are counted too) |
 | `stallsTotal` | `{kind: int}` | monotonic stall episodes since daemon start |
 | `rateBps` | `{kind: int}` | sum of current rates |
 | `downloadsByState` | `{state: int}` | every known download, running or only persisted (`downloading`, `paused`, `stopped`, `queued`, …) |
