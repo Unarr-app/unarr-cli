@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"io"
 	"net/http"
 	"time"
 )
@@ -56,8 +57,8 @@ func (r *HLSSessionRegistry) Infos() []HLSInfo {
 }
 
 // servedWriter counts the bytes a handler writes to a viewer. It forwards
-// Flush and exposes Unwrap so http.ResponseController (deadlines, hijack) still
-// reaches the real writer.
+// Flush and ReadFrom and exposes Unwrap so http.ResponseController (deadlines,
+// hijack) still reaches the real writer.
 type servedWriter struct {
 	http.ResponseWriter
 	add func(int64)
@@ -70,6 +71,24 @@ func (w *servedWriter) Write(p []byte) (int, error) {
 	}
 	return n, err
 }
+
+// ReadFrom keeps the io.ReaderFrom path that http.ServeFile copies through
+// (sendfile for a segment on disk); hiding it would turn every segment into a
+// userspace copy.
+func (w *servedWriter) ReadFrom(src io.Reader) (int64, error) {
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := rf.ReadFrom(src)
+		if n > 0 {
+			w.add(n)
+		}
+		return n, err
+	}
+	// writeOnly hides this method from io.Copy, which would otherwise call it
+	// again; Write does the counting.
+	return io.Copy(writeOnly{w}, src)
+}
+
+type writeOnly struct{ io.Writer }
 
 func (w *servedWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
