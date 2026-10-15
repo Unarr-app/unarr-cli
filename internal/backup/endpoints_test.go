@@ -111,6 +111,87 @@ func TestRedactedRestoreWarnsWhenLocalEndpointsAreUnknown(t *testing.T) {
 	}
 }
 
+// plainWarning is the plan's warning about an unencrypted archive, or "".
+func plainWarning(p Plan) string {
+	for _, w := range p.Warnings {
+		if strings.HasPrefix(w, "this archive is not encrypted") {
+			return w
+		}
+	}
+	return ""
+}
+
+// checkRedacted's way round: relabel an edited secret-free archive "included"
+// and recompute the checksums. It then restored whole, replacing this machine's
+// api_key and api_url without a word. Plain "included" archives are what
+// pre-restore snapshots are, so the plan warns — dry-run and --apply alike —
+// and still restores.
+func TestPlainArchiveWarnsWhenItBringsAnotherIdentity(t *testing.T) {
+	cfg := "[auth]\napi_key = \"ATTACKER\"\napi_url = \"http://evil.example\"\n\n[agent]\nagent_hash = \"ATTACKER-HASH\"\n"
+	arc := craftArchive(t, SecretsIncluded, map[string]string{nameConfig: cfg})
+	l := newLayout(t)
+	plan, err := arc.Plan(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := plainWarning(plan)
+	for _, want := range []string{
+		"its auth.api_key is not this machine's",
+		"its agent.agent_hash is not this machine's",
+		`auth.api_url changes from "https://x.example" to "http://evil.example"`,
+	} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warning lacks %q:\n%v", want, plan.Warnings)
+		}
+	}
+
+	write(t, l.ConfigPath, "[auth]\napi_key = \"LOCAL\"\n\n[downloads\n") // nothing to compare against
+	if plan, err = arc.Plan(l); err != nil {
+		t.Fatal(err)
+	}
+	if w := plainWarning(plan); !strings.Contains(w, `config.toml does not parse`) || !strings.Contains(w, `"http://evil.example"`) {
+		t.Errorf("an unparseable local config must not silence the warning:\n%v", plan.Warnings)
+	}
+	mustApply(t, arc, l, t.TempDir())
+	if got := read(t, l.ConfigPath); got != cfg {
+		t.Fatalf("restore is warned about, not refused:\n%s", got)
+	}
+}
+
+// No noise when the archive's identity is this machine's — its own snapshot,
+// even one with other settings or another api_url — or when the archive is
+// encrypted: the passphrase authenticates it.
+func TestPlainArchiveQuietForThisMachinesIdentity(t *testing.T) {
+	l := newLayout(t)
+	redacted := mustCreate(t, l, CreateOptions{})
+	write(t, l.ConfigPath, strings.Replace(testConfig, `"https://x.example"`, `"https://other.example"`, 1))
+	arc, err := Open(redacted.Path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := mustApply(t, arc, l, t.TempDir()).PreRestore // a real one: plain, secrets included
+	other := strings.Replace(testConfig, `"https://x.example"`, `"http://evil.example"`, 1)
+	write(t, l.ConfigPath, strings.Replace(other, "SECRET-API-KEY", "ARCHIVE-KEY", 1))
+	encrypted := mustCreate(t, l, CreateOptions{Passphrase: "pw"})
+	for name, c := range map[string]struct{ file, pass, current string }{
+		"own pre-restore snapshot":  {snapshot, "", testConfig},
+		"encrypted, another server": {encrypted.Path, "pw", testConfig},
+	} {
+		write(t, l.ConfigPath, c.current)
+		arc, err := Open(c.file, c.pass)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan, err := arc.Plan(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w := plainWarning(plan); w != "" {
+			t.Errorf("%s: unexpected warning: %s", name, w)
+		}
+	}
+}
+
 // No warning when nothing goes anywhere new: the same server spelled the way
 // config.Load reads it, mirrors only reordered, no credentials kept here, or an
 // encrypted archive (its credentials are its own).

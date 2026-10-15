@@ -109,6 +109,11 @@ func (a *Archive) planItem(l Layout, name string) (PlanItem, []string, error) {
 	if err := src.check(a.files[name]); err != nil {
 		return PlanItem{}, nil, err
 	}
+	if name == nameConfig && a.Manifest.Secrets == SecretsRedacted {
+		if err := checkRedacted(a.files[name]); err != nil {
+			return PlanItem{}, nil, err
+		}
+	}
 	// Write THROUGH a symlink (a dotfiles-managed config.toml), not over it:
 	// renaming onto the link would silently replace it with a regular file.
 	dest := src.path
@@ -125,12 +130,9 @@ func (a *Archive) planItem(l Layout, name string) (PlanItem, []string, error) {
 		it.Action, it.prev, it.existed = ActionOverwrite, cur, true
 	}
 	var warn []string
-	if it.existed && name == nameConfig && a.Manifest.Secrets == SecretsRedacted {
-		it.data, warn = mergeRedactedConfig(it.data, cur)
-		// The merge splices in the credentials exactly as this machine writes
-		// them, so what gets written is checked too.
-		if err := src.check(it.data); err != nil {
-			return it, nil, fmt.Errorf("%w (once merged with this machine's credentials)", err)
+	if it.existed && name == nameConfig {
+		if it.data, warn, err = a.fitConfig(src, it.data, cur); err != nil {
+			return it, nil, err
 		}
 	}
 	if it.existed && sumHex(it.prev) == sumHex(it.data) {
@@ -138,6 +140,26 @@ func (a *Archive) planItem(l Layout, name string) (PlanItem, []string, error) {
 	}
 	it.Size = int64(len(it.data))
 	return it, warn, nil
+}
+
+// fitConfig is the archive's config.toml (data) as it would be written over
+// this machine's (cur), with the plan's warnings about it: a secret-free one
+// keeps the credentials here (mergeRedactedConfig), and an unencrypted one that
+// carries its own says when they are not this machine's (plainArchiveWarnings).
+func (a *Archive) fitConfig(src source, data, cur []byte) ([]byte, []string, error) {
+	switch {
+	case a.Manifest.Secrets == SecretsRedacted:
+		merged, warn := mergeRedactedConfig(data, cur)
+		// The merge splices in the credentials exactly as this machine writes
+		// them, so what gets written is checked too.
+		if err := src.check(merged); err != nil {
+			return nil, nil, fmt.Errorf("%w (once merged with this machine's credentials)", err)
+		}
+		return merged, warn, nil
+	case !a.Encrypted:
+		return data, plainArchiveWarnings(data, cur), nil
+	}
+	return data, nil, nil
 }
 
 // ApplyOptions configures Plan.Apply.

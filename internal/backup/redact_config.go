@@ -110,6 +110,27 @@ func redactConfig(data []byte) ([]byte, error) {
 	return out, nil
 }
 
+// checkRedacted refuses the config.toml of an archive whose manifest says it has
+// no secrets, yet sets one. redactConfig proves every one blank before such an
+// archive is written, so a value here was put there afterwards: the manifest's
+// checksums only prove the file is the one it lists, and whoever edits a plain
+// archive can recompute them. Restoring it would let the archive's credentials
+// replace this machine's (mergeConfigSecrets keeps a value the archive sets)
+// while the plan says the ones here are kept.
+func checkRedacted(data []byte) error {
+	c, err := decodeConfig(data)
+	if err != nil {
+		return nil // checkConfig reports it
+	}
+	for _, s := range configSecrets {
+		if *s.field(&c) != "" {
+			return fmt.Errorf("%w: its manifest says it has no secrets, but %s sets %s, so it was edited after it was made",
+				ErrNotRedacted, nameConfig, s.id())
+		}
+	}
+	return nil
+}
+
 // hasCredentials reports whether config data sets any credential; false when it
 // does not parse.
 func hasCredentials(data []byte) bool {

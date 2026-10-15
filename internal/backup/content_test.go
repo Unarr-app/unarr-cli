@@ -71,7 +71,14 @@ func TestRestoreRefusesContentUnarrCannotLoad(t *testing.T) {
 			t.Run(name+"/"+secrets, func(t *testing.T) {
 				l := newLayout(t)
 				before := snapshotState(t, l)
-				members := map[string]string{nameConfig: testConfig, nameTasks: testTasks}
+				cfg := []byte(testConfig)
+				if secrets == SecretsRedacted { // as create writes it: a set secret is refused on its own
+					var err error
+					if cfg, err = redactConfig(cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				members := map[string]string{nameConfig: string(cfg), nameTasks: testTasks}
 				members[c.member] = c.body
 				_, err := craftArchive(t, secrets, members).Plan(l)
 				if !errors.Is(err, ErrBadContent) || !strings.Contains(err.Error(), c.member) {

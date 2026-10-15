@@ -72,6 +72,58 @@ func endpointWarnings(merged, current []byte) []string {
 	return warn
 }
 
+// plainArchiveWarnings warns when an unencrypted archive that carries its own
+// credentials would sign this machine in as someone else, or point it at
+// another server. Nothing in such an archive is authenticated — the checksums
+// prove integrity, not who wrote it — so whoever had the file could have
+// edited it, manifest included: a secret-free archive relabelled "included"
+// gets past checkRedacted. Pre-restore snapshots are written exactly so, which
+// is why it warns instead of refusing, and says nothing when the archive's
+// credentials are this machine's own (its snapshot, restored).
+func plainArchiveWarnings(archived, current []byte) []string {
+	arc, err := decodeConfig(archived)
+	if err != nil {
+		return nil // checkConfig refuses it
+	}
+	arcEP, _ := endpointsOf(archived)
+	const lead = "this archive is not encrypted, so whoever had the file could have edited it, checksums and all: "
+	const tail = ": restore only an archive you made, or run `unarr login` after restoring"
+	cur, err := decodeConfig(current)
+	if err != nil {
+		if !hasIdentity(arc) {
+			return nil
+		}
+		return []string{fmt.Sprintf(lead+"this machine's config.toml does not parse, so unarr cannot tell whether the archive's "+
+			"api_key/agent_hash and auth.api_url %q are this machine's"+tail, arcEP.apiURL)}
+	}
+	if hasIdentity(arc) && arc.Auth.APIKey == cur.Auth.APIKey && arc.Agent.Hash == cur.Agent.Hash {
+		return nil // this machine's own identity
+	}
+	changes := foreignCredentials(arc, cur)
+	if curEP, _ := endpointsOf(current); !sameURL(arcEP.apiURL, curEP.apiURL) {
+		changes = append(changes, fmt.Sprintf("auth.api_url changes from %q to %q", curEP.apiURL, arcEP.apiURL))
+	}
+	if len(changes) == 0 {
+		return nil
+	}
+	return []string{lead + strings.Join(changes, "; ") + tail}
+}
+
+func hasIdentity(c config.Config) bool { return c.Auth.APIKey != "" || c.Agent.Hash != "" }
+
+// foreignCredentials words each credential the archive sets that differs from
+// this machine's.
+func foreignCredentials(arc, cur config.Config) []string {
+	var out []string
+	if arc.Auth.APIKey != "" && arc.Auth.APIKey != cur.Auth.APIKey {
+		out = append(out, "its auth.api_key is not this machine's, so the machine signs in as whoever it belongs to")
+	}
+	if arc.Agent.Hash != "" && arc.Agent.Hash != cur.Agent.Hash {
+		out = append(out, "its agent.agent_hash is not this machine's")
+	}
+	return out
+}
+
 // quoteAll words a list of URLs for a warning; "none" when it is empty.
 func quoteAll(urls []string) string {
 	if len(urls) == 0 {
