@@ -2,8 +2,10 @@ package metrics
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func hubWith(readings *[]Reading) *Hub {
@@ -196,6 +198,21 @@ func TestHubUnmeasuredRateIsNotZeroFlow(t *testing.T) {
 	h.Poll(at(0))
 	if s := h.Poll(at(5)).Sessions[0]; s.Health != HealthDegraded {
 		t.Fatalf("health after 5 s of zero flow = %s, want degraded", s.Health)
+	}
+}
+
+// A title is a file or release name: unbounded. It is cut at the source, on a
+// rune boundary, so no consumer gets a megabyte or half a UTF-8 sequence.
+func TestHubTruncatesTitle(t *testing.T) {
+	long := strings.Repeat("é", MaxTitleRunes+50)
+	rs := []Reading{{Session: Session{ID: "h", Kind: KindHLS, Title: long}}}
+	got := hubWith(&rs).Poll(at(0)).Sessions[0].Title
+	if n := utf8.RuneCountInString(got); n != MaxTitleRunes || !utf8.ValidString(got) {
+		t.Fatalf("title = %d runes, valid=%v; want %d valid runes", n, utf8.ValidString(got), MaxTitleRunes)
+	}
+	rs[0].Title = "Movie"
+	if got := hubWith(&rs).Poll(at(0)).Sessions[0].Title; got != "Movie" {
+		t.Fatalf("short title = %q", got)
 	}
 }
 

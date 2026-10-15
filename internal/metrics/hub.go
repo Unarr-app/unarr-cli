@@ -198,6 +198,7 @@ func (h *Hub) Run(ctx context.Context, interval time.Duration) {
 // It also returns the stall that started on this tick, if any.
 func (h *Hub) finish(r Reading, now time.Time) (Session, *StallEvent) {
 	s := r.Session
+	s.Title = truncateRunes(s.Title, MaxTitleRunes)
 	prev, seen := h.last[key(s.Kind, s.ID)]
 	var measured bool
 	s.RateBps, measured = h.account(r, prev, seen, now)
@@ -293,6 +294,21 @@ func (h *Hub) summarize(sessions []Session) Summary {
 		}
 	}
 	return sum
+}
+
+// truncateRunes cuts s to at most n runes, never inside a UTF-8 sequence.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n {
+		return s // n bytes hold at most n runes
+	}
+	runes := 0
+	for i := range s {
+		if runes == n {
+			return s[:i]
+		}
+		runes++
+	}
+	return s
 }
 
 func kindRank(k Kind) int {

@@ -29,6 +29,10 @@ const (
 	KindDownload Kind = "download" // a download task the manager is running
 )
 
+// MaxTitleRunes bounds Session.Title (a file or release name, unbounded at the
+// source).
+const MaxTitleRunes = 200
+
 // Kinds lists every Kind in a stable order (exposition order, UI order).
 var Kinds = []Kind{KindDownload, KindHLS, KindStream, KindMount}
 
@@ -48,8 +52,8 @@ type Session struct {
 	Kind  Kind   `json:"kind"`
 	Title string `json:"title"`
 	// State is kind-specific: download = the manager status ("resolving",
-	// "downloading", "verifying", …); hls = "starting"|"active"|"idle";
-	// stream/mount = "active".
+	// "downloading", "verifying", …); hls = "active"|"idle"; stream/mount =
+	// "active".
 	State  string `json:"state"`
 	Health Health `json:"health"`
 	// StartedAt is when the session began (first time the daemon saw it when the
@@ -147,5 +151,7 @@ type Reading struct {
 }
 
 // Source reports the sessions of one subsystem. Called on every poll, so it
-// must be cheap and must not block.
+// must be cheap and must not block. It may be called concurrently — the
+// sampler, GET /sessions and /metrics scrapes each poll on their own goroutine —
+// so it must be safe for that.
 type Source func() []Reading
