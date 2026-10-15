@@ -106,11 +106,7 @@ func (a *Archive) planItem(l Layout, name string) (PlanItem, []string, error) {
 	}
 	var warn []string
 	if it.existed && name == nameConfig && a.Manifest.Secrets == SecretsRedacted {
-		var lost []string
-		it.data, lost = mergeConfigSecrets(it.data, cur)
-		for _, id := range lost {
-			warn = append(warn, fmt.Sprintf("%s is set on this machine but cannot be carried over: set it again after restoring", id))
-		}
+		it.data, warn = mergeRedactedConfig(it.data, cur)
 	}
 	if it.existed && sumHex(it.prev) == sumHex(it.data) {
 		it.Action = ActionUnchanged

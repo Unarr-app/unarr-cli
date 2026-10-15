@@ -3,6 +3,7 @@ package backup
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -33,6 +34,10 @@ var configSecrets = []configSecret{
 	{"downloads", "webdav_password", func(c *config.Config) *string { return &c.Download.WebDAVPassword }},
 }
 
+// agentIDKey is [agent] id. Not a secret, but the identity this machine's
+// api_key and agent_hash belong to (see keepLocalAgentID).
+var agentIDKey = configSecret{"agent", "id", func(c *config.Config) *string { return &c.Agent.ID }}
+
 func (s configSecret) id() string { return s.table + "." + s.key }
 
 // RedactedConfigKeys names the config.toml keys a secret-free archive blanks.
@@ -54,12 +59,17 @@ var (
 	keyValueRe = regexp.MustCompile(`^([ \t]*([A-Za-z0-9_-]+)[ \t]*=[ \t]*)("(?:[^"\\]|\\.)*"|'[^']*')([ \t]*(?:#.*)?)$`)
 )
 
-// rewriteSecrets calls fn with the raw quoted value of every secret key found
-// in its own table, and replaces the value with what fn returns. Line-based on
+// rewriteSecrets is rewriteKeys over every configSecret.
+func rewriteSecrets(data []byte, fn func(s configSecret, quoted string) string) []byte {
+	return rewriteKeys(data, configSecrets, fn)
+}
+
+// rewriteKeys calls fn with the raw quoted value of every key in keys found in
+// its own table, and replaces the value with what fn returns. Line-based on
 // purpose: round-tripping through a TOML encoder would drop the user's
 // comments and ordering. Forms it does not recognise (dotted keys, inline
 // tables, multi-line strings) are left alone — redactConfig catches those.
-func rewriteSecrets(data []byte, fn func(s configSecret, quoted string) string) []byte {
+func rewriteKeys(data []byte, keys []configSecret, fn func(s configSecret, quoted string) string) []byte {
 	lines := strings.SplitAfter(string(data), "\n")
 	table := ""
 	for i, line := range lines {
@@ -72,7 +82,7 @@ func rewriteSecrets(data []byte, fn func(s configSecret, quoted string) string) 
 		if m == nil {
 			continue
 		}
-		for _, s := range configSecrets {
+		for _, s := range keys {
 			if s.table == table && s.key == m[2] {
 				lines[i] = m[1] + fn(s, m[3]) + m[4] + line[len(body):]
 				break
@@ -134,4 +144,88 @@ func mergeConfigSecrets(restored, current []byte) ([]byte, []string) {
 		}
 	}
 	return merged, lost
+}
+
+// mergeRedactedConfig fits a secret-free config.toml being restored onto the
+// current one: the credentials already here stay (mergeConfigSecrets), and so
+// does the agent id they belong to (keepLocalAgentID). It returns the config
+// to write and the warnings for the plan.
+func mergeRedactedConfig(restored, current []byte) ([]byte, []string) {
+	merged, lost := mergeConfigSecrets(restored, current)
+	var warn []string
+	for _, id := range lost {
+		warn = append(warn, fmt.Sprintf("%s is set on this machine but cannot be carried over: set it again after restoring", id))
+	}
+	merged, note := keepLocalAgentID(merged, current)
+	if note != "" {
+		warn = append(warn, note)
+	}
+	return merged, warn
+}
+
+// keepLocalAgentID stops a secret-free restore from pairing the archive's agent
+// id with this machine's credentials: the api_key that mergeConfigSecrets keeps
+// was minted for THIS machine's id (`unarr login` binds it), and agent_hash is
+// this machine's too. So while the machine has an id and either credential, its
+// id stays. Without them the archive's id is restored as before — the
+// replacement-machine path, where `unarr login` follows. It returns the config
+// to write and a note for the plan ("" when the id was not in question).
+func keepLocalAgentID(restored, current []byte) ([]byte, string) {
+	var cur, arc config.Config
+	if _, err := toml.Decode(string(current), &cur); err != nil {
+		return restored, ""
+	}
+	if _, err := toml.Decode(string(restored), &arc); err != nil {
+		return restored, ""
+	}
+	if cur.Agent.ID == "" || cur.Agent.ID == arc.Agent.ID || (cur.Auth.APIKey == "" && cur.Agent.Hash == "") {
+		return restored, ""
+	}
+	out := setAgentID(restored, quotedAgentID(current, cur.Agent.ID))
+	var got config.Config
+	if _, err := toml.Decode(string(out), &got); err != nil || got.Agent.ID != cur.Agent.ID {
+		return restored, fmt.Sprintf("this machine's agent id %q is written in a form unarr cannot carry over, so the archive's %q replaces it: "+
+			"run `unarr login` after restoring", cur.Agent.ID, arc.Agent.ID)
+	}
+	return out, fmt.Sprintf("kept this machine's agent id %q (the archive has %q): the api_key and agent_hash here belong to it. "+
+		"Run `unarr login` if this is a new machine", cur.Agent.ID, arc.Agent.ID)
+}
+
+// quotedAgentID is the [agent] id exactly as current writes it, or id quoted
+// afresh when the line rewrite does not recognise its form.
+func quotedAgentID(current []byte, id string) string {
+	quoted := strconv.Quote(id)
+	rewriteKeys(current, []configSecret{agentIDKey}, func(_ configSecret, q string) string {
+		quoted = q
+		return q
+	})
+	return quoted
+}
+
+// setAgentID sets [agent] id to quoted, adding the key — and the table — when
+// the config has none (written by hand, or before the machine signed in).
+func setAgentID(data []byte, quoted string) []byte {
+	found := false
+	out := rewriteKeys(data, []configSecret{agentIDKey}, func(configSecret, string) string {
+		found = true
+		return quoted
+	})
+	if found {
+		return out
+	}
+	line := "id = " + quoted + "\n"
+	lines := strings.SplitAfter(string(data), "\n")
+	for i, l := range lines {
+		if m := tableHeaderRe.FindStringSubmatch(strings.TrimRight(l, "\r\n")); m != nil && m[1] == "agent" {
+			if !strings.HasSuffix(l, "\n") {
+				line = "\n" + line // the header is the last line
+			}
+			return []byte(strings.Join(lines[:i+1], "") + line + strings.Join(lines[i+1:], ""))
+		}
+	}
+	s := string(data)
+	if s != "" && !strings.HasSuffix(s, "\n") {
+		s += "\n"
+	}
+	return []byte(s + "\n[agent]\n" + line)
 }

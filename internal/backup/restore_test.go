@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
 func mustApply(t *testing.T, arc *Archive, l Layout, snapDir string) Plan {
@@ -48,6 +50,86 @@ func TestRedactedRestoreKeepsExistingSecrets(t *testing.T) {
 	}
 	if !strings.Contains(got, `dir = "/tmp/dl"`) {
 		t.Fatalf("non-secret setting not restored:\n%s", got)
+	}
+}
+
+// The api_key and agent_hash a redacted restore keeps were minted for THIS
+// machine's agent id: restoring the archive's id next to them would pair one
+// machine's credentials with another's identity. The local id stays, and the
+// plan says so.
+func TestRedactedRestoreKeepsLocalAgentID(t *testing.T) {
+	l := newLayout(t)
+	res := mustCreate(t, l, CreateOptions{})
+	write(t, l.ConfigPath, strings.Replace(testConfig, `id = "agent-1"`, `id = "agent-local"`, 1))
+	arc, err := Open(res.Path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := mustApply(t, arc, l, t.TempDir())
+	w := strings.Join(plan.Warnings, "\n")
+	if !strings.Contains(w, `"agent-local"`) || !strings.Contains(w, `"agent-1"`) || !strings.Contains(w, "unarr login") {
+		t.Fatalf("plan does not say the local agent id was kept: %v", plan.Warnings)
+	}
+	got := read(t, l.ConfigPath)
+	if !strings.Contains(got, `id = "agent-local"`) || strings.Contains(got, "agent-1") {
+		t.Fatalf("archive's agent id paired with the local credentials:\n%s", got)
+	}
+	if !strings.Contains(got, `api_key = "SECRET-API-KEY"`) || !strings.Contains(got, `agent_hash = "SECRET-AGENT-HASH"`) {
+		t.Fatalf("local credentials not kept:\n%s", got)
+	}
+}
+
+// Without local credentials there is nothing the id is bound to: the archive's
+// id is restored (the replacement-machine path, `unarr login` follows) — and so
+// it is from an encrypted archive, which carries its own matching credentials.
+func TestRestoreUsesArchiveAgentIDWhenNotBoundLocally(t *testing.T) {
+	cases := map[string]struct {
+		opts    CreateOptions
+		current string
+	}{
+		"redacted, no local credentials": {CreateOptions{}, "[agent]\nid = \"agent-local\"\n"},
+		"encrypted archive":              {CreateOptions{Passphrase: "pw"}, strings.Replace(testConfig, `id = "agent-1"`, `id = "agent-local"`, 1)},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			l := newLayout(t)
+			res := mustCreate(t, l, tc.opts)
+			write(t, l.ConfigPath, tc.current)
+			arc, err := Open(res.Path, tc.opts.Passphrase)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan := mustApply(t, arc, l, t.TempDir())
+			if w := strings.Join(plan.Warnings, "\n"); strings.Contains(w, "agent id") {
+				t.Fatalf("unexpected agent id warning: %v", plan.Warnings)
+			}
+			if got := read(t, l.ConfigPath); !strings.Contains(got, `id = "agent-1"`) {
+				t.Fatalf("archive's agent id not restored:\n%s", got)
+			}
+		})
+	}
+}
+
+// An archive whose config has no [agent] id line (hand-written, or made before
+// the machine signed in) must not drop the local id either: it is added back.
+func TestRedactedRestoreAddsLocalAgentIDTheArchiveLacks(t *testing.T) {
+	for name, archived := range map[string]string{
+		"no [agent] table": "[auth]\napi_key = \"OLD-KEY\"\n[downloads]\ndir = \"/tmp/dl\"\n",
+		"no id key":        "[auth]\napi_key = \"OLD-KEY\"\n[agent]\nname = \"box\"\n[downloads]\ndir = \"/tmp/dl\"\n",
+		"[agent] at EOF":   "[auth]\napi_key = \"OLD-KEY\"\n[downloads]\ndir = \"/tmp/dl\"\n[agent]",
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := newLayout(t)
+			write(t, l.ConfigPath, archived)
+			res := mustCreate(t, l, CreateOptions{})
+			write(t, l.ConfigPath, testConfig)
+			arc, _ := Open(res.Path, "")
+			mustApply(t, arc, l, t.TempDir())
+			cfg, err := config.Load(l.ConfigPath)
+			if err != nil || cfg.Agent.ID != "agent-1" || cfg.Auth.APIKey != "SECRET-API-KEY" || cfg.Download.Dir != "/tmp/dl" {
+				t.Fatalf("restored config: %v %+v %+v\n%s", err, cfg.Agent, cfg.Auth, read(t, l.ConfigPath))
+			}
+		})
 	}
 }
 

@@ -222,6 +222,29 @@ func TestBackupCLIPrune(t *testing.T) {
 	}
 }
 
+// A secret-free archive restored onto a machine that already ran `unarr login`
+// keeps that machine's agent id — its api_key is bound to it — and says so in
+// the dry-run and again with --apply.
+func TestRestoreKeepsLocalAgentIDAndSaysSo(t *testing.T) {
+	cfgPath := backupEnv(t, "[agent]\nid = \"OLD-AGENT\"\n")
+	if _, err := runBackup(t, "create"); err != nil {
+		t.Fatal(err)
+	}
+	es := mustList(t, localBackupDir())
+	writeBackupTestFile(t, cfgPath, "[auth]\napi_key = \"KEY-NEW\"\n[agent]\nid = \"NEW-AGENT\"\n")
+	for _, args := range [][]string{{"restore", es[0].Path}, {"restore", es[0].Path, "--apply"}} {
+		out, err := runBackup(t, args...)
+		if err != nil || !strings.Contains(out, `kept this machine's agent id "NEW-AGENT"`) || !strings.Contains(out, "unarr login") {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	b, _ := os.ReadFile(cfgPath)
+	if got := string(b); !strings.Contains(got, `id = "NEW-AGENT"`) || strings.Contains(got, "OLD-AGENT") ||
+		!strings.Contains(got, "KEY-NEW") || !strings.Contains(got, "/tmp/dl") {
+		t.Fatalf("restored config:\n%s", got)
+	}
+}
+
 // A relative [backup] dir is invalid — `unarr config check` flags it and the
 // daemon will not schedule it — so the subcommands refuse it too, before
 // touching anything, instead of resolving it against the working directory.

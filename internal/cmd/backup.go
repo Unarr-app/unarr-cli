@@ -26,7 +26,7 @@ By default the archive contains NO secrets: the API key, agent hash and WebDAV
 credentials are blanked, and resolved download URLs / NZB passwords are
 stripped from the queue. Use --encrypt (AES-256-GCM, passphrase) to keep them.
 Restoring a secret-free archive never wipes the credentials already on this
-machine.
+machine, nor pairs them with the archive's agent id: the local one is kept.
 
 Scheduled backups ([backup] in config.toml) always run secret-free.`,
 		GroupID: "system",
