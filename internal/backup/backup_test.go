@@ -356,12 +356,21 @@ func TestTamperedEncryptedArchiveRejected(t *testing.T) {
 	l := newLayout(t)
 	res := mustCreate(t, l, CreateOptions{Passphrase: "pw"})
 	b, _ := os.ReadFile(res.Path)
-	for _, i := range []int{len(encMagic) + 1, len(b) - 3} { // a salt byte (header is GCM AAD) and a ciphertext byte
+	// Layout: magic | salt(16) | nonce(12) | ciphertext | GCM tag(16). The whole
+	// header is GCM additional data, so every region is authenticated.
+	const nonceLen = 12
+	body := len(encMagic) + saltLen + nonceLen
+	for name, i := range map[string]int{
+		"salt":       len(encMagic) + 1,
+		"nonce":      len(encMagic) + saltLen + 1,
+		"ciphertext": body + 1,
+		"tag":        len(b) - 3,
+	} {
 		c := append([]byte{}, b...)
 		c[i] ^= 0xff
 		write(t, res.Path, string(c))
 		if _, err := Open(res.Path, "pw"); !errors.Is(err, ErrBadPassphrase) {
-			t.Fatalf("byte %d flipped: err = %v", i, err)
+			t.Fatalf("%s byte %d flipped: err = %v", name, i, err)
 		}
 	}
 }
