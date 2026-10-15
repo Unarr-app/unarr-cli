@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
@@ -233,6 +234,37 @@ func TestConfigCapEdge(t *testing.T) {
 		if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s: --out written despite the refusal: %v", name, err)
 		}
+	}
+}
+
+// Open refuses a member by the size its header declares, before inflating it:
+// config.toml declares 5 MiB, over its own 4 MiB cap yet well inside what is
+// left of the shared bound, and its deflate stream is corrupt. Checked first,
+// that is ErrTooLarge; inflated first, it would be ErrChecksum.
+func TestOpenRefusesDeclaredSizeBeforeInflating(t *testing.T) {
+	garbage := bytes.Repeat([]byte{0xff}, 64) // BTYPE=11: corrupt from its first block
+	p := filepath.Join(t.TempDir(), "declared.zip")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	w, err := zw.CreateRaw(&zip.FileHeader{Name: nameConfig, Method: zip.Deflate,
+		UncompressedSize64: 5 << 20, CompressedSize64: uint64(len(garbage))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(garbage); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	_, err = Open(p, "")
+	wantTooLarge(t, err, nameConfig)
+	if errors.Is(err, ErrChecksum) {
+		t.Fatalf("err = %v: the member was inflated before its declared size was checked", err)
 	}
 }
 
