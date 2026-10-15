@@ -7,6 +7,8 @@ import (
 
 // Size bounds, shared by Create and Open: Create refuses — before writing
 // anything — an archive Open would refuse, so every backup it writes restores.
+// The one exception is the pre-restore snapshot (Kind.asIs), which is only held
+// to the shared bound.
 //
 // maxContentSize bounds the members together, decompressed, manifest included:
 // it is the zip-bomb guard and what a restore holds in memory. Only the queue
@@ -61,13 +63,31 @@ func maxArchiveSize() int64 { return maxContentSize + archiveFraming }
 // contentBudget counts member bytes against maxContentSize, and each member
 // against its own cap. Create and Open spend one member by member, so they
 // agree on what fits.
-type contentBudget struct{ left int64 }
+type contentBudget struct {
+	left int64
+	// uncapped drops the members' own caps, leaving only the shared bound.
+	uncapped bool
+}
 
 func newContentBudget() *contentBudget { return &contentBudget{left: maxContentSize} }
 
+// budgetFor is the budget Create makes an archive of kind k within: the caps
+// Open holds every archive to, except for one taken as is.
+func budgetFor(k Kind) *contentBudget {
+	return &contentBudget{left: maxContentSize, uncapped: k.asIs()}
+}
+
+// memberCap is memberCap(name) unless the budget is uncapped.
+func (b *contentBudget) memberCap(name string) int64 {
+	if b.uncapped {
+		return maxContentSize
+	}
+	return memberCap(name)
+}
+
 // room is the most member name can still take: its own cap or what is left of
 // the shared bound, whichever is less.
-func (b *contentBudget) room(name string) int64 { return min(memberCap(name), b.left) }
+func (b *contentBudget) room(name string) int64 { return min(b.memberCap(name), b.left) }
 
 // spend takes n bytes for member name, or reports that they do not fit.
 func (b *contentBudget) spend(name string, n int64) error {
@@ -86,7 +106,7 @@ func (b *contentBudget) tooLarge(name string, size int64) error {
 	if size >= 0 {
 		what += " (" + mib(size) + ")"
 	}
-	if c := memberCap(name); c < maxContentSize && c <= b.left {
+	if c := b.memberCap(name); c < maxContentSize && c <= b.left {
 		return fmt.Errorf("%w: %s is over the %s limit for that file", ErrTooLarge, what, mib(c))
 	}
 	return fmt.Errorf("%w: %s takes the content past the %s a backup can hold", ErrTooLarge, what, mib(maxContentSize))

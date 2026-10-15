@@ -35,6 +35,14 @@ const (
 
 var allKinds = []Kind{KindManual, KindScheduled, KindPreRestore}
 
+// asIs reports whether an archive of this kind captures this machine's files as
+// they are. The pre-restore snapshot is the undo for a restore: refusing a
+// config that does not parse, or one over its cap (a config that size is what an
+// older unarr may have restored), would block restoring a good backup over a
+// broken or bloated state — the very case restore is for. So neither the
+// content checks nor the members' own caps apply; only the shared bound does.
+func (k Kind) asIs() bool { return k == KindPreRestore }
+
 // prefix is the file-name prefix that records the kind on disk, so List needs
 // no index file and works on encrypted archives without a passphrase.
 func (k Kind) prefix() string {
@@ -86,10 +94,7 @@ func create(o CreateOptions, k Kind) (Result, error) {
 		secrets = SecretsIncluded
 	}
 
-	// A pre-restore snapshot is not checked: it is the undo for a restore, and
-	// refusing a config that does not parse would block restoring a good backup
-	// over a broken config — the very case restore is for.
-	files, err := collect(o.Layout, secrets == SecretsRedacted, k != KindPreRestore)
+	files, err := collect(o.Layout, secrets == SecretsRedacted, k)
 	if err != nil {
 		return Result{}, err
 	}
@@ -103,7 +108,7 @@ func create(o CreateOptions, k Kind) (Result, error) {
 	for _, f := range files {
 		m.Files = append(m.Files, FileEntry{Name: f.name, Size: int64(len(f.data)), SHA256: sumHex(f.data)})
 	}
-	blob, err := pack(m, files, o.Passphrase)
+	blob, err := pack(m, files, o.Passphrase, budgetFor(k))
 	if err != nil {
 		return Result{}, err
 	}
@@ -119,19 +124,20 @@ type memFile struct {
 	data []byte
 }
 
-// collect reads the allowlisted files that exist, checking that restore would
-// accept them and redacting if asked. A read that Windows blocks for a moment —
-// the daemon replacing the queue file by rename — is retried within the same
-// bounds as writeFileAtomic's rename.
-func collect(l Layout, redact, check bool) ([]memFile, error) {
+// collect reads the allowlisted files that exist for an archive of kind k,
+// checking that restore would accept them (unless k takes them as is) and
+// redacting if asked. A read that Windows blocks for a moment — the daemon
+// replacing the queue file by rename — is retried within the same bounds as
+// writeFileAtomic's rename.
+func collect(l Layout, redact bool, k Kind) ([]memFile, error) {
 	var out []memFile
 	for _, s := range l.sources() {
-		data, err := retryTransient(func() ([]byte, error) { return readSource(s) }, renameWindow, renameStep)
+		data, err := retryTransient(func() ([]byte, error) { return readSource(s, k) }, renameWindow, renameStep)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err == nil {
-			data, err = s.prepare(data, redact, check)
+			data, err = s.prepare(data, redact, !k.asIs())
 		}
 		if err != nil {
 			return nil, err
@@ -163,15 +169,16 @@ func (s source) prepare(data []byte, redact, check bool) ([]byte, error) {
 // openFile is os.Open; a var so tests can fail an open the way Windows does.
 var openFile = os.Open
 
-// readSource reads one allowlisted file, refusing one larger than a backup can
-// hold — its own cap, or the shared bound — before reading it into memory.
-func readSource(s source) ([]byte, error) {
+// readSource reads one allowlisted file for an archive of kind k, refusing one
+// larger than that archive can hold — its own cap, or the shared bound — before
+// reading it into memory.
+func readSource(s source, k Kind) ([]byte, error) {
 	f, err := openFile(s.path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", s.path, err)
 	}
 	defer f.Close()
-	budget := newContentBudget() // what the file may take in an otherwise empty backup
+	budget := budgetFor(k) // what the file may take in an otherwise empty backup
 	room := budget.room(s.name)
 	if st, err := f.Stat(); err == nil && st.Size() > room {
 		return nil, budget.tooLarge(s.name, st.Size())
@@ -187,14 +194,13 @@ func readSource(s source) ([]byte, error) {
 }
 
 // pack builds the archive in memory — encryption seals the whole zip in one
-// go — and refuses, before anything is written, one that Open would refuse.
-func pack(m Manifest, files []memFile, passphrase string) ([]byte, error) {
+// go — and refuses, before anything is written, one that does not fit budget.
+func pack(m Manifest, files []memFile, passphrase string, budget *contentBudget) ([]byte, error) {
 	mj, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	members := append([]memFile{{ManifestName, mj}}, files...)
-	budget := newContentBudget()
 	for _, f := range members {
 		if err := budget.spend(f.name, int64(len(f.data))); err != nil {
 			return nil, err

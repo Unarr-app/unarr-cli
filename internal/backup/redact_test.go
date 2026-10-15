@@ -149,7 +149,7 @@ func TestLayoutReadsTheAgentTaskStore(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", filepath.Join(root, "local"))
 	agent.NewActiveTaskStore().Add(agent.Task{ID: "store-task"})
 
-	files, err := collect(Layout{ConfigPath: filepath.Join(root, "none.toml"), DataDir: config.DataDir()}, false, true)
+	files, err := collect(Layout{ConfigPath: filepath.Join(root, "none.toml"), DataDir: config.DataDir()}, false, KindManual)
 	if err != nil || len(files) != 1 || !strings.Contains(string(files[0].data), "store-task") {
 		t.Fatalf("backup does not see the agent's queue file: %v %s", err, fmt.Sprint(files))
 	}

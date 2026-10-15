@@ -158,6 +158,9 @@ func (p *Plan) Apply(o ApplyOptions) error {
 		return nil
 	}
 	snap, err := create(CreateOptions{Layout: p.layout, Version: o.Version, Dir: o.SnapshotDir, Now: o.Now}, KindPreRestore)
+	if errors.Is(err, ErrTooLarge) {
+		err = p.snapshotTooLarge(err)
+	}
 	if err != nil && !errors.Is(err, ErrNothingToBackup) {
 		return fmt.Errorf("pre-restore snapshot (nothing was changed): %w", err)
 	}
@@ -174,6 +177,23 @@ func (p *Plan) Apply(o ApplyOptions) error {
 	}
 	p.Applied = true
 	return nil
+}
+
+// snapshotTooLarge adds the way out when this machine's own files are too large
+// to save before the restore. Only the shared bound applies to the snapshot, so
+// the largest of them is far beyond anything unarr writes: moving it aside keeps
+// it, and lets the restore go on.
+func (p *Plan) snapshotTooLarge(err error) error {
+	biggest, size := "", int64(-1)
+	for _, s := range p.layout.sources() {
+		if st, serr := os.Stat(s.path); serr == nil && st.Size() > size {
+			biggest, size = s.path, st.Size()
+		}
+	}
+	if biggest == "" {
+		return err
+	}
+	return fmt.Errorf("%w: move %s aside and run the restore again", err, biggest)
 }
 
 // rollback restores the files already written, newest first, and reports cause
