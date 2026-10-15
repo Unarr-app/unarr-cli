@@ -42,15 +42,22 @@ func sameURL(a, b string) bool { return strings.TrimRight(a, "/") == strings.Tri
 // never issued to, should the archive have been tampered with. A warning, not
 // a refusal: the daemon accepts any URL there, and pointing a machine at
 // another server is a real use. merged is the config about to be written.
+// When this machine's own config does not parse there is nothing to compare
+// against, and the plan says so rather than staying silent.
 func endpointWarnings(merged, current []byte) []string {
 	got, err := decodeConfig(merged)
 	if err != nil || (got.Auth.APIKey == "" && got.Agent.Hash == "") {
 		return nil // no credentials kept: nothing to send anywhere
 	}
+	arc, ok := endpointsOf(merged)
+	if !ok {
+		return nil // Plan refuses a merged config that does not parse
+	}
 	cur, ok := endpointsOf(current)
-	arc, ok2 := endpointsOf(merged)
-	if !ok || !ok2 {
-		return nil
+	if !ok {
+		return []string{fmt.Sprintf("this machine's config.toml does not parse, so unarr cannot tell whether auth.api_url or "+
+			"auth.mirrors change: the api_key/agent_hash kept here will be sent to the archive's auth.api_url %q (mirrors: %s): "+
+			"restore only if you trust that server, or set auth.api_url and auth.mirrors after restoring", arc.apiURL, quoteAll(arc.mirrors))}
 	}
 	var warn []string
 	if !sameURL(arc.apiURL, cur.apiURL) {
@@ -63,6 +70,18 @@ func endpointWarnings(merged, current []byte) []string {
 			strings.Join(added, ", ")))
 	}
 	return warn
+}
+
+// quoteAll words a list of URLs for a warning; "none" when it is empty.
+func quoteAll(urls []string) string {
+	if len(urls) == 0 {
+		return "none"
+	}
+	out := make([]string, len(urls))
+	for i, u := range urls {
+		out[i] = fmt.Sprintf("%q", u)
+	}
+	return strings.Join(out, ", ")
 }
 
 // newMirrors lists the archive's mirrors this machine sends nothing to yet:

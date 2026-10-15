@@ -81,6 +81,36 @@ func TestRedactedRestoreWarnsWhenKeptCredentialsGoSomewhereNew(t *testing.T) {
 	}
 }
 
+// The local config.toml does not parse, yet the line rewrite still carries its
+// api_key over: with nothing to compare the archive's endpoints against, the
+// plan used to say nothing at all. It must name where the credentials go — in
+// the plan both the dry-run and --apply print — and still restore.
+func TestRedactedRestoreWarnsWhenLocalEndpointsAreUnknown(t *testing.T) {
+	evil := strings.Replace(testConfig, `"https://x.example"`, `"http://evil.example"`, 1)
+	arc := redactedArchiveOf(t, evil)
+	l := newLayout(t)
+	write(t, l.ConfigPath, "[auth]\napi_key = \"LOCAL-KEY\"\napi_url = \"https://x.example\"\n\n[downloads\ndir = \"x\"\n")
+	plan, err := arc.Plan(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := strings.Join(plan.Warnings, "\n")
+	for _, want := range []string{
+		"this machine's config.toml does not parse",
+		`api_key/agent_hash kept here will be sent to the archive's auth.api_url "http://evil.example"`,
+		`(mirrors: "https://torrentclaw.to", "https://torrentclaw.com")`,
+	} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warnings lack %q:\n%s", want, w)
+		}
+	}
+
+	mustApply(t, arc, l, t.TempDir())
+	if got := read(t, l.ConfigPath); !strings.Contains(got, `api_key = "LOCAL-KEY"`) || !strings.Contains(got, "http://evil.example") {
+		t.Fatalf("restore is warned about, not refused:\n%s", got)
+	}
+}
+
 // No warning when nothing goes anywhere new: the same server spelled the way
 // config.Load reads it, mirrors only reordered, no credentials kept here, or an
 // encrypted archive (its credentials are its own).
