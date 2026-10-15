@@ -133,8 +133,8 @@ func runDaemonStart() error {
 	// An unreadable config only LOOKS keyless, and a key without an agent ID is
 	// fixed by `doctor --fix`; both keep the plain error and the restart.
 	if cfg.Auth.APIKey == "" {
-		if errCfgLoad != nil { // an env key (UNARR_API_KEY) still runs without it
-			return fmt.Errorf("config could not be loaded: %w", errCfgLoad)
+		if err := configLoadError(); err != nil { // an env key (UNARR_API_KEY) still runs without it
+			return err
 		}
 		return needsSignIn("no API key configured — %s", signInHint(cfg.Auth.APIURL))
 	}

@@ -163,7 +163,7 @@ unarr start
 | `unarr init` | First-time configuration wizard (API key, download dir, daemon) |
 | `unarr login` | Authenticate with your account (opens browser) |
 | `unarr config` | Edit all settings interactively (speed, organization, etc.) |
-| `unarr config check` | Validate `config.toml` — unknown keys (with suggestions) and out-of-range values; exits non-zero when anything is reported |
+| `unarr config check` | Validate `config.toml` — unknown keys (with suggestions) and out-of-range values; exits non-zero when anything is reported, or with the daemon's own error when the file does not load at all (invalid TOML, a value of the wrong type) |
 | `unarr config mount` | Configure the optional local mount; provider accounts and credentials are managed on the web |
 | `unarr migrate` | Import settings and wanted list from Sonarr/Radarr/Prowlarr [pre-beta] |
 

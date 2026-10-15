@@ -288,6 +288,17 @@ func loadConfig() config.Config {
 	return appCfg
 }
 
+// configLoadError is why config.toml could not be loaded, worded the way the
+// daemon refuses to start over it; nil when it loaded. Call after loadConfig.
+// Shared so `unarr config check` fails with exactly the daemon's error instead
+// of checking the defaults loadConfig fell back to.
+func configLoadError() error {
+	if errCfgLoad == nil {
+		return nil
+	}
+	return fmt.Errorf("config could not be loaded: %w", errCfgLoad)
+}
+
 // getClient returns a configured API client, initializing it on first use.
 func getClient() *tc.Client {
 	if apiClient != nil {

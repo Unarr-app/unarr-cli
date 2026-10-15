@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,56 @@ func loadTestConfig(t *testing.T, body string) config.Config {
 		t.Fatalf("load config: %v", err)
 	}
 	return cfg
+}
+
+// runConfigCheckOn runs `unarr config check --config <body written to a file>`
+// as a fresh process would, and returns its error and config.Load's own.
+func runConfigCheckOn(t *testing.T, body string) (checkErr, loadErr error) {
+	t.Helper()
+	for _, key := range []string{"UNARR_API_KEY", "UNARR_API_URL", "UNARR_DOWNLOAD_DIR", "UNARR_COUNTRY"} {
+		t.Setenv(key, "")
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	previous, loaded, previousFile, previousError := appCfg, cfgLoaded, cfgFile, errCfgLoad
+	t.Cleanup(func() { appCfg, cfgLoaded, cfgFile, errCfgLoad = previous, loaded, previousFile, previousError })
+	cfgFile, cfgLoaded, errCfgLoad = path, false, nil
+	_, loadErr = config.Load(path)
+	return runConfigCheck(), loadErr
+}
+
+// A config.toml config.Load rejects used to come back "no problems found" with
+// exit 0: loadConfig fell back to the defaults, and those check clean. It must
+// fail with the error the daemon refuses to start with.
+func TestConfigCheckFailsOnConfigThatDoesNotLoad(t *testing.T) {
+	cases := map[string]string{
+		"unterminated table header": "[auth\napi_key = \"k\"\n",
+		"unterminated string":       "[auth]\napi_key = \"k\n",
+		"duplicate key":             "[auth]\napi_key = \"a\"\napi_key = \"b\"\n",
+		"string for an integer":     "[downloads]\nmax_concurrent = \"three\"\n",
+		"string for a list":         "[auth]\nmirrors = \"https://m.example\"\n",
+		"table for a string":        "[auth]\napi_url = { host = \"x\" }\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			checkErr, loadErr := runConfigCheckOn(t, body)
+			if loadErr == nil {
+				t.Fatalf("fixture must be one config.Load rejects:\n%s", body)
+			}
+			want := "config could not be loaded: " + loadErr.Error() // daemon.go's wording
+			if checkErr == nil || checkErr.Error() != want {
+				t.Fatalf("config check = %v, want %q", checkErr, want)
+			}
+			if !errors.Is(checkErr, errCfgLoad) {
+				t.Errorf("config check must wrap the load error, got %v", checkErr)
+			}
+		})
+	}
+	if checkErr, loadErr := runConfigCheckOn(t, "[downloads]\nmax_concurrent = 2\n"); loadErr != nil || checkErr != nil {
+		t.Fatalf("a config that loads must still pass: load %v, check %v", loadErr, checkErr)
+	}
 }
 
 func TestConfigKeysCheckResultClean(t *testing.T) {
