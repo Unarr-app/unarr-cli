@@ -98,13 +98,20 @@ func (p *Plan) credentialsNote() string {
 	return ""
 }
 
+// planItem plans one member. It fails closed on content unarr could not load,
+// before anything is written: the archive's own bytes first, then — for a
+// secret-free config merged with this machine's — what would be written.
 func (a *Archive) planItem(l Layout, name string) (PlanItem, []string, error) {
-	dest, ok := l.dest(name)
+	src, ok := l.source(name)
 	if !ok {
 		return PlanItem{}, nil, fmt.Errorf("%w: %q is not a file unarr restores", ErrUnsafePath, name)
 	}
+	if err := src.check(a.files[name]); err != nil {
+		return PlanItem{}, nil, err
+	}
 	// Write THROUGH a symlink (a dotfiles-managed config.toml), not over it:
 	// renaming onto the link would silently replace it with a regular file.
+	dest := src.path
 	if real, err := filepath.EvalSymlinks(dest); err == nil {
 		dest = real
 	}
@@ -120,6 +127,11 @@ func (a *Archive) planItem(l Layout, name string) (PlanItem, []string, error) {
 	var warn []string
 	if it.existed && name == nameConfig && a.Manifest.Secrets == SecretsRedacted {
 		it.data, warn = mergeRedactedConfig(it.data, cur)
+		// The merge splices in the credentials exactly as this machine writes
+		// them, so what gets written is checked too.
+		if err := src.check(it.data); err != nil {
+			return it, nil, fmt.Errorf("%w (once merged with this machine's credentials)", err)
+		}
 	}
 	if it.existed && sumHex(it.prev) == sumHex(it.data) {
 		it.Action = ActionUnchanged

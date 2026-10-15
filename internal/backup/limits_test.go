@@ -82,9 +82,29 @@ func withContentLimit(t *testing.T, n int64) {
 	t.Cleanup(func() { maxContentSize = old })
 }
 
+// jsonNoise is a queue of size bytes that passes checkTasks yet barely
+// compresses: one task whose only field is random bytes, bar the few a JSON
+// string cannot hold raw.
+func jsonNoise(t *testing.T, size int) []byte {
+	t.Helper()
+	const head, tail = `[{"n":"`, `"}]`
+	b := make([]byte, size)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range b {
+		if c < 0x20 || c == '"' || c == '\\' {
+			b[i] = c | 0x80
+		}
+	}
+	copy(b, head)
+	copy(b[size-len(tail):], tail)
+	return b
+}
+
 // Create refuses, before writing anything, the archive Open would refuse, and
-// the file it does write opens — swept across the edge with incompressible
-// content, where zip and encryption framing weigh the most.
+// the file it does write opens — swept across the edge with all but
+// incompressible content, where zip and encryption framing weigh the most.
 func TestCreateWritesOnlyWhatOpenAccepts(t *testing.T) {
 	const limit = 64 << 10
 	withContentLimit(t, limit)
@@ -93,11 +113,7 @@ func TestCreateWritesOnlyWhatOpenAccepts(t *testing.T) {
 	cfgSize := int64(len(testConfig))
 	refused, written := 0, 0
 	for size := limit - cfgSize - 1024; size <= limit-cfgSize; size += 256 {
-		noise := make([]byte, size)
-		if _, err := rand.Read(noise); err != nil {
-			t.Fatal(err)
-		}
-		write(t, tasks, string(noise)) // verbatim: an encrypted archive does not parse the queue
+		write(t, tasks, string(jsonNoise(t, int(size)))) // verbatim: an encrypted archive is not redacted
 		dir := t.TempDir()
 		res, err := Create(CreateOptions{Layout: l, Dir: dir, Passphrase: "pw"})
 		if err != nil {
@@ -154,4 +170,82 @@ func TestOpenBoundsTheMembersTogether(t *testing.T) {
 	if _, err := Open(p, ""); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("err = %v, want ErrTooLarge", err)
 	}
+}
+
+// wantTooLarge fails unless err is ErrTooLarge naming member.
+func wantTooLarge(t *testing.T, err error, member string) {
+	t.Helper()
+	if !errors.Is(err, ErrTooLarge) || !strings.Contains(err.Error(), member) {
+		t.Fatalf("err = %v, want ErrTooLarge naming %s", err, member)
+	}
+}
+
+// Case 15 of the hostile-archive sweep: config.toml is 40 MiB of NUL bytes —
+// 40 KB deflated — with a manifest that matches it. It fits the shared bound,
+// so only config.toml's own cap stops restore from writing it as the config.
+func TestOpenRefusesZipBombConfig(t *testing.T) {
+	bomb := strings.Repeat("\x00", 40<<20)
+	p := craft(t, map[string]string{ManifestName: manifestFor(nameConfig, bomb), nameConfig: bomb})
+	if st, _ := os.Stat(p); st.Size() > 1<<20 {
+		t.Fatalf("bomb archive is %d bytes: it should deflate to a few KB", st.Size())
+	}
+	_, err := Open(p, "")
+	wantTooLarge(t, err, nameConfig)
+}
+
+// paddedConfig is testConfig grown with comment lines to exactly size bytes:
+// still valid TOML, so only its size is in question.
+func paddedConfig(size int) string {
+	line := "# " + strings.Repeat("p", 77) + "\n"
+	pad := size - len(testConfig)
+	return testConfig + strings.Repeat(line, pad/len(line)) + strings.Repeat("\n", pad%len(line))
+}
+
+// A config.toml right at its cap backs up and restores, encrypted or not; one
+// byte over, create refuses it before writing anything.
+func TestConfigCapEdge(t *testing.T) {
+	l := newLayout(t)
+	atCap := paddedConfig(maxConfigSize)
+	write(t, l.ConfigPath, atCap)
+	for name, pass := range map[string]string{"encrypted": "pw", "secret-free": ""} {
+		res := mustCreate(t, l, CreateOptions{Passphrase: pass})
+		arc, err := Open(res.Path, pass)
+		if err != nil {
+			t.Fatalf("%s: a config at the cap does not open: %v", name, err)
+		}
+		fresh := Layout{ConfigPath: filepath.Join(t.TempDir(), "config.toml"), DataDir: t.TempDir()}
+		mustApply(t, arc, fresh, t.TempDir())
+		if got := read(t, fresh.ConfigPath); len(got) > maxConfigSize || !strings.HasPrefix(got, "# my comment\n[auth]") {
+			t.Fatalf("%s: restored config is %d bytes, not the one backed up", name, len(got))
+		}
+	}
+
+	write(t, l.ConfigPath, atCap+"\n")
+	for name, pass := range map[string]string{"encrypted": "pw", "secret-free": ""} {
+		dir, out := t.TempDir(), filepath.Join(t.TempDir(), "b.zip")
+		_, err := Create(CreateOptions{Layout: l, Dir: dir, Passphrase: pass})
+		wantTooLarge(t, err, nameConfig)
+		_, err = Create(CreateOptions{Layout: l, Out: out, Passphrase: pass})
+		wantTooLarge(t, err, nameConfig)
+		if es, _ := os.ReadDir(dir); len(es) != 0 {
+			t.Fatalf("%s: refused, yet %d file(s) written", name, len(es))
+		}
+		if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: --out written despite the refusal: %v", name, err)
+		}
+	}
+}
+
+// Open holds config.toml and the manifest to their own caps too, whatever
+// create would have done: one byte over is refused, valid content or not.
+func TestOpenRefusesMembersOverTheirOwnCap(t *testing.T) {
+	cfg := paddedConfig(maxConfigSize + 1)
+	_, err := Open(craft(t, map[string]string{ManifestName: manifestFor(nameConfig, cfg), nameConfig: cfg}), "")
+	wantTooLarge(t, err, nameConfig)
+
+	// Whitespace keeps the manifest valid JSON while it grows past its cap.
+	m := manifestFor(nameConfig, testConfig)
+	m = m[:len(m)-1] + strings.Repeat(" ", maxManifestSize-len(m)+1) + "}"
+	_, err = Open(craft(t, map[string]string{ManifestName: m, nameConfig: testConfig}), "")
+	wantTooLarge(t, err, ManifestName)
 }

@@ -86,7 +86,10 @@ func create(o CreateOptions, k Kind) (Result, error) {
 		secrets = SecretsIncluded
 	}
 
-	files, err := collect(o.Layout, secrets == SecretsRedacted)
+	// A pre-restore snapshot is not checked: it is the undo for a restore, and
+	// refusing a config that does not parse would block restoring a good backup
+	// over a broken config — the very case restore is for.
+	files, err := collect(o.Layout, secrets == SecretsRedacted, k != KindPreRestore)
 	if err != nil {
 		return Result{}, err
 	}
@@ -116,25 +119,43 @@ type memFile struct {
 	data []byte
 }
 
-// collect reads the allowlisted files that exist, redacting if asked. A read
-// that Windows blocks for a moment — the daemon replacing the queue file by
-// rename — is retried within the same bounds as writeFileAtomic's rename.
-func collect(l Layout, redact bool) ([]memFile, error) {
+// collect reads the allowlisted files that exist, checking that restore would
+// accept them and redacting if asked. A read that Windows blocks for a moment —
+// the daemon replacing the queue file by rename — is retried within the same
+// bounds as writeFileAtomic's rename.
+func collect(l Layout, redact, check bool) ([]memFile, error) {
 	var out []memFile
 	for _, s := range l.sources() {
 		data, err := retryTransient(func() ([]byte, error) { return readSource(s) }, renameWindow, renameStep)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
+		if err == nil {
+			data, err = s.prepare(data, redact, check)
+		}
 		if err != nil {
 			return nil, err
 		}
-		if redact {
-			if data, err = s.redact(data); err != nil {
-				return nil, fmt.Errorf("redact %s: %w", s.name, err)
-			}
-		}
 		out = append(out, memFile{s.name, data})
+	}
+	return out, nil
+}
+
+// prepare turns a file read from disk into its archive member. The check comes
+// first, so a config that does not parse is reported as such, not as one whose
+// secrets cannot be stripped; what redaction then writes parses by construction.
+func (s source) prepare(data []byte, redact, check bool) ([]byte, error) {
+	if check {
+		if err := s.check(data); err != nil {
+			return nil, err
+		}
+	}
+	if !redact {
+		return data, nil
+	}
+	out, err := s.redact(data)
+	if err != nil {
+		return nil, fmt.Errorf("redact %s: %w", s.name, err)
 	}
 	return out, nil
 }
@@ -143,22 +164,24 @@ func collect(l Layout, redact bool) ([]memFile, error) {
 var openFile = os.Open
 
 // readSource reads one allowlisted file, refusing one larger than a backup can
-// hold before reading it into memory.
+// hold — its own cap, or the shared bound — before reading it into memory.
 func readSource(s source) ([]byte, error) {
 	f, err := openFile(s.path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", s.path, err)
 	}
 	defer f.Close()
-	if st, err := f.Stat(); err == nil && st.Size() > maxContentSize {
-		return nil, errContentTooLarge(s.name, st.Size())
+	budget := newContentBudget() // what the file may take in an otherwise empty backup
+	room := budget.room(s.name)
+	if st, err := f.Stat(); err == nil && st.Size() > room {
+		return nil, budget.tooLarge(s.name, st.Size())
 	}
-	data, over, err := readLimited(f, maxContentSize)
+	data, over, err := readLimited(f, room)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", s.path, err)
 	}
 	if over {
-		return nil, errContentTooLarge(s.name, -1)
+		return nil, budget.tooLarge(s.name, -1)
 	}
 	return data, nil
 }

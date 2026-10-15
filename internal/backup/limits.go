@@ -20,6 +20,30 @@ import (
 // A var only so tests can probe the edge without writing 128 MiB.
 var maxContentSize int64 = 128 << 20
 
+// The members that do not grow with use get a cap of their own, far below the
+// shared bound only the queue needs. config.toml is a settings file: one with
+// every table set and commented is under 100 KB, so 4 MiB is forty times any
+// real config. The manifest lists two files in under 1 KB. Without these caps a
+// crafted archive could hand restore 128 MiB of anything as config.toml — 40
+// MiB of NUL bytes deflate to 40 KB — and replace the config with it.
+const (
+	maxConfigSize   = 4 << 20
+	maxManifestSize = 1 << 20
+)
+
+// memberCap is the most member name may hold on its own. The queue, and any
+// name restore refuses anyway, are only bound by the shared maxContentSize.
+func memberCap(name string) int64 {
+	switch name {
+	case nameConfig:
+		return maxConfigSize
+	case ManifestName:
+		return maxManifestSize
+	default:
+		return maxContentSize
+	}
+}
+
 const (
 	// archiveFraming is what zip and encryption add on top of the content:
 	// member headers, deflate's stored blocks for incompressible data (5 bytes
@@ -34,28 +58,38 @@ const (
 // refused before it is read into memory.
 func maxArchiveSize() int64 { return maxContentSize + archiveFraming }
 
-// contentBudget counts member bytes against maxContentSize. Create and Open
-// spend one member by member, so they agree on what fits.
+// contentBudget counts member bytes against maxContentSize, and each member
+// against its own cap. Create and Open spend one member by member, so they
+// agree on what fits.
 type contentBudget struct{ left int64 }
 
 func newContentBudget() *contentBudget { return &contentBudget{left: maxContentSize} }
 
+// room is the most member name can still take: its own cap or what is left of
+// the shared bound, whichever is less.
+func (b *contentBudget) room(name string) int64 { return min(memberCap(name), b.left) }
+
 // spend takes n bytes for member name, or reports that they do not fit.
 func (b *contentBudget) spend(name string, n int64) error {
-	if n > b.left {
-		return errContentTooLarge(name, n)
+	if n > b.room(name) {
+		return b.tooLarge(name, n)
 	}
 	b.left -= n
 	return nil
 }
 
-// errContentTooLarge names the member that broke the bound; size < 0 when it
-// is not known (more bytes turned up than were declared).
-func errContentTooLarge(name string, size int64) error {
-	if size < 0 {
-		return fmt.Errorf("%w: %s takes the content past the %s a backup can hold", ErrTooLarge, name, mib(maxContentSize))
+// tooLarge names the member that broke a bound, and which one: its own cap
+// when that was the tighter, else the shared bound. size < 0 when it is not
+// known (more bytes turned up than were declared).
+func (b *contentBudget) tooLarge(name string, size int64) error {
+	what := name
+	if size >= 0 {
+		what += " (" + mib(size) + ")"
 	}
-	return fmt.Errorf("%w: %s (%s) takes the content past the %s a backup can hold", ErrTooLarge, name, mib(size), mib(maxContentSize))
+	if c := memberCap(name); c < maxContentSize && c <= b.left {
+		return fmt.Errorf("%w: %s is over the %s limit for that file", ErrTooLarge, what, mib(c))
+	}
+	return fmt.Errorf("%w: %s takes the content past the %s a backup can hold", ErrTooLarge, what, mib(maxContentSize))
 }
 
 // checkArchiveSize refuses an archive file larger than maxArchiveSize; size < 0

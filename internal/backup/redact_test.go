@@ -78,8 +78,7 @@ func TestRedactionFailsClosed(t *testing.T) {
 		"[auth]\napi_key = \"\"\"S3CRET-4\"\"\"\n",
 		"[downloads]\nwebdav_password = '''S3CRET-5'''\n",
 		"[agent]\nagent_hash = \"\"\"\nS3CRET-6\"\"\"\n",
-		"not toml at all = = =\n",
-	} {
+	} { // a config that does not parse at all is ErrBadContent: see content_test.go
 		l := Layout{ConfigPath: filepath.Join(t.TempDir(), "config.toml"), DataDir: t.TempDir()}
 		write(t, l.ConfigPath, cfg)
 		dir := t.TempDir()
@@ -141,7 +140,8 @@ func TestRedactTasksStripsEveryAgentTaskSecret(t *testing.T) {
 }
 
 // The backup reads active-tasks.json from the same place the daemon's store
-// writes it; this fails if either side moves the file.
+// writes it, and the queue check accepts what the store writes; this fails if
+// either side moves the file or changes its shape.
 func TestLayoutReadsTheAgentTaskStore(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("UNARR_CONFIG_DIR", filepath.Join(root, "cfg"))
@@ -149,7 +149,7 @@ func TestLayoutReadsTheAgentTaskStore(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", filepath.Join(root, "local"))
 	agent.NewActiveTaskStore().Add(agent.Task{ID: "store-task"})
 
-	files, err := collect(Layout{ConfigPath: filepath.Join(root, "none.toml"), DataDir: config.DataDir()}, false)
+	files, err := collect(Layout{ConfigPath: filepath.Join(root, "none.toml"), DataDir: config.DataDir()}, false, true)
 	if err != nil || len(files) != 1 || !strings.Contains(string(files[0].data), "store-task") {
 		t.Fatalf("backup does not see the agent's queue file: %v %s", err, fmt.Sprint(files))
 	}

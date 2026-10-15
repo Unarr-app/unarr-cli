@@ -21,30 +21,31 @@ type Layout struct {
 	DataDir    string // holds active-tasks.json
 }
 
-// source is one allowlisted file: its archive name, where it lives, and how to
-// strip secrets from it.
+// source is one allowlisted file: its archive name, where it lives, how to
+// strip secrets from it, and how to tell that unarr can load it.
 type source struct {
 	name   string
 	path   string
 	redact func([]byte) ([]byte, error)
+	check  func([]byte) error
 }
 
 func (l Layout) sources() []source {
 	return []source{
-		{nameConfig, l.ConfigPath, redactConfig},
-		{nameTasks, filepath.Join(l.DataDir, nameTasks), redactTasks},
+		{nameConfig, l.ConfigPath, redactConfig, checkConfig},
+		{nameTasks, filepath.Join(l.DataDir, nameTasks), redactTasks, checkTasks},
 	}
 }
 
-// dest maps an archive member to its on-disk path; ok is false for any name
-// not on the allowlist, which is what makes path traversal impossible.
-func (l Layout) dest(name string) (string, bool) {
+// source maps an archive member to its allowlisted file; ok is false for any
+// name not on the allowlist, which is what makes path traversal impossible.
+func (l Layout) source(name string) (source, bool) {
 	for _, s := range l.sources() {
 		if s.name == name {
-			return s.path, true
+			return s, true
 		}
 	}
-	return "", false
+	return source{}, false
 }
 
 // Bounds for the rename retry: a Windows antivirus or indexer briefly holding a

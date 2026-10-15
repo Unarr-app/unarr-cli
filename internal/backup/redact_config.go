@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/BurntSushi/toml"
-
 	"github.com/Unarr-app/unarr-cli/internal/config"
 )
 
@@ -100,8 +98,8 @@ func isEmptyString(quoted string) bool { return quoted == `""` || quoted == `''`
 // refused backup (use --encrypt), never a leaked credential.
 func redactConfig(data []byte) ([]byte, error) {
 	out := rewriteSecrets(data, func(configSecret, string) string { return `""` })
-	var c config.Config
-	if _, err := toml.Decode(string(out), &c); err != nil {
+	c, err := decodeConfig(out)
+	if err != nil {
 		return nil, fmt.Errorf("%w: config.toml does not parse: %v", ErrRedaction, err)
 	}
 	for _, s := range configSecrets {
@@ -115,8 +113,8 @@ func redactConfig(data []byte) ([]byte, error) {
 // hasCredentials reports whether config data sets any credential; false when it
 // does not parse.
 func hasCredentials(data []byte) bool {
-	var c config.Config
-	if _, err := toml.Decode(string(data), &c); err != nil {
+	c, err := decodeConfig(data)
+	if err != nil {
 		return false
 	}
 	for _, s := range configSecrets {
@@ -145,11 +143,12 @@ func mergeConfigSecrets(restored, current []byte) ([]byte, []string) {
 		}
 		return quoted // the archive carries a real value: keep it
 	})
-	var cur, got config.Config
-	if _, err := toml.Decode(string(current), &cur); err != nil {
+	cur, err := decodeConfig(current)
+	if err != nil {
 		return merged, nil // nothing reliable to compare against
 	}
-	if _, err := toml.Decode(string(merged), &got); err != nil {
+	got, err := decodeConfig(merged)
+	if err != nil {
 		return merged, nil // Plan reports the archive's own problems
 	}
 	var lost []string
@@ -189,19 +188,19 @@ func mergeRedactedConfig(restored, current []byte) ([]byte, []string) {
 // returns the config to write and a note for the plan ("" when the id was not
 // in question).
 func keepLocalAgentID(restored, current []byte) ([]byte, string) {
-	var cur, arc config.Config
-	if _, err := toml.Decode(string(current), &cur); err != nil {
+	cur, err := decodeConfig(current)
+	if err != nil {
 		return restored, ""
 	}
-	if _, err := toml.Decode(string(restored), &arc); err != nil {
+	arc, err := decodeConfig(restored)
+	if err != nil {
 		return restored, ""
 	}
 	if cur.Agent.ID == arc.Agent.ID || (cur.Auth.APIKey == "" && cur.Agent.Hash == "") {
 		return restored, ""
 	}
 	out := setAgentID(restored, quotedAgentID(current, cur.Agent.ID))
-	var got config.Config
-	if _, err := toml.Decode(string(out), &got); err != nil || got.Agent.ID != cur.Agent.ID {
+	if got, err := decodeConfig(out); err != nil || got.Agent.ID != cur.Agent.ID {
 		return restored, fmt.Sprintf("the archive's agent id %q is written in a form unarr cannot replace, so it is restored next to "+
 			"this machine's credentials: run `unarr login` after restoring", arc.Agent.ID)
 	}

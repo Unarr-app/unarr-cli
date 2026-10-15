@@ -80,8 +80,8 @@ func readBounded(file string) ([]byte, error) {
 // readMembers loads every member, rejecting names that are not a bare file
 // name: that is the zip-slip defence at the archive level (restore adds the
 // allowlist on top). Every member must be a regular file — a symlink's
-// "content" is its target, which must never become a config — and together
-// they must fit maxContentSize.
+// "content" is its target, which must never become a config — each must fit
+// its own cap, and together they must fit maxContentSize.
 func readMembers(zr *zip.Reader) (map[string][]byte, error) {
 	if len(zr.File) > maxMembers {
 		return nil, fmt.Errorf("%w: %d members", ErrTooLarge, len(zr.File))
@@ -119,24 +119,26 @@ func fileKind(mode fs.FileMode) string {
 	}
 }
 
-// readMember inflates f within what is left of budget: the size the zip
-// declares is checked before inflating, then the bytes that actually come out,
-// so a member that understates its size cannot get past the bound either.
+// readMember inflates f within its room in budget (its own cap, or what is left
+// of the shared bound): the size the zip declares is checked before inflating,
+// then the bytes that actually come out, so a member that understates its size
+// cannot get past the bound either.
 func readMember(f *zip.File, budget *contentBudget) ([]byte, error) {
-	if f.UncompressedSize64 > uint64(budget.left) {
-		return nil, errContentTooLarge(f.Name, -1)
+	room := budget.room(f.Name)
+	if f.UncompressedSize64 > uint64(room) {
+		return nil, budget.tooLarge(f.Name, -1)
 	}
 	rc, err := f.Open()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %q: %v", ErrBadManifest, f.Name, err)
 	}
-	data, over, err := readLimited(rc, budget.left)
+	data, over, err := readLimited(rc, room)
 	_ = rc.Close()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %q: %v", ErrChecksum, f.Name, err)
 	}
 	if over {
-		return nil, errContentTooLarge(f.Name, -1)
+		return nil, budget.tooLarge(f.Name, -1)
 	}
 	return data, budget.spend(f.Name, int64(len(data)))
 }
