@@ -129,6 +129,14 @@ func TestRestoreChecksMergedConfig(t *testing.T) {
 	if got := read(t, l.ConfigPath); got != "[auth]\napi_key = \"BAD\\q\"\n" {
 		t.Fatalf("config changed by a refused restore:\n%s", got)
 	}
+	// The way out the README gives: with config.toml moved aside, it restores.
+	if err := os.Rename(l.ConfigPath, l.ConfigPath+".aside"); err != nil {
+		t.Fatal(err)
+	}
+	mustApply(t, arc, l, t.TempDir())
+	if got := read(t, l.ConfigPath); got != "[auth]\napi_key = \"\"\n" {
+		t.Fatalf("restored config:\n%s", got)
+	}
 }
 
 // Create refuses what restore would refuse, before writing anything, encrypted
