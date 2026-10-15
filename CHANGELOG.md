@@ -5,12 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] - 2026-10-15
+
+
+### Added
+
+- **backup**: comando `unarr backup` y backups programados en el daemon
+- **backup**: archivo verificado del estado local, sin secretos por defecto
+- **config**: tabla [backup] para backups programados del estado
+
+### Documentation
+
+- **backup**: restore todo o nada y salida al merge que falla
+
+### Fixed
+
+- **backup**: avisar si las credenciales conservadas irían a otro servidor
+- **backup**: restore no anuncia "Backup OK" antes de validar el contenido
+- **backup**: validar la cola con el tipo de tarea del daemon
+- **backup**: el snapshot pre-restore no aplica el tope por fichero
+- **backup**: tope por fichero y validar el contenido antes de restaurar
+- **backup**: no emparejar el agent id del archivo con credenciales locales
+- **backup**: reintentar la lectura que Windows bloquea un instante
+- **backup**: prometer conservar credenciales solo cuando las hay
+- **backup**: rechazar miembros del zip que no son ficheros regulares
+- **backup**: una sola cota de tamaño para create y restore
+- **backup**: retencion de los snapshots pre-restore
+- **backup**: conservar el agent id local al restaurar un archivo sin secretos
+- **backup**: rechazar un [backup] dir relativo en create/list/prune
 ## [1.18.2] - 2026-10-12
 
 
 ### Fixed
 
 - **usenet**: streaming Usenet activado por defecto
+
+### Other
+
+- **release**: 1.18.2
 ## [1.18.1] - 2026-10-11
 
 
@@ -2078,6 +2110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.19.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.18.2...v1.19.0
 [1.18.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.18.1...v1.18.2
 [1.18.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.18.0...v1.18.1
 [1.18.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.17.1...v1.18.0
