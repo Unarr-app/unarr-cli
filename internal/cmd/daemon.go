@@ -898,12 +898,28 @@ func runDaemonStart() error {
 	// desktop tray drive. It is what makes a download stoppable when the web
 	// cannot reach it — server down, account logged out, or the task row deleted
 	// out from under a still-running download.
-	if ctrlSrv, err := control.NewServer(controller); err != nil {
-		log.Printf("[control] could not create the local control plane: %v - `unarr downloads` will fall back to offline mode", err)
-	} else if err := ctrlSrv.Listen(ctx); err != nil {
-		log.Printf("[control] could not start the local control plane: %v - `unarr downloads` will fall back to offline mode", err)
-	} else {
-		d.SetControlPlane(ctrlSrv.Port(), ctrlSrv.Token())
+	ctrlSrv, ctrlErr := control.NewServer(controller)
+	if ctrlErr != nil {
+		log.Printf("[control] could not create the local control plane: %v - `unarr downloads` will fall back to offline mode", ctrlErr)
+	}
+	// Unified session view (GET /sessions, optional /metrics). Built even without
+	// a control plane: the sampler also feeds the stall log.
+	ctrlToken := ""
+	if ctrlSrv != nil {
+		ctrlToken = ctrlSrv.Token()
+	}
+	sessionHub := newSessionHub(sessionDeps{
+		version: Version, cfg: cfg, manager: manager, streamSrv: streamSrv,
+		vpnTunnel: vpnTunnel, controller: controller,
+	})
+	startSessionView(ctx, sessionHub, cfg.Metrics, ctrlToken)
+	if ctrlSrv != nil {
+		ctrlSrv.SetSessions(sessionHub)
+		if err := ctrlSrv.Listen(ctx); err != nil {
+			log.Printf("[control] could not start the local control plane: %v - `unarr downloads` will fall back to offline mode", err)
+		} else {
+			d.SetControlPlane(ctrlSrv.Port(), ctrlSrv.Token())
+		}
 	}
 
 	// Wire: sync receives file deletion requests from the server.

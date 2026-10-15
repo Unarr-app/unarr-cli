@@ -210,7 +210,7 @@ recovery path, and how these interact with the website.
 |---------|-------------|
 | `unarr start` | Start the download daemon (foreground) |
 | `unarr stop` | How to stop the running daemon |
-| `unarr status` | Show daemon status and active downloads |
+| `unarr status` | Show daemon status and active downloads (`--sessions` for live sessions, `--json` for raw) |
 | `unarr daemon install` | Install as system service (systemd/launchd) |
 | `unarr daemon uninstall` | Remove the system service |
 | `unarr vpn status` | Show managed-VPN config and live tunnel state |
@@ -409,6 +409,71 @@ The daemon connects via WebSocket for instant task delivery, with automatic HTTP
 **Service locations:**
 - Linux: `~/.config/systemd/user/unarr.service` (systemd)
 - macOS: `~/Library/LaunchAgents/com.torrentclaw.unarr.plist` (launchd)
+
+## Metrics
+
+The daemon keeps one view of everything that is moving right now — downloads,
+in-browser HLS streams and the remote-folder mount — with each session's rate,
+bytes moved, uptime, health (`ok` / `degraded` / `stalled`) and stall count.
+
+```bash
+unarr status --sessions          # table
+unarr status --sessions --json   # the same snapshot the website reads
+```
+
+A session is **degraded** as soon as it is impaired (a download receiving no
+data, a transcode below realtime, a mount read that moves no bytes) and
+**stalled** once that lasts 30 s. Each stall is counted **once**, not once per
+check, and it only ends after 10 s of healthy flow, so a rate flapping around the
+threshold is one stall.
+
+### Prometheus endpoint (optional)
+
+Off by default: nothing listens until you opt in.
+
+```toml
+[metrics]
+enabled = true
+# listen = "127.0.0.1:9877"   # default: loopback only
+# token = "change-me"         # required if listen is not loopback
+```
+
+`GET /metrics` returns the Prometheus text format and always needs a token, sent
+as `Authorization: Bearer <token>` (or the `X-Unarr-Control-Token` header). With
+no `token` set, the control-plane token is used — it is in the daemon state file,
+but it changes on every restart, so for a Prometheus server set your own `token`.
+A non-loopback `listen` without a `token` is refused.
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: unarr
+    authorization: { credentials: change-me }
+    static_configs: [{ targets: ["127.0.0.1:9877"] }]
+```
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `unarr_info` | gauge | `version` |
+| `unarr_uptime_seconds` | gauge | |
+| `unarr_sessions_active` | gauge | `kind` = `download`, `hls`, `stream`, `mount` |
+| `unarr_sessions_stalled` | gauge | |
+| `unarr_session_bytes_total` | counter | `kind` |
+| `unarr_session_rate_bytes_per_second` | gauge | `kind` |
+| `unarr_session_stalls_total` | counter | `kind` |
+| `unarr_vpn_up`, `unarr_vpn_enabled`, `unarr_vpn_required` | gauge | |
+| `unarr_downloads` | gauge | `state` (`downloading`, `paused`, …) |
+
+There are no per-title or per-hash labels, so cardinality stays fixed. The format
+is written by hand instead of pulling in `client_golang`, which would add several
+MB and a chain of dependencies to the binary for ten fixed series.
+
+### `GET /sessions` (local control plane)
+
+The same snapshot is served to local tools (the website's unified view, the
+desktop tray) at `GET /sessions` on the loopback control plane, with the
+`X-Unarr-Control-Token` from the daemon state file. The JSON schema
+(`schemaVersion` 1) is documented in [`internal/metrics/SCHEMA.md`](internal/metrics/SCHEMA.md).
 
 ## VPN
 

@@ -50,7 +50,8 @@ func serveDAVRead(w http.ResponseWriter, r *http.Request, dav http.Handler, read
 	if r.Method == http.MethodGet {
 		select {
 		case reads <- struct{}{}:
-			defer func() { <-reads }()
+			activeReads.Add(1)
+			defer func() { <-reads; activeReads.Add(-1) }()
 			w = progressWriter{ResponseWriter: w, timeout: mediaIdleTimeout}
 		default:
 			w.Header().Set("Retry-After", "1")

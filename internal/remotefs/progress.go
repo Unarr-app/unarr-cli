@@ -50,7 +50,9 @@ func (w progressWriter) Write(p []byte) (int, error) {
 	c := http.NewResponseController(w.ResponseWriter)
 	_ = c.SetWriteDeadline(time.Now().Add(w.timeout))
 	defer c.SetWriteDeadline(time.Time{})
-	return w.ResponseWriter.Write(p)
+	n, err := w.ResponseWriter.Write(p)
+	servedBytes.Add(int64(n))
+	return n, err
 }
 
 func (w progressWriter) Flush() {

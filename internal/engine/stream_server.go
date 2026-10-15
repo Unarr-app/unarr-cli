@@ -956,6 +956,7 @@ func (ss *StreamServer) hlsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resource := remainder
+	w = session.countServed(w)
 
 	switch {
 	case resource == "master.m3u8":

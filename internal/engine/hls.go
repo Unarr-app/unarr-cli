@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/engine/srcproxy"
@@ -403,6 +404,7 @@ type HLSSession struct {
 	// shape over 15-30s. Guarded by statsMu (the stderr goroutine writes; the
 	// watcher goroutine reads).
 	statsMu      sync.Mutex
+	servedBytes  atomic.Int64 // bytes written to viewers (hls_info.go)
 	speedEWMA    float64
 	fpsEWMA      float64
 	speedSamples int
