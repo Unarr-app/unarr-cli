@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"maps"
 	"sort"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ type Hub struct {
 	version string
 	started time.Time
 	mon     *Monitor
+	onStall func(StallEvent) // fired by Poll after h.mu is released
 
 	mu      sync.Mutex
 	sources []Source
@@ -47,7 +49,8 @@ func NewHub(version string, onStall func(StallEvent)) *Hub {
 	return &Hub{
 		version:  version,
 		started:  time.Now(),
-		mon:      NewMonitor(0, 0, onStall),
+		mon:      NewMonitor(0, 0, nil),
+		onStall:  onStall,
 		last:     make(map[sessionKey]sample),
 		bytes:    make(map[Kind]int64),
 		counters: make(map[Kind]func() int64),
@@ -94,12 +97,12 @@ func (h *Hub) SetDownloadStates(fn func() map[string]int) {
 func (h *Hub) Poll(now time.Time) Snapshot {
 	h.mu.Lock()
 	sources, vpn, states := append([]Source(nil), h.sources...), h.vpn, h.states
-	counters := make(map[Kind]func() int64, len(h.counters))
-	for k, fn := range h.counters {
-		counters[k] = fn
-	}
+	counters := maps.Clone(h.counters)
 	h.mu.Unlock()
 
+	// Everything that reads another subsystem runs before the lock: the VPN
+	// reader is an IpcGet on the tunnel and the state reader walks the store, so
+	// concurrent polls (sampler, GET /sessions, scrapes) must not queue on them.
 	var readings []Reading
 	for _, src := range sources {
 		readings = append(readings, src()...)
@@ -108,7 +111,39 @@ func (h *Hub) Poll(now time.Time) Snapshot {
 	for k, fn := range counters {
 		counts[k] = fn()
 	}
+	var vpnState VPN
+	if vpn != nil {
+		vpnState = vpn()
+	}
+	var byState map[string]int
+	if states != nil {
+		byState = states()
+	}
 
+	sessions, sum, events := h.update(now, readings, counts)
+	sum.VPN = vpnState
+	if byState != nil {
+		sum.DownloadsByState = byState
+	}
+	// The stall callback (a log line in the daemon) runs after the lock too.
+	if h.onStall != nil {
+		for _, ev := range events {
+			h.onStall(ev)
+		}
+	}
+	return Snapshot{
+		SchemaVersion: SchemaVersion,
+		GeneratedAt:   now.UTC(),
+		Agent:         Agent{Version: h.version, UptimeSec: int64(now.Sub(h.started).Seconds())},
+		Sessions:      sessions,
+		Summary:       sum,
+	}
+}
+
+// update folds one round of readings into the hub's state and returns the
+// sessions, their summary and the stalls that started. The only part of a poll
+// that holds h.mu.
+func (h *Hub) update(now time.Time, readings []Reading, counts map[Kind]int64) ([]Session, Summary, []StallEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for k, v := range counts {
@@ -118,10 +153,15 @@ func (h *Hub) Poll(now time.Time) Snapshot {
 		}
 	}
 	sessions := make([]Session, 0, len(readings))
+	var events []StallEvent
 	live := make(map[sessionKey]bool, len(readings))
 	for _, r := range readings {
 		live[key(r.Kind, r.ID)] = true
-		sessions = append(sessions, h.finish(r, now))
+		s, ev := h.finish(r, now)
+		sessions = append(sessions, s)
+		if ev != nil {
+			events = append(events, *ev)
+		}
 	}
 	h.mon.Retain(live)
 	for k := range h.last {
@@ -135,21 +175,7 @@ func (h *Hub) Poll(now time.Time) Snapshot {
 		}
 		return sessions[i].StartedAt.Before(sessions[j].StartedAt)
 	})
-
-	snap := Snapshot{
-		SchemaVersion: SchemaVersion,
-		GeneratedAt:   now.UTC(),
-		Agent:         Agent{Version: h.version, UptimeSec: int64(now.Sub(h.started).Seconds())},
-		Sessions:      sessions,
-		Summary:       h.summarize(sessions),
-	}
-	if vpn != nil {
-		snap.Summary.VPN = vpn()
-	}
-	if states != nil {
-		snap.Summary.DownloadsByState = states()
-	}
-	return snap
+	return sessions, h.summarize(sessions), events
 }
 
 // Run polls the hub every interval until ctx is done. The poll is what feeds
@@ -169,7 +195,8 @@ func (h *Hub) Run(ctx context.Context, interval time.Duration) {
 }
 
 // finish completes one reading: derived rate, byte accounting, stall health.
-func (h *Hub) finish(r Reading, now time.Time) Session {
+// It also returns the stall that started on this tick, if any.
+func (h *Hub) finish(r Reading, now time.Time) (Session, *StallEvent) {
 	s := r.Session
 	prev, seen := h.last[key(s.Kind, s.ID)]
 	var measured bool
@@ -181,7 +208,7 @@ func (h *Hub) finish(r Reading, now time.Time) Session {
 	if reason == "" && flowStopped {
 		reason = "no_data"
 	}
-	health, stall, first := h.mon.Observe(Tick{
+	health, stall, first, ev := h.mon.observe(Tick{
 		ID: s.ID, Kind: s.Kind, Title: s.Title,
 		Impaired: r.Impaired || flowStopped, Reason: reason,
 	}, now)
@@ -198,7 +225,7 @@ func (h *Hub) finish(r Reading, now time.Time) Session {
 		s.ActiveSec = sec
 		s.AvgRateBps = own / sec
 	}
-	return s
+	return s, ev
 }
 
 // ownBytes is what this session itself moved. A source that knows when its

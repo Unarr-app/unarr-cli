@@ -86,6 +86,16 @@ type Tick struct {
 // Observe records one tick for a session and returns its health, a copy of its
 // stall history, and when the session was first seen.
 func (m *Monitor) Observe(tk Tick, now time.Time) (Health, Stall, time.Time) {
+	health, st, first, fire := m.observe(tk, now)
+	if fire != nil && m.onStall != nil {
+		m.onStall(*fire)
+	}
+	return health, st, first
+}
+
+// observe is Observe without the callback: it returns the stall event (nil when
+// none started) for a caller that must fire it outside a lock of its own.
+func (m *Monitor) observe(tk Tick, now time.Time) (Health, Stall, time.Time, *StallEvent) {
 	id, kind, impaired, reason := tk.ID, tk.Kind, tk.Impaired, tk.Reason
 	k := key(kind, id)
 	m.mu.Lock()
@@ -135,11 +145,7 @@ func (m *Monitor) Observe(tk Tick, now time.Time) (Health, Stall, time.Time) {
 	}
 	first := e.firstSeen
 	m.mu.Unlock()
-
-	if fire != nil && m.onStall != nil {
-		m.onStall(*fire)
-	}
-	return health, st, first
+	return health, st, first, fire
 }
 
 // Retain forgets every session not in live. Totals survive: they are
