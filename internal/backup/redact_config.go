@@ -181,10 +181,13 @@ func mergeRedactedConfig(restored, current []byte) ([]byte, []string) {
 // keepLocalAgentID stops a secret-free restore from pairing the archive's agent
 // id with this machine's credentials: the api_key that mergeConfigSecrets keeps
 // was minted for THIS machine's id (`unarr login` binds it), and agent_hash is
-// this machine's too. So while the machine has an id and either credential, its
-// id stays. Without them the archive's id is restored as before — the
-// replacement-machine path, where `unarr login` follows. It returns the config
-// to write and a note for the plan ("" when the id was not in question).
+// this machine's too. So while the machine has either credential, its id stays
+// — even an empty one (a config written by hand, a sign-in that never
+// finished): the archive's id is left out rather than handed to credentials it
+// does not belong to. Without credentials the archive's id is restored as
+// before — the replacement-machine path, where `unarr login` follows. It
+// returns the config to write and a note for the plan ("" when the id was not
+// in question).
 func keepLocalAgentID(restored, current []byte) ([]byte, string) {
 	var cur, arc config.Config
 	if _, err := toml.Decode(string(current), &cur); err != nil {
@@ -193,14 +196,18 @@ func keepLocalAgentID(restored, current []byte) ([]byte, string) {
 	if _, err := toml.Decode(string(restored), &arc); err != nil {
 		return restored, ""
 	}
-	if cur.Agent.ID == "" || cur.Agent.ID == arc.Agent.ID || (cur.Auth.APIKey == "" && cur.Agent.Hash == "") {
+	if cur.Agent.ID == arc.Agent.ID || (cur.Auth.APIKey == "" && cur.Agent.Hash == "") {
 		return restored, ""
 	}
 	out := setAgentID(restored, quotedAgentID(current, cur.Agent.ID))
 	var got config.Config
 	if _, err := toml.Decode(string(out), &got); err != nil || got.Agent.ID != cur.Agent.ID {
-		return restored, fmt.Sprintf("this machine's agent id %q is written in a form unarr cannot carry over, so the archive's %q replaces it: "+
-			"run `unarr login` after restoring", cur.Agent.ID, arc.Agent.ID)
+		return restored, fmt.Sprintf("the archive's agent id %q is written in a form unarr cannot replace, so it is restored next to "+
+			"this machine's credentials: run `unarr login` after restoring", arc.Agent.ID)
+	}
+	if cur.Agent.ID == "" {
+		return out, fmt.Sprintf("left [agent] id empty instead of restoring the archive's %q: the api_key and agent_hash here "+
+			"belong to this machine, not to that agent. Run `unarr login` after restoring", arc.Agent.ID)
 	}
 	return out, fmt.Sprintf("kept this machine's agent id %q (the archive has %q): the api_key and agent_hash here belong to it. "+
 		"Run `unarr login` if this is a new machine", cur.Agent.ID, arc.Agent.ID)

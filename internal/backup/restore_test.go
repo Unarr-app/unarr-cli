@@ -79,6 +79,34 @@ func TestRedactedRestoreKeepsLocalAgentID(t *testing.T) {
 	}
 }
 
+// Credentials here with no agent id beside them (a config written by hand, or a
+// sign-in that never finished) are still this machine's: the archive's id is not
+// restored next to them, and the plan says so.
+func TestRedactedRestoreDoesNotPairArchiveIDWithLocalCredentials(t *testing.T) {
+	for name, current := range map[string]string{
+		"api_key, no [agent] table": "[auth]\napi_key = \"SECRET-LOCAL\"\n",
+		"agent_hash, empty id":      "[agent]\nid = \"\"\nagent_hash = \"SECRET-LOCAL-HASH\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := newLayout(t)
+			res := mustCreate(t, l, CreateOptions{})
+			write(t, l.ConfigPath, current)
+			arc, err := Open(res.Path, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan := mustApply(t, arc, l, t.TempDir())
+			if w := strings.Join(plan.Warnings, "\n"); !strings.Contains(w, `"agent-1"`) || !strings.Contains(w, "unarr login") {
+				t.Fatalf("plan does not say the archive's agent id was left out: %v", plan.Warnings)
+			}
+			cfg, err := config.Load(l.ConfigPath)
+			if err != nil || cfg.Agent.ID != "" || cfg.Auth.APIKey+cfg.Agent.Hash == "" || cfg.Download.Dir != "/tmp/dl" {
+				t.Fatalf("restored config: %v %+v %+v\n%s", err, cfg.Agent, cfg.Auth, read(t, l.ConfigPath))
+			}
+		})
+	}
+}
+
 // Without local credentials there is nothing the id is bound to: the archive's
 // id is restored (the replacement-machine path, `unarr login` follows) — and so
 // it is from an encrypted archive, which carries its own matching credentials.
@@ -182,7 +210,7 @@ func TestPlanOnlyPromisesCredentialsThatExist(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		w := strings.Join(plan.Warnings, "\n")
+		w := secretsWarning(plan)
 		if strings.Contains(w, "are kept") != kept || strings.Contains(w, "unarr login") == kept {
 			t.Errorf("current config %q: warnings: %v", current, plan.Warnings)
 		}
@@ -198,6 +226,16 @@ func TestPlanOnlyPromisesCredentialsThatExist(t *testing.T) {
 	if w := strings.Join(plan.Warnings, "\n"); err != nil || strings.Contains(w, "config") || strings.Contains(w, "unarr login") {
 		t.Fatalf("tasks-only archive: %v %v", err, plan.Warnings)
 	}
+}
+
+// secretsWarning is the plan's "archive has no secrets" warning.
+func secretsWarning(p Plan) string {
+	for _, w := range p.Warnings {
+		if strings.HasPrefix(w, "archive has no secrets") {
+			return w
+		}
+	}
+	return ""
 }
 
 func TestPlanWritesNothing(t *testing.T) {
