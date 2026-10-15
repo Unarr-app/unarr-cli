@@ -61,8 +61,10 @@ func runBackupRestore(w, prompts io.Writer, f restoreFlags) error {
 	if err != nil {
 		return err
 	}
+	// Open vouches for the archive's integrity only: whether unarr can load its
+	// content is the plan's to say, right below.
 	m := arc.Manifest
-	fmt.Fprintf(w, "Backup OK: unarr %s, %s/%s, %s, secrets %s\n", m.UnarrVersion, m.OS, m.Arch,
+	fmt.Fprintf(w, "Archive verified: manifest and checksums OK (unarr %s, %s/%s, %s, secrets %s)\n", m.UnarrVersion, m.OS, m.Arch,
 		m.CreatedAt.Local().Format("2006-01-02 15:04:05"), m.Secrets)
 	if !f.apply {
 		plan, err := arc.Plan(backupLayout())
