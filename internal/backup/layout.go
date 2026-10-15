@@ -54,6 +54,26 @@ const (
 	renameStep   = 50 * time.Millisecond
 )
 
+// isTransientBlock is the retry criterion; a var so tests can stand in for
+// Windows, the only platform where it ever reports true.
+var isTransientBlock = fsx.IsTransientRenameBlock
+
+// retryTransient is the read side of writeFileAtomic's rename retry: it calls
+// read until it succeeds, fails for any other reason, or window runs out,
+// pausing step between attempts, and returns the last error. On Windows an
+// open of active-tasks.json that lands while the daemon replaces it by rename
+// fails with a sharing violation that clears within milliseconds.
+func retryTransient(read func() ([]byte, error), window, step time.Duration) ([]byte, error) {
+	deadline := time.Now().Add(window)
+	for {
+		data, err := read()
+		if err == nil || !isTransientBlock(err) || !time.Now().Before(deadline) {
+			return data, err
+		}
+		time.Sleep(step)
+	}
+}
+
 // writeFileAtomic writes via a temp file in the destination directory then
 // renames it over the target, so a crash never leaves a half-written file.
 // os.CreateTemp creates the file 0600, so a copy of config.toml (or of its

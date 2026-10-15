@@ -116,11 +116,13 @@ type memFile struct {
 	data []byte
 }
 
-// collect reads the allowlisted files that exist, redacting if asked.
+// collect reads the allowlisted files that exist, redacting if asked. A read
+// that Windows blocks for a moment — the daemon replacing the queue file by
+// rename — is retried within the same bounds as writeFileAtomic's rename.
 func collect(l Layout, redact bool) ([]memFile, error) {
 	var out []memFile
 	for _, s := range l.sources() {
-		data, err := readSource(s)
+		data, err := retryTransient(func() ([]byte, error) { return readSource(s) }, renameWindow, renameStep)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -137,10 +139,13 @@ func collect(l Layout, redact bool) ([]memFile, error) {
 	return out, nil
 }
 
+// openFile is os.Open; a var so tests can fail an open the way Windows does.
+var openFile = os.Open
+
 // readSource reads one allowlisted file, refusing one larger than a backup can
 // hold before reading it into memory.
 func readSource(s source) ([]byte, error) {
-	f, err := os.Open(s.path)
+	f, err := openFile(s.path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", s.path, err)
 	}
