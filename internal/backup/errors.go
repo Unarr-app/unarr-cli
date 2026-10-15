@@ -11,9 +11,9 @@ var (
 	ErrUnsafePath = errors.New("unsafe path in backup archive")
 	// ErrTooLarge: the archive or one of its members exceeds the size bounds.
 	ErrTooLarge = errors.New("backup archive is too large")
-	// ErrBadContent: config.toml does not parse or the queue is not a JSON list
-	// of tasks, so restore refuses it before writing anything — and create
-	// before writing an archive restore would refuse.
+	// ErrBadContent: config.toml does not parse or the queue does not decode as
+	// the daemon's task list, so restore refuses it before writing anything — and
+	// create before writing an archive restore would refuse.
 	ErrBadContent = errors.New("backup content unarr cannot load")
 	// ErrPassphraseRequired: the archive is encrypted and no passphrase was given.
 	ErrPassphraseRequired = errors.New("backup is encrypted: a passphrase is required")

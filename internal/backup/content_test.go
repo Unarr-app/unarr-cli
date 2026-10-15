@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Unarr-app/unarr-cli/internal/agent"
 )
 
 // manifestOf lists members with their sizes and SHA-256, the way Create would.
@@ -60,6 +62,9 @@ func TestRestoreRefusesContentUnarrCannotLoad(t *testing.T) {
 		"queue not JSON":            {nameTasks, `[{"id":"t1"`},
 		"queue not a list":          {nameTasks, `{"id":"t1"}`},
 		"queue not of objects":      {nameTasks, `[1, 2]`},
+		// JSON lists of objects the daemon's store still drops whole.
+		"queue with an id that is a number": {nameTasks, `[{"id":5}]`},
+		"queue with a queuedAt not a time":  {nameTasks, `[{"id":"t","queuedAt":"not-a-time"}]`},
 	}
 	for name, c := range cases {
 		for _, secrets := range []string{SecretsRedacted, SecretsIncluded} {
@@ -80,6 +85,33 @@ func TestRestoreRefusesContentUnarrCannotLoad(t *testing.T) {
 			})
 		}
 	}
+}
+
+// checkTasks accepts exactly what the daemon's store loads — json.Unmarshal of
+// the whole file into []agent.Task — although it decodes one task at a time.
+// Refusing less lets through a queue the daemon drops whole; refusing more
+// blocks a restore the daemon would have taken. The seeds run with go test.
+func FuzzCheckTasksAgreesWithDaemonLoad(f *testing.F) {
+	for _, q := range []string{
+		testTasks, `[]`, ` [ ] `, `null`, `[null]`, `[{"id":"t"}]  `,
+		`[{"id":"t","queuedAt":"2026-01-01T00:00:00Z","extra":{"deep":[1,{"a":null}]}}]`,
+		`[{"id":5}]`, `[{"id":"t","queuedAt":"not-a-time"}]`, `[{"id":"t","contentId":1.5}]`,
+		`[{"id":"t","sourceSet":{"sources":5}}]`, `[1]`, `[[]]`, `{}`, `"x"`, `5`, `true`,
+		``, `   `, `[`, `[1,]`, `[{"id":"a"} {"id":"b"}]`, `[] []`, `[] x`, `[]]`, "\xEF\xBB\xBF[]",
+	} {
+		f.Add([]byte(q))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var tasks []agent.Task
+		daemon := json.Unmarshal(data, &tasks)
+		check := checkTasks(data)
+		if (daemon == nil) != (check == nil) {
+			t.Fatalf("queue %q: the daemon's load says %v, checkTasks says %v", data, daemon, check)
+		}
+		if check != nil && !errors.Is(check, ErrBadContent) {
+			t.Fatalf("queue %q: err = %v, want ErrBadContent", data, check)
+		}
+	})
 }
 
 // A secret-free config is checked as it would be written: merged with this
