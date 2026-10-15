@@ -32,15 +32,18 @@ func TestBackupDirFollowsConfigPath(t *testing.T) {
 	if got, want := b.Directory(other), filepath.Join(filepath.Dir(other), "backups"); got != want {
 		t.Fatalf("dir = %s, want %s", got, want)
 	}
-	b.Dir = "/srv/b"
-	if got := b.Directory(other); got != "/srv/b" {
+	// Absolute on every platform: "/srv/b" has no drive letter, so Windows does
+	// not count it as absolute.
+	explicit := filepath.Join(t.TempDir(), "b")
+	b.Dir = explicit
+	if got := b.Directory(other); got != explicit {
 		t.Fatalf("explicit dir ignored: %s", got)
 	}
 }
 
 func TestBackupValueIssues(t *testing.T) {
 	ok := Default()
-	ok.Backup = BackupConfig{Enabled: true, Frequency: "Weekly", Time: "23:59", Weekday: "Friday", RetentionCount: 7, Dir: "/srv/b"}
+	ok.Backup = BackupConfig{Enabled: true, Frequency: "Weekly", Time: "23:59", Weekday: "Friday", RetentionCount: 7, Dir: filepath.Join(t.TempDir(), "b")}
 	if iss := ok.Backup.valueIssues(); len(iss) != 0 {
 		t.Fatalf("valid config flagged: %v", iss)
 	}
