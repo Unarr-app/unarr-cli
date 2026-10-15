@@ -56,6 +56,29 @@ func craftBackupFile(t *testing.T, members map[string]string) string {
 	return p
 }
 
+// A secret-free archive whose api_url differs from this machine's: the plan
+// warns, in the dry-run and again with --apply, that the api_key kept here
+// will be sent to the archive's server — and the restore still goes through.
+func TestRestoreWarnsWhenKeptKeyGoesToTheArchiveServer(t *testing.T) {
+	cfgPath := backupEnv(t, "")
+	writeBackupTestFile(t, cfgPath, "[auth]\napi_key = \"KEY-123\"\napi_url = \"http://evil.example\"\n")
+	if _, err := runBackup(t, "create"); err != nil {
+		t.Fatal(err)
+	}
+	es := mustList(t, localBackupDir())
+	writeBackupTestFile(t, cfgPath, "[auth]\napi_key = \"KEY-LOCAL\"\n")
+	const want = `! auth.api_url changes from "https://unarr.app" to the archive's "http://evil.example"`
+	for _, args := range [][]string{{"restore", es[0].Path}, {"restore", es[0].Path, "--apply"}} {
+		out, err := runBackup(t, args...)
+		if err != nil || !strings.Contains(out, want) {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	if b, _ := os.ReadFile(cfgPath); !strings.Contains(string(b), "KEY-LOCAL") || !strings.Contains(string(b), "evil.example") {
+		t.Fatalf("restored config:\n%s", b)
+	}
+}
+
 // Open only proves the archive intact; whether unarr can load its content is
 // the plan's call. So the line printed after Open says what was verified and
 // never reads "Backup OK" right before the plan refuses the content.

@@ -163,7 +163,8 @@ func mergeConfigSecrets(restored, current []byte) ([]byte, []string) {
 // mergeRedactedConfig fits a secret-free config.toml being restored onto the
 // current one: the credentials already here stay (mergeConfigSecrets), and so
 // does the agent id they belong to (keepLocalAgentID). It returns the config
-// to write and the warnings for the plan.
+// to write and the warnings for the plan — among them any new server those
+// credentials would be sent to (endpointWarnings).
 func mergeRedactedConfig(restored, current []byte) ([]byte, []string) {
 	merged, lost := mergeConfigSecrets(restored, current)
 	var warn []string
@@ -174,7 +175,7 @@ func mergeRedactedConfig(restored, current []byte) ([]byte, []string) {
 	if note != "" {
 		warn = append(warn, note)
 	}
-	return merged, warn
+	return merged, append(warn, endpointWarnings(merged, current)...)
 }
 
 // keepLocalAgentID stops a secret-free restore from pairing the archive's agent
