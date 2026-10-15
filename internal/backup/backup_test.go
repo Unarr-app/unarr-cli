@@ -234,6 +234,67 @@ func TestListAndPruneRetention(t *testing.T) {
 	}
 }
 
+// Pre-restore retention: the newest PreRestoreKeep stay, anything younger than
+// PreRestoreMaxAge stays, the spared snapshot stays, and other kinds are not
+// its business.
+func TestPrunePreRestoreRetention(t *testing.T) {
+	l := newLayout(t)
+	dir := t.TempDir()
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	snap := func(age time.Duration) string {
+		t.Helper()
+		res, err := create(CreateOptions{Layout: l, Dir: dir, Now: now.Add(-age)}, KindPreRestore)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Path
+	}
+	day := 24 * time.Hour
+	var young []string
+	for _, age := range []time.Duration{time.Hour, 2 * day, 3 * day, 4 * day} {
+		young = append(young, snap(age))
+	}
+	expired := snap(PreRestoreMaxAge + day)
+	spared := snap(PreRestoreMaxAge + 2*day)
+	manual, err := Create(CreateOptions{Layout: l, Dir: dir, Now: now.Add(-365 * day)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := PrunePreRestore(dir, now, spared)
+	if err != nil || len(removed) != 1 || removed[0] != expired {
+		t.Fatalf("removed %v (%v), want only %s", removed, err, expired)
+	}
+	for _, p := range append(young, spared, manual.Path) {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s removed: %v", filepath.Base(p), err)
+		}
+	}
+	// Past the age limit, the newest PreRestoreKeep still survive.
+	later := now.Add(10 * PreRestoreMaxAge)
+	if _, err := PrunePreRestore(dir, later, ""); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range mustListDir(t, dir) {
+		if e.Kind == KindPreRestore {
+			n++
+		}
+	}
+	if n != PreRestoreKeep {
+		t.Fatalf("%d snapshots left, want %d", n, PreRestoreKeep)
+	}
+}
+
+func mustListDir(t *testing.T, dir string) []Entry {
+	t.Helper()
+	es, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return es
+}
+
 // craft builds a zip with arbitrary members.
 func craft(t *testing.T, members map[string]string) string {
 	t.Helper()

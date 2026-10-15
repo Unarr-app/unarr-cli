@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
@@ -32,7 +33,9 @@ func newBackupRestoreCmd() *cobra.Command {
 		Long: `Verify the archive (manifest + SHA-256 of every file) and show what would change.
 Nothing is written without --apply. With --apply the daemon must be stopped,
 and a pre-restore snapshot of the current state is saved first, beside
-config.toml (it holds the current secrets, so it never goes to [backup] dir).`,
+config.toml (it holds the current secrets, so it never goes to [backup] dir).
+After a successful restore, older snapshots are trimmed: ` + preRestoreRetention() + `
+(see 'unarr backup prune --pre-restore').`,
 		Example: "  unarr backup restore ~/unarr-backup.zip\n  unarr backup restore ~/unarr-backup.zip --apply",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -85,12 +88,10 @@ func applyRestore(w io.Writer, arc *backup.Archive, dir string) error {
 		fmt.Fprintln(w, "Nothing to change.")
 		return nil
 	}
-	if dir == "" {
-		// The snapshot keeps the CURRENT secrets in the clear, so it stays beside
-		// config.toml even when [backup] dir points at a NAS or a cloud folder.
-		dir = config.DefaultBackupDir(resolvedConfigPath())
-	}
+	dir = preRestoreDir(dir)
 	if err := plan.Apply(backup.ApplyOptions{SnapshotDir: dir, Version: Version}); err != nil {
+		// Nothing is pruned: the snapshot just taken may be the only copy of
+		// the state the failed restore could not put back.
 		return err
 	}
 	if plan.PreRestore == "" {
@@ -98,7 +99,43 @@ func applyRestore(w io.Writer, arc *backup.Archive, dir string) error {
 	} else {
 		fmt.Fprintf(w, "Restored. Previous state saved to %s\n", plan.PreRestore)
 	}
+	// The restore is done: a failed trim is reported, not returned.
+	removed, err := backup.PrunePreRestore(dir, time.Now(), plan.PreRestore)
+	if len(removed) > 0 {
+		fmt.Fprintf(w, "Retention: removed %d old pre-restore snapshot(s); %s.\n", len(removed), preRestoreRetention())
+	}
+	if err != nil {
+		fmt.Fprintf(w, "  ! could not remove old pre-restore snapshots: %v\n", err)
+	}
 	return nil
+}
+
+// preRestoreDir is where pre-restore snapshots live: override, else beside
+// config.toml. A snapshot keeps the CURRENT secrets in the clear, so it stays
+// local even when [backup] dir points at a NAS or a cloud folder.
+func preRestoreDir(override string) string {
+	if override != "" {
+		return override
+	}
+	return config.DefaultBackupDir(resolvedConfigPath())
+}
+
+// preRestoreRetention words backup.PrunePreRestore's policy for humans.
+func preRestoreRetention() string {
+	return fmt.Sprintf("the newest %d and any younger than %d days are kept",
+		backup.PreRestoreKeep, int(backup.PreRestoreMaxAge/(24*time.Hour)))
+}
+
+// runPrunePreRestore is `unarr backup prune --pre-restore`.
+func runPrunePreRestore(w io.Writer, dir string) error {
+	removed, err := backup.PrunePreRestore(preRestoreDir(dir), time.Now(), "")
+	for _, p := range removed {
+		fmt.Fprintf(w, "removed %s\n", p)
+	}
+	if err == nil {
+		fmt.Fprintf(w, "pre-restore snapshots: %s; removed %d\n", preRestoreRetention(), len(removed))
+	}
+	return err
 }
 
 func printRestorePlan(w io.Writer, plan backup.Plan) {

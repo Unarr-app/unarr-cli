@@ -201,14 +201,23 @@ func entryTags(e backup.Entry) string {
 func newBackupPruneCmd() *cobra.Command {
 	var dir string
 	var keep int
+	var preRestore bool
 	cmd := &cobra.Command{
 		Use:   "prune",
 		Short: "Delete old backups, keeping the newest [backup] retention_count",
 		Long: `Delete all but the newest manual and scheduled backups in the backup directory.
-Pre-restore snapshots are never pruned. (The daemon's own retention only ever
-deletes scheduled backups.)`,
-		Args: cobra.NoArgs,
+Pre-restore snapshots are left alone. (The daemon's own retention only ever
+deletes scheduled backups.)
+
+--pre-restore trims the pre-restore snapshots instead — they sit beside
+config.toml and hold this machine's secrets in the clear: ` + preRestoreRetention() + `.
+A successful 'unarr backup restore --apply' does the same on its own.`,
+		Example: "  unarr backup prune --keep 3\n  unarr backup prune --pre-restore",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if preRestore {
+				return runPrunePreRestore(cmd.OutOrStdout(), dir)
+			}
 			d, err := backupDir(dir)
 			if err != nil {
 				return err
@@ -226,7 +235,9 @@ deletes scheduled backups.)`,
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&dir, "dir", "", "backup directory (default: [backup] dir)")
+	cmd.Flags().StringVar(&dir, "dir", "", "backup directory (default: [backup] dir; with --pre-restore, <config dir>/backups)")
 	cmd.Flags().IntVar(&keep, "keep", 0, "how many to keep (default: [backup] retention_count)")
+	cmd.Flags().BoolVar(&preRestore, "pre-restore", false, "trim pre-restore snapshots instead, with their fixed retention")
+	cmd.MarkFlagsMutuallyExclusive("keep", "pre-restore")
 	return cmd
 }

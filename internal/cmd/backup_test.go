@@ -7,8 +7,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofrs/flock"
 
@@ -242,6 +244,136 @@ func TestRestoreKeepsLocalAgentIDAndSaysSo(t *testing.T) {
 	if got := string(b); !strings.Contains(got, `id = "NEW-AGENT"`) || strings.Contains(got, "OLD-AGENT") ||
 		!strings.Contains(got, "KEY-NEW") || !strings.Contains(got, "/tmp/dl") {
 		t.Fatalf("restored config:\n%s", got)
+	}
+}
+
+// preRestoreName is a snapshot file name for the given time.
+func preRestoreName(at time.Time) string {
+	return "unarr-prerestore-" + at.UTC().Format("20060102T150405Z") + ".zip"
+}
+
+func countPreRestore(t *testing.T, dir string) (n int) {
+	t.Helper()
+	for _, e := range mustList(t, dir) {
+		if e.Kind == backup.KindPreRestore {
+			n++
+		}
+	}
+	return n
+}
+
+// Each --apply leaves a snapshot holding the secrets in the clear: a successful
+// restore trims the old ones (newest 3 kept, younger than 30 days kept), never
+// the one it just took.
+func TestRestoreApplyPrunesOldPreRestoreSnapshots(t *testing.T) {
+	cfgPath := backupEnv(t, "")
+	if _, err := runBackup(t, "create"); err != nil {
+		t.Fatal(err)
+	}
+	dir := localBackupDir()
+	archive := mustList(t, dir)[0].Path
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range 4 {
+		writeBackupTestFile(t, filepath.Join(dir, preRestoreName(old.AddDate(0, 0, i))), "x")
+	}
+	recent := filepath.Join(dir, preRestoreName(time.Now().Add(-48*time.Hour)))
+	writeBackupTestFile(t, recent, "x")
+	writeBackupTestFile(t, cfgPath, "[downloads]\ndir = \"/changed\"\n")
+
+	out, err := runBackup(t, "restore", archive, "--apply")
+	if err != nil || !strings.Contains(out, "removed 3 old pre-restore snapshot") {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+	es := mustList(t, dir)
+	if n := countPreRestore(t, dir); n != 3 {
+		t.Fatalf("pre-restore snapshots left: %d, want 3: %+v", n, es)
+	}
+	for _, keep := range []string{recent, filepath.Join(dir, preRestoreName(old.AddDate(0, 0, 3)))} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Fatalf("%s pruned: %v", keep, err)
+		}
+	}
+	newest := ""
+	for _, e := range es {
+		if e.Kind == backup.KindPreRestore {
+			newest = e.Path
+			break
+		}
+	}
+	if !strings.Contains(out, "Previous state saved to "+newest+"\n") {
+		t.Fatalf("the snapshot this restore took is gone or not the newest: %+v\n%s", es, out)
+	}
+	if _, err := os.Stat(archive); err != nil {
+		t.Fatalf("a manual backup was pruned: %v", err)
+	}
+}
+
+// A restore that fails prunes nothing: the snapshot it took may be the only
+// copy of the state it could not put back.
+func TestFailedRestorePrunesNoSnapshot(t *testing.T) {
+	// Linux only: root bypasses the chmod, Windows ignores it, and on macOS the
+	// data dir is the config dir, which the restore must still be able to lock.
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		t.Skip("needs a non-root Linux user to make the data dir unwritable")
+	}
+	cfgPath := backupEnv(t, "")
+	tasks := filepath.Join(config.DataDir(), "active-tasks.json")
+	writeBackupTestFile(t, tasks, "[]")
+	if _, err := runBackup(t, "create"); err != nil {
+		t.Fatal(err)
+	}
+	dir := localBackupDir()
+	archive := mustList(t, dir)[0].Path
+	for i := range 4 {
+		writeBackupTestFile(t, filepath.Join(dir, preRestoreName(time.Date(2020, 1, 1+i, 0, 0, 0, 0, time.UTC))), "x")
+	}
+	writeBackupTestFile(t, cfgPath, "[downloads]\ndir = \"/changed\"\n")
+	writeBackupTestFile(t, tasks, "[{\"id\":\"other\"}]")
+	if err := os.Chmod(filepath.Dir(tasks), 0o500); err != nil { // the tasks write now fails
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(filepath.Dir(tasks), 0o755) })
+
+	if out, err := runBackup(t, "restore", archive, "--apply"); err == nil {
+		t.Fatalf("restore succeeded:\n%s", out)
+	}
+	if n := countPreRestore(t, dir); n != 5 {
+		t.Fatalf("pre-restore snapshots left: %d, want all 4 old ones plus the new one", n)
+	}
+}
+
+// `prune --pre-restore` applies the same retention on demand, in the folder the
+// snapshots live in (beside config.toml, not [backup] dir), and touches nothing
+// else.
+func TestBackupCLIPrunePreRestore(t *testing.T) {
+	nas := t.TempDir()
+	backupEnv(t, "[backup]\ndir = "+tomlQuote(nas)+"\n")
+	dir := localBackupDir()
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range 5 {
+		writeBackupTestFile(t, filepath.Join(dir, preRestoreName(old.AddDate(0, 0, i))), "x")
+	}
+	manual := filepath.Join(dir, "unarr-backup-20190101T000000Z.zip")
+	writeBackupTestFile(t, manual, "x")
+
+	if _, err := runBackup(t, "prune"); err != nil {
+		t.Fatal(err)
+	}
+	if n := countPreRestore(t, dir); n != 5 {
+		t.Fatalf("plain prune touched pre-restore snapshots: %d left", n)
+	}
+	out, err := runBackup(t, "prune", "--pre-restore")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if n := countPreRestore(t, dir); n != 3 {
+		t.Fatalf("pre-restore snapshots left: %d, want 3\n%s", n, out)
+	}
+	if _, err := os.Stat(manual); err != nil {
+		t.Fatalf("prune --pre-restore removed a manual backup: %v", err)
+	}
+	if _, err := runBackup(t, "prune", "--pre-restore", "--keep", "1"); err == nil {
+		t.Fatal("--keep accepted with --pre-restore, whose retention is fixed")
 	}
 }
 

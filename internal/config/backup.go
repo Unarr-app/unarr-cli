@@ -35,7 +35,8 @@ type BackupConfig struct {
 	// Weekday applies to frequency = "weekly" only (default "sunday").
 	Weekday string `toml:"weekday,omitempty"`
 	// RetentionCount is how many SCHEDULED backups the scheduler keeps (default
-	// 3). Manual and pre-restore archives are never deleted automatically.
+	// 3). Manual archives are never deleted automatically; pre-restore snapshots
+	// have a fixed retention of their own (backup.PrunePreRestore).
 	RetentionCount int `toml:"retention_count,omitempty"`
 	// Dir overrides where archives are stored (default <config dir>/backups).
 	Dir string `toml:"dir,omitempty"`

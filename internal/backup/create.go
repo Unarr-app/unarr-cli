@@ -28,7 +28,8 @@ const (
 	KindManual Kind = iota
 	// KindScheduled is the daemon's [backup] schedule, which prunes its own.
 	KindScheduled
-	// KindPreRestore is the undo button for a restore; never deleted automatically.
+	// KindPreRestore is the undo button for a restore. Only its own retention
+	// (PrunePreRestore, after a restore that succeeded) deletes it.
 	KindPreRestore
 )
 

@@ -76,19 +76,39 @@ func parseEntryName(name string) (Entry, bool) {
 }
 
 // Prune deletes all but the newest keep manual and scheduled backups in dir —
-// the explicit `unarr backup prune`. Pre-restore snapshots are never pruned.
+// the explicit `unarr backup prune`. Pre-restore snapshots have their own
+// retention (PrunePreRestore).
 func Prune(dir string, keep int) ([]string, error) {
-	return prune(dir, keep, func(e Entry) bool { return e.Kind != KindPreRestore })
+	return prune(dir, keep, func(e Entry) bool { return e.Kind != KindPreRestore }, nil)
 }
 
 // pruneScheduled is the scheduler's retention: it only ever deletes archives
 // the scheduler wrote, so an encrypted manual backup — the one copy that holds
 // the secrets — cannot age out behind the user's back.
 func pruneScheduled(dir string, keep int) ([]string, error) {
-	return prune(dir, keep, func(e Entry) bool { return e.Kind == KindScheduled })
+	return prune(dir, keep, func(e Entry) bool { return e.Kind == KindScheduled }, nil)
 }
 
-func prune(dir string, keep int, eligible func(Entry) bool) ([]string, error) {
+// Pre-restore retention. A snapshot is the undo button for a restore AND a
+// cleartext copy of this machine's secrets, so it must neither go early nor
+// pile up forever: the newest PreRestoreKeep always stay, and an older one only
+// goes once it is PreRestoreMaxAge old.
+const (
+	PreRestoreKeep   = 3
+	PreRestoreMaxAge = 30 * 24 * time.Hour
+)
+
+// PrunePreRestore applies the pre-restore retention to the snapshots in dir as
+// of now. spare is never deleted: it is the snapshot a restore has just taken.
+func PrunePreRestore(dir string, now time.Time, spare string) ([]string, error) {
+	return prune(dir, PreRestoreKeep,
+		func(e Entry) bool { return e.Kind == KindPreRestore },
+		func(e Entry) bool { return e.Path == spare || now.Sub(e.CreatedAt) < PreRestoreMaxAge })
+}
+
+// prune deletes the eligible archives in dir past the newest keep, except those
+// holdBack (nil = none) reports.
+func prune(dir string, keep int, eligible, holdBack func(Entry) bool) ([]string, error) {
 	if keep < 1 {
 		keep = 1 // never delete the last copy
 	}
@@ -102,7 +122,7 @@ func prune(dir string, keep int, eligible func(Entry) bool) ([]string, error) {
 		if !eligible(e) {
 			continue
 		}
-		if n++; n <= keep {
+		if n++; n <= keep || (holdBack != nil && holdBack(e)) {
 			continue
 		}
 		if err := os.Remove(e.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
