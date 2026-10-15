@@ -222,6 +222,35 @@ func TestBackupCLIPrune(t *testing.T) {
 	}
 }
 
+// A relative [backup] dir is invalid — `unarr config check` flags it and the
+// daemon will not schedule it — so the subcommands refuse it too, before
+// touching anything, instead of resolving it against the working directory.
+func TestBackupCommandsRefuseRelativeConfigDir(t *testing.T) {
+	backupEnv(t, "[backup]\ndir = \"rel\"\n")
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	stray := filepath.Join(cwd, "rel")
+	for _, n := range []string{"unarr-backup-20260101T030000Z.zip", "unarr-backup-20260102T030000Z.zip"} {
+		writeBackupTestFile(t, filepath.Join(stray, n), "x")
+	}
+	for _, args := range [][]string{{"prune", "--keep", "1"}, {"list"}, {"create"}} {
+		out, err := runBackup(t, args...)
+		if err == nil || !strings.Contains(err.Error(), "backup.dir") || !strings.Contains(err.Error(), "absolute") {
+			t.Fatalf("%v: err = %v\n%s", args, err, out)
+		}
+	}
+	if es := mustList(t, stray); len(es) != 2 {
+		t.Fatalf("a relative [backup] dir was used: %+v", es)
+	}
+	// Commands that do not use [backup] dir are not blocked by it.
+	if out, err := runBackup(t, "create", "--out", filepath.Join(t.TempDir(), "b.zip")); err != nil {
+		t.Fatalf("create --out: %v\n%s", err, out)
+	}
+	if out, err := runBackup(t, "list", "--dir", stray); err != nil || !strings.Contains(out, "20260102") {
+		t.Fatalf("list --dir: %v\n%s", err, out)
+	}
+}
+
 // An invalid [backup] table is reported once at daemon start instead of being
 // silently never scheduled.
 func TestDaemonLogsInvalidBackupSchedule(t *testing.T) {

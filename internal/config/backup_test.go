@@ -75,6 +75,32 @@ func TestBackupValueIssues(t *testing.T) {
 	}
 }
 
+// CheckedDirectory is the gate for code about to read, write or delete in the
+// backup dir: it refuses exactly what Validate (and `unarr config check`)
+// rejects, so the CLI, the daemon and config check cannot disagree.
+func TestBackupCheckedDirectoryMatchesValidate(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	abs := t.TempDir()
+	for dir, bad := range map[string]bool{
+		"": false, abs: false, " " + abs + " ": false,
+		"rel": true, "./backups": true, "~/backups": true,
+	} {
+		b := BackupConfig{Dir: dir}
+		got, err := b.CheckedDirectory(cfgPath)
+		if (err != nil) != bad || (b.Validate() != nil) != bad {
+			t.Errorf("dir %q: CheckedDirectory err = %v, Validate = %v, want refused=%v", dir, err, b.Validate(), bad)
+			continue
+		}
+		if bad {
+			if !strings.Contains(err.Error(), "backup.dir") || !strings.Contains(err.Error(), "absolute") {
+				t.Errorf("dir %q: unclear error %q", dir, err)
+			}
+		} else if got != b.Directory(cfgPath) {
+			t.Errorf("dir %q: CheckedDirectory = %q, Directory = %q", dir, got, b.Directory(cfgPath))
+		}
+	}
+}
+
 func TestBackupTableLoadsAndIsOmittedWhenUnset(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(p, []byte("[backup]\nenabled = true\nfrequency = \"weekly\"\ntime = \"04:30\"\nretention_count = 5\n"), 0o600); err != nil {

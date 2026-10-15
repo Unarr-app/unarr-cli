@@ -39,11 +39,15 @@ func backupLayout() backup.Layout {
 	return backup.Layout{ConfigPath: resolvedConfigPath(), DataDir: config.DataDir()}
 }
 
-func backupDir(override string) string {
+// backupDir is --dir when given (relative to the working directory, like any
+// path typed on a command line), else [backup] dir — refused when invalid, so a
+// relative dir in config.toml never sends create, list or prune into whatever
+// directory the command happens to run from.
+func backupDir(override string) (string, error) {
 	if override != "" {
-		return override
+		return override, nil
 	}
-	return loadConfig().Backup.Directory(resolvedConfigPath())
+	return loadConfig().Backup.CheckedDirectory(resolvedConfigPath())
 }
 
 type passphraseFlags struct {
@@ -104,7 +108,13 @@ func newBackupCreateCmd() *cobra.Command {
 		Example: "  unarr backup create\n  unarr backup create --out ~/unarr-backup.zip\n  unarr backup create --encrypt",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			w := cmd.OutOrStdout()
+			dir := ""
+			if out == "" { // --out bypasses [backup] dir, so only then must it be valid
+				var err error
+				if dir, err = backupDir(""); err != nil {
+					return err
+				}
+			}
 			pass := ""
 			if encrypt {
 				var err error
@@ -114,21 +124,12 @@ func newBackupCreateCmd() *cobra.Command {
 			}
 			res, err := backup.Create(backup.CreateOptions{
 				Layout: backupLayout(), Version: Version, Out: out,
-				Dir: backupDir(""), Passphrase: pass,
+				Dir: dir, Passphrase: pass,
 			})
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(w, "Backup written: %s\n", res.Path)
-			for _, f := range res.Manifest.Files {
-				fmt.Fprintf(w, "  %-18s %6d bytes  sha256 %s…\n", f.Name, f.Size, f.SHA256[:12])
-			}
-			if pass == "" {
-				fmt.Fprintf(w, "Secrets were NOT included (%s, download URLs). Use --encrypt to include them.\n",
-					strings.Join(backup.RedactedConfigKeys(), ", "))
-			} else {
-				fmt.Fprintln(w, "Archive is encrypted (AES-256-GCM). Keep the passphrase: it cannot be recovered.")
-			}
+			printBackupCreated(cmd.OutOrStdout(), res, pass != "")
 			return nil
 		},
 	}
@@ -136,6 +137,19 @@ func newBackupCreateCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&encrypt, "encrypt", false, "encrypt with a passphrase and include secrets")
 	pf.bind(cmd)
 	return cmd
+}
+
+func printBackupCreated(w io.Writer, res backup.Result, encrypted bool) {
+	fmt.Fprintf(w, "Backup written: %s\n", res.Path)
+	for _, f := range res.Manifest.Files {
+		fmt.Fprintf(w, "  %-18s %6d bytes  sha256 %s…\n", f.Name, f.Size, f.SHA256[:12])
+	}
+	if encrypted {
+		fmt.Fprintln(w, "Archive is encrypted (AES-256-GCM). Keep the passphrase: it cannot be recovered.")
+		return
+	}
+	fmt.Fprintf(w, "Secrets were NOT included (%s, download URLs). Use --encrypt to include them.\n",
+		strings.Join(backup.RedactedConfigKeys(), ", "))
 }
 
 func newBackupListCmd() *cobra.Command {
@@ -146,7 +160,10 @@ func newBackupListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			w := cmd.OutOrStdout()
-			d := backupDir(dir)
+			d, err := backupDir(dir)
+			if err != nil {
+				return err
+			}
 			entries, err := backup.List(d)
 			if err != nil {
 				return err
@@ -192,10 +209,14 @@ Pre-restore snapshots are never pruned. (The daemon's own retention only ever
 deletes scheduled backups.)`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			d, err := backupDir(dir)
+			if err != nil {
+				return err
+			}
 			if keep <= 0 {
 				keep = loadConfig().Backup.Retention()
 			}
-			removed, err := backup.Prune(backupDir(dir), keep)
+			removed, err := backup.Prune(d, keep)
 			for _, p := range removed {
 				fmt.Fprintf(cmd.OutOrStdout(), "removed %s\n", p)
 			}

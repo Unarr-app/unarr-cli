@@ -79,6 +79,25 @@ func (b BackupConfig) Directory(configPath string) string {
 	return DefaultBackupDir(configPath)
 }
 
+// CheckedDirectory is Directory for code about to read, write or delete there:
+// it refuses a dir that Validate rejects instead of resolving a relative one
+// against whatever the working directory happens to be.
+func (b BackupConfig) CheckedDirectory(configPath string) (string, error) {
+	if msg := b.dirIssue(); msg != "" {
+		return "", fmt.Errorf("backup.dir %q %s (see `unarr config check`)", b.Dir, msg)
+	}
+	return b.Directory(configPath), nil
+}
+
+// dirIssue is the one rule for [backup] dir, shared by Validate and
+// CheckedDirectory. It judges the value Directory would use.
+func (b BackupConfig) dirIssue() string {
+	if d := strings.TrimSpace(b.Dir); d != "" && !filepath.IsAbs(d) {
+		return "must be an absolute path"
+	}
+	return ""
+}
+
 // DefaultBackupDir is "backups" beside config.toml. Derived from the config
 // path actually in use (like MountConfig.NZBDirectory) so a second agent run
 // with --config never shares, prunes or schedules off another agent's archives.
@@ -144,8 +163,8 @@ func (b BackupConfig) valueIssues() issueList {
 	if b.RetentionCount < 0 {
 		l.add("backup.retention_count", fmt.Sprintf("%d must be zero or positive (0 = default %d)", b.RetentionCount, defaultBackupRetention))
 	}
-	if b.Dir != "" && !filepath.IsAbs(b.Dir) {
-		l.add("backup.dir", "must be an absolute path")
+	if msg := b.dirIssue(); msg != "" {
+		l.add("backup.dir", msg)
 	}
 	return l
 }

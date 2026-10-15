@@ -637,7 +637,7 @@ retention_count = 3       # scheduled backups to keep
 # dir = "/srv/unarr-backups"   # default: <config dir>/backups
 ```
 
-`retention_count` only ever deletes scheduled backups (`unarr-scheduled-<stamp>.zip`): a manual archive — say the encrypted one holding your secrets — is never pruned behind your back. `unarr config check` validates this table. The default folder is next to the `config.toml` in use (so `--config` gets its own) rather than in the data dir, because `unarr clean --all` wipes the data dir on Linux and Windows. On macOS the data dir *is* the config dir, so `unarr clean --all` removes the backups too — point `dir` elsewhere there.
+`retention_count` only ever deletes scheduled backups (`unarr-scheduled-<stamp>.zip`): a manual archive — say the encrypted one holding your secrets — is never pruned behind your back. `unarr config check` validates this table. `dir` must be an absolute path: a relative one would depend on the directory unarr happens to run from, so the daemon does not schedule it and `unarr backup create` / `list` / `prune` refuse it before touching anything (their `--dir` and `--out` flags are ordinary command-line paths, relative to where you run them). The default folder is next to the `config.toml` in use (so `--config` gets its own) rather than in the data dir, because `unarr clean --all` wipes the data dir on Linux and Windows. On macOS the data dir *is* the config dir, so `unarr clean --all` removes the backups too — point `dir` elsewhere there.
 
 ## Library clean (hygiene sweep)
 
