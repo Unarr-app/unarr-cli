@@ -43,6 +43,7 @@ var configFields = map[string]Sensitivity{
 	"Mount.NZBDir":            Publishable,
 	"Mount.RefreshInterval":   Publishable,
 	"Metrics.Enabled":         Publishable,
+	"Metrics.Publish":         Publishable,
 	"Metrics.Listen":          Publishable,
 	"Metrics.Token":           Secret,
 

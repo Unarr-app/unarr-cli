@@ -7,8 +7,13 @@ import (
 
 // MetricsConfig gates the optional Prometheus endpoint. Off by default: a
 // disabled feature binds no port and runs no goroutine for /metrics.
+//
+// Publish is separate: it sends the session view to the web (POST
+// /api/internal/agent/sessions) and is ON by default, whatever Enabled says.
 type MetricsConfig struct {
 	Enabled bool `toml:"enabled"`
+	// Publish sends the session snapshot to the web. false = nothing is sent.
+	Publish bool `toml:"publish"`
 	// Listen is the host:port to bind. Default 127.0.0.1:9877 (loopback).
 	Listen string `toml:"listen,omitempty"`
 	// Token is the bearer token scrapers must present. Empty = reuse the

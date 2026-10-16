@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -57,6 +58,39 @@ func TestMetricsRoundTripAndKnownKeys(t *testing.T) {
 	}
 	if issues := out.ValueIssues(); len(issues) != 0 {
 		t.Fatalf("issues: %v", issues)
+	}
+}
+
+// Publishing the session view to the web is on by default and independent of
+// the Prometheus switch: a config predating the key, or one that only turns
+// Prometheus on or off, still publishes. Only an explicit false turns it off.
+func TestMetricsPublishDefaultsOn(t *testing.T) {
+	if !Default().Metrics.Publish {
+		t.Fatal("Default() must publish")
+	}
+	cases := map[string]bool{
+		"":                             true,
+		"[metrics]\nenabled = true\n":  true,
+		"[metrics]\nenabled = false\n": true,
+		"[metrics]\npublish = false\n": false,
+		"[metrics]\npublish = true\n":  true,
+		"[metrics]\nenabled = true\npublish = false\n": false,
+	}
+	for body, want := range cases {
+		f := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Metrics.Publish != want {
+			t.Errorf("%q: publish = %v, want %v", body, c.Metrics.Publish, want)
+		}
+		if len(c.UnknownKeys()) != 0 {
+			t.Errorf("%q: unknown keys %v", body, c.UnknownKeys())
+		}
 	}
 }
 

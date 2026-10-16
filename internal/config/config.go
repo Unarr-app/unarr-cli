@@ -711,6 +711,7 @@ func Default() Config {
 				RemoveCorruptVideos:   false, // heuristic — opt-in only (see CleanupConfig)
 			},
 		},
+		Metrics: MetricsConfig{Publish: true},
 	}
 }
 
