@@ -430,6 +430,35 @@ data, a transcode below realtime, a mount read that moves no bytes) and
 check, and it only ends after 10 s of healthy flow, so a rate flapping around the
 threshold is one stall.
 
+### Publishing to the web
+
+The daemon sends that same snapshot to your unarr account, so the website's
+sessions page can show it. It is on by default and does not depend on the
+Prometheus switch below.
+
+```toml
+[metrics]
+publish = false   # stop sending the session snapshot to the web
+```
+
+- **Cadence:** every 5 s while at least one session exists. When the last one
+  ends, one empty snapshot is sent, then one every 30 s as a heartbeat.
+- **What is sent:** the `unarr status --sessions --json` document (see
+  [`internal/metrics/SCHEMA.md`](internal/metrics/SCHEMA.md)) and the agent id:
+  session kind, state, health, rates, bytes, progress, stall counts, the VPN
+  state and the session titles — the release or file names of what the website
+  already asked this machine to download or play. No file paths, IPs, tokens or
+  URLs: a title that looks like an absolute path is cut to its last element, and
+  one that looks like a URL is sent empty.
+- **Limits:** at most 50 sessions and 64 KiB per snapshot; anything beyond that
+  is dropped from the end of the list (the summary still counts it).
+- **Failures never hold up the daemon:** one request at a time on its own
+  goroutine, 5 s timeout, nothing queued — a snapshot that does not arrive is
+  replaced by the next one. A website that does not support it yet (HTTP 404)
+  is asked again every 10 minutes, with one log line. Other errors are logged
+  once per failure streak.
+- Changing `publish` takes effect after `unarr daemon restart`.
+
 ### Prometheus endpoint (optional)
 
 Off by default: nothing listens until you opt in.

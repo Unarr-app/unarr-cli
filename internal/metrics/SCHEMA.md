@@ -126,3 +126,28 @@ A daemon goroutine polls every source every 5 s; that tick feeds the stall
 monitor. Each `GET /sessions` (and `/metrics` scrape) also takes a fresh sample,
 which never double-counts a stall — the monitor works on timestamps. Rates
 derived from byte deltas are recomputed at most once per second.
+
+## Publishing to the web
+
+Unless `[metrics] publish = false`, the daemon also sends this document to the
+web (`internal/metrics/publish.go`). Independent of `[metrics] enabled`.
+
+* **Request:** `POST /api/internal/agent/sessions`, the agent's usual
+  `Authorization: Bearer` key, body
+  `{"agentId": "<agent id>", "snapshot": <this document, schemaVersion 1>}`.
+  Expected answer: `200 {"ok":true}`.
+* **Cadence:** every 5 s while `sessions` is non-empty; once it empties, ONE
+  empty snapshot, then one every 30 s (heartbeat). A session that appears during
+  the heartbeat wait is sent on the next 5 s tick. A consumer should treat a
+  snapshot older than ~45 s as "no data from this agent", not as live sessions.
+* **Differences from `GET /sessions`:** at most 50 `sessions` and 64 KiB minus a
+  512-byte margin for the envelope; over a cap, rows are dropped from the end of
+  the (sorted) list. There is no `truncated` flag in v1, so `summary` may count
+  more sessions than `sessions` holds. A `title` that is an absolute path is
+  reduced to its last element; one containing `://` or starting `magnet:` is
+  sent as `""`.
+* **Answers:** `404`/`405` from the app (not the edge proxy's bare 404) = a web
+  without the endpoint — no request for 10 min, logged once. `400`/`413` — logged
+  once, retried after 30 s, doubling up to 10 min. Anything else (network, `5xx`,
+  `401`/`403`) — the snapshot is dropped and the next tick sends a fresh one;
+  logged once per failure streak. One request in flight at most, 5 s timeout.
