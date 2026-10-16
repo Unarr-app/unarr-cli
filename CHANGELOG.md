@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] - 2026-10-16
+
+
+### Added
+
+- **agent**: PublishSessions contra POST /api/internal/agent/sessions
+- **config**: [metrics] publish, activo por defecto
+- **daemon**: publica el snapshot de sesiones a la web
+- **metrics**: publisher del snapshot de sesiones hacia la web
+- **metrics**: vista unificada de sesiones, salud y endpoint Prometheus
+
+### Documentation
+
+- **metrics**: vida de la sesión mount y snapshot vacío al parar
+- **metrics**: sección "Publishing to the web" en README y SCHEMA.md
+
+### Fixed
+
+- **backup**: el archivo sin secretos también vacía [metrics] token
+- **backup**: no fiarse de un archivo sin cifrar que trae credenciales
+- **backup**: avisar del api_url aunque el config local no parsee
+- **config**: config check falla si config.toml no carga
+- **engine**: servedWriter conserva io.ReaderFrom
+- **metrics**: snapshot vacío final al parar el publisher
+- **metrics**: la sesión mount sobrevive 15 s a su última lectura
+- **metrics**: Title acotado a 200 runas y comentarios de session.go
+- **metrics**: unarr status --json vuelve a dar el texto de siempre
+- **metrics**: el reload avisa de que [metrics] necesita reinicio
+- **metrics**: timeouts en /metrics y en el control plane
+- **metrics**: vpn, states y onStall fuera del lock del hub
+- **metrics**: bytes de la sesión, no los acumulados del proceso
+- **metrics**: la primera muestra no cuenta como flujo parado
+- **metrics**: clave (kind,id) para que download y stream no se pisen
 ## [1.19.0] - 2026-10-15
 
 
@@ -20,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **backup**: rutas absolutas de la plataforma en los tests de config
 - **backup**: avisar si las credenciales conservadas irían a otro servidor
 - **backup**: restore no anuncia "Backup OK" antes de validar el contenido
 - **backup**: validar la cola con el tipo de tarea del daemon
@@ -33,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **backup**: retencion de los snapshots pre-restore
 - **backup**: conservar el agent id local al restaurar un archivo sin secretos
 - **backup**: rechazar un [backup] dir relativo en create/list/prune
+
+### Other
+
+- **release**: 1.19.0
 ## [1.18.2] - 2026-10-12
 
 
@@ -2110,6 +2148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.20.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.18.2...v1.19.0
 [1.18.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.18.1...v1.18.2
 [1.18.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.18.0...v1.18.1
