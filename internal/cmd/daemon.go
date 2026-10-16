@@ -913,6 +913,8 @@ func runDaemonStart() error {
 		vpnTunnel: vpnTunnel, controller: controller,
 	})
 	startSessionView(ctx, sessionHub, cfg.Metrics, ctrlToken)
+	stopSessionPublish := startSessionPublisher(ctx, sessionHub, cfg.Metrics, webSessionPoster{client: agentClient, agentID: creds.agent})
+	defer stopSessionPublish()
 	if ctrlSrv != nil {
 		ctrlSrv.SetSessions(sessionHub)
 		if err := ctrlSrv.Listen(ctx); err != nil {
