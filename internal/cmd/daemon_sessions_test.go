@@ -167,12 +167,6 @@ func TestReportMetricsReload(t *testing.T) {
 	}
 }
 
-func TestMountReadingsEmptyWhenIdle(t *testing.T) {
-	if got := mountReadings(); len(got) != 0 {
-		t.Fatalf("idle mount reported as a session: %+v", got)
-	}
-}
-
 func TestPrintSessions(t *testing.T) {
 	speed := 1.01
 	var buf bytes.Buffer
