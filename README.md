@@ -442,7 +442,9 @@ publish = false   # stop sending the session snapshot to the web
 ```
 
 - **Cadence:** every 5 s while at least one session exists. When the last one
-  ends, one empty snapshot is sent, then one every 30 s as a heartbeat.
+  ends, one empty snapshot is sent, then one every 30 s as a heartbeat. Stopping
+  the daemon sends one last empty snapshot (waiting at most 2 s for it), so the
+  website clears this machine's sessions straight away.
 - **What is sent:** the `unarr status --sessions --json` document (see
   [`internal/metrics/SCHEMA.md`](internal/metrics/SCHEMA.md)) and the agent id:
   session kind, state, health, rates, bytes, progress, stall counts, the VPN

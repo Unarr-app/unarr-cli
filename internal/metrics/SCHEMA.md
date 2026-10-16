@@ -77,7 +77,7 @@ The same document is printed by `unarr status --sessions --json`.
 | Field | Type | Notes |
 |-------|------|-------|
 | `id` | string | task id (`download`, `stream`), HLS session id (`hls`), `"mount"` (`mount`). Stable for the life of the session. **Not unique on its own:** a file streamed while it downloads appears as a `download` and a `stream` row with the same task id. The unique key of a session is the pair (`kind`, `id`). |
-| `kind` | `"download"` \| `"hls"` \| `"stream"` \| `"mount"` | `hls` = in-browser transcode/copy playback; `stream` = direct single-file stream with a reader attached; `mount` = the WebDAV remote folder (one aggregate session, present only while a read is in flight) |
+| `kind` | `"download"` \| `"hls"` \| `"stream"` \| `"mount"` | `hls` = in-browser transcode/copy playback; `stream` = direct single-file stream with a reader attached; `mount` = the WebDAV remote folder (one aggregate session: it opens on the first read and stays open — same `startedAt`, `bytes` keep adding up — until 15 s pass with no read in flight and no byte served; players read in bursts, so `rateBps` is often 0 inside an open session) |
 | `title` | string | display title; may be empty (`stream` without a known task, …) |
 | `state` | string | `download`: the manager status (`resolving`, `downloading`, `verifying`, `organizing`, `seeding`, …). `hls`: `active` (viewer fetched in the last 30 s) or `idle`. `stream`, `mount`: `active`. |
 | `health` | `"ok"` \| `"degraded"` \| `"stalled"` | `degraded` = impaired for less than 30 s; `stalled` = impaired for ≥ 30 s; back to `ok` after 10 s of healthy flow |
@@ -96,7 +96,7 @@ The same document is printed by `unarr status --sessions --json`.
 |------|---------------|
 | `download` | status `downloading` and speed is 0 (reason `no_data`) |
 | `hls` | the encoder is `struggling` — the same verdict the web gets (`< 0.75×` realtime, or input-bound below `0.95×`) — or the encoder gave up (`encoder_failed`). `marginal` (0.75–0.95×) is **not** impaired. Idle sessions and cache replays are never impaired. |
-| `mount` | a read is in flight and no bytes were served since the previous sample (`no_data`) |
+| `mount` | a read is in flight and no bytes were served since the previous sample (`no_data`). The quiet seconds between bursts, with no read in flight, are not impaired. |
 | `stream` | never (no flow signal available) |
 
 ## `Stall`
@@ -140,6 +140,10 @@ web (`internal/metrics/publish.go`). Independent of `[metrics] enabled`.
   empty snapshot, then one every 30 s (heartbeat). A session that appears during
   the heartbeat wait is sent on the next 5 s tick. A consumer should treat a
   snapshot older than ~45 s as "no data from this agent", not as live sessions.
+* **On stop:** a clean daemon stop sends ONE final empty snapshot (best effort,
+  at most 2 s added to the shutdown), unless the last one that landed was
+  already empty or the web answered `404`/`405`. A crash or a lost network
+  sends nothing, so the ~45 s rule above still applies.
 * **Differences from `GET /sessions`:** at most 50 `sessions` and 64 KiB minus a
   512-byte margin for the envelope; over a cap, rows are dropped from the end of
   the (sorted) list. There is no `truncated` flag in v1, so `summary` may count
