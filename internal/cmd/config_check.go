@@ -26,7 +26,10 @@ Reports two classes of problem that would otherwise be ignored in silence:
     preset, …). Unsafe download/organize directories are reported too.
 
 Exits non-zero when anything is reported, so it can gate a deployment. The
-daemon never refuses to start over these — it only warns in its log.`,
+daemon never refuses to start over these — it only warns in its log.
+
+A file that does not load at all (invalid TOML, a value of the wrong type)
+fails with the same error the daemon refuses to start with.`,
 		Example: `  unarr config check`,
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -38,6 +41,11 @@ daemon never refuses to start over these — it only warns in its log.`,
 func runConfigCheck() error {
 	cfg := loadConfig()
 	path := resolvedConfigPath()
+	// A config that does not load leaves cfg holding the defaults, which have
+	// nothing to report: fail with the daemon's own error instead.
+	if err := configLoadError(); err != nil {
+		return err
+	}
 
 	issues := cfg.UnknownKeyIssues()
 	issues = append(issues, cfg.ValueIssues()...)

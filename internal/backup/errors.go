@@ -15,6 +15,10 @@ var (
 	// the daemon's task list, so restore refuses it before writing anything — and
 	// create before writing an archive restore would refuse.
 	ErrBadContent = errors.New("backup content unarr cannot load")
+	// ErrNotRedacted: the manifest says the archive has no secrets, yet its
+	// config.toml sets one. create never writes that, so the archive was edited
+	// afterwards — its checksums cannot tell, anyone can recompute them.
+	ErrNotRedacted = errors.New("secret-free backup carries credentials")
 	// ErrPassphraseRequired: the archive is encrypted and no passphrase was given.
 	ErrPassphraseRequired = errors.New("backup is encrypted: a passphrase is required")
 	// ErrBadPassphrase: decryption failed (wrong passphrase or corrupted file).

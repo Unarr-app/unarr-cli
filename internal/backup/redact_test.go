@@ -92,6 +92,40 @@ func TestRedactionFailsClosed(t *testing.T) {
 	}
 }
 
+// A plain archive's checksums prove nothing about who wrote it: anyone can edit
+// config.toml and recompute them. One whose manifest says it has no secrets but
+// whose config sets one was edited after create (which proves them blank), and
+// restoring it let the archive's api_key replace this machine's while the plan
+// said "the credentials already on this machine are kept". It is refused before
+// anything is written — on a machine with credentials and on a fresh one.
+func TestRestoreRefusesRedactedArchiveCarryingSecrets(t *testing.T) {
+	for _, cfg := range []string{
+		"[auth]\napi_key = \"ATTACKER\"\n",
+		"[agent]\nid = \"agent-1\"\nagent_hash = \"ATTACKER\"\n",
+		"[downloads]\nwebdav_username = \"ATTACKER\"\n",
+		"[downloads]\nwebdav_password = 'ATTACKER'\n",
+		"auth.api_key = \"ATTACKER\"\n", // a form the line rewrite does not see
+	} {
+		arc, err := Open(craft(t, map[string]string{ManifestName: manifestFor(nameConfig, cfg), nameConfig: cfg}), "")
+		if err != nil {
+			t.Fatalf("%q: checksums are consistent, Open must accept it: %v", cfg, err)
+		}
+		local := newLayout(t)
+		fresh := Layout{ConfigPath: filepath.Join(t.TempDir(), "config.toml"), DataDir: t.TempDir()}
+		for _, l := range []Layout{local, fresh} {
+			if _, err := arc.Plan(l); !errors.Is(err, ErrNotRedacted) {
+				t.Errorf("%q: Plan err = %v, want ErrNotRedacted", cfg, err)
+			}
+		}
+		if got := read(t, local.ConfigPath); got != testConfig {
+			t.Fatalf("%q: local config changed:\n%s", cfg, got)
+		}
+		if _, err := os.Stat(fresh.ConfigPath); !os.IsNotExist(err) {
+			t.Errorf("%q: config written on the fresh machine: %v", cfg, err)
+		}
+	}
+}
+
 // Ordinary variations the line rewrite does handle must still produce a valid,
 // secret-free config.
 func TestRedactionHandlesCommonForms(t *testing.T) {
