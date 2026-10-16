@@ -47,6 +47,7 @@ func TestSecretFieldsAreTheExpectedOnes(t *testing.T) {
 		"Auth.APIKey",
 		"Download.WebDAVPassword",
 		"Download.WebDAVUsername",
+		"Metrics.Token",
 		"Mount.Directory",
 	}
 	if got := secretPaths(); !slices.Equal(got, want) {

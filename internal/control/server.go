@@ -13,17 +13,31 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/Unarr-app/unarr-cli/internal/metrics"
 )
 
 // TokenHeader carries the shared secret on every control request.
 const TokenHeader = "X-Unarr-Control-Token" //nolint:gosec // G101: header NAME, not a credential
 
+// HTTP limits of the control plane. Without IdleTimeout an idle keep-alive
+// connection is held forever. No WriteTimeout: an action (cancel with file
+// deletion, purge) may legitimately take longer than any fixed budget.
+// Variables only so a test can shorten the idle wait.
+var (
+	idleTimeout = 30 * time.Second
+	readTimeout = 10 * time.Second
+)
+
+const maxHeaderBytes = 16 << 10
+
 // Server is the daemon's loopback control endpoint.
 type Server struct {
-	ctrl  Controller
-	token string
-	ln    net.Listener
-	srv   *http.Server
+	ctrl     Controller
+	sessions SessionSource
+	token    string
+	ln       net.Listener
+	srv      *http.Server
 }
 
 // NewServer creates a control server for the given controller. The token is
@@ -45,6 +59,16 @@ func newToken() (string, error) {
 	}
 	return hex.EncodeToString(buf), nil
 }
+
+// SessionSource supplies the snapshot behind GET /sessions. It is optional and
+// wired after NewServer rather than added to Controller, so the /tasks contract
+// (and every Controller implementation) stays untouched.
+type SessionSource interface {
+	Poll(now time.Time) metrics.Snapshot
+}
+
+// SetSessions enables GET /sessions. Call before Listen.
+func (s *Server) SetSessions(src SessionSource) { s.sessions = src }
 
 // Token returns the secret clients must present.
 func (s *Server) Token() string { return s.token }
@@ -78,10 +102,14 @@ func (s *Server) Listen(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tasks", s.handleList)
 	mux.HandleFunc("/tasks/", s.handleAction)
+	mux.HandleFunc("/sessions", s.handleSessions)
 
 	s.srv = &http.Server{
 		Handler:           s.withAuth(mux),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
 	}
 
 	go func() {

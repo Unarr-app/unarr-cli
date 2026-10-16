@@ -42,6 +42,10 @@ var configFields = map[string]Sensitivity{
 	"Mount.CacheDir":          Publishable,
 	"Mount.NZBDir":            Publishable,
 	"Mount.RefreshInterval":   Publishable,
+	"Metrics.Enabled":         Publishable,
+	"Metrics.Publish":         Publishable,
+	"Metrics.Listen":          Publishable,
+	"Metrics.Token":           Secret,
 
 	"Backup.Enabled":        Publishable,
 	"Backup.Frequency":      Publishable,

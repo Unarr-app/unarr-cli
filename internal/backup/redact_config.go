@@ -30,6 +30,7 @@ var configSecrets = []configSecret{
 	{"agent", "agent_hash", func(c *config.Config) *string { return &c.Agent.Hash }},
 	{"downloads", "webdav_username", func(c *config.Config) *string { return &c.Download.WebDAVUsername }},
 	{"downloads", "webdav_password", func(c *config.Config) *string { return &c.Download.WebDAVPassword }},
+	{"metrics", "token", func(c *config.Config) *string { return &c.Metrics.Token }},
 }
 
 // agentIDKey is [agent] id. Not a secret, but the identity this machine's

@@ -210,7 +210,7 @@ recovery path, and how these interact with the website.
 |---------|-------------|
 | `unarr start` | Start the download daemon (foreground) |
 | `unarr stop` | How to stop the running daemon |
-| `unarr status` | Show daemon status and active downloads |
+| `unarr status` | Show daemon status and active downloads (`--sessions` for live sessions, `--json` for raw) |
 | `unarr daemon install` | Install as system service (systemd/launchd) |
 | `unarr daemon uninstall` | Remove the system service |
 | `unarr vpn status` | Show managed-VPN config and live tunnel state |
@@ -409,6 +409,105 @@ The daemon connects via WebSocket for instant task delivery, with automatic HTTP
 **Service locations:**
 - Linux: `~/.config/systemd/user/unarr.service` (systemd)
 - macOS: `~/Library/LaunchAgents/com.torrentclaw.unarr.plist` (launchd)
+
+## Metrics
+
+The daemon keeps one view of everything that is moving right now — downloads,
+in-browser HLS streams and the remote-folder mount — with each session's rate,
+bytes moved, uptime, health (`ok` / `degraded` / `stalled`) and stall count.
+
+```bash
+unarr status --sessions          # table
+unarr status --sessions --json   # the same snapshot the website reads
+```
+
+`--json` only changes `--sessions`: a plain `unarr status --json` still prints
+the usual text status.
+
+A session is **degraded** as soon as it is impaired (a download receiving no
+data, a transcode below realtime, a mount read that moves no bytes) and
+**stalled** once that lasts 30 s. Each stall is counted **once**, not once per
+check, and it only ends after 10 s of healthy flow, so a rate flapping around the
+threshold is one stall.
+
+### Publishing to the web
+
+The daemon sends that same snapshot to your unarr account, so the website's
+sessions page can show it. It is on by default and does not depend on the
+Prometheus switch below.
+
+```toml
+[metrics]
+publish = false   # stop sending the session snapshot to the web
+```
+
+- **Cadence:** every 5 s while at least one session exists. When the last one
+  ends, one empty snapshot is sent, then one every 30 s as a heartbeat. Stopping
+  the daemon sends one last empty snapshot (waiting at most 2 s for it), so the
+  website clears this machine's sessions straight away.
+- **What is sent:** the `unarr status --sessions --json` document (see
+  [`internal/metrics/SCHEMA.md`](internal/metrics/SCHEMA.md)) and the agent id:
+  session kind, state, health, rates, bytes, progress, stall counts, the VPN
+  state and the session titles — the release or file names of what the website
+  already asked this machine to download or play. No file paths, IPs, tokens or
+  URLs: a title that looks like an absolute path is cut to its last element, and
+  one that looks like a URL is sent empty.
+- **Limits:** at most 50 sessions and 64 KiB per snapshot; anything beyond that
+  is dropped from the end of the list (the summary still counts it).
+- **Failures never hold up the daemon:** one request at a time on its own
+  goroutine, 5 s timeout, nothing queued — a snapshot that does not arrive is
+  replaced by the next one. A website that does not support it yet (HTTP 404)
+  is asked again every 10 minutes, with one log line. Other errors are logged
+  once per failure streak.
+- Changing `publish` takes effect after `unarr daemon restart`.
+
+### Prometheus endpoint (optional)
+
+Off by default: nothing listens until you opt in.
+
+```toml
+[metrics]
+enabled = true
+# listen = "127.0.0.1:9877"   # default: loopback only
+# token = "change-me"         # required if listen is not loopback
+```
+
+`GET /metrics` returns the Prometheus text format and always needs a token, sent
+as `Authorization: Bearer <token>` (or the `X-Unarr-Control-Token` header). With
+no `token` set, the control-plane token is used — it is in the daemon state file,
+but it changes on every restart, so for a Prometheus server set your own `token`.
+A non-loopback `listen` without a `token` is refused.
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: unarr
+    authorization: { credentials: change-me }
+    static_configs: [{ targets: ["127.0.0.1:9877"] }]
+```
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `unarr_info` | gauge | `version` |
+| `unarr_uptime_seconds` | gauge | |
+| `unarr_sessions_active` | gauge | `kind` = `download`, `hls`, `stream`, `mount` |
+| `unarr_sessions_stalled` | gauge | |
+| `unarr_session_bytes_total` | counter | `kind` |
+| `unarr_session_rate_bytes_per_second` | gauge | `kind` |
+| `unarr_session_stalls_total` | counter | `kind` |
+| `unarr_vpn_up`, `unarr_vpn_enabled`, `unarr_vpn_required` | gauge | |
+| `unarr_downloads` | gauge | `state` (`downloading`, `paused`, …) |
+
+There are no per-title or per-hash labels, so cardinality stays fixed. The format
+is written by hand instead of pulling in `client_golang`, which would add several
+MB and a chain of dependencies to the binary for ten fixed series.
+
+### `GET /sessions` (local control plane)
+
+The same snapshot is served to local tools (the website's unified view, the
+desktop tray) at `GET /sessions` on the loopback control plane, with the
+`X-Unarr-Control-Token` from the daemon state file. The JSON schema
+(`schemaVersion` 1) is documented in [`internal/metrics/SCHEMA.md`](internal/metrics/SCHEMA.md).
 
 ## VPN
 
@@ -622,7 +721,7 @@ unarr backup prune --pre-restore       # trim old pre-restore snapshots (newest 
 
 **What is in it:** `config.toml` and `active-tasks.json` (the download resume queue), plus a `manifest.json` (unarr version, schema, OS/arch, date, SHA-256 and size of every file). An archive holds up to 128 MiB of files (uncompressed, all together — some 150,000 queued tasks), of which `config.toml` may take at most 4 MiB and `manifest.json` 1 MiB (a real config is well under 100 KB). `create` checks those bounds, and that `config.toml` parses and the daemon can load the queue, before writing anything: it refuses an archive that `restore` would refuse, so every backup it writes can be restored. **What is never in it:** anything ephemeral or machine-bound — `daemon.state.json` (PID and the local control-plane token), `unarr.lock`, the agent TLS private key under `certs/`, logs, caches (including the `library.json` scan cache, rebuilt by a rescan), partial-download progress and your media.
 
-**Secrets — excluded by default.** A plain archive is a file people copy to a NAS or a cloud folder, so it must be safe to lose. `[auth] api_key`, `[agent] agent_hash` and `[downloads] webdav_username` / `webdav_password` are blanked in the copy of `config.toml` (the file stays valid TOML; your comments and layout are untouched) and resolved download URLs / NZB passwords are stripped from the queue. The result is checked by parsing it: if a credential is written in a form unarr cannot blank (a dotted key, an inline table, a multi-line string), the backup is refused rather than written with the secret inside — use `--encrypt` for such a config. Restoring a secret-free archive keeps the credentials already on the machine (the dry-run names any it cannot carry over; if the archive's `auth.api_url` or `auth.mirrors` would send them to a server this machine does not use, the dry-run and `--apply` warn — a warning, not a refusal, since pointing a machine at another server is legitimate; when this machine's own `config.toml` does not parse, so there is nothing to compare against, they say so and name the archive's `auth.api_url` and `auth.mirrors` the credentials will go to) and the `[agent] id` they belong to: when this machine already has an `api_key` or `agent_hash`, its own id stays instead of the archive's — even an empty one, in which case `[agent] id` is left empty rather than paired with credentials that are not its own — and both the dry-run and `--apply` say so (run `unarr login` if this is a new machine). On a machine with no credentials yet, the archive's id is restored; run `unarr login` afterwards. Debrid downloads in a restored queue have no link of their own and need a fresh one from the server. `--encrypt` is the opt-in for a full copy: the whole archive is sealed with AES-256-GCM using a key derived from your passphrase (PBKDF2-HMAC-SHA256, 600k rounds, random salt and nonce per archive — Go standard library only). The passphrase comes from a prompt, `--passphrase-file`, or `UNARR_BACKUP_PASSPHRASE`; an empty one is refused, and it cannot be recovered. VPN keys live in the `.conf` that `[downloads.vpn] config_file` points to; that file is not backed up.
+**Secrets — excluded by default.** A plain archive is a file people copy to a NAS or a cloud folder, so it must be safe to lose. `[auth] api_key`, `[agent] agent_hash` and `[downloads] webdav_username` / `webdav_password` and `[metrics] token` are blanked in the copy of `config.toml` (the file stays valid TOML; your comments and layout are untouched) and resolved download URLs / NZB passwords are stripped from the queue. The result is checked by parsing it: if a credential is written in a form unarr cannot blank (a dotted key, an inline table, a multi-line string), the backup is refused rather than written with the secret inside — use `--encrypt` for such a config. Restoring a secret-free archive keeps the credentials already on the machine (the dry-run names any it cannot carry over; if the archive's `auth.api_url` or `auth.mirrors` would send them to a server this machine does not use, the dry-run and `--apply` warn — a warning, not a refusal, since pointing a machine at another server is legitimate; when this machine's own `config.toml` does not parse, so there is nothing to compare against, they say so and name the archive's `auth.api_url` and `auth.mirrors` the credentials will go to) and the `[agent] id` they belong to: when this machine already has an `api_key` or `agent_hash`, its own id stays instead of the archive's — even an empty one, in which case `[agent] id` is left empty rather than paired with credentials that are not its own — and both the dry-run and `--apply` say so (run `unarr login` if this is a new machine). On a machine with no credentials yet, the archive's id is restored; run `unarr login` afterwards. Debrid downloads in a restored queue have no link of their own and need a fresh one from the server. `--encrypt` is the opt-in for a full copy: the whole archive is sealed with AES-256-GCM using a key derived from your passphrase (PBKDF2-HMAC-SHA256, 600k rounds, random salt and nonce per archive — Go standard library only). The passphrase comes from a prompt, `--passphrase-file`, or `UNARR_BACKUP_PASSPHRASE`; an empty one is refused, and it cannot be recovered. VPN keys live in the `.conf` that `[downloads.vpn] config_file` points to; that file is not backed up.
 
 **Restore is safe by default.** It refuses a bad manifest, a newer schema, any checksum mismatch, an archive or a file over its size bound, any archive member that is not one of the two known files (so a crafted `../` path cannot write elsewhere) or not a regular file (a symlink, a directory, a device), and content unarr could not load — a `config.toml` that does not parse the way unarr reads it (checked as it would be written, with this machine's credentials merged in) or a queue the daemon would drop on load (decoded with its own task type: one field of the wrong type, such as a `queuedAt` that is not a time, and it starts with an empty queue). Those checks run before anything is written or snapshotted. A restore is all or nothing: a queue an older unarr backed up that the daemon cannot load blocks the `config.toml` beside it too (there is no partial restore). A secret-free archive is also refused when this machine's own credentials are written in a form unarr cannot load, since they would be merged in: move `config.toml` aside, restore, then `unarr login`. The checksums prove integrity, not authorship: whoever holds an unencrypted archive can edit it and recompute them, so restore only archives you made — or encrypted ones, which the passphrase authenticates. A secret-free archive whose `config.toml` sets a credential anyway was edited after it was made, and is refused. An unencrypted archive with secrets included (what a pre-restore snapshot is, or an edited archive relabelled) is restored, but when its `api_key` / `agent_hash` are not this machine's, or it changes `auth.api_url` without being this machine's own identity, the dry-run and `--apply` warn. Without `--apply` nothing is written. With `--apply` it takes the daemon's instance lock for the whole restore — so it refuses to run while the daemon is up (`unarr stop` first) and a daemon cannot start halfway through — saves your current state as `unarr-prerestore-<stamp>.zip` in `<config dir>/backups` (a verbatim copy with your current secrets, 0600; it stays beside `config.toml` even when `[backup] dir` points elsewhere — `--dir` overrides; it is taken even when the current `config.toml` does not parse or is over its 4 MiB cap, so a good backup can replace a broken config, though `restore` will not bring that broken file back — unzip the snapshot for it; only the 128 MiB bound applies, and past it the error names the file to move aside before running the restore again), then replaces each file atomically. If a write fails, the files already replaced are put back. Because every snapshot holds secrets in the clear, each successful `--apply` then trims the older ones: the newest 3 and any younger than 30 days are kept, and never the one just taken. A failed restore removes nothing, and `unarr backup prune --pre-restore` applies the same retention on demand (plain `prune` and the daemon never touch snapshots). A symlinked `config.toml` is updated through the link. An encrypted archive — or a secret-free one restored before `unarr login` — brings the archived agent id with it: restore it onto a replacement machine, not onto a second one while the original still runs, or both daemons share one identity.
 

@@ -15,9 +15,11 @@ import (
 	"github.com/fatih/color"
 )
 
-// ReloadableConfig holds a reference to the daemon for hot-reload.
+// ReloadableConfig holds a reference to the daemon for hot-reload, and the
+// startup values of the settings a reload can only report on.
 type ReloadableConfig struct {
-	Daemon *agent.Daemon
+	Daemon  *agent.Daemon
+	Metrics config.MetricsConfig
 }
 
 // startReloadWatcher listens for SIGUSR1 and reloads config.
@@ -49,6 +51,7 @@ func startReloadWatcher(rc *ReloadableConfig) {
 			// ApplyReloadedConfig logs precisely what landed and what still needs
 			// a restart — don't add a blanket "reloaded successfully" on top of it.
 			rc.Daemon.ApplyReloadedConfig(cfg.Library.AllowDelete, cfg.Download.MethodOrder())
+			reportMetricsReload(rc.Metrics, cfg.Metrics)
 		}
 	}()
 }

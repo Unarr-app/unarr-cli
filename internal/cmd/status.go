@@ -17,18 +17,31 @@ import (
 )
 
 func newStatusCmd() *cobra.Command {
-	return &cobra.Command{
+	var sessions bool
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show daemon status, configuration, and update availability",
 		Long: `Display the current state of unarr: version, configuration, daemon status,
 disk usage, and whether an update is available.
 
-When the daemon is running, also displays uptime, active downloads, and stats.`,
-		Example: `  unarr status`,
+When the daemon is running, also displays uptime, active downloads, and stats.
+
+With --sessions, show instead what is moving right now — downloads, HLS
+streams and the mount — with rate, bytes, health and stall count per session;
+add --json for the raw snapshot. Without --sessions, --json is ignored and the
+usual text is printed.`,
+		Example: `  unarr status
+  unarr status --sessions
+  unarr status --sessions --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if sessions {
+				return runStatusSessions(cmd.Context(), jsonOut)
+			}
 			return runStatus()
 		},
 	}
+	cmd.Flags().BoolVar(&sessions, "sessions", false, "Show live sessions (downloads, streams, mount) from the running daemon")
+	return cmd
 }
 
 func runStatus() error {

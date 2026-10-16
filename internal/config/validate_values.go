@@ -28,6 +28,9 @@ func (c *Config) ValueIssues() []Issue {
 		l.add("mount", err.Error())
 	}
 	l = append(l, c.Backup.valueIssues()...)
+	if err := c.Metrics.Validate(); err != nil {
+		l.add("metrics", err.Error())
+	}
 	return l
 }
 
