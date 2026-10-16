@@ -96,6 +96,58 @@ func TestSessionPublisherOffSendsNothing(t *testing.T) {
 	}
 }
 
+// landedPoster signals once a post has returned success to the publisher (the
+// fake web's own signal fires before the client has read the answer).
+type landedPoster struct {
+	metrics.Poster
+	landed chan struct{}
+}
+
+func (p landedPoster) PostSessions(ctx context.Context, snapshot []byte) error {
+	err := p.Poster.PostSessions(ctx, snapshot)
+	if err == nil {
+		select {
+		case p.landed <- struct{}{}:
+		default:
+		}
+	}
+	return err
+}
+
+// A daemon shutdown ends the context first and then runs the deferred stop: the
+// web still gets one empty snapshot, so the stopped agent's rows go at once.
+func TestSessionPublisherClearsWebOnShutdown(t *testing.T) {
+	web, client := newSessionsWeb(t)
+	poster := landedPoster{
+		Poster: webSessionPoster{client: client, agentID: func() string { return "agent-1" }},
+		landed: make(chan struct{}, 1),
+	}
+	hub := metrics.NewHub("v", nil)
+	hub.AddSource(func() []metrics.Reading {
+		return []metrics.Reading{{Session: metrics.Session{ID: "dl-1", Kind: metrics.KindDownload, State: "downloading"}}}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := startSessionPublisher(ctx, hub, config.MetricsConfig{Publish: true}, poster)
+	select {
+	case <-poster.landed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing was published")
+	}
+	cancel()
+	stop()
+
+	if n := web.count(); n != 2 {
+		t.Fatalf("%d snapshots, want the live one and a final empty one", n)
+	}
+	web.mu.Lock()
+	raw := web.bodies[1]["snapshot"]
+	web.mu.Unlock()
+	var snap metrics.Snapshot
+	if err := json.Unmarshal(raw, &snap); err != nil || snap.Sessions == nil || len(snap.Sessions) != 0 {
+		t.Fatalf("final snapshot = %s (%v), want sessions: []", raw, err)
+	}
+}
+
 // Without an identity there is nobody to publish for, and nothing goes out.
 func TestWebSessionPosterNeedsAnAgentID(t *testing.T) {
 	web, client := newSessionsWeb(t)

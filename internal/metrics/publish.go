@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sync"
 	"time"
 )
 
@@ -26,6 +27,9 @@ const (
 	PublishUnsupportedPause = 10 * time.Minute
 	// PublishTimeout bounds one request.
 	PublishTimeout = 5 * time.Second
+	// PublishStopTimeout bounds the final empty snapshot sent on stop: the most
+	// a slow or dead server can add to the daemon's shutdown.
+	PublishStopTimeout = 2 * time.Second
 
 	publishBackoffMin = 30 * time.Second
 	publishBackoffMax = 10 * time.Minute
@@ -63,10 +67,12 @@ type Publisher struct {
 	poll   func(time.Time) Snapshot
 	poster Poster
 
-	Clock   Clock
-	Logf    func(format string, args ...any)
-	Timeout time.Duration
+	Clock       Clock
+	Logf        func(format string, args ...any)
+	Timeout     time.Duration
+	StopTimeout time.Duration
 
+	latest    Snapshot      // the last one polled: the base of the final empty one
 	delivered bool          // a snapshot has landed since start
 	lastEmpty bool          // ...and the latest one to land was empty
 	lastAt    time.Time     // when it landed
@@ -77,22 +83,76 @@ type Publisher struct {
 
 // NewPublisher builds a publisher over poll (Hub.Poll in the daemon).
 func NewPublisher(poll func(time.Time) Snapshot, poster Poster) *Publisher {
-	return &Publisher{poll: poll, poster: poster, Clock: realClock{}, Logf: log.Printf, Timeout: PublishTimeout}
+	return &Publisher{
+		poll: poll, poster: poster, Clock: realClock{}, Logf: log.Printf,
+		Timeout: PublishTimeout, StopTimeout: PublishStopTimeout,
+	}
 }
 
 // Start runs the publisher until ctx ends or stop is called. stop cancels an
-// in-flight request, returns once the goroutine has exited, and is idempotent.
+// in-flight request, waits for the goroutine to exit, then sends the final
+// empty snapshot (see farewell) — even when ctx has already ended, which is how
+// a daemon shutdown reaches it. It holds the caller at most StopTimeout longer
+// and is idempotent.
 func (p *Publisher) Start(ctx context.Context) (stop func()) {
-	ctx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		p.run(ctx)
+		p.run(runCtx)
 	}()
+	var once sync.Once
 	return func() {
-		cancel()
-		<-done
+		once.Do(func() {
+			cancel()
+			<-done
+			p.farewell(context.WithoutCancel(ctx))
+		})
 	}
+}
+
+// farewell posts ONE empty snapshot so the web drops this agent's sessions now
+// instead of when they go stale. Best effort: skipped when nothing has landed,
+// when the web already holds an empty view, or when it does not take snapshots
+// at all (404/405); bounded by StopTimeout even if the Poster ignores its
+// context. Runs after the publisher goroutine has exited, so it owns p.
+func (p *Publisher) farewell(ctx context.Context) {
+	if !p.delivered || p.lastEmpty || p.failClass == "unsupported" {
+		return
+	}
+	body, err := encodeForPublish(emptied(p.latest, p.Clock.Now()))
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, p.StopTimeout)
+	defer cancel()
+	res := make(chan error, 1)
+	go func() { res <- p.poster.PostSessions(ctx, body) }()
+	select {
+	case err = <-res:
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+	if err != nil {
+		p.Logf("[sessions] could not clear the web's session view on stop (%v)", err)
+	}
+}
+
+// emptied is s with no session in it: nothing active, stalled or moving, while
+// the agent and the monotonic totals stay what they were.
+func emptied(s Snapshot, now time.Time) Snapshot {
+	if !s.GeneratedAt.IsZero() && now.After(s.GeneratedAt) {
+		s.Agent.UptimeSec += int64(now.Sub(s.GeneratedAt).Seconds())
+	}
+	s.GeneratedAt = now.UTC()
+	s.Sessions = []Session{}
+	s.Summary.Active = make(map[Kind]int, len(Kinds))
+	s.Summary.RateBps = make(map[Kind]int64, len(Kinds))
+	for _, k := range Kinds {
+		s.Summary.Active[k], s.Summary.RateBps[k] = 0, 0
+	}
+	s.Summary.Stalled = 0
+	return s
 }
 
 func (p *Publisher) run(ctx context.Context) {
@@ -112,6 +172,7 @@ func (p *Publisher) tick(ctx context.Context, now time.Time) time.Duration {
 		return p.holdUntil.Sub(now)
 	}
 	snap := p.poll(now)
+	p.latest = snap
 	empty := len(snap.Sessions) == 0
 	if !p.due(empty, now) {
 		return PublishActiveInterval
