@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.1] - 2026-10-27
+
+
+### Fixed
+
+- **daemon**: absorber SIGPIPE desde el PersistentPreRun de start/up
+- **daemon**: SIGHUP/SIGPIPE ya no dejan firma de crash falsa
+- **torrent**: floor the tracker announce interval to stop the dispatcher spinning
+
+### Build
+
+- **go**: bump the toolchain directive to 1.26.10
 ## [1.20.0] - 2026-10-16
 
 
@@ -38,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **metrics**: bytes de la sesión, no los acumulados del proceso
 - **metrics**: la primera muestra no cuenta como flujo parado
 - **metrics**: clave (kind,id) para que download y stream no se pisen
+
+### Other
+
+- **release**: 1.20.0
 ## [1.19.0] - 2026-10-15
 
 
@@ -2148,6 +2164,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.20.1]: https://github.com/Unarr-app/unarr-cli/compare/v1.20.0...v1.20.1
 [1.20.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.18.2...v1.19.0
 [1.18.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.18.1...v1.18.2
