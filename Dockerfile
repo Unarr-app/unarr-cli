@@ -11,8 +11,11 @@ RUN apk add --no-cache git ca-certificates
 
 WORKDIR /src
 
-# Copy go.mod/go.sum first for layer caching
+# Copy go.mod/go.sum first for layer caching. third_party/ comes along because
+# go.mod `replace`s anacrolix/torrent with ./third_party/torrent: without it
+# `go mod download` cannot read that module's go.mod.
 COPY go.mod go.sum ./
+COPY third_party ./third_party
 RUN go mod download
 
 # Copy source
