@@ -19,8 +19,15 @@ import (
 // would silently re-arm it and turn a daemon that was meant to outlive its
 // terminal into one that quits with it.
 func daemonStopSignals() []os.Signal {
+	return stopSignals(signal.Ignored(syscall.SIGHUP))
+}
+
+// stopSignals is daemonStopSignals with the process-wide SIGHUP disposition
+// passed in, so a test can cover the nohup case without mutating it (signal.Reset
+// does not undo signal.Ignore).
+func stopSignals(hupIgnored bool) []os.Signal {
 	sigs := []os.Signal{syscall.SIGINT, syscall.SIGTERM}
-	if !signal.Ignored(syscall.SIGHUP) {
+	if !hupIgnored {
 		sigs = append(sigs, syscall.SIGHUP)
 	}
 	return sigs

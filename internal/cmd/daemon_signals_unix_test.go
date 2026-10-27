@@ -84,9 +84,8 @@ func TestDaemonSurvivesItsOutputPipeClosing(t *testing.T) {
 	cmd, out, receipt := startSignalDaemon(t)
 	out.Close()                        // the tray went away
 	time.Sleep(300 * time.Millisecond) // many log lines into the broken pipe
-	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-		t.Fatalf("daemon died when its output pipe closed: %v", err)
-	}
+	// No liveness probe here: signal 0 answers nil for an unreaped zombie. A
+	// daemon killed by SIGPIPE shows up as a non-nil Wait error below.
 	cmd.Process.Signal(syscall.SIGTERM)
 	waitCleanStop(t, cmd, receipt, "terminated")
 }
@@ -94,6 +93,9 @@ func TestDaemonSurvivesItsOutputPipeClosing(t *testing.T) {
 // TestDaemonTreatsHangupAsAStop: closing the terminal a foreground daemon runs in
 // sends SIGHUP; it must take the same clean path as SIGTERM, not die mid-run.
 func TestDaemonTreatsHangupAsAStop(t *testing.T) {
+	if signal.Ignored(syscall.SIGHUP) {
+		t.Skip("SIGHUP is ignored here (nohup runner) and the stand-in inherits it")
+	}
 	cmd, _, receipt := startSignalDaemon(t)
 	cmd.Process.Signal(syscall.SIGHUP)
 	waitCleanStop(t, cmd, receipt, "hangup")
@@ -102,20 +104,18 @@ func TestDaemonTreatsHangupAsAStop(t *testing.T) {
 // TestDaemonStopSignalsRespectNohup: a SIGHUP inherited as ignored (nohup) is a
 // request to outlive the terminal; Notify would silently undo it.
 func TestDaemonStopSignalsRespectNohup(t *testing.T) {
-	has := func() bool {
-		for _, s := range daemonStopSignals() {
+	has := func(sigs []os.Signal) bool {
+		for _, s := range sigs {
 			if s == syscall.SIGHUP {
 				return true
 			}
 		}
 		return false
 	}
-	if !has() {
+	if !has(stopSignals(false)) {
 		t.Fatal("SIGHUP must be a stop signal by default")
 	}
-	signal.Ignore(syscall.SIGHUP)
-	defer signal.Reset(syscall.SIGHUP)
-	if has() {
+	if has(stopSignals(true)) {
 		t.Fatal("SIGHUP ignored at start (nohup) must stay ignored")
 	}
 }
