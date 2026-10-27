@@ -53,6 +53,9 @@ Get started:
 Documentation:  https://unarr.app/cli
 Source:         https://github.com/Unarr-app/unarr-cli`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			if isDaemonEntry(cmd) {
+				survivePipeClose()
+			}
 			if noColor || os.Getenv("NO_COLOR") != "" {
 				color.NoColor = true
 			}

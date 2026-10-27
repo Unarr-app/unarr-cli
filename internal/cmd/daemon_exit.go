@@ -26,6 +26,7 @@ import "github.com/Unarr-app/unarr-cli/internal/agent"
 // mechanism exists to catch. See agent.ReapOwnState for the PID guard that keeps
 // a dev agent and the production agent from reaping each other.
 func runDaemon() error {
+	survivePipeClose() // before the first log line: see survivePipeClose
 	err := runDaemonStart()
 	// Seal BEFORE reaping. Removing the file is not enough on its own: the sync
 	// loop and the task reporters are still unwinding at this point, and a single
