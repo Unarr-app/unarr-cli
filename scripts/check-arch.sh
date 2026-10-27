@@ -45,7 +45,7 @@ collect() {
     git ls-files --others --exclude-standard 2>/dev/null || true
   } | sort -u \
     | grep -E '\.go$' \
-    | grep -vE '(_test\.go$|\.pb\.go$|_gen\.go$|mock_.*\.go$|^vendor/|^dist/)' || true
+    | grep -vE '(_test\.go$|\.pb\.go$|_gen\.go$|mock_.*\.go$|^vendor/|^third_party/|^dist/)' || true
 }
 
 # Line count of a file at the base rev (0 if it didn't exist there). Captured into a var

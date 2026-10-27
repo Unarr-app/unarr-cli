@@ -66,6 +66,7 @@ linters:
     paths:
       - dist
       - vendor
+      - third_party
     rules:
       # Tests are exempt from architectural limits (table-driven tests get long/complex).
       - linters:

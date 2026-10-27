@@ -1,6 +1,6 @@
 module github.com/Unarr-app/unarr-cli
 
-go 1.26.0
+go 1.26.10
 
 require (
 	fyne.io/systray v1.12.2
@@ -153,3 +153,5 @@ require (
 	modernc.org/sqlite v1.48.0 // indirect
 	zombiezen.com/go/sqlite v1.4.2 // indirect
 )
+
+replace github.com/anacrolix/torrent => ./third_party/torrent
