@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/Unarr-app/unarr-cli/internal/acme"
@@ -1496,7 +1495,7 @@ func runDaemonStart() error {
 
 	// Signal handling
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, daemonStopSignals()...)
 	// Windows has no signals, so a stop there arrives as a file on disk instead.
 	// Watching it is what lets ANY running daemon be stopped — including one the
 	// state file has not caught up with after a respawn. See watchStopIntent.
