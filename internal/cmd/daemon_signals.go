@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/spf13/cobra"
 )
 
 // daemonStopSignals are the signals that mean "stop, on purpose". SIGHUP is one
@@ -38,4 +40,14 @@ func daemonStopSignals() []os.Signal {
 // and ffmpeg and friends should keep SIGPIPE's default.
 func survivePipeClose() {
 	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
+}
+
+// isDaemonEntry reports whether cmd is a command that goes on to run the daemon
+// (the same two that call runDaemon). The root PersistentPreRun uses it to call
+// survivePipeClose before config loading and the updater setup, which already
+// write to stdout/stderr — a gap runDaemon alone cannot cover. Scoped on
+// purpose: every other command SHOULD die on a closed pipe (`unarr search | head`).
+func isDaemonEntry(cmd *cobra.Command) bool {
+	p := cmd.CommandPath()
+	return p == rootCmd.Name()+" start" || p == rootCmd.Name()+" up"
 }
