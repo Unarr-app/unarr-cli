@@ -126,14 +126,17 @@ RUN ARCH="$(dpkg --print-architecture)" && \
 
 # Bundle cloudflared so `unarr funnel on` (default: on, see config defaults)
 # Just Works on a headless container with no first-run network round-trip.
+# Keep CF_VERSION and the hashes in step with internal/funnel/install.go.
+ARG CF_VERSION=2026.10.5
 RUN ARCH="$(dpkg --print-architecture)" && \
     case "$ARCH" in \
-      amd64)  CF_ARCH=amd64 ;; \
-      arm64)  CF_ARCH=arm64 ;; \
-      armhf)  CF_ARCH=armhf ;; \
+      amd64)  CF_ARCH=amd64; CF_SHA=e1bc0cf084fd9e590554fe769a86b1db46701c3f847a43d902f7b974a4e16298 ;; \
+      arm64)  CF_ARCH=arm64; CF_SHA=72e0d05a67e09da87cf495e409a28c3cc5994dd23fc66a982eebea6a55923b7d ;; \
+      armhf)  CF_ARCH=armhf; CF_SHA=4aed2f4179f2ac1068b45073761409ba4540a631a2e70df98543a65b4a982d27 ;; \
       *)      echo "unsupported arch=$ARCH" >&2; exit 1 ;; \
     esac && \
-    wget -4 --tries=3 --timeout=30 -qO /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH" && \
+    wget -4 --tries=3 --timeout=30 -qO /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/download/$CF_VERSION/cloudflared-linux-$CF_ARCH" && \
+    echo "$CF_SHA  /usr/local/bin/cloudflared" | sha256sum -c - && \
     chmod +x /usr/local/bin/cloudflared
 
 # Non-root user (UID 1000 matches typical host user for volume permissions)

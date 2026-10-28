@@ -60,3 +60,24 @@ func TestPinnedCloudflaredSHA256Complete(t *testing.T) {
 		t.Error("pinnedCloudflaredVersion must be set")
 	}
 }
+
+// TestRemoveStaleCached: a bump must leave only the current binary, without
+// touching another daemon's in-flight .partial download.
+func TestRemoveStaleCached(t *testing.T) {
+	dir := t.TempDir()
+	current := filepath.Join(dir, "cloudflared-2026.10.5")
+	for _, n := range []string{"cloudflared-2026.10.5", "cloudflared-2026.5.2", "cloudflared", "cloudflared-2026.10.5.partial", "other"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removeStaleCached(current)
+	for n, want := range map[string]bool{
+		"cloudflared-2026.10.5": true, "cloudflared-2026.10.5.partial": true, "other": true,
+		"cloudflared-2026.5.2": false, "cloudflared": false,
+	} {
+		if _, err := os.Stat(filepath.Join(dir, n)); (err == nil) != want {
+			t.Errorf("%s exists=%v, want %v", n, err == nil, want)
+		}
+	}
+}
