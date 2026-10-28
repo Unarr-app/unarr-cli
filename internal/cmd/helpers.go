@@ -87,6 +87,19 @@ func setupHintFor(apiURL string, inDocker, interactive bool) string {
 	return "run `unarr init`"
 }
 
+// apiKeyHint says where to get the key the manual-paste fallback asks for. The
+// unarr brand has no API-key tab (the web hides ?tab=apikey and bounces it to
+// the account page, so users reported "can't find the API"); its agents tab is
+// the page that exists, and hands out a one-line install command with a
+// single-use auth-key instead of a key to copy.
+func apiKeyHint(apiURL string) string {
+	if isUnarrBrandHost(apiURL) {
+		return "there is no key to copy on unarr.app: get the one-line install command at " +
+			apiURL + "/profile?tab=agents, or retry with `unarr login --browser`"
+	}
+	return "get it from " + apiURL + "/profile?tab=apikey"
+}
+
 // sudoGuard aborts a command that writes USER-level state — config.toml, the
 // systemd user unit, the download directory — when the only reason we are root
 // is a `sudo` in front of it. All of it would land in /root, invisible to the

@@ -121,7 +121,7 @@ func runLogin(apiURLOverride string, browserOnly bool) error {
 			dim.Printf("  Could not connect automatically: %s\n", browserErr)
 		}
 		fmt.Println("  Paste your API key instead:")
-		dim.Printf("  (get it from %s/profile?tab=apikey)\n", apiURL)
+		dim.Printf("  (%s)\n", apiKeyHint(apiURL))
 		fmt.Println()
 
 		err := huh.NewForm(
