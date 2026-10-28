@@ -130,6 +130,19 @@ func TestSetupHintUsesConfiguredAPIURL(t *testing.T) {
 	}
 }
 
+// unarr.app has no ?tab=apikey (it bounces to the account page), so its users
+// must be sent to the agents tab; every other server keeps the API-key tab.
+func TestAPIKeyHint(t *testing.T) {
+	unarr := apiKeyHint("https://unarr.app")
+	if !strings.Contains(unarr, "https://unarr.app/profile?tab=agents") || strings.Contains(unarr, "tab=apikey") {
+		t.Errorf("unarr hint %q should point at the agents tab only", unarr)
+	}
+	tc := apiKeyHint("https://torrentclaw.com")
+	if !strings.Contains(tc, "https://torrentclaw.com/profile?tab=apikey") {
+		t.Errorf("torrentclaw hint %q should keep the API-key tab", tc)
+	}
+}
+
 // With no api_url configured the hint still has to name a host the user can open.
 func TestSetupHintFallsBackToDefaultAPIURL(t *testing.T) {
 	if hint := setupHintFor("", true, false); !strings.Contains(hint, config.Default().Auth.APIURL) {
