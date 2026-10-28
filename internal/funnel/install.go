@@ -29,7 +29,7 @@ import (
 // (https://github.com/cloudflare/cloudflared/releases/tag/<version>) into the
 // map below, and update this constant. EVERY asset named by assetFor must have
 // an entry, or the download refuses to run for that platform.
-const pinnedCloudflaredVersion = "2026.5.2"
+const pinnedCloudflaredVersion = "2026.10.5"
 
 // pinnedCloudflaredSHA256 maps each downloadable asset to its SHA-256 for
 // pinnedCloudflaredVersion (from the release body — Cloudflare publishes the
@@ -48,11 +48,11 @@ const pinnedCloudflaredVersion = "2026.5.2"
 // (.goreleaser.yml: amd64, arm64). Both fall through to the manual-install
 // message rather than being given a hash nobody has verified.
 var pinnedCloudflaredSHA256 = map[string]string{
-	"cloudflared-linux-amd64":       "5286698547f03df745adb2355f04c12dde52ef425491e81f433642d695521886",
-	"cloudflared-linux-arm64":       "5a4e8ce2701105271412059f44b6a0bf1ae4542b4d98ff3180c0c019443a5815",
-	"cloudflared-linux-armhf":       "190152c373f608080eb6aa9e2aad395f88398dfb9efd0f9b064e2652cffcefdd",
-	"cloudflared-linux-386":         "ad82d1dbed8bbb9d702807cbd97df932cc774d29e9da5c109b7a3c7f7aee2065",
-	"cloudflared-windows-amd64.exe": "20b9638f685333d623798e733effbad2487093f15ba592f6c7752360ff3b7ab7",
+	"cloudflared-linux-amd64":       "e1bc0cf084fd9e590554fe769a86b1db46701c3f847a43d902f7b974a4e16298",
+	"cloudflared-linux-arm64":       "72e0d05a67e09da87cf495e409a28c3cc5994dd23fc66a982eebea6a55923b7d",
+	"cloudflared-linux-armhf":       "4aed2f4179f2ac1068b45073761409ba4540a631a2e70df98543a65b4a982d27",
+	"cloudflared-linux-386":         "f2de713829081837130b38e27f3c95aa9d7fc1a4f48b833362d21234dd8780d8",
+	"cloudflared-windows-amd64.exe": "db4e4c413612a0916f3e1679d3caaf376f94911952d163028fb726fb2e0516a9",
 }
 
 // ErrNoAutoDownload marks the one funnel failure that RETRYING CANNOT FIX:
@@ -84,7 +84,11 @@ func ResolveBinary() (string, error) {
 	if _, err := os.Stat(cached); err == nil {
 		return cached, nil
 	}
-	return downloadCloudflared(cached)
+	p, err := downloadCloudflared(cached)
+	if err == nil {
+		removeStaleCached(p)
+	}
+	return p, err
 }
 
 // installHint is the per-OS one-liner that actually gets a user unstuck. The
@@ -139,12 +143,30 @@ func assetFor(goos, goarch string) (string, bool) {
 	return "", false
 }
 
+// cachedBinaryPath embeds the pinned version so a bump invalidates every binary
+// cached by an older release: ResolveBinary never inspects a cached file, and
+// --no-autoupdate means nothing else would ever replace it.
 func cachedBinaryPath() string {
-	name := "cloudflared"
+	name := "cloudflared-" + pinnedCloudflaredVersion
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
 	return filepath.Join(config.DataDir(), "bin", name)
+}
+
+// removeStaleCached drops binaries cached by earlier pins (and the old
+// unversioned name) once the current one is in place. Best effort.
+func removeStaleCached(current string) {
+	dir := filepath.Dir(current)
+	for _, pattern := range []string{"cloudflared", "cloudflared.exe", "cloudflared-*"} {
+		matches, _ := filepath.Glob(filepath.Join(dir, pattern))
+		for _, m := range matches {
+			// .partial is another daemon's in-flight download (see O_EXCL below).
+			if m != current && !strings.HasSuffix(m, ".partial") {
+				_ = os.Remove(m)
+			}
+		}
+	}
 }
 
 // downloadCloudflared fetches the PINNED cloudflared release asset matching the
