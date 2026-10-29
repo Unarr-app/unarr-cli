@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -163,6 +164,7 @@ func runCategory(cfg *config.Config, category string) error {
 }
 
 func configDownloads(cfg *config.Config) error {
+	dir := cfg.Download.Dir
 	concurrent := strconv.Itoa(cfg.Download.MaxConcurrent)
 	validConcurrent := map[string]bool{"1": true, "2": true, "3": true, "4": true, "5": true, "6": true, "8": true, "10": true}
 	if !validConcurrent[concurrent] {
@@ -195,7 +197,9 @@ func configDownloads(cfg *config.Config) error {
 		huh.NewGroup(
 			huh.NewInput().
 				Title("Download directory").
-				Value(&cfg.Download.Dir),
+				Description("Where NEW downloads are saved (files already downloaded are not moved). Example: "+downloadDirExample()).
+				Value(&dir).
+				Validate(validateDownloadDir),
 			huh.NewSelect[string]().
 				Title("Preferred method").
 				Description("Methods not listed are disabled (e.g. debrid-only never uses torrent)").
@@ -247,7 +251,9 @@ func configDownloads(cfg *config.Config) error {
 		return err
 	}
 
-	cfg.Download.Dir = expandHome(strings.TrimSpace(cfg.Download.Dir))
+	if dir = expandHome(strings.TrimSpace(dir)); dir != cfg.Download.Dir {
+		cfg.SetDownloadDir(dir)
+	}
 	n, _ := strconv.Atoi(concurrent)
 	if n > 0 {
 		cfg.Download.MaxConcurrent = n
@@ -390,6 +396,25 @@ func validateSpeed(s string) error {
 		return fmt.Errorf("invalid speed: %s (e.g. 10MB, 500KB, 0)", s)
 	}
 	return nil
+}
+
+// validateDownloadDir runs the daemon's own path gate inside the form, so a
+// refused folder (D:\, a system dir) is corrected where the user typed it
+// instead of after every other question has been answered.
+func validateDownloadDir(s string) error {
+	if err := config.DriveRootError("downloads.dir", s, runtime.GOOS); err != nil {
+		return err
+	}
+	c := config.Config{}
+	c.Download.Dir = expandHome(strings.TrimSpace(s))
+	return c.ValidatePaths()
+}
+
+func downloadDirExample() string {
+	if runtime.GOOS == "windows" {
+		return `D:\Downloads`
+	}
+	return "~/Media"
 }
 
 func validateDuration(s string) error {

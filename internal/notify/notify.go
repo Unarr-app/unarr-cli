@@ -64,18 +64,24 @@ func send(title, body string, urgent bool) {
 		winproc.HideWindow(cmd)
 		spawnAndReap(cmd)
 	case "windows":
-		// Use PowerShell toast notification (Windows 10+)
-		script := `[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;` +
-			`$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(1);` +
-			`$text = $xml.GetElementsByTagName('text');` +
-			`$text[0].AppendChild($xml.CreateTextNode('` + escapePowerShell(title) + `')) > $null;` +
-			`$text[1].AppendChild($xml.CreateTextNode('` + escapePowerShell(body) + `')) > $null;` +
-			`$toast = [Windows.UI.Notifications.ToastNotification]::new($xml);` +
-			`[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('unarr').Show($toast)`
-		cmd := exec.Command("powershell", "-NoProfile", "-Command", script)
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", windowsToastScript(title, body))
 		winproc.HideWindow(cmd)
 		spawnAndReap(cmd)
 	}
+}
+
+// windowsToastScript builds the PowerShell toast (Windows 10+). The text nodes
+// are reached with .Item(n), never $text[n]: PowerShell does not index a WinRT
+// XmlNodeList, so $text[1] was $null and every toast showed its title with the
+// body silently dropped (verified on Win11 in test/windows).
+func windowsToastScript(title, body string) string {
+	return `[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;` +
+		`$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(1);` +
+		`$text = $xml.GetElementsByTagName('text');` +
+		`$text.Item(0).AppendChild($xml.CreateTextNode('` + escapePowerShell(title) + `')) > $null;` +
+		`$text.Item(1).AppendChild($xml.CreateTextNode('` + escapePowerShell(body) + `')) > $null;` +
+		`$toast = [Windows.UI.Notifications.ToastNotification]::new($xml);` +
+		`[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('unarr').Show($toast)`
 }
 
 func escapePowerShell(s string) string {
