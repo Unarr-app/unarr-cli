@@ -881,7 +881,8 @@ func applyDefaults(cfg *Config, meta toml.MetaData) {
 	// `unarr funnel on` whenever they're ready.
 }
 
-// Save writes config to the default or specified path using atomic write.
+// Save writes config to the default or specified path using atomic write,
+// patching an existing file in place (comments, order and unknown keys kept).
 func Save(cfg Config, path string) error {
 	if path == "" {
 		path = FilePath()
@@ -892,15 +893,14 @@ func Save(cfg Config, path string) error {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
-	var buf strings.Builder
-	encoder := toml.NewEncoder(&buf)
-	if err := encoder.Encode(cfg); err != nil {
-		return fmt.Errorf("encode config: %w", err)
+	data, err := renderConfig(cfg, path)
+	if err != nil {
+		return err
 	}
 
 	// Atomic write: write to temp, then rename
 	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(buf.String()), 0o600); err != nil {
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
 		return fmt.Errorf("write temp config: %w", err)
 	}
 
