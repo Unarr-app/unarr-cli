@@ -199,7 +199,7 @@ func configDownloads(cfg *config.Config) error {
 				Title("Download directory").
 				Description("Where NEW downloads are saved (files already downloaded are not moved). Example: "+downloadDirExample()).
 				Value(&dir).
-				Validate(validateDownloadDir),
+				Validate(func(s string) error { return validateDownloadDir(s, cfg.Download.Dir) }),
 			huh.NewSelect[string]().
 				Title("Preferred method").
 				Description("Methods not listed are disabled (e.g. debrid-only never uses torrent)").
@@ -400,10 +400,14 @@ func validateSpeed(s string) error {
 
 // validateDownloadDir runs the daemon's own path gate inside the form, so a
 // refused folder (D:\, a system dir) is corrected where the user typed it
-// instead of after every other question has been answered.
-func validateDownloadDir(s string) error {
-	if err := config.DriveRootError("downloads.dir", s, runtime.GOOS); err != nil {
-		return err
+// instead of after every other question has been answered. The whole-drive
+// rule only applies to a NEW value: an agent already running on E:\ must still
+// be able to change its speed limits here.
+func validateDownloadDir(s, current string) error {
+	if strings.TrimSpace(s) != current {
+		if err := config.DriveRootError("downloads.dir", s, runtime.GOOS); err != nil {
+			return err
+		}
 	}
 	c := config.Config{}
 	c.Download.Dir = expandHome(strings.TrimSpace(s))

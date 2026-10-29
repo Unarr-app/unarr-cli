@@ -2,6 +2,7 @@ package dialog
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,17 +30,24 @@ func PickFolder(title, initial string) (string, error) {
 	if fi, err := os.Stat(initial); err != nil || !fi.IsDir() {
 		initial = ""
 	}
+	var failed error
 	for _, cmd := range folderCandidates(title, initial) {
 		winproc.HideWindow(cmd)
 		out, err := cmd.Output()
 		if err != nil {
-			// A picker that ran and exited non-zero is a cancel; any other
-			// error means it never started, so the next candidate gets a turn.
+			// Exited non-zero quietly = the user cancelled. Non-zero with an error
+			// on stderr = the picker broke (a script that did not parse, zenity
+			// with no display): try the next one, and report it if none works,
+			// rather than looking like a dead menu item. Never started = next.
 			var ee *exec.ExitError
-			if errors.As(err, &ee) {
-				return "", ErrCancelled
+			if !errors.As(err, &ee) {
+				continue
 			}
-			continue
+			if msg := pickerFailure(string(ee.Stderr)); msg != "" {
+				failed = fmt.Errorf("folder picker failed: %s", msg)
+				continue
+			}
+			return "", ErrCancelled
 		}
 		// Clean: osascript answers "/Users/x/Media/" — the trailing slash would
 		// make an unchanged pick look like a change.
@@ -48,7 +56,24 @@ func PickFolder(title, initial string) (string, error) {
 		}
 		return "", ErrCancelled
 	}
+	if failed != nil {
+		return "", failed
+	}
 	return "", ErrUnavailable
+}
+
+// pickerFailure returns the first real error line a picker wrote to stderr, or
+// "" when it only said the user cancelled (osascript's -128) or printed toolkit
+// warnings (GTK chatter from zenity on an ordinary cancel).
+func pickerFailure(stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, "(-128)") || strings.Contains(strings.ToLower(line), "warning") {
+			continue
+		}
+		return line
+	}
+	return ""
 }
 
 // folderCandidates is a var so tests can stand in for the platform's programs.

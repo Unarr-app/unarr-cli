@@ -167,14 +167,8 @@ func defaultDownloadDir() string {
 	return filepath.Join(home, "Media")
 }
 
-// expandHome expands a leading ~/ to the user's home directory.
-func expandHome(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, path[2:])
-	}
-	return path
-}
+// expandHome expands a leading ~ to the user's home directory.
+func expandHome(path string) string { return config.ExpandHome(path) }
 
 // isTerminal checks if stdin is a terminal (not piped).
 func isTerminal() bool {

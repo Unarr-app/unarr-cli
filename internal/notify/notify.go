@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/Unarr-app/unarr-cli/internal/winproc"
 )
@@ -84,17 +85,12 @@ func windowsToastScript(title, body string) string {
 		`[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('unarr').Show($toast)`
 }
 
-func escapePowerShell(s string) string {
-	out := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\'' {
-			out = append(out, '\'', '\'') // double single-quote to escape
-		} else {
-			out = append(out, s[i])
-		}
-	}
-	return string(out)
-}
+// escapePowerShell escapes s for a single-quoted PowerShell string, doubling
+// the typographic quotes ‘ ’ ‚ ‛ too: PowerShell ends the string on them, and a
+// path like "Bob’s Films" in a toast body broke the script.
+func escapePowerShell(s string) string { return psQuoteEscaper.Replace(s) }
+
+var psQuoteEscaper = strings.NewReplacer("'", "''", "‘", "‘‘", "’", "’’", "‚", "‚‚", "‛", "‛‛")
 
 func escapeAppleScript(s string) string {
 	out := make([]byte, 0, len(s))

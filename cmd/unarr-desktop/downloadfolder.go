@@ -51,6 +51,13 @@ func (ui *trayUI) changeDownloadFolder() {
 		changeFolderFailed(err)
 		return
 	}
+	// Re-read: the picker can stay open for minutes while the daemon persists a
+	// key/hash or the Player menu writes the file; saving the pre-picker copy
+	// would silently revert those writes.
+	if cfg, err = config.Load(path); err != nil {
+		changeFolderFailed(err)
+		return
+	}
 	if dir == cfg.Download.Dir {
 		return
 	}

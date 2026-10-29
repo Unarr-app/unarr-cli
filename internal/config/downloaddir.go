@@ -19,7 +19,9 @@ import (
 func (c *Config) SetDownloadDir(dir string) {
 	old := c.Download.Dir
 	c.Download.Dir = dir
-	if old == "" {
+	// Clearing the dir is not a move: rebasing onto "" would turn
+	// <old>/Movies into the relative path "Movies".
+	if old == "" || dir == "" || old == dir {
 		return
 	}
 	c.Organize.MoviesDir = rebaseUnder(c.Organize.MoviesDir, old, dir)
@@ -55,22 +57,24 @@ func isDriveRoot(p string) bool {
 	return len(p) == 2 || p[2] == '\\' || p[2] == '/'
 }
 
-// rebaseUnder returns p re-rooted from oldRoot to newRoot when p is strictly
-// inside oldRoot, and p unchanged otherwise. A leading ~ on either side is
-// expanded first: config.toml can hold a hand-written `~/Media`, and mixing it
-// with an absolute path would make filepath.Rel fail and skip the move.
+// rebaseUnder returns p re-rooted from oldRoot to newRoot when p is oldRoot
+// itself or inside it (movies_dir = the download dir must follow too), and p
+// unchanged otherwise. A leading ~ on either side is expanded first:
+// config.toml can hold a hand-written `~/Media`, and mixing it with an
+// absolute path would make filepath.Rel fail and skip the move.
 func rebaseUnder(p, oldRoot, newRoot string) string {
 	if p == "" {
 		return p
 	}
-	rel, err := filepath.Rel(filepath.Clean(expandTilde(oldRoot)), filepath.Clean(expandTilde(p)))
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	rel, err := filepath.Rel(filepath.Clean(ExpandHome(oldRoot)), filepath.Clean(ExpandHome(p)))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return p
 	}
 	return filepath.Join(newRoot, rel)
 }
 
-func expandTilde(p string) string {
+// ExpandHome expands a leading `~`, `~/` or `~\` to the user's home directory.
+func ExpandHome(p string) string {
 	if p != "~" && !strings.HasPrefix(p, "~/") && !strings.HasPrefix(p, `~\`) {
 		return p
 	}

@@ -69,16 +69,33 @@ func TestDriveRootErrorOnlyForWholeWindowsDrives(t *testing.T) {
 	}
 }
 
-func TestRebaseUnderLeavesLookalikesAndTheRootAlone(t *testing.T) {
+func TestRebaseUnderLeavesLookalikesAlone(t *testing.T) {
 	root := filepath.FromSlash("/c/Videos")
 	for _, p := range []string{
 		"",
-		root,                               // the old dir itself is not "inside" it
 		filepath.FromSlash("/c/VideosOld"), // prefix match is not containment
 		filepath.FromSlash("/c/Other/Movies"),
 	} {
 		if got := rebaseUnder(p, root, filepath.FromSlash("/d/x")); got != p {
 			t.Errorf("rebaseUnder(%q) = %q, want unchanged", p, got)
 		}
+	}
+}
+
+func TestRebaseUnderMovesAFolderEqualToTheOldDir(t *testing.T) {
+	// movies_dir = downloads.dir: finished movies must follow to the new drive.
+	root, nu := filepath.FromSlash("/c/Media"), filepath.FromSlash("/e/Media")
+	if got := rebaseUnder(root, root, nu); got != nu {
+		t.Errorf("rebaseUnder(root) = %q, want %q", got, nu)
+	}
+}
+
+func TestSetDownloadDirClearingIsNotAMove(t *testing.T) {
+	var c Config
+	c.Download.Dir = filepath.FromSlash("/data/dl")
+	c.Organize.MoviesDir = filepath.FromSlash("/data/dl/Movies")
+	c.SetDownloadDir("")
+	if c.Organize.MoviesDir != filepath.FromSlash("/data/dl/Movies") || c.Library.ScanPath != "" {
+		t.Errorf("clearing moved things: movies=%q scan=%q", c.Organize.MoviesDir, c.Library.ScanPath)
 	}
 }

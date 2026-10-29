@@ -53,6 +53,35 @@ func TestPickFolderNonZeroExitOrEmptyOutputIsCancel(t *testing.T) {
 	}
 }
 
+func TestPickFolderBrokenPickerIsAnErrorNotACancel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell as the stand-in picker")
+	}
+	// zenity with no display: falls through to the next picker…
+	stubFolderPickers(t, exec.Command("sh", "-c", "echo 'cannot open display' >&2; exit 1"), exec.Command("sh", "-c", "echo /ok"))
+	if got, err := PickFolder("t", ""); err != nil || got != "/ok" {
+		t.Fatalf("got %q, %v; want the next picker's answer", got, err)
+	}
+	// …and with none left it is reported, not swallowed as a cancel.
+	stubFolderPickers(t, exec.Command("sh", "-c", "echo 'ParserError: missing terminator' >&2; exit 1"))
+	if _, err := PickFolder("t", ""); err == nil || errors.Is(err, ErrCancelled) || !strings.Contains(err.Error(), "ParserError") {
+		t.Fatalf("err = %v, want a reported picker failure", err)
+	}
+	// osascript's cancel and GTK warnings are still a quiet cancel.
+	for _, s := range []string{"echo 'execution error: User canceled. (-128)' >&2; exit 1", "echo 'Gtk-WARNING **: x' >&2; exit 1"} {
+		stubFolderPickers(t, exec.Command("sh", "-c", s))
+		if _, err := PickFolder("t", ""); !errors.Is(err, ErrCancelled) {
+			t.Errorf("%q: err = %v, want ErrCancelled", s, err)
+		}
+	}
+}
+
+func TestEscapePowerShellDoublesTypographicQuotes(t *testing.T) {
+	if got, want := escapePowerShell("Bob’s ‘x’ it's"), "Bob’’s ‘‘x’’ it''s"; got != want {
+		t.Errorf("escapePowerShell = %q, want %q", got, want)
+	}
+}
+
 func TestFolderCandidatesCarryTitleAndInitial(t *testing.T) {
 	dir := t.TempDir()
 	for _, c := range folderCandidates("Pick it", dir) {
