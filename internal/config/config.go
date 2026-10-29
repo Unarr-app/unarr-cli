@@ -992,6 +992,16 @@ var dangerousPaths = func() map[string]bool {
 	return m
 }()
 
+// systemDirError explains a refused system directory. A drive root (D:\) is the
+// common innocent case — someone pointing downloads at a whole data drive — so
+// it says to use a folder on it instead of calling their drive a system folder.
+func systemDirError(label, clean string) error {
+	if runtime.GOOS == "windows" && isDriveRoot(clean) {
+		return driveRootMessage(label, clean)
+	}
+	return fmt.Errorf("%s: refusing to use system directory %q", label, clean)
+}
+
 // ValidatePaths checks that configured directories are safe to write to.
 // Returns an error if any path points to a system directory or the user's
 // home directory root (must use a subdirectory).
@@ -1014,7 +1024,7 @@ func (c *Config) ValidatePaths() error {
 		clean := filepath.Clean(abs)
 
 		if dangerousPaths[clean] {
-			return fmt.Errorf("%s: refusing to use system directory %q", label, clean)
+			return systemDirError(label, clean)
 		}
 
 		// Block home root — require a subdirectory

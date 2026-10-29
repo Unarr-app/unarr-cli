@@ -54,6 +54,7 @@ func (ui *trayUI) applyMenuIcons() {
 		ui.mOpen:            "open",
 		ui.mLibrary:         "library",
 		ui.mDownloads:       "downloads",
+		ui.mChangeDir:       "downloads",
 		ui.mConfigure:       "configure",
 		ui.mEdit:            "edit",
 		ui.mPlayer:          "player",

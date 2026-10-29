@@ -32,6 +32,7 @@ type trayUI struct {
 	mEnableDownloads                      *systray.MenuItem
 	mOpen, mLibrary, mDownloads           *systray.MenuItem
 	mConfigure, mEdit, mPlayer            *systray.MenuItem
+	mChangeDir                            *systray.MenuItem
 	mLogs, mSendLogs, mDocs               *systray.MenuItem
 	mAutostart, mUpdate, mQuit            *systray.MenuItem
 
@@ -164,6 +165,7 @@ func newTrayUI() *trayUI {
 	ui.mOpen = systray.AddMenuItem("Open unarr.app", "Open the unarr web app")
 	ui.mLibrary = systray.AddMenuItem("Open library (web)", "Your unarr library on the web")
 	ui.mDownloads = systray.AddMenuItem("Open downloads folder", "Open the agent's download directory")
+	ui.mChangeDir = systray.AddMenuItem("Change download folder…", "Pick where new downloads are saved")
 	ui.mConfigure = systray.AddMenuItem("Configure agent (web)", "Paths, codecs, hardware — on the web")
 	ui.mEdit = systray.AddMenuItem("Edit config.toml", "Open the agent config file")
 	// Player submenu: pick which local player unarr:// links open in (writes
@@ -265,7 +267,7 @@ func (ui *trayUI) applyMode(cli bool) {
 	// submenu + Open unarr.app / library / docs stay in both modes.
 	daemon := []*systray.MenuItem{
 		ui.mPause, ui.mResume, ui.mRestart, ui.mAccount, ui.mVersion,
-		ui.mDownloads, ui.mEdit,
+		ui.mDownloads, ui.mChangeDir, ui.mEdit,
 	}
 	for _, it := range daemon {
 		if cli {

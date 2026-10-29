@@ -144,7 +144,12 @@ func exitCode(err error) int {
 	return -1
 }
 
-func escapePowerShell(s string) string { return strings.ReplaceAll(s, "'", "''") }
+// escapePowerShell escapes s for a single-quoted PowerShell string. PowerShell
+// also closes such a string on the typographic quotes ‘ ’ ‚ ‛ (a folder named
+// "Bob’s Films" broke the script), so each is doubled like the ASCII one.
+func escapePowerShell(s string) string { return psQuoteEscaper.Replace(s) }
+
+var psQuoteEscaper = strings.NewReplacer("'", "''", "‘", "‘‘", "’", "’’", "‚", "‚‚", "‛", "‛‛")
 
 func escapeAppleScript(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
