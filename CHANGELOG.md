@@ -5,12 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.0] - 2026-10-29
+
+
+### Added
+
+- **desktop**: change download folder from the tray; fix Windows toast body
+
+### Fixed
+
+- **config**: keep comments, order and unknown keys when saving config.toml
+- **desktop**: address review of the download-folder change
 ## [1.20.4] - 2026-10-28
 
 
 ### Fixed
 
 - **funnel**: bump pinned cloudflared to 2026.10.5 and refresh cached binaries
+
+### Other
+
+- **release**: 1.20.4
 ## [1.20.3] - 2026-10-28
 
 
@@ -2194,6 +2209,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Build
 
 - add -s -w -trimpath to Makefile, add build-small target with UPX
+[1.21.0]: https://github.com/Unarr-app/unarr-cli/compare/v1.20.4...v1.21.0
 [1.20.4]: https://github.com/Unarr-app/unarr-cli/compare/v1.20.3...v1.20.4
 [1.20.3]: https://github.com/Unarr-app/unarr-cli/compare/v1.20.2...v1.20.3
 [1.20.2]: https://github.com/Unarr-app/unarr-cli/compare/v1.20.1...v1.20.2
