@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/net/html/charset"
+
 	"github.com/Unarr-app/unarr-cli/internal/usenet/nntp"
 )
 
@@ -77,6 +79,9 @@ type xmlSegment struct {
 func Parse(r io.Reader) (*NZB, error) {
 	var raw xmlNZB
 	dec := xml.NewDecoder(r)
+	// Some indexers emit <?xml encoding="iso-8859-1"?>; without a CharsetReader
+	// encoding/xml rejects anything but UTF-8 and the whole download fails.
+	dec.CharsetReader = charset.NewReaderLabel
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("nzb: xml decode: %w", err)
 	}

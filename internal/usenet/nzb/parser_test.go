@@ -116,6 +116,20 @@ func TestParseBytes(t *testing.T) {
 	}
 }
 
+// Prod 2026-10-27: `xml: encoding "iso-8859-1" declared but Decoder.CharsetReader is nil`.
+func TestParseLatin1(t *testing.T) {
+	doc := "<?xml version=\"1.0\" encoding=\"iso-8859-1\"?>\n" +
+		`<nzb><file poster="x" date="1" subject="Pel` + "\xed" + `cula.part1.rar"><groups><group>a.b</group></groups>` +
+		`<segments><segment bytes="10" number="1">m1@x</segment></segments></file></nzb>`
+	nzb, err := ParseBytes([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseBytes latin1: %v", err)
+	}
+	if got := nzb.Files[0].Subject; got != "Película.part1.rar" {
+		t.Errorf("subject: got %q", got)
+	}
+}
+
 func TestTotalBytes(t *testing.T) {
 	nzb, _ := ParseBytes([]byte(testNZB))
 	// 768000 + 768000 + 512000 + 4096 + 32768
