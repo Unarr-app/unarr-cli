@@ -338,12 +338,19 @@ func (m *Manager) ActiveTasks() []*Task {
 
 // TaskStates returns the current state of all active tasks plus any recently
 // finished tasks that haven't been synced yet. Called by the sync goroutine.
+//
+// Active tasks that are pending, claimed or cancelled have no API status (see
+// ToStatusUpdate) and stay out: the server rejects an empty status, and a long
+// queue would count against its limit of 50 tasks per sync, which 400s the whole
+// request.
 func (m *Manager) TaskStates() []agent.TaskState {
 	// Collect active tasks
 	m.activeMu.RLock()
 	states := make([]agent.TaskState, 0, len(m.active))
 	for _, t := range m.active {
-		states = append(states, agent.TaskStateFromUpdate(t.ToStatusUpdate()))
+		if u := t.ToStatusUpdate(); u.Status != "" {
+			states = append(states, agent.TaskStateFromUpdate(u))
+		}
 	}
 	m.activeMu.RUnlock()
 
