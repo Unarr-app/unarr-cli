@@ -659,16 +659,21 @@ type SupportReport struct {
 	DesktopVersion string `json:"desktopVersion,omitempty"`
 	OS             string `json:"os"`
 	Arch           string `json:"arch"`
+	// SaveToAccount also keeps the log in the user's account, readable on the
+	// web. Set it only after the user explicitly agreed.
+	SaveToAccount bool `json:"saveToAccount,omitempty"`
 }
 
 // SendSupportReport posts a diagnostics/crash report to the server, which
-// forwards it to the developers by email.
-func (c *Client) SendSupportReport(ctx context.Context, r SupportReport) error {
+// forwards it to the developers by email. saved reports whether the server kept
+// the copy SaveToAccount asked for; failing to keep it does not fail the report.
+func (c *Client) SendSupportReport(ctx context.Context, r SupportReport) (saved bool, err error) {
 	var resp struct {
-		OK bool `json:"ok"`
+		OK    bool `json:"ok"`
+		Saved bool `json:"saved"`
 	}
 	if err := c.doPost(ctx, "/api/internal/agent/support-report", r, &resp); err != nil {
-		return fmt.Errorf("support report: %w", err)
+		return false, fmt.Errorf("support report: %w", err)
 	}
-	return nil
+	return resp.Saved, nil
 }

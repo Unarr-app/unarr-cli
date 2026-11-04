@@ -43,8 +43,8 @@ func TestSendReportBodyCarriesBothLogsBounded(t *testing.T) {
 		"version":            {out: "unarr 1.8.1 (windows/amd64)\n"},
 	})
 
-	if err := sendReport("crash", "Agent process (PID 12272, v1.8.1) died",
-		agentStatus{crashed: true, pid: 12272, version: "1.8.1", agentID: "test-agent"}); err != nil {
+	if _, err := sendReport("crash", "Agent process (PID 12272, v1.8.1) died",
+		agentStatus{crashed: true, pid: 12272, version: "1.8.1", agentID: "test-agent"}, false); err != nil {
 		t.Fatalf("sendReport: %v", err)
 	}
 
@@ -104,7 +104,7 @@ func TestSendReportTransportsNonASCIIIntact(t *testing.T) {
 		"version":     {out: "unarr 1.9.0 (windows/amd64)\n"},
 	})
 
-	if err := sendReport("logs", "user submitted "+tricky, agentStatus{}); err != nil {
+	if _, err := sendReport("logs", "user submitted "+tricky, agentStatus{}, false); err != nil {
 		t.Fatalf("sendReport: %v", err)
 	}
 	if !strings.Contains(got.Logs, tricky) {
@@ -122,7 +122,7 @@ func TestSendReportWithoutCredentialsFails(t *testing.T) {
 	isolatePaths(t)
 	stubUnarr(t, map[string]reply{"daemon logs": {out: "x\n"}})
 
-	if err := sendReport("crash", "no creds", agentStatus{}); err == nil {
+	if _, err := sendReport("crash", "no creds", agentStatus{}, false); err == nil {
 		t.Fatal("sendReport must fail when the agent has no API key")
 	}
 }

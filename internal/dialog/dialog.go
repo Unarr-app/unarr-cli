@@ -47,7 +47,20 @@ const sendLabel = "Send report"
 // with neither zenity nor kdialog); the caller is expected to fall back to a
 // notification.
 func Error(title, body string) Choice {
-	for _, c := range candidates(title, body) {
+	return ask(candidates(title, body))
+}
+
+// Confirm asks a yes/no question whose safe answer is no, and blocks until the
+// user answers. It is true only when the user pressed yesLabel: closing the
+// dialog, or having no dialog program at all, means no.
+func Confirm(title, body, yesLabel string) bool {
+	return ask(confirmCandidates(title, body, yesLabel)) == SendReport
+}
+
+// ask runs the first dialog program that starts. pressedSend reports the
+// affirmative button, which ask returns as SendReport.
+func ask(cs []candidate) Choice {
+	for _, c := range cs {
 		winproc.HideWindow(c.cmd)
 		out, err := c.cmd.Output()
 		if err != nil {
@@ -124,6 +137,57 @@ var candidates = func(title, body string) []candidate {
 				// neither of the above. Better than the user seeing nothing.
 				cmd: exec.Command("xmessage", "-center",
 					"-buttons", "Close:0,"+sendLabel+":2", title+"\n\n"+body),
+				exitMeansAnswer: true,
+				pressedSend:     func(_ string, err error) bool { return exitCode(err) == 2 },
+			},
+		}
+	}
+}
+
+// confirmCandidates is the question form of candidates; every program defaults
+// to the negative button, so a stray Enter does not agree to anything.
+var confirmCandidates = func(title, body, yesLabel string) []candidate {
+	const noLabel = "No"
+	switch runtime.GOOS {
+	case "darwin":
+		script := `display dialog "` + escapeAppleScript(body) + `" with title "` +
+			escapeAppleScript(title) + `" buttons {"` + noLabel + `", "` +
+			escapeAppleScript(yesLabel) + `"} default button "` + noLabel + `"`
+		return []candidate{{
+			cmd: exec.Command("osascript", "-e", script),
+			pressedSend: func(out string, _ error) bool {
+				return strings.Contains(out, "button returned:"+yesLabel)
+			},
+		}}
+	case "windows":
+		// MessageBox has no custom labels; yesLabel is dropped and Yes answers.
+		script := `Add-Type -AssemblyName System.Windows.Forms;` +
+			`[System.Windows.Forms.MessageBox]::Show('` + escapePowerShell(body) + `','` +
+			escapePowerShell(title) + `','YesNo','Question','Button2')`
+		return []candidate{{
+			cmd:         exec.Command("powershell", "-NoProfile", "-Command", script),
+			pressedSend: func(out string, _ error) bool { return strings.Contains(out, "Yes") },
+		}}
+	default:
+		pressedOK := func(_ string, err error) bool { return err == nil }
+		return []candidate{
+			{
+				cmd: exec.Command("zenity", "--question", "--no-wrap", "--default-cancel",
+					"--title", title, "--text", body,
+					"--ok-label", yesLabel, "--cancel-label", noLabel),
+				exitMeansAnswer: true,
+				pressedSend:     pressedOK,
+			},
+			{
+				// warningyesno is the kdialog form that focuses No.
+				cmd: exec.Command("kdialog", "--title", title, "--warningyesno", body,
+					"--yes-label", yesLabel, "--no-label", noLabel),
+				exitMeansAnswer: true,
+				pressedSend:     pressedOK,
+			},
+			{
+				cmd: exec.Command("xmessage", "-center", "-default", noLabel,
+					"-buttons", noLabel+":0,"+yesLabel+":2", title+"\n\n"+body),
 				exitMeansAnswer: true,
 				pressedSend:     func(_ string, err error) bool { return exitCode(err) == 2 },
 			},

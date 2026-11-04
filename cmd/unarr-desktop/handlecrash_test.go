@@ -60,6 +60,54 @@ func TestHandleCrashSendsAReportWithTheDeadAgentsIdentity(t *testing.T) {
 	if !strings.Contains(sent[0].Logs, "panic: runtime error") {
 		t.Error("the crash report went out without the panic, which is the point of sending it")
 	}
+	if sent[0].SaveToAccount {
+		t.Error("an automatic crash report asked to keep the log: nobody agreed to that")
+	}
+}
+
+// TestSendLogsToSupportKeepsACopyOnlyWhenTheUserAgrees pins the opt-in on the
+// wire: the field reaches the server if, and only if, the user said yes.
+func TestSendLogsToSupportKeepsACopyOnlyWhenTheUserAgrees(t *testing.T) {
+	for _, agreed := range []bool{true, false} {
+		isolatePaths(t)
+		srv, reports := crashReportServer(t, http.StatusOK)
+		writeAuthConfig(t, srv.URL)
+		stubUnarr(t, map[string]reply{"daemon logs": {out: "a log line\n"}})
+		prev := askKeepLogCopy
+		t.Cleanup(func() { askKeepLogCopy = prev })
+		askKeepLogCopy = func() bool { return agreed }
+
+		sendLogsToSupport()
+
+		sent := reports()
+		if len(sent) != 1 {
+			t.Fatalf("agreed=%v: sent %d reports, want exactly 1", agreed, len(sent))
+		}
+		if sent[0].SaveToAccount != agreed {
+			t.Errorf("agreed=%v: SaveToAccount = %v", agreed, sent[0].SaveToAccount)
+		}
+	}
+}
+
+// TestSendLogsToSupportDoesNotStackDialogs: a second click while the question
+// is still on screen must not send the logs a second time.
+func TestSendLogsToSupportDoesNotStackDialogs(t *testing.T) {
+	isolatePaths(t)
+	srv, reports := crashReportServer(t, http.StatusOK)
+	writeAuthConfig(t, srv.URL)
+	stubUnarr(t, map[string]reply{"daemon logs": {out: "a log line\n"}})
+	prev := askKeepLogCopy
+	t.Cleanup(func() { askKeepLogCopy = prev })
+	askKeepLogCopy = func() bool {
+		sendLogsToSupport() // the second click, while this dialog is up
+		return false
+	}
+
+	sendLogsToSupport()
+
+	if sent := reports(); len(sent) != 1 {
+		t.Errorf("sent %d reports, want exactly 1", len(sent))
+	}
 }
 
 // TestHandleCrashRespectsTelemetryOptOut: UNARR_NO_TELEMETRY=1 means nothing
