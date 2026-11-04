@@ -537,7 +537,7 @@ func reportFailureToSupport(action, detail string, cause error) {
 	// A tray action failed while the agent itself is presumably still up, so
 	// there is no captured agentStatus to describe — the LIVE daemon is the
 	// right thing to identify, and sendReport reads it for a zero value.
-	if err := sendReport("error", msg, agentStatus{}); err != nil {
+	if _, err := sendReport("error", msg, agentStatus{}, false); err != nil {
 		notify.Send("unarr agent", "Could not send the report: "+err.Error())
 		return
 	}

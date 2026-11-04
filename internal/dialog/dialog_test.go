@@ -92,6 +92,59 @@ func TestErrorReadsTheUsersAnswer(t *testing.T) {
 	}
 }
 
+func TestConfirmIsYesOnlyWhenTheUserSaysSo(t *testing.T) {
+	tests := []struct {
+		name  string
+		bin   string
+		press bool
+		want  bool
+	}{
+		{"pressed yes", "echo", true, true},
+		{"pressed no", "echo", false, false},
+		{"no dialog program", "unarr-no-such-dialog-program", true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := confirmCandidates
+			t.Cleanup(func() { confirmCandidates = prev })
+			confirmCandidates = func(_, _, _ string) []candidate {
+				return []candidate{{
+					cmd:             exec.Command(tc.bin, "ignored"),
+					exitMeansAnswer: true,
+					pressedSend:     func(string, error) bool { return tc.press },
+				}}
+			}
+
+			if got := Confirm("t", "b", "Yes please"); got != tc.want {
+				t.Errorf("Confirm() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestConfirmCandidatesCarryTheQuestionAndDefaultToNo(t *testing.T) {
+	for _, c := range confirmCandidates("title", "keep this log?", "Keep a copy") {
+		joined := strings.Join(c.cmd.Args, " ")
+		if !strings.Contains(joined, "keep this log?") {
+			t.Errorf("%s does not carry the question: %v", c.cmd.Path, c.cmd.Args)
+		}
+		switch c.cmd.Args[0] {
+		case "zenity":
+			if !strings.Contains(joined, "--default-cancel") {
+				t.Errorf("zenity focuses yes: %v", c.cmd.Args)
+			}
+		case "kdialog":
+			if !strings.Contains(joined, "--warningyesno") {
+				t.Errorf("kdialog form focuses yes: %v", c.cmd.Args)
+			}
+		case "xmessage":
+			if !strings.Contains(joined, "-default No") {
+				t.Errorf("xmessage has no safe default: %v", c.cmd.Args)
+			}
+		}
+	}
+}
+
 func TestExitCode(t *testing.T) {
 	// xmessage reports the pressed button as an exit status, so reading it
 	// wrongly would report the wrong answer.

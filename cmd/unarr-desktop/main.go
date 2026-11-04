@@ -20,11 +20,13 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/systray"
 	"github.com/pkg/browser"
 
+	"github.com/Unarr-app/unarr-cli/internal/dialog"
 	"github.com/Unarr-app/unarr-cli/internal/notify"
 	"github.com/Unarr-app/unarr-cli/internal/sentry"
 )
@@ -269,7 +271,7 @@ func handleCrash(s agentStatus) {
 	}
 	notify.Send("unarr agent stopped unexpectedly", "Collecting a crash report…")
 	msg := fmt.Sprintf("Agent process (PID %d, v%s) died without a clean shutdown; detected by unarr-desktop.", s.pid, s.version)
-	if err := sendReport("crash", msg, s); err != nil {
+	if _, err := sendReport("crash", msg, s, false); err != nil {
 		forgetCrashReport(s)
 		fmt.Fprintln(os.Stderr, "unarr-desktop: crash report:", err)
 		sentry.CaptureError(err, "desktop:crash-report")
@@ -280,17 +282,43 @@ func handleCrash(s agentStatus) {
 	notify.Send("Crash report sent", "The developers have been notified. You can resume the agent from the tray.")
 }
 
+// sendingLogs single-flights sendLogsToSupport.
+var sendingLogs atomic.Bool
+
+// askKeepLogCopy is a var so tests can answer for the user.
+var askKeepLogCopy = func() bool {
+	return dialog.Confirm("Send logs to support",
+		"Also keep this log in your unarr account so you can read it on the web?\n"+
+			"It is deleted after 30 days. Support receives the log either way.",
+		"Keep a copy")
+}
+
 // sendLogsToSupport is the user-initiated path ("Send logs to support"). It is
 // always allowed (explicit user action, so UNARR_NO_TELEMETRY does not apply).
 // When the agent has no API credentials yet, fall back to a mail draft +
 // on-disk log dump the user can attach by hand.
 func sendLogsToSupport() {
+	// The question below waits on a human, so a second click on the menu would
+	// otherwise stack another dialog and send the logs twice.
+	if !sendingLogs.CompareAndSwap(false, true) {
+		return
+	}
+	defer sendingLogs.Store(false)
+
+	keepCopy := askKeepLogCopy()
 	notify.Send("Sending logs to support…", "Collecting agent logs.")
 	// No specific agent is under discussion here, so sendReport falls back to
 	// reading the state file for identity — see its doc comment.
-	err := sendReport("logs", "User-initiated log submission from the desktop tray.", agentStatus{})
+	saved, err := sendReport("logs", "User-initiated log submission from the desktop tray.", agentStatus{}, keepCopy)
 	if err == nil {
-		notify.Send("Logs sent", "Thanks — the developers received your logs (support@unarr.app).")
+		switch {
+		case saved:
+			notify.Send("Logs sent", "Thanks — the developers received your logs. Your copy is in Profile → Agents → Diagnose.")
+		case keepCopy:
+			notify.Send("Logs sent, copy not kept", "The developers received your logs, but your account could not keep a copy.")
+		default:
+			notify.Send("Logs sent", "Thanks — the developers received your logs (support@unarr.app).")
+		}
 		return
 	}
 	fmt.Fprintln(os.Stderr, "unarr-desktop: send logs:", err)

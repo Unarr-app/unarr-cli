@@ -49,10 +49,13 @@ const (
 // A zero `about` (the user-initiated "Send logs to support" path, where no
 // specific agent is under discussion) still falls back to reading the state
 // file — there is nothing better to use, and no crash is being described.
-func sendReport(kind, message string, about agentStatus) error {
+//
+// saveToAccount must only be true when the user just agreed to it. saved says
+// whether the server kept that copy.
+func sendReport(kind, message string, about agentStatus, saveToAccount bool) (saved bool, err error) {
 	client, _, err := newAgentClient()
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	agentVersion, agentID := about.version, about.agentID
@@ -77,6 +80,7 @@ func sendReport(kind, message string, about agentStatus) error {
 		AgentID:        agentID,
 		OS:             runtime.GOOS,
 		Arch:           runtime.GOARCH,
+		SaveToAccount:  saveToAccount,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), reportTimeout)
