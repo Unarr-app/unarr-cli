@@ -12,7 +12,19 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/storage"
 )
+
+// smokeSeederStorage gives a loopback seeder the mmap storage the product uses,
+// closed when the test ends. anacrolix's default file storage has a no-op
+// per-torrent Close, so on Windows its mapped payload stayed open and
+// t.TempDir's cleanup failed every run ("being used by another process").
+func smokeSeederStorage(t *testing.T, dir string) storage.ClientImplCloser {
+	t.Helper()
+	s := storage.NewMMap(dir)
+	t.Cleanup(func() { _ = s.Close() }) // after the deferred seeder.Close, before TempDir removal
+	return s
+}
 
 // TestSeedLifecycleSmoke spins up a real loopback BitTorrent swarm: a seeder
 // client serving a small file, and our TorrentDownloader's client leeching it.
@@ -44,6 +56,7 @@ func TestSeedLifecycleSmoke(t *testing.T) {
 
 	scfg := torrent.NewDefaultClientConfig()
 	scfg.DataDir = seedDir
+	scfg.DefaultStorage = smokeSeederStorage(t, seedDir)
 	scfg.Seed = true
 	scfg.NoDHT = true
 	scfg.DisableTrackers = true

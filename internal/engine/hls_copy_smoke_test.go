@@ -69,6 +69,11 @@ func genSource(t *testing.T, rt TranscodeRuntime, name string, vArgs, aArgs []st
 
 // runCopySession starts a VideoCopy session and waits for ffmpeg's playlist
 // to reach ENDLIST. Returns the session and the final playlist text.
+//
+// Fmp4Only pins the fMP4 EVENT copy this suite is about. Without it a local
+// H.264 source takes COPY-VOD (MPEG-TS, no copy.m3u8, hls_copy_vod*_test.go),
+// and these tests waited 30 s for a playlist that path never writes. EVENT copy
+// is still what HEVC, cast and range-less remote sources get.
 func runCopySession(t *testing.T, rt TranscodeRuntime, source string, startSec float64) (*HLSSession, string) {
 	t.Helper()
 	s, err := StartHLSSession(context.Background(), HLSSessionConfig{
@@ -78,6 +83,7 @@ func runCopySession(t *testing.T, rt TranscodeRuntime, source string, startSec f
 		AudioIndex: -1,
 		StartSec:   startSec,
 		VideoCopy:  true,
+		Fmp4Only:   true,
 		Transcode:  rt,
 	})
 	if err != nil {
