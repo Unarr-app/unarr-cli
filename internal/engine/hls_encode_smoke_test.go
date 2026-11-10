@@ -60,6 +60,9 @@ func TestRejectedSourceIsRecognised(t *testing.T) {
 			if !recognised {
 				t.Errorf("no line recognised for %d (%v):\n%s", status, err, out)
 			}
+			if !isHTTPExit(err) {
+				t.Errorf("exit for %d not recognised as HTTP: %v", status, err)
+			}
 			t.Logf("%d -> %v", status, err)
 		})
 	}

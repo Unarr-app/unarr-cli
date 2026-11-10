@@ -1,7 +1,10 @@
 package engine
 
 import (
+	"errors"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -9,37 +12,61 @@ import (
 
 func TestSanitizeEncoderLine(t *testing.T) {
 	const secret = "s3cr3t-token"
-	for _, line := range []string{
-		"[https @ 000001] HTTP error 410 Gone https://cdn.example/dld/" + secret + "/a.mkv",
-		"Error opening input: https://cdn.example/a.mkv?token=" + secret,
-		"failed for 'http://u:" + secret + "@host/x'",
+	for _, tc := range []struct{ line, source string }{
+		{"[https @ 000001] HTTP error 410 Gone https://cdn.example/dld/" + secret + "/a.mkv", ""},
+		{"Error opening input: https://cdn.example/a.mkv?token=" + secret, ""},
+		{"failed for 'http://u:" + secret + "@host/x'", ""},
+		// A decoded URL has spaces the generic pattern stops at; the session's
+		// own URL is redacted by RedactSourceText first.
+		{"Error opening input: https://cdn.example/x?file=My Movie.mkv&token=" + secret,
+			"https://cdn.example/x?file=My%20Movie.mkv&token=" + secret},
 	} {
-		if got := sanitizeEncoderLine(line); strings.Contains(got, secret) {
-			t.Errorf("sanitizeEncoderLine(%q) leaked the secret: %q", line, got)
+		if got := sanitizeEncoderLine(tc.line, "", tc.source); strings.Contains(got, secret) {
+			t.Errorf("sanitizeEncoderLine(%q) leaked the secret: %q", tc.line, got)
 		}
 	}
-	got := sanitizeEncoderLine("[hls @ 00000252dac6aec0] Failed to open segment 'init.mp4'")
-	if got != "[hls] Failed to open segment 'init.mp4'" {
-		t.Errorf("address not stripped: %q", got)
+	for _, line := range []string{
+		"[hls @ 00000252dac6aec0] Failed to open segment 'init.mp4'",
+		"[hls @ 0x55d3c8a0e2c0] Failed to open segment 'init.mp4'",
+	} {
+		if got := sanitizeEncoderLine(line, ""); got != "[hls] Failed to open segment 'init.mp4'" {
+			t.Errorf("address not stripped from %q: %q", line, got)
+		}
 	}
-	if long := sanitizeEncoderLine(strings.Repeat("é", 500)); len([]rune(long)) != encoderTailLineCap {
+	for _, line := range []string{
+		`Failed to open segment 'C:\Users\JDoe\AppData\Local\x\init.mp4'`,
+		`Failed to open segment 'c:/users/jdoe/AppData/Local/x/init.mp4'`,
+	} {
+		got := sanitizeEncoderLine(line, `C:\Users\jdoe`)
+		if strings.Contains(strings.ToLower(got), "jdoe") || !strings.Contains(got, "~") {
+			t.Errorf("home not replaced in %q: %q", line, got)
+		}
+	}
+	if long := sanitizeEncoderLine(strings.Repeat("é", 500), ""); len([]rune(long)) != encoderTailLineCap {
 		t.Errorf("line not capped on a rune boundary: %d runes", len([]rune(long)))
 	}
 }
 
-func TestEncoderTailKeepsTheEndWithoutRepeats(t *testing.T) {
+func TestEncoderTailKeepsTheNewestCause(t *testing.T) {
 	s := &HLSSession{}
-	s.recordEncoderLine("oldest")
-	for i := 0; i < encoderTailLines; i++ {
-		s.recordEncoderLine(strconv.Itoa(i))
-		s.recordEncoderLine(strconv.Itoa(i)) // a repeat must not use up a slot
+	s.recordEncoderLine("oldest warning")
+	for i := 0; i < 10; i++ {
+		line := "warning " + strconv.Itoa(i) + " " + strings.Repeat("x", 90)
+		s.recordEncoderLine(line)
+		s.recordEncoderLine(line) // a repeat must not use up a slot
 	}
+	s.recordEncoderLine("x264 [error]: invalid preset 'bogus'")
+	s.recordEncoderLine("[vf#0:0 @ 0x55d8bc2eb2c0] Terminating thread with return code -22 (Invalid argument)")
+	s.recordEncoderLine("[out#0/hls @ 0x55d8bc2ecac0] Nothing was written into output file")
 	tail := s.EncoderErrorTail()
-	if strings.Contains(tail, "oldest") {
-		t.Errorf("the oldest line should have been dropped: %q", tail)
+	if !strings.HasSuffix(tail, "x264 [error]: invalid preset 'bogus'") {
+		t.Errorf("the cause must be the last kept line, generic chatter dropped: %q", tail)
 	}
-	if got := strings.Count(tail, " | ") + 1; got != encoderTailLines {
-		t.Errorf("kept %d lines, want %d: %q", got, encoderTailLines, tail)
+	if strings.Contains(tail, "oldest") || len(tail) > encoderTailBudget {
+		t.Errorf("the tail must keep the newest lines within %d chars: %d %q", encoderTailBudget, len(tail), tail)
+	}
+	if got := buildEncoderTail([]string{"Conversion failed!"}, ""); got != "Conversion failed!" {
+		t.Errorf("only generic lines: keep the last one rather than nothing, got %q", got)
 	}
 	s.resetTranscodeStats()
 	if got := s.EncoderErrorTail(); got != "" {
@@ -47,24 +74,69 @@ func TestEncoderTailKeepsTheEndWithoutRepeats(t *testing.T) {
 	}
 }
 
-func TestSourceRejectedOnlyForRemoteSources(t *testing.T) {
-	const line = "[https @ 01] Server returned 4XX Client Error, but not one of 40{0,1,3,4}"
-	local := &HLSSession{}
-	local.recordEncoderLine(line)
-	if local.SourceRejected() {
-		t.Error("a local session cannot be refused by a remote server")
+func TestIsHTTPExitCode(t *testing.T) {
+	for code, want := range map[int]bool{
+		0xcccfcb08: true,  // 403, Windows
+		0xa7a7cb08: true,  // 410/429, Windows
+		0xa7a7ca08: true,  // 500, Windows
+		8:          true,  // any of them on unix: only the low byte survives
+		0xfffffff3: false, // EACCES, Windows
+		243:        false, // EACCES, unix
+		234:        false, // EINVAL, unix
+		1:          false,
+	} {
+		if got := isHTTPExitCode(code); got != want {
+			t.Errorf("isHTTPExitCode(%#x) = %v, want %v", code, got, want)
+		}
 	}
-	remote := &HLSSession{cfg: HLSSessionConfig{SourceURL: "https://cdn.example/a.mkv"}}
-	remote.recordEncoderLine("Server returned 200 OK")
-	if remote.SourceRejected() {
-		t.Error("a successful status is not a rejection")
+}
+
+// exitWith returns the *exec.ExitError of a process that exited with code.
+func exitWith(t *testing.T, code int) error {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", "exit "+strconv.Itoa(code))
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/c", "exit "+strconv.Itoa(code))
 	}
-	remote.recordEncoderLine(line)
-	if !remote.SourceRejected() {
-		t.Error("a 4xx from the remote server should mark the source as rejected")
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected an exit error, got %v", err)
 	}
-	remote.resetTranscodeStats()
-	if remote.SourceRejected() {
+	return err
+}
+
+func TestSourceRejected(t *testing.T) {
+	const refusal = "[https @ 01] Server returned 4XX Client Error, but not one of 40{0,1,3,4}"
+	httpExit, localExit := exitWith(t, 8), exitWith(t, 243)
+	for _, tc := range []struct {
+		name   string
+		source string
+		line   string
+		exit   error
+		want   bool
+	}{
+		{"remote refusal that killed ffmpeg", "https://cdn.example/a.mkv", refusal, httpExit, true},
+		{"local file", "", refusal, httpExit, false},
+		{"agent's own loopback server (usenet)", "http://127.0.0.1:41234/usenet/a.mkv", refusal, httpExit, false},
+		{"localhost by name", "http://localhost:41234/a.mkv", refusal, httpExit, false},
+		{"recovered refusal, later local fault", "https://cdn.example/a.mkv", refusal, localExit, false},
+		{"HTTP exit without a refusal line", "https://cdn.example/a.mkv", "Server returned 200 OK", httpExit, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &HLSSession{cfg: HLSSessionConfig{SourceURL: tc.source}}
+			s.recordEncoderLine(tc.line)
+			s.exitErr = tc.exit
+			if got := s.SourceRejected(); got != tc.want {
+				t.Errorf("SourceRejected() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	s := &HLSSession{cfg: HLSSessionConfig{SourceURL: "https://cdn.example/a.mkv"}}
+	s.recordEncoderLine(refusal)
+	s.exitErr = httpExit
+	s.resetTranscodeStats()
+	if s.SourceRejected() {
 		t.Error("the verdict must belong to the current ffmpeg only")
 	}
 }
