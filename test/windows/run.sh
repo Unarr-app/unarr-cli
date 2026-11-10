@@ -31,6 +31,7 @@ cp smoke.ps1    "$SHARED/smoke.ps1"
 # here so a VM that is already up gets them without another deploy step.
 cp smoke-hostevents.ps1 "$SHARED/smoke-hostevents.ps1"
 cp mount-matrix.ps1 "$SHARED/mount-matrix.ps1"
+cp smoke-encode.ps1 "$SHARED/smoke-encode.ps1"
 
 echo "==> Booting Windows VM (first boot installs Windows unattended, ~10-20 min)…"
 docker compose up -d

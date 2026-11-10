@@ -415,6 +415,10 @@ type HLSSession struct {
 	// reconnects through) must not reclassify every sub-realtime dip as
 	// "input_bound/struggling" for the rest of a multi-hour session.
 	inputErrAt time.Time
+	// End of the current ffmpeg's stderr and whether a remote server refused its
+	// source (hls_encoder_diag.go). Reset with the rest when a new ffmpeg starts.
+	encoderTail    []string
+	sourceRejected bool
 
 	// ── COPY-VOD state (hls_copy_vod.go) ──
 	// copyVOD=true means this VideoCopy session uses the keyframe-indexed VOD
@@ -1283,6 +1287,8 @@ func (s *HLSSession) resetTranscodeStats() {
 	s.warmupSeen = 0
 	s.speedSamples = 0 // recordProgress re-seeds the EWMA on the next sample
 	s.inputErrAt = time.Time{}
+	s.encoderTail = nil
+	s.sourceRejected = false
 	s.statsMu.Unlock()
 }
 
@@ -2689,7 +2695,7 @@ func buildHLSFFmpegArgsAt(cfg HLSSessionConfig, probe *StreamProbe, tmpDir strin
 		"-start_number", strconv.Itoa(startIdx),
 		"-hls_fmp4_init_filename", "init.mp4",
 		"-hls_segment_filename", filepath.Join(videoDir, "seg-%d.m4s"),
-		filepath.Join(videoDir, manifestName),
+		hlsPlaylistOutput(filepath.Join(videoDir, manifestName)),
 	)
 	return args
 }
@@ -2819,7 +2825,7 @@ func buildHLSCopyArgs(cfg HLSSessionConfig, probe *StreamProbe, tmpDir string) [
 		"-hls_flags", "independent_segments+temp_file",
 		"-hls_fmp4_init_filename", "init.mp4",
 		"-hls_segment_filename", filepath.Join(tmpDir, "video", "seg-%d.m4s"),
-		filepath.Join(tmpDir, "video", copyPlaylistName),
+		hlsPlaylistOutput(filepath.Join(tmpDir, "video", copyPlaylistName)),
 	)
 
 	// Subtitle sidecars: one WebVTT output per TEXT track, appended AFTER the HLS
@@ -3036,6 +3042,7 @@ func (c *hlsStderrCapture) Write(p []byte) (int, error) {
 		if isEncoderInitFailureLine(line) {
 			c.owner.markEncoderInitFailed()
 		}
+		c.owner.recordEncoderLine(line)
 		log.Printf("[hls %s] ffmpeg: %s", shortHLSID(c.owner.cfg.SessionID),
 			RedactSourceText(line, c.owner.cfg.SourceURL))
 	}

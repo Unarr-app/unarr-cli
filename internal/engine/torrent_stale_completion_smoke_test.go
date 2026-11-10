@@ -50,6 +50,7 @@ func TestStalePieceCompletionSmoke(t *testing.T) {
 
 	scfg := torrent.NewDefaultClientConfig()
 	scfg.DataDir = seedDir
+	scfg.DefaultStorage = smokeSeederStorage(t, seedDir)
 	scfg.Seed = true
 	scfg.NoDHT = true
 	scfg.DisableTrackers = true
