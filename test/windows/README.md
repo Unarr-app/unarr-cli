@@ -429,6 +429,34 @@ and friends): they read their own package's `.go` sources, which do not travel
 next to a `go test -c` binary. Those failures are the harness, not findings —
 letting them show red trains the reader to ignore red.
 
+### Real encodes from any working directory — `smoke-encode.ps1`
+
+Deploy the smoke-tagged test binary, plus `ffmpeg.exe` + `ffprobe.exe`:
+
+```bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -tags=smoke -o test/windows/shared/engine_smoke.exe ./internal/engine
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File \\host.lan\Data\smoke-encode.ps1
+```
+
+Run it **not elevated**: an elevated shell can write into System32 and would pass
+with the bug in place. Result lands in `shared/encode-result.txt`.
+
+**The bug it guards.** ffmpeg's HLS muxer looks for `/` to place
+`-hls_fmp4_init_filename`, so with a backslash playlist path it writes `init.mp4`
+into the CURRENT WORKING DIRECTORY. The scheduled task sets no
+`<WorkingDirectory>`, so the daemon runs from `C:\Windows\System32` (measured by
+swapping `unarr.exe` for a probe under the real task and shim).
+
+**What it established (2026-11-09, Win11 26200, gyan ffmpeg 6.1):** before the
+fix, 12/12 encodes failed from each directory. From System32:
+`Failed to open segment 'init.mp4'`, `Permission denied`, exit `0xfffffff3`, four
+times in milliseconds. From a writable directory the encode "worked" but left
+`init.mp4` there, and `ServeInit` answered 503 after 30 s. After the fix, 12/12
+pass from both. Mocked ffmpeg and a Linux run cannot show either failure.
+
 ### Gotchas that cost real time here (read before writing a .ps1)
 
 - **Copy binaries to a LOCAL directory before running them.** A process started

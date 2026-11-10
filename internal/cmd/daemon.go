@@ -2338,11 +2338,8 @@ func watchSessionReady(ctx context.Context, client *agent.Client, hsess *engine.
 		// late encoder death is the health monitor's business, not ours.
 		if !readyPosted {
 			if failed, exitErr := hsess.Failed(); failed {
-				msg := "transcode produced no output"
-				if exitErr != nil {
-					msg = fmt.Sprintf("transcode failed: %v", exitErr)
-				}
-				failSession(sessionID, sessErrTranscodeFailed, msg)
+				code, msg := encoderFailureReport(exitErr, hsess.SourceRejected(), hsess.EncoderErrorTail())
+				failSession(sessionID, code, msg)
 				return
 			}
 		}
