@@ -26,9 +26,11 @@ func init() {
 		fmt.Println("obscured-synthetic")
 		os.Exit(0)
 	}
-	_ = os.WriteFile(os.Getenv("MOUNT_TEST_RCLONE_PID"), []byte(strconv.Itoa(os.Getpid())), 0o600)
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
+	// The PID tells the test it may cancel: publish it only once SIGINT is handled,
+	// or an early cancel kills the child at once and the join looks skipped.
+	_ = os.WriteFile(os.Getenv("MOUNT_TEST_RCLONE_PID"), []byte(strconv.Itoa(os.Getpid())), 0o600)
 	<-interrupt
 	if os.Getenv("MOUNT_TEST_RCLONE_STUCK") == "1" {
 		select {}
